@@ -36757,6 +36757,2150 @@ pub unsafe extern "C" fn sidereon_cdm_object_velocity_covariance(
     )
 }
 
+// ===========================================================================
+// Newer core additions. Each entry marshals the caller's flat C inputs into the
+// merged-core types and delegates: the numbers are exactly what the core
+// produces. Grouped by capability:
+//   - generic data-driven trust-region least squares (solve + leave-one-out)
+//   - Jacobian-derived covariance / Hessian trace / 2x2 error ellipse
+//   - DOP with an explicit ENU convention
+//   - residual-distribution statistics (moments + normality tests)
+//   - batch forward-observable prediction
+//   - leap-second accessors (GPS-UTC, TAI-UTC)
+//   - embedded EGM96 geoid undulation and height conversions
+//   - ground-observer Sun/Moon geometry, illumination, rise/set, transits
+// ===========================================================================
+
+use nalgebra::DMatrix;
+use sidereon_core::astro::bodies::{
+    find_moon_elevation_crossings as core_find_moon_elevation_crossings,
+    find_moon_transits as core_find_moon_transits, moon_az_el as core_moon_az_el,
+    moon_illumination as core_moon_illumination, sun_az_el as core_sun_az_el,
+    BodyObservationError, MoonElevationCrossingKind,
+    MoonElevationOptions as CoreMoonElevationOptions, MoonTransitKind,
+};
+use sidereon_core::astro::events::EventFinderError;
+use sidereon_core::astro::frames::transforms::GeodeticStationKm;
+use sidereon_core::astro::math::least_squares::{
+    covariance_from_jacobian as core_covariance_from_jacobian, hessian_trace as core_hessian_trace,
+    normal_covariance as core_normal_covariance, SolveError as LsqSolveError,
+};
+use sidereon_core::astro::time::scales::{
+    gps_utc_offset_s as core_gps_utc_offset_s, tai_utc_offset_s as core_tai_utc_offset_s,
+};
+use sidereon_core::geoid::{
+    egm96_ellipsoidal_height_m as core_egm96_ellipsoidal_height_m,
+    egm96_orthometric_height_m as core_egm96_orthometric_height_m,
+    egm96_undulation as core_egm96_undulation,
+};
+use sidereon_core::geometry::{
+    dop_with_convention as core_dop_with_convention, error_ellipse_2x2 as core_error_ellipse_2x2,
+    EnuConvention,
+};
+use sidereon_core::observables::{predict_batch as core_predict_batch, PredictRequest};
+use sidereon_core::quality::normality::{
+    jarque_bera as core_jarque_bera, kurtosis as core_kurtosis, moments as core_moments,
+    shapiro_wilk as core_shapiro_wilk, skewness as core_skewness, NormalityError,
+};
+use trust_region_least_squares::batch::{
+    solve_data_problem_drop_one as core_solve_drop_one,
+    solve_data_problem_drop_one_with as core_solve_drop_one_with, DropOneReport,
+};
+use trust_region_least_squares::data::{
+    solve_data_problem as core_solve_data_problem,
+    solve_data_problem_with as core_solve_data_problem_with, BuiltinResidual, DataProblem,
+};
+use trust_region_least_squares::hostlapack::LapackSvd;
+use trust_region_least_squares::loss::Loss as TrlsLoss;
+use trust_region_least_squares::trf::{TrfError, TrfResult, XScale};
+
+// --- Generic data-driven trust-region least squares (HEADLINE) --------------
+
+/// Which built-in residual a [`SidereonDataProblem`] fits. Selects the meaning
+/// of the data arrays the problem carries.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonTrlsKind {
+    /// Dense linear least squares `r_i = (row_i . x) - b_i`. Uses `a` (row-major
+    /// `m`-by-`n`) and `b` (length `m`); `m` and `n` set the shape.
+    Linear = 0,
+    /// Polynomial fit of `degree` (so `n = degree + 1` coefficients, lowest
+    /// order first): `r_i = horner(x, t_i) - y_i`. Uses `t` and `y`.
+    Polynomial = 1,
+    /// Exponential model with `n = 3` parameters `[amp, rate, offset]`:
+    /// `r_i = (x0 exp(x1 t_i) + x2) - y_i`. Uses `t` and `y`.
+    Exponential = 2,
+}
+
+/// SciPy `loss` selector for a [`SidereonDataProblem`].
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonTrlsLoss {
+    /// Identity loss (ordinary least squares); the default.
+    Linear = 0,
+    /// SciPy `soft_l1`.
+    SoftL1 = 1,
+    /// SciPy `huber`.
+    Huber = 2,
+    /// SciPy `cauchy`.
+    Cauchy = 3,
+    /// SciPy `arctan`.
+    Arctan = 4,
+}
+
+/// SciPy `x_scale` mode for a [`SidereonDataProblem`].
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonTrlsXScale {
+    /// Unit per-parameter scale (`x_scale = 1.0`); the default.
+    Unit = 0,
+    /// Jacobian-derived adaptive scale (`x_scale = 'jac'`).
+    Jac = 1,
+    /// Explicit per-parameter scale read from `x_scale_values` (length `n`).
+    Values = 2,
+}
+
+/// Which linear-algebra backend drives the trust-region iteration.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonTrlsBackend {
+    /// Pure-Rust in-crate SVD (works everywhere; not bit-identical to SciPy).
+    Native = 0,
+    /// Host LAPACK/BLAS resolved from the environment
+    /// (`TRUST_REGION_LEAST_SQUARES_LAPACK_PATH`), for bit-for-bit SciPy parity.
+    HostLapack = 1,
+}
+
+/// A fully specified data-driven least-squares problem, flat for FFI.
+///
+/// Fill the kind-specific data pointers and lengths, the starting point `x0`,
+/// and the SciPy-style configuration; the residual and Jacobian for every
+/// iteration are evaluated entirely in the core, so the solve crosses the C
+/// boundary once in and once out. Initialize with
+/// [`sidereon_data_problem_init`] for the SciPy defaults, then set the data
+/// pointers. The core validates every shape before iterating.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonDataProblem {
+    /// Residual kind, selecting which data arrays are read. Stored as a
+    /// uint32_t; use the SidereonTrlsKind discriminants.
+    pub kind: u32,
+    /// Linear design matrix, row-major `m`-by-`n` (Linear only). May be NULL for
+    /// the other kinds.
+    pub a: *const f64,
+    /// Length of `a` (must equal `m * n` for Linear).
+    pub a_len: usize,
+    /// Linear right-hand side, length `m` (Linear only).
+    pub b: *const f64,
+    /// Length of `b` (must equal `m` for Linear).
+    pub b_len: usize,
+    /// Sample abscissae `t` (Polynomial / Exponential only).
+    pub t: *const f64,
+    /// Length of `t`.
+    pub t_len: usize,
+    /// Sample ordinates `y` (Polynomial / Exponential only).
+    pub y: *const f64,
+    /// Length of `y` (must equal `t_len`).
+    pub y_len: usize,
+    /// Residual-row count `m` (Linear only; for Polynomial/Exponential the row
+    /// count is `t_len`).
+    pub m: usize,
+    /// Parameter count `n` (Linear only; derived from `degree`/`3` otherwise).
+    pub n: usize,
+    /// Polynomial degree (Polynomial only; coefficients `n = degree + 1`).
+    pub degree: usize,
+    /// Starting parameter vector, length equal to the kind's parameter count.
+    pub x0: *const f64,
+    /// Length of `x0`.
+    pub x0_len: usize,
+    /// SciPy `loss`. Stored as a uint32_t; use the SidereonTrlsLoss
+    /// discriminants.
+    pub loss: u32,
+    /// SciPy `f_scale` (only consulted for a robust loss).
+    pub f_scale: f64,
+    /// SciPy `x_scale` mode. Stored as a uint32_t; use the SidereonTrlsXScale
+    /// discriminants.
+    pub x_scale_mode: u32,
+    /// Per-parameter scale values, length `n` (read only when
+    /// `x_scale_mode == Values`).
+    pub x_scale_values: *const f64,
+    /// Length of `x_scale_values`.
+    pub x_scale_values_len: usize,
+    /// SciPy `max_nfev`; a negative value selects the default `100 * n`.
+    pub max_nfev: i64,
+    /// SciPy `ftol`.
+    pub ftol: f64,
+    /// SciPy `xtol`.
+    pub xtol: f64,
+    /// SciPy `gtol`.
+    pub gtol: f64,
+    /// Linear-algebra backend. Stored as a uint32_t; use the
+    /// SidereonTrlsBackend discriminants.
+    pub backend: u32,
+}
+
+/// Scalar summary of a converged trust-region solve.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonTrlsSummary {
+    /// Final cost `0.5 * sum(residual^2)`.
+    pub cost: f64,
+    /// First-order optimality `||J^T f||_inf` at the solution.
+    pub optimality: f64,
+    /// Residual-evaluation count.
+    pub nfev: usize,
+    /// Jacobian-evaluation count.
+    pub njev: usize,
+    /// SciPy status: 0 max-eval, 1 gtol, 2 ftol, 3 xtol, 4 ftol+xtol.
+    pub status: i32,
+    /// Whether the solve converged (status > 0).
+    pub success: bool,
+    /// Parameter count `n` (length of the solution vector).
+    pub n: usize,
+    /// Residual count `m`.
+    pub m: usize,
+}
+
+/// Opaque handle to a converged TRLS solution. Release with
+/// [`sidereon_trls_solution_free`].
+pub struct SidereonTrlsSolution {
+    inner: TrfResult,
+}
+
+/// Opaque handle to a leave-one-out (RAIM/FDE) report: the base solve plus one
+/// re-solve per dropped residual row. Release with
+/// [`sidereon_trls_drop_one_free`].
+pub struct SidereonTrlsDropOne {
+    inner: DropOneReport,
+}
+
+// The data-problem enum fields and the convention argument cross the C boundary
+// as their raw uint32_t repr: matching the integer against the known
+// discriminants here means an out-of-range value reported by C becomes an
+// InvalidArgument status rather than an invalid Rust enum (undefined behavior).
+
+fn trls_kind_from_c(
+    fn_name: &str,
+    arg_name: &str,
+    kind: u32,
+) -> Result<SidereonTrlsKind, SidereonStatus> {
+    match kind {
+        value if value == SidereonTrlsKind::Linear as u32 => Ok(SidereonTrlsKind::Linear),
+        value if value == SidereonTrlsKind::Polynomial as u32 => Ok(SidereonTrlsKind::Polynomial),
+        value if value == SidereonTrlsKind::Exponential as u32 => Ok(SidereonTrlsKind::Exponential),
+        _ => {
+            set_last_error(format!("{fn_name}: invalid {arg_name} TRLS residual kind"));
+            Err(SidereonStatus::InvalidArgument)
+        }
+    }
+}
+
+fn trls_loss_from_c(fn_name: &str, arg_name: &str, loss: u32) -> Result<TrlsLoss, SidereonStatus> {
+    match loss {
+        value if value == SidereonTrlsLoss::Linear as u32 => Ok(TrlsLoss::Linear),
+        value if value == SidereonTrlsLoss::SoftL1 as u32 => Ok(TrlsLoss::SoftL1),
+        value if value == SidereonTrlsLoss::Huber as u32 => Ok(TrlsLoss::Huber),
+        value if value == SidereonTrlsLoss::Cauchy as u32 => Ok(TrlsLoss::Cauchy),
+        value if value == SidereonTrlsLoss::Arctan as u32 => Ok(TrlsLoss::Arctan),
+        _ => {
+            set_last_error(format!("{fn_name}: invalid {arg_name} TRLS loss"));
+            Err(SidereonStatus::InvalidArgument)
+        }
+    }
+}
+
+fn trls_xscale_from_c(
+    fn_name: &str,
+    arg_name: &str,
+    mode: u32,
+) -> Result<SidereonTrlsXScale, SidereonStatus> {
+    match mode {
+        value if value == SidereonTrlsXScale::Unit as u32 => Ok(SidereonTrlsXScale::Unit),
+        value if value == SidereonTrlsXScale::Jac as u32 => Ok(SidereonTrlsXScale::Jac),
+        value if value == SidereonTrlsXScale::Values as u32 => Ok(SidereonTrlsXScale::Values),
+        _ => {
+            set_last_error(format!("{fn_name}: invalid {arg_name} TRLS x_scale mode"));
+            Err(SidereonStatus::InvalidArgument)
+        }
+    }
+}
+
+fn trls_backend_from_c(
+    fn_name: &str,
+    arg_name: &str,
+    backend: u32,
+) -> Result<SidereonTrlsBackend, SidereonStatus> {
+    match backend {
+        value if value == SidereonTrlsBackend::Native as u32 => Ok(SidereonTrlsBackend::Native),
+        value if value == SidereonTrlsBackend::HostLapack as u32 => {
+            Ok(SidereonTrlsBackend::HostLapack)
+        }
+        _ => {
+            set_last_error(format!("{fn_name}: invalid {arg_name} TRLS backend"));
+            Err(SidereonStatus::InvalidArgument)
+        }
+    }
+}
+
+/// Map a TRLS solver error to a status code. Shape/configuration errors report
+/// SIDEREON_STATUS_INVALID_ARGUMENT; runtime numeric failures (non-finite
+/// initial residual, SVD backend failure) report SIDEREON_STATUS_SOLVE.
+fn map_trls_error(fn_name: &str, err: TrfError) -> SidereonStatus {
+    set_last_error(format!("{fn_name}: {err}"));
+    match err {
+        TrfError::NonFiniteInitialResidual
+        | TrfError::InvalidSvdOutput(_)
+        | TrfError::Svd(_) => SidereonStatus::Solve,
+        _ => SidereonStatus::InvalidArgument,
+    }
+}
+
+unsafe fn data_problem_from_c(
+    fn_name: &str,
+    problem: *const SidereonDataProblem,
+) -> Result<DataProblem, SidereonStatus> {
+    let problem = require_ref(problem, fn_name, "problem")?;
+
+    let kind = match trls_kind_from_c(fn_name, "kind", problem.kind)? {
+        SidereonTrlsKind::Linear => {
+            let a = require_slice(problem.a, problem.a_len, fn_name, "a")?;
+            let b = require_slice(problem.b, problem.b_len, fn_name, "b")?;
+            BuiltinResidual::Linear {
+                a: a.to_vec(),
+                b: b.to_vec(),
+                m: problem.m,
+                n: problem.n,
+            }
+        }
+        SidereonTrlsKind::Polynomial => {
+            let t = require_slice(problem.t, problem.t_len, fn_name, "t")?;
+            let y = require_slice(problem.y, problem.y_len, fn_name, "y")?;
+            BuiltinResidual::Polynomial {
+                degree: problem.degree,
+                t: t.to_vec(),
+                y: y.to_vec(),
+            }
+        }
+        SidereonTrlsKind::Exponential => {
+            let t = require_slice(problem.t, problem.t_len, fn_name, "t")?;
+            let y = require_slice(problem.y, problem.y_len, fn_name, "y")?;
+            BuiltinResidual::Exponential {
+                t: t.to_vec(),
+                y: y.to_vec(),
+            }
+        }
+    };
+
+    let x0 = require_slice(problem.x0, problem.x0_len, fn_name, "x0")?.to_vec();
+    let x_scale = match trls_xscale_from_c(fn_name, "x_scale_mode", problem.x_scale_mode)? {
+        SidereonTrlsXScale::Unit => XScale::Unit,
+        SidereonTrlsXScale::Jac => XScale::Jac,
+        SidereonTrlsXScale::Values => {
+            let values = require_slice(
+                problem.x_scale_values,
+                problem.x_scale_values_len,
+                fn_name,
+                "x_scale_values",
+            )?;
+            XScale::Values(values.to_vec())
+        }
+    };
+    let max_nfev = if problem.max_nfev < 0 {
+        None
+    } else {
+        Some(problem.max_nfev as usize)
+    };
+
+    Ok(DataProblem {
+        kind,
+        x0,
+        loss: trls_loss_from_c(fn_name, "loss", problem.loss)?,
+        f_scale: problem.f_scale,
+        x_scale,
+        max_nfev,
+        ftol: problem.ftol,
+        xtol: problem.xtol,
+        gtol: problem.gtol,
+    })
+}
+
+fn trls_summary(result: &TrfResult) -> SidereonTrlsSummary {
+    SidereonTrlsSummary {
+        cost: result.cost,
+        optimality: result.optimality,
+        nfev: result.nfev,
+        njev: result.njev,
+        status: result.status,
+        success: result.success(),
+        n: result.x.len(),
+        m: result.fun.len(),
+    }
+}
+
+/// Populate `*out_problem` with the SciPy `least_squares` defaults for `kind`:
+/// linear loss, `f_scale = 1`, unit `x_scale`, default evaluation budget, the
+/// SciPy `ftol = xtol = 1e-8` / `gtol = 1e-10` tolerances, and the native
+/// backend. All data pointers are zeroed; set them (and `m`/`n`/`degree`) before
+/// solving.
+///
+/// Safety: out_problem must point to a SidereonDataProblem.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_data_problem_init(
+    kind: u32,
+    out_problem: *mut SidereonDataProblem,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_data_problem_init", SidereonStatus::Panic, || {
+        let out_problem = c_try!(require_out(
+            out_problem,
+            "sidereon_data_problem_init",
+            "out_problem"
+        ));
+        // Validate the C-supplied kind against the known discriminants before
+        // storing it, so an out-of-range integer is rejected here.
+        let kind = c_try!(trls_kind_from_c("sidereon_data_problem_init", "kind", kind)) as u32;
+        // Mirror DataProblem::new (TrfOptions::default) for the scalar fields.
+        *out_problem = SidereonDataProblem {
+            kind,
+            a: ptr::null(),
+            a_len: 0,
+            b: ptr::null(),
+            b_len: 0,
+            t: ptr::null(),
+            t_len: 0,
+            y: ptr::null(),
+            y_len: 0,
+            m: 0,
+            n: 0,
+            degree: 0,
+            x0: ptr::null(),
+            x0_len: 0,
+            loss: SidereonTrlsLoss::Linear as u32,
+            f_scale: 1.0,
+            x_scale_mode: SidereonTrlsXScale::Unit as u32,
+            x_scale_values: ptr::null(),
+            x_scale_values_len: 0,
+            max_nfev: -1,
+            ftol: 1e-8,
+            xtol: 1e-8,
+            gtol: 1e-10,
+            backend: SidereonTrlsBackend::Native as u32,
+        };
+        SidereonStatus::Ok
+    })
+}
+
+/// Solve a data-driven least-squares problem, transferring a solution handle to
+/// `*out_solution`. Delegates to the core `solve_data_problem` (native backend)
+/// or `solve_data_problem_with` (host-LAPACK backend). The trust-region loop
+/// runs entirely in the core; read the result with the
+/// sidereon_trls_solution_* accessors and release it with
+/// sidereon_trls_solution_free.
+///
+/// Safety: problem must point to a SidereonDataProblem whose data pointers are
+/// valid for their stated lengths; out_solution must point to storage for a
+/// SidereonTrlsSolution*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_solve_data_problem(
+    problem: *const SidereonDataProblem,
+    out_solution: *mut *mut SidereonTrlsSolution,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_solve_data_problem", SidereonStatus::Panic, || {
+        let out_solution = c_try!(require_out(
+            out_solution,
+            "sidereon_solve_data_problem",
+            "out_solution"
+        ));
+        *out_solution = ptr::null_mut();
+        let backend_raw =
+            c_try!(require_ref(problem, "sidereon_solve_data_problem", "problem")).backend;
+        let backend = c_try!(trls_backend_from_c(
+            "sidereon_solve_data_problem",
+            "backend",
+            backend_raw
+        ));
+        let parsed = c_try!(data_problem_from_c("sidereon_solve_data_problem", problem));
+        let result = match backend {
+            SidereonTrlsBackend::Native => core_solve_data_problem(&parsed),
+            SidereonTrlsBackend::HostLapack => {
+                core_solve_data_problem_with(&parsed, &LapackSvd::from_env())
+            }
+        };
+        let inner = match result {
+            Ok(inner) => inner,
+            Err(err) => return map_trls_error("sidereon_solve_data_problem", err),
+        };
+        write_boxed_handle(out_solution, SidereonTrlsSolution { inner });
+        SidereonStatus::Ok
+    })
+}
+
+/// Copy the scalar summary (cost, optimality, evaluation counts, status, shape)
+/// into *out_summary.
+///
+/// Safety: sol must be a live handle; out_summary must point to a
+/// SidereonTrlsSummary.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_trls_solution_summary(
+    sol: *const SidereonTrlsSolution,
+    out_summary: *mut SidereonTrlsSummary,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_trls_solution_summary", SidereonStatus::Panic, || {
+        let out_summary = c_try!(require_out(
+            out_summary,
+            "sidereon_trls_solution_summary",
+            "out_summary"
+        ));
+        let sol = c_try!(require_ref(sol, "sidereon_trls_solution_summary", "solution"));
+        *out_summary = trls_summary(&sol.inner);
+        SidereonStatus::Ok
+    })
+}
+
+/// Copy the solution vector `x` (length `n`) into out. Variable-length output
+/// contract: pass out NULL with len 0 to query the count via *out_required.
+///
+/// Safety: sol must be a live handle; out must point to at least len writable
+/// doubles or be NULL when len is 0; out_written and out_required must point to
+/// size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_trls_solution_x(
+    sol: *const SidereonTrlsSolution,
+    out: *mut f64,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_trls_solution_x", SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(
+            "sidereon_trls_solution_x",
+            out_written,
+            out_required
+        ));
+        let sol = c_try!(require_ref(sol, "sidereon_trls_solution_x", "solution"));
+        c_try!(copy_prefix_to_c(
+            "sidereon_trls_solution_x",
+            "out",
+            &sol.inner.x,
+            out,
+            len,
+            out_written,
+            out_required,
+        ));
+        SidereonStatus::Ok
+    })
+}
+
+/// Copy the residual vector `fun` (length `m`) at the solution into out. Same
+/// variable-length output contract as sidereon_trls_solution_x.
+///
+/// Safety: sol must be a live handle; out must point to at least len writable
+/// doubles or be NULL when len is 0; out_written and out_required must point to
+/// size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_trls_solution_residuals(
+    sol: *const SidereonTrlsSolution,
+    out: *mut f64,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_trls_solution_residuals",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_trls_solution_residuals",
+                out_written,
+                out_required
+            ));
+            let sol = c_try!(require_ref(
+                sol,
+                "sidereon_trls_solution_residuals",
+                "solution"
+            ));
+            c_try!(copy_prefix_to_c(
+                "sidereon_trls_solution_residuals",
+                "out",
+                &sol.inner.fun,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy the gradient `J^T f` (length `n`) at the solution into out. Same
+/// variable-length output contract as sidereon_trls_solution_x.
+///
+/// Safety: sol must be a live handle; out must point to at least len writable
+/// doubles or be NULL when len is 0; out_written and out_required must point to
+/// size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_trls_solution_gradient(
+    sol: *const SidereonTrlsSolution,
+    out: *mut f64,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_trls_solution_gradient",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_trls_solution_gradient",
+                out_written,
+                out_required
+            ));
+            let sol = c_try!(require_ref(
+                sol,
+                "sidereon_trls_solution_gradient",
+                "solution"
+            ));
+            c_try!(copy_prefix_to_c(
+                "sidereon_trls_solution_gradient",
+                "out",
+                &sol.inner.grad,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy the row-major `m`-by-`n` Jacobian at the solution into out (length
+/// `m * n`). Same variable-length output contract as sidereon_trls_solution_x.
+///
+/// Safety: sol must be a live handle; out must point to at least len writable
+/// doubles or be NULL when len is 0; out_written and out_required must point to
+/// size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_trls_solution_jacobian(
+    sol: *const SidereonTrlsSolution,
+    out: *mut f64,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_trls_solution_jacobian",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_trls_solution_jacobian",
+                out_written,
+                out_required
+            ));
+            let sol = c_try!(require_ref(
+                sol,
+                "sidereon_trls_solution_jacobian",
+                "solution"
+            ));
+            c_try!(copy_prefix_to_c(
+                "sidereon_trls_solution_jacobian",
+                "out",
+                &sol.inner.jac,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Release a TRLS solution handle. Null is a no-op.
+///
+/// Safety: sol must be NULL or a live handle from sidereon_solve_data_problem,
+/// freed exactly once.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_trls_solution_free(sol: *mut SidereonTrlsSolution) {
+    ffi_boundary("sidereon_trls_solution_free", (), || {
+        free_boxed(sol);
+    });
+}
+
+/// Solve a data-driven problem and every leave-one-out re-solve (RAIM / FDE),
+/// transferring a report handle to *out_report. Delegates to the core
+/// `solve_data_problem_drop_one` (native) or `_with` (host-LAPACK). The report
+/// carries the base solve, one re-solve per masked residual row, and the cost
+/// delta for each masked row.
+///
+/// Safety: problem must point to a SidereonDataProblem whose data pointers are
+/// valid for their stated lengths; out_report must point to storage for a
+/// SidereonTrlsDropOne*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_solve_data_problem_drop_one(
+    problem: *const SidereonDataProblem,
+    out_report: *mut *mut SidereonTrlsDropOne,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_solve_data_problem_drop_one",
+        SidereonStatus::Panic,
+        || {
+            let out_report = c_try!(require_out(
+                out_report,
+                "sidereon_solve_data_problem_drop_one",
+                "out_report"
+            ));
+            *out_report = ptr::null_mut();
+            let backend_raw = c_try!(require_ref(
+                problem,
+                "sidereon_solve_data_problem_drop_one",
+                "problem"
+            ))
+            .backend;
+            let backend = c_try!(trls_backend_from_c(
+                "sidereon_solve_data_problem_drop_one",
+                "backend",
+                backend_raw
+            ));
+            let parsed = c_try!(data_problem_from_c(
+                "sidereon_solve_data_problem_drop_one",
+                problem
+            ));
+            let result = match backend {
+                SidereonTrlsBackend::Native => core_solve_drop_one(&parsed),
+                SidereonTrlsBackend::HostLapack => {
+                    core_solve_drop_one_with(&parsed, &LapackSvd::from_env())
+                }
+            };
+            let inner = match result {
+                Ok(inner) => inner,
+                Err(err) => return map_trls_error("sidereon_solve_data_problem_drop_one", err),
+            };
+            write_boxed_handle(out_report, SidereonTrlsDropOne { inner });
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Write the number of dropped-row re-solves (equal to the residual count `m`)
+/// into *out_count.
+///
+/// Safety: report must be a live handle; out_count must point to a size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_trls_drop_one_count(
+    report: *const SidereonTrlsDropOne,
+    out_count: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_trls_drop_one_count", SidereonStatus::Panic, || {
+        let out_count = c_try!(require_out(
+            out_count,
+            "sidereon_trls_drop_one_count",
+            "out_count"
+        ));
+        *out_count = 0;
+        let report = c_try!(require_ref(report, "sidereon_trls_drop_one_count", "report"));
+        *out_count = report.inner.drops.len();
+        SidereonStatus::Ok
+    })
+}
+
+/// Copy the base (all-rows) solve summary into *out_summary.
+///
+/// Safety: report must be a live handle; out_summary must point to a
+/// SidereonTrlsSummary.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_trls_drop_one_base_summary(
+    report: *const SidereonTrlsDropOne,
+    out_summary: *mut SidereonTrlsSummary,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_trls_drop_one_base_summary",
+        SidereonStatus::Panic,
+        || {
+            let out_summary = c_try!(require_out(
+                out_summary,
+                "sidereon_trls_drop_one_base_summary",
+                "out_summary"
+            ));
+            let report = c_try!(require_ref(
+                report,
+                "sidereon_trls_drop_one_base_summary",
+                "report"
+            ));
+            *out_summary = trls_summary(&report.inner.base);
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy the summary of the re-solve with residual row `index` masked into
+/// *out_summary. `index` must be less than sidereon_trls_drop_one_count.
+///
+/// Safety: report must be a live handle; out_summary must point to a
+/// SidereonTrlsSummary.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_trls_drop_one_drop_summary(
+    report: *const SidereonTrlsDropOne,
+    index: usize,
+    out_summary: *mut SidereonTrlsSummary,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_trls_drop_one_drop_summary",
+        SidereonStatus::Panic,
+        || {
+            let out_summary = c_try!(require_out(
+                out_summary,
+                "sidereon_trls_drop_one_drop_summary",
+                "out_summary"
+            ));
+            let report = c_try!(require_ref(
+                report,
+                "sidereon_trls_drop_one_drop_summary",
+                "report"
+            ));
+            let Some(drop) = report.inner.drops.get(index) else {
+                set_last_error(format!(
+                    "sidereon_trls_drop_one_drop_summary: index {index} out of range"
+                ));
+                return SidereonStatus::InvalidArgument;
+            };
+            *out_summary = trls_summary(drop);
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy the solution vector of the re-solve with residual row `index` masked
+/// into out. Same variable-length output contract as sidereon_trls_solution_x.
+///
+/// Safety: report must be a live handle; out must point to at least len writable
+/// doubles or be NULL when len is 0; out_written and out_required must point to
+/// size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_trls_drop_one_drop_x(
+    report: *const SidereonTrlsDropOne,
+    index: usize,
+    out: *mut f64,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_trls_drop_one_drop_x", SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(
+            "sidereon_trls_drop_one_drop_x",
+            out_written,
+            out_required
+        ));
+        let report = c_try!(require_ref(report, "sidereon_trls_drop_one_drop_x", "report"));
+        let Some(drop) = report.inner.drops.get(index) else {
+            set_last_error(format!(
+                "sidereon_trls_drop_one_drop_x: index {index} out of range"
+            ));
+            return SidereonStatus::InvalidArgument;
+        };
+        c_try!(copy_prefix_to_c(
+            "sidereon_trls_drop_one_drop_x",
+            "out",
+            &drop.x,
+            out,
+            len,
+            out_written,
+            out_required,
+        ));
+        SidereonStatus::Ok
+    })
+}
+
+/// Copy the per-row cost deltas (`drops[i].cost - base.cost`, length `m`) into
+/// out: how much the optimum cost moves when each row is removed, the influence
+/// signal for fault detection. Same variable-length output contract as
+/// sidereon_trls_solution_x.
+///
+/// Safety: report must be a live handle; out must point to at least len writable
+/// doubles or be NULL when len is 0; out_written and out_required must point to
+/// size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_trls_drop_one_cost_delta(
+    report: *const SidereonTrlsDropOne,
+    out: *mut f64,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_trls_drop_one_cost_delta",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_trls_drop_one_cost_delta",
+                out_written,
+                out_required
+            ));
+            let report = c_try!(require_ref(
+                report,
+                "sidereon_trls_drop_one_cost_delta",
+                "report"
+            ));
+            c_try!(copy_prefix_to_c(
+                "sidereon_trls_drop_one_cost_delta",
+                "out",
+                &report.inner.cost_delta,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Release a leave-one-out report handle. Null is a no-op.
+///
+/// Safety: report must be NULL or a live handle from
+/// sidereon_solve_data_problem_drop_one, freed exactly once.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_trls_drop_one_free(report: *mut SidereonTrlsDropOne) {
+    ffi_boundary("sidereon_trls_drop_one_free", (), || {
+        free_boxed(report);
+    });
+}
+
+// --- Jacobian-derived covariance / Hessian trace / error ellipse ------------
+
+/// A 2D confidence ellipse from a 2x2 covariance block. Mirrors the core
+/// `ErrorEllipse2`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonErrorEllipse2 {
+    /// Confidence level used to scale the axes, in `[0, 1)`.
+    pub confidence: f64,
+    /// Two-DOF chi-square quantile `-2 ln(1 - confidence)`.
+    pub chi_square_scale: f64,
+    /// Semi-major axis length.
+    pub semi_major: f64,
+    /// Semi-minor axis length.
+    pub semi_minor: f64,
+    /// Orientation of the major axis, radians.
+    pub orientation_rad: f64,
+}
+
+/// Map a least-squares geometry error to a status code. A rank-deficient
+/// Jacobian reports SIDEREON_STATUS_SOLVE; malformed input reports
+/// SIDEREON_STATUS_INVALID_ARGUMENT.
+fn map_lsq_error(fn_name: &str, err: LsqSolveError) -> SidereonStatus {
+    set_last_error(format!("{fn_name}: {err}"));
+    match err {
+        LsqSolveError::SingularJacobian => SidereonStatus::Solve,
+        LsqSolveError::InvalidInput { .. } => SidereonStatus::InvalidArgument,
+    }
+}
+
+/// Parameter covariance `variance_scale * (J^T J)^-1` from a row-major `m`-by-`n`
+/// design (Jacobian) matrix, written row-major (`n * n`) into out. Delegates to
+/// the core `normal_covariance` (SVD of J, so the conditioning is `cond(J)`, not
+/// `cond(J)^2`). A rank-deficient Jacobian returns SIDEREON_STATUS_SOLVE. Same
+/// variable-length output contract as the other array readers (query with out
+/// NULL, len 0).
+///
+/// Safety: jacobian must point to m*n readable doubles (or be NULL when m*n is
+/// 0); out must point to at least len writable doubles or be NULL when len is 0;
+/// out_written and out_required must point to size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_normal_covariance(
+    jacobian: *const f64,
+    m: usize,
+    n: usize,
+    variance_scale: f64,
+    out: *mut f64,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_normal_covariance", SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(
+            "sidereon_normal_covariance",
+            out_written,
+            out_required
+        ));
+        let count = c_try!(m
+            .checked_mul(n)
+            .ok_or_else(|| {
+                set_last_error("sidereon_normal_covariance: m*n overflows".to_string());
+                SidereonStatus::InvalidArgument
+            }));
+        let data = c_try!(require_slice(jacobian, count, "sidereon_normal_covariance", "jacobian"));
+        let jac = DMatrix::from_row_slice(m, n, data);
+        let cov = match core_normal_covariance(&jac, variance_scale) {
+            Ok(cov) => cov,
+            Err(err) => return map_lsq_error("sidereon_normal_covariance", err),
+        };
+        // nalgebra stores column-major; transpose-iterate to emit row-major.
+        let row_major: Vec<f64> = cov.row_iter().flat_map(|r| r.iter().copied().collect::<Vec<_>>()).collect();
+        c_try!(copy_prefix_to_c(
+            "sidereon_normal_covariance",
+            "out",
+            &row_major,
+            out,
+            len,
+            out_written,
+            out_required,
+        ));
+        SidereonStatus::Ok
+    })
+}
+
+/// Trace of the Gauss-Newton Hessian approximation `J^T J` (the sum of squared
+/// column norms) of a row-major `m`-by-`n` Jacobian, written to *out. Delegates
+/// to the core `hessian_trace`; forms no inverse.
+///
+/// Safety: jacobian must point to m*n readable doubles (or be NULL when m*n is
+/// 0); out must point to a double.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_hessian_trace(
+    jacobian: *const f64,
+    m: usize,
+    n: usize,
+    out: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_hessian_trace", SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out, "sidereon_hessian_trace", "out"));
+        *out = 0.0;
+        let count = c_try!(m.checked_mul(n).ok_or_else(|| {
+            set_last_error("sidereon_hessian_trace: m*n overflows".to_string());
+            SidereonStatus::InvalidArgument
+        }));
+        let data = c_try!(require_slice(jacobian, count, "sidereon_hessian_trace", "jacobian"));
+        let jac = DMatrix::from_row_slice(m, n, data);
+        *out = core_hessian_trace(&jac);
+        SidereonStatus::Ok
+    })
+}
+
+/// Fitted parameter covariance from a converged fit: `(J^T J)^-1` scaled by the
+/// post-fit reduced chi-square `s_sq = 2 * cost / (m - n)`, the same quantity
+/// `scipy.optimize.curve_fit` reports as `pcov`. Forms the covariance straight
+/// from the row-major `m`-by-`n` design (Jacobian) matrix and the final cost via
+/// the core `covariance_from_jacobian`, with the redundancy taken from the
+/// Jacobian's own shape; requires positive redundancy `m > n`. Writes the
+/// `n`-by-`n` covariance row-major into out. Same variable-length output contract
+/// as sidereon_normal_covariance.
+///
+/// Safety: jacobian must point to m*n readable doubles (or be NULL when m*n is
+/// 0); out must point to at least len writable doubles or be NULL when len is 0;
+/// out_written and out_required must point to size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_covariance_from_jacobian(
+    jacobian: *const f64,
+    m: usize,
+    n: usize,
+    cost: f64,
+    out: *mut f64,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_covariance_from_jacobian",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_covariance_from_jacobian",
+                out_written,
+                out_required
+            ));
+            let count = c_try!(m.checked_mul(n).ok_or_else(|| {
+                set_last_error("sidereon_covariance_from_jacobian: m*n overflows".to_string());
+                SidereonStatus::InvalidArgument
+            }));
+            let data = c_try!(require_slice(
+                jacobian,
+                count,
+                "sidereon_covariance_from_jacobian",
+                "jacobian"
+            ));
+            let jac = DMatrix::from_row_slice(m, n, data);
+            let cov = match core_covariance_from_jacobian(&jac, cost) {
+                Ok(cov) => cov,
+                Err(err) => return map_lsq_error("sidereon_covariance_from_jacobian", err),
+            };
+            let row_major: Vec<f64> = cov
+                .row_iter()
+                .flat_map(|r| r.iter().copied().collect::<Vec<_>>())
+                .collect();
+            c_try!(copy_prefix_to_c(
+                "sidereon_covariance_from_jacobian",
+                "out",
+                &row_major,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Confidence ellipse from a 2x2 covariance block (row-major `[c00, c01, c10,
+/// c11]`) at `confidence` in `[0, 1)`, written to *out_ellipse. Delegates to the
+/// core `error_ellipse_2x2` (closed-form symmetric 2x2 eigensolve). A
+/// non-positive-semidefinite block or out-of-range confidence returns
+/// SIDEREON_STATUS_INVALID_ARGUMENT.
+///
+/// Safety: covariance must point to 4 readable doubles; out_ellipse must point
+/// to a SidereonErrorEllipse2.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_error_ellipse_2x2(
+    covariance: *const f64,
+    confidence: f64,
+    out_ellipse: *mut SidereonErrorEllipse2,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_error_ellipse_2x2", SidereonStatus::Panic, || {
+        let out_ellipse = c_try!(require_out(
+            out_ellipse,
+            "sidereon_error_ellipse_2x2",
+            "out_ellipse"
+        ));
+        let cov = c_try!(require_slice(
+            covariance,
+            4,
+            "sidereon_error_ellipse_2x2",
+            "covariance"
+        ));
+        let block = [[cov[0], cov[1]], [cov[2], cov[3]]];
+        let ellipse = match core_error_ellipse_2x2(block, confidence) {
+            Ok(ellipse) => ellipse,
+            Err(err) => return map_dop_error("sidereon_error_ellipse_2x2", err),
+        };
+        *out_ellipse = SidereonErrorEllipse2 {
+            confidence: ellipse.confidence,
+            chi_square_scale: ellipse.chi_square_scale,
+            semi_major: ellipse.semi_major,
+            semi_minor: ellipse.semi_minor,
+            orientation_rad: ellipse.orientation_rad,
+        };
+        SidereonStatus::Ok
+    })
+}
+
+// --- DOP with explicit ENU convention ---------------------------------------
+
+/// The local ENU convention used for the DOP horizontal/vertical split.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonEnuConvention {
+    /// Geodetic-ellipsoid-normal ENU (the GNSS-standard default, RTKLIB
+    /// `xyz2enu`); identical to sidereon_dop.
+    GeodeticNormal = 0,
+    /// Geocentric-radial ENU whose up is `position / |position|`; changes only
+    /// HDOP/VDOP (GDOP/PDOP/TDOP are identical).
+    GeocentricRadial = 1,
+}
+
+fn enu_convention_from_c(
+    fn_name: &str,
+    arg_name: &str,
+    convention: u32,
+) -> Result<EnuConvention, SidereonStatus> {
+    match convention {
+        value if value == SidereonEnuConvention::GeodeticNormal as u32 => {
+            Ok(EnuConvention::GeodeticNormal)
+        }
+        value if value == SidereonEnuConvention::GeocentricRadial as u32 => {
+            Ok(EnuConvention::GeocentricRadial)
+        }
+        _ => {
+            set_last_error(format!("{fn_name}: invalid {arg_name} ENU convention"));
+            Err(SidereonStatus::InvalidArgument)
+        }
+    }
+}
+
+/// Dilution-of-precision scalars with an explicit ENU convention. Like
+/// sidereon_dop but the horizontal/vertical split uses `convention`. Delegates
+/// to the core `dop_with_convention`.
+///
+/// Safety: los and weights must each point to count readable entries (or be
+/// NULL when count is 0); out_dop must point to a SidereonDop.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_dop_with_convention(
+    los: *const SidereonLineOfSight,
+    weights: *const f64,
+    count: usize,
+    receiver: SidereonGeodetic,
+    convention: u32,
+    out_dop: *mut SidereonDop,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_dop_with_convention", SidereonStatus::Panic, || {
+        let out_dop = c_try!(require_out(out_dop, "sidereon_dop_with_convention", "out_dop"));
+        *out_dop = empty_dop();
+        let convention = c_try!(enu_convention_from_c(
+            "sidereon_dop_with_convention",
+            "convention",
+            convention
+        ));
+        let los = c_try!(require_slice(los, count, "sidereon_dop_with_convention", "los"));
+        let weights = c_try!(require_slice(
+            weights,
+            count,
+            "sidereon_dop_with_convention",
+            "weights"
+        ));
+        let receiver = c_try!(geodetic_to_wgs84(
+            "sidereon_dop_with_convention",
+            "receiver",
+            receiver
+        ));
+        let rows: Vec<LineOfSight> = los
+            .iter()
+            .map(|l| LineOfSight::new(l.e_x, l.e_y, l.e_z))
+            .collect();
+        let dop = match core_dop_with_convention(&rows, weights, receiver, convention) {
+            Ok(dop) => dop,
+            Err(err) => return map_dop_error("sidereon_dop_with_convention", err),
+        };
+        *out_dop = dop_to_c(dop);
+        SidereonStatus::Ok
+    })
+}
+
+// --- Residual-distribution statistics ---------------------------------------
+
+/// Sample mean, variance, skewness, and kurtosis of a residual set. Mirrors the
+/// core `MomentStats`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonResidualMoments {
+    /// Arithmetic mean.
+    pub mean: f64,
+    /// Population (biased) variance, the second central moment.
+    pub variance: f64,
+    /// Sample skewness (biased or bias-corrected per the request).
+    pub skewness: f64,
+    /// Sample kurtosis: excess (Gaussian -> 0) when fisher, Pearson otherwise.
+    pub kurtosis_excess: f64,
+}
+
+/// Jarque-Bera normality test result.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonJarqueBera {
+    /// Test statistic `n/6 * (S^2 + K^2/4)`.
+    pub statistic: f64,
+    /// Upper-tail chi-square(2) p-value `exp(-statistic/2)`.
+    pub p_value: f64,
+}
+
+/// Shapiro-Wilk normality test result.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonShapiroWilk {
+    /// The `W` statistic in `(0, 1]`.
+    pub w: f64,
+    /// Upper-tail p-value for the normality null.
+    pub p_value: f64,
+}
+
+/// Map a residual-distribution error to a status code. All causes (non-finite
+/// value, too few samples, zero variance/range) are input conditions and report
+/// SIDEREON_STATUS_INVALID_ARGUMENT.
+fn map_normality_error(fn_name: &str, err: NormalityError) -> SidereonStatus {
+    set_last_error(format!("{fn_name}: {err}"));
+    SidereonStatus::InvalidArgument
+}
+
+/// Sample skewness of a residual set, written to *out. `bias = true` is the
+/// Fisher-Pearson coefficient `g1` (scipy.stats.skew default); `bias = false`
+/// applies the sample correction (needs at least three values). Delegates to the
+/// core `skewness`.
+///
+/// Safety: x must point to len readable doubles (or be NULL when len is 0); out
+/// must point to a double.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_residual_skewness(
+    x: *const f64,
+    len: usize,
+    bias: bool,
+    out: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_residual_skewness", SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out, "sidereon_residual_skewness", "out"));
+        *out = 0.0;
+        let x = c_try!(require_slice(x, len, "sidereon_residual_skewness", "x"));
+        match core_skewness(x, bias) {
+            Ok(v) => {
+                *out = v;
+                SidereonStatus::Ok
+            }
+            Err(err) => map_normality_error("sidereon_residual_skewness", err),
+        }
+    })
+}
+
+/// Sample kurtosis of a residual set, written to *out. `fisher = true` returns
+/// excess kurtosis (Gaussian -> 0, scipy default); `fisher = false` the Pearson
+/// kurtosis. `bias = false` applies the sample correction (needs at least four
+/// values). Delegates to the core `kurtosis`.
+///
+/// Safety: x must point to len readable doubles (or be NULL when len is 0); out
+/// must point to a double.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_residual_kurtosis(
+    x: *const f64,
+    len: usize,
+    fisher: bool,
+    bias: bool,
+    out: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_residual_kurtosis", SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out, "sidereon_residual_kurtosis", "out"));
+        *out = 0.0;
+        let x = c_try!(require_slice(x, len, "sidereon_residual_kurtosis", "x"));
+        match core_kurtosis(x, fisher, bias) {
+            Ok(v) => {
+                *out = v;
+                SidereonStatus::Ok
+            }
+            Err(err) => map_normality_error("sidereon_residual_kurtosis", err),
+        }
+    })
+}
+
+/// Mean, variance, skewness, and kurtosis of a residual set in one pass, written
+/// to *out_moments. `fisher`/`bias` select the kurtosis convention and the
+/// bias correction as in sidereon_residual_skewness/kurtosis. Delegates to the
+/// core `moments`.
+///
+/// Safety: x must point to len readable doubles (or be NULL when len is 0);
+/// out_moments must point to a SidereonResidualMoments.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_residual_moments(
+    x: *const f64,
+    len: usize,
+    fisher: bool,
+    bias: bool,
+    out_moments: *mut SidereonResidualMoments,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_residual_moments", SidereonStatus::Panic, || {
+        let out_moments = c_try!(require_out(
+            out_moments,
+            "sidereon_residual_moments",
+            "out_moments"
+        ));
+        *out_moments = SidereonResidualMoments {
+            mean: 0.0,
+            variance: 0.0,
+            skewness: 0.0,
+            kurtosis_excess: 0.0,
+        };
+        let x = c_try!(require_slice(x, len, "sidereon_residual_moments", "x"));
+        match core_moments(x, fisher, bias) {
+            Ok(stats) => {
+                *out_moments = SidereonResidualMoments {
+                    mean: stats.mean,
+                    variance: stats.variance,
+                    skewness: stats.skewness,
+                    kurtosis_excess: stats.kurtosis_excess,
+                };
+                SidereonStatus::Ok
+            }
+            Err(err) => map_normality_error("sidereon_residual_moments", err),
+        }
+    })
+}
+
+/// Jarque-Bera normality test on a residual set, written to *out. Uses the
+/// biased skewness and excess kurtosis (scipy.stats.jarque_bera). Needs at least
+/// two values. Delegates to the core `jarque_bera`.
+///
+/// Safety: x must point to len readable doubles (or be NULL when len is 0); out
+/// must point to a SidereonJarqueBera.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_residual_jarque_bera(
+    x: *const f64,
+    len: usize,
+    out: *mut SidereonJarqueBera,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_residual_jarque_bera",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(out, "sidereon_residual_jarque_bera", "out"));
+            *out = SidereonJarqueBera {
+                statistic: 0.0,
+                p_value: 0.0,
+            };
+            let x = c_try!(require_slice(x, len, "sidereon_residual_jarque_bera", "x"));
+            match core_jarque_bera(x) {
+                Ok(jb) => {
+                    *out = SidereonJarqueBera {
+                        statistic: jb.statistic,
+                        p_value: jb.p_value,
+                    };
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_normality_error("sidereon_residual_jarque_bera", err),
+            }
+        },
+    )
+}
+
+/// Shapiro-Wilk W normality test on a residual set, written to *out (Royston AS
+/// R94, the scipy.stats.shapiro algorithm). Needs at least three values; all
+/// equal values return SIDEREON_STATUS_INVALID_ARGUMENT. Delegates to the core
+/// `shapiro_wilk`.
+///
+/// Safety: x must point to len readable doubles (or be NULL when len is 0); out
+/// must point to a SidereonShapiroWilk.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_residual_shapiro_wilk(
+    x: *const f64,
+    len: usize,
+    out: *mut SidereonShapiroWilk,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_residual_shapiro_wilk",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(out, "sidereon_residual_shapiro_wilk", "out"));
+            *out = SidereonShapiroWilk {
+                w: 0.0,
+                p_value: 0.0,
+            };
+            let x = c_try!(require_slice(x, len, "sidereon_residual_shapiro_wilk", "x"));
+            match core_shapiro_wilk(x) {
+                Ok(sw) => {
+                    *out = SidereonShapiroWilk {
+                        w: sw.w,
+                        p_value: sw.p_value,
+                    };
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_normality_error("sidereon_residual_shapiro_wilk", err),
+            }
+        },
+    )
+}
+
+// --- Batch forward-observable prediction ------------------------------------
+
+/// One batch observable-prediction request: the satellite token, the static
+/// receiver ECEF position (meters), and the receive epoch (seconds since J2000).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonPredictRequest {
+    /// Null-terminated satellite token (e.g. "G01").
+    pub sat_id: *const c_char,
+    /// Receiver ECEF position, meters.
+    pub receiver_ecef_m: [f64; 3],
+    /// Receive epoch, seconds since J2000.
+    pub t_rx_j2000_s: f64,
+}
+
+fn zero_predicted_observables() -> SidereonPredictedObservables {
+    SidereonPredictedObservables {
+        geometric_range_m: 0.0,
+        range_rate_m_s: 0.0,
+        doppler_hz: 0.0,
+        has_sat_clock_s: false,
+        sat_clock_s: 0.0,
+        elevation_deg: 0.0,
+        azimuth_deg: 0.0,
+        transmit_offset_us: 0,
+        transmit_time_j2000_s: 0.0,
+        los_unit: [0.0; 3],
+        sat_pos_ecef_m: [0.0; 3],
+        sat_velocity_m_s: [0.0; 3],
+    }
+}
+
+unsafe fn predict_requests_from_c(
+    fn_name: &str,
+    requests: &[SidereonPredictRequest],
+) -> Result<Vec<PredictRequest>, SidereonStatus> {
+    let mut parsed = Vec::with_capacity(requests.len());
+    for request in requests {
+        let sat = parse_satellite_token(fn_name, request.sat_id)?;
+        parsed.push((sat, request.receiver_ecef_m, request.t_rx_j2000_s));
+    }
+    Ok(parsed)
+}
+
+unsafe fn write_predict_batch_results(
+    results: &[Result<PredictedObservables, ObservablesError>],
+    out: *mut SidereonPredictedObservables,
+    out_ok: *mut bool,
+) {
+    for (idx, result) in results.iter().enumerate() {
+        match result {
+            Ok(obs) => {
+                *out.add(idx) = predicted_observables_to_c(obs);
+                *out_ok.add(idx) = true;
+            }
+            Err(_) => {
+                *out.add(idx) = zero_predicted_observables();
+                *out_ok.add(idx) = false;
+            }
+        }
+    }
+}
+
+/// Predict observables for many `(satellite, receiver, epoch)` requests from a
+/// loaded SP3 product in one call. Delegates to the core serial `predict_batch`.
+/// `out` and `out_ok` are caller arrays of `count` entries: `out[i]` holds the
+/// observables for `requests[i]` and `out_ok[i]` is true on success. A
+/// per-request failure (e.g. no ephemeris) sets `out_ok[i]` false and zeroes
+/// `out[i]`; the call still returns SIDEREON_STATUS_OK. options may be NULL for
+/// the engine defaults.
+///
+/// Safety: sp3 must be a live handle; requests must point to count entries (each
+/// with a valid sat_id); out and out_ok must each point to count writable
+/// entries (or be NULL when count is 0); options must be NULL or point to a
+/// SidereonObservablesOptions.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sp3_observables_batch(
+    sp3: *const SidereonSp3,
+    requests: *const SidereonPredictRequest,
+    count: usize,
+    options: *const SidereonObservablesOptions,
+    out: *mut SidereonPredictedObservables,
+    out_ok: *mut bool,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_sp3_observables_batch", SidereonStatus::Panic, || {
+        let sp3 = c_try!(require_ref(sp3, "sidereon_sp3_observables_batch", "sp3"));
+        let raw = c_try!(require_slice(
+            requests,
+            count,
+            "sidereon_sp3_observables_batch",
+            "requests"
+        ));
+        // Guard the caller's output arrays (non-null when count > 0, no element
+        // overflow) before writing them element-by-element below.
+        c_try!(require_slice(
+            out as *const SidereonPredictedObservables,
+            count,
+            "sidereon_sp3_observables_batch",
+            "out"
+        ));
+        c_try!(require_slice(
+            out_ok as *const bool,
+            count,
+            "sidereon_sp3_observables_batch",
+            "out_ok"
+        ));
+        let opts = c_try!(predict_options_from_c("sidereon_sp3_observables_batch", options));
+        let parsed = c_try!(predict_requests_from_c("sidereon_sp3_observables_batch", raw));
+        let results = core_predict_batch(&sp3.inner, &parsed, opts);
+        write_predict_batch_results(&results, out, out_ok);
+        SidereonStatus::Ok
+    })
+}
+
+/// Predict observables for many `(satellite, receiver, epoch)` requests from a
+/// loaded broadcast (navigation message) source in one call. Mirror of
+/// sidereon_sp3_observables_batch for the broadcast source; same per-request
+/// out/out_ok contract. Delegates to the core serial `predict_batch`.
+///
+/// Safety: broadcast must be a live handle; requests must point to count entries
+/// (each with a valid sat_id); out and out_ok must each point to count writable
+/// entries (or be NULL when count is 0); options must be NULL or point to a
+/// SidereonObservablesOptions.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_broadcast_observables_batch(
+    broadcast: *const SidereonBroadcastEphemeris,
+    requests: *const SidereonPredictRequest,
+    count: usize,
+    options: *const SidereonObservablesOptions,
+    out: *mut SidereonPredictedObservables,
+    out_ok: *mut bool,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_broadcast_observables_batch",
+        SidereonStatus::Panic,
+        || {
+            let broadcast = c_try!(require_ref(
+                broadcast,
+                "sidereon_broadcast_observables_batch",
+                "broadcast"
+            ));
+            let raw = c_try!(require_slice(
+                requests,
+                count,
+                "sidereon_broadcast_observables_batch",
+                "requests"
+            ));
+            // Guard the caller's output arrays (non-null when count > 0, no
+            // element overflow) before writing them element-by-element below.
+            c_try!(require_slice(
+                out as *const SidereonPredictedObservables,
+                count,
+                "sidereon_broadcast_observables_batch",
+                "out"
+            ));
+            c_try!(require_slice(
+                out_ok as *const bool,
+                count,
+                "sidereon_broadcast_observables_batch",
+                "out_ok"
+            ));
+            let opts = c_try!(predict_options_from_c(
+                "sidereon_broadcast_observables_batch",
+                options
+            ));
+            let parsed = c_try!(predict_requests_from_c(
+                "sidereon_broadcast_observables_batch",
+                raw
+            ));
+            let results = core_predict_batch(&broadcast.inner, &parsed, opts);
+            write_predict_batch_results(&results, out, out_ok);
+            SidereonStatus::Ok
+        },
+    )
+}
+
+// --- Leap-second accessors --------------------------------------------------
+
+/// GPS - UTC (the GNSS leap-second offset a GPS receiver applies, IS-GPS-200) at
+/// a UTC Julian date, written to *out. 18 s from 2017-01-01. Delegates to the
+/// core `gps_utc_offset_s`. This is NOT TAI - UTC (use
+/// sidereon_tai_utc_offset_s); the two differ by a constant 19 s.
+///
+/// Safety: out must point to a double.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_gps_utc_offset_s(jd_utc: f64, out: *mut f64) -> SidereonStatus {
+    ffi_boundary("sidereon_gps_utc_offset_s", SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out, "sidereon_gps_utc_offset_s", "out"));
+        *out = core_gps_utc_offset_s(jd_utc);
+        SidereonStatus::Ok
+    })
+}
+
+/// TAI - UTC (the IERS / Bulletin C leap-second count) at a UTC Julian date,
+/// written to *out. 37 s from 2017-01-01. Delegates to the core
+/// `tai_utc_offset_s`. For the GNSS "GPS - UTC" quantity use
+/// sidereon_gps_utc_offset_s instead.
+///
+/// Safety: out must point to a double.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_tai_utc_offset_s(jd_utc: f64, out: *mut f64) -> SidereonStatus {
+    ffi_boundary("sidereon_tai_utc_offset_s", SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out, "sidereon_tai_utc_offset_s", "out"));
+        *out = core_tai_utc_offset_s(jd_utc);
+        SidereonStatus::Ok
+    })
+}
+
+// --- Embedded EGM96 geoid ---------------------------------------------------
+
+/// Geoid undulation `N` (meters above the WGS84 ellipsoid) at a geodetic
+/// position in radians, from the embedded genuine EGM96 1-degree grid, written
+/// to *out. Latitude positive north, longitude positive east. Delegates to the
+/// core `egm96_undulation`.
+///
+/// Safety: out must point to a double.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_egm96_undulation(
+    lat_rad: f64,
+    lon_rad: f64,
+    out: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_egm96_undulation", SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out, "sidereon_egm96_undulation", "out"));
+        *out = core_egm96_undulation(lat_rad, lon_rad);
+        SidereonStatus::Ok
+    })
+}
+
+/// Orthometric height `H = h - N` (meters above mean sea level) from an
+/// ellipsoidal height and a geodetic position in radians, using the embedded
+/// genuine EGM96 model, written to *out. Delegates to the core
+/// `egm96_orthometric_height_m`.
+///
+/// Safety: out must point to a double.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_egm96_orthometric_height_m(
+    ellipsoidal_height_m: f64,
+    lat_rad: f64,
+    lon_rad: f64,
+    out: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_egm96_orthometric_height_m",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out,
+                "sidereon_egm96_orthometric_height_m",
+                "out"
+            ));
+            *out = core_egm96_orthometric_height_m(ellipsoidal_height_m, lat_rad, lon_rad);
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Ellipsoidal height `h = H + N` (meters above the WGS84 ellipsoid) from an
+/// orthometric height and a geodetic position in radians, using the embedded
+/// genuine EGM96 model, written to *out. Delegates to the core
+/// `egm96_ellipsoidal_height_m`.
+///
+/// Safety: out must point to a double.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_egm96_ellipsoidal_height_m(
+    orthometric_height_m: f64,
+    lat_rad: f64,
+    lon_rad: f64,
+    out: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_egm96_ellipsoidal_height_m",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out,
+                "sidereon_egm96_ellipsoidal_height_m",
+                "out"
+            ));
+            *out = core_egm96_ellipsoidal_height_m(orthometric_height_m, lat_rad, lon_rad);
+            SidereonStatus::Ok
+        },
+    )
+}
+
+// --- Ground-observer Sun/Moon geometry --------------------------------------
+
+/// A geodetic ground station for the Sun/Moon observation helpers.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonGeodeticStation {
+    /// Geodetic latitude, degrees (positive north).
+    pub latitude_deg: f64,
+    /// Geodetic longitude, degrees (positive east).
+    pub longitude_deg: f64,
+    /// Height above the ellipsoid, kilometers.
+    pub altitude_km: f64,
+}
+
+/// Topocentric look angle of a body (Sun or Moon) from a ground site.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonBodyAzEl {
+    /// Azimuth, degrees clockwise from north on [0, 360).
+    pub azimuth_deg: f64,
+    /// Elevation above the local horizon, degrees on [-90, 90].
+    pub elevation_deg: f64,
+    /// Slant range from the site to the body, kilometers.
+    pub range_km: f64,
+}
+
+/// The Moon's illuminated state as seen from a ground site.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonMoonIllumination {
+    /// Sunlit fraction of the lunar disk on [0, 1] (0 = new, 1 = full).
+    pub illuminated_fraction: f64,
+    /// Sun-Moon-observer phase angle, degrees on [0, 180] (0 = full).
+    pub phase_angle_deg: f64,
+}
+
+/// Direction of a Moon elevation threshold crossing.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonMoonRiseSetKind {
+    /// The Moon crossed upward through the threshold (moonrise).
+    Rising = 0,
+    /// The Moon crossed downward through the threshold (moonset).
+    Setting = 1,
+}
+
+/// One Moon elevation threshold crossing (moonrise / moonset).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonMoonElevationCrossing {
+    /// Refined crossing instant, Unix microseconds.
+    pub time_unix_us: i64,
+    /// Crossing direction.
+    pub kind: SidereonMoonRiseSetKind,
+    /// Topocentric Moon elevation at the refined instant, degrees.
+    pub elevation_deg: f64,
+}
+
+/// Options for the Moon rise/set finder. Pass NULL for the engine defaults
+/// (-0.833 deg threshold, 300 s scan step, 1 s refinement tolerance).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonMoonElevationOptions {
+    /// Topocentric Moon (disk-center) elevation threshold, degrees.
+    pub elevation_threshold_deg: f64,
+    /// Uniform event-finder scan step, seconds.
+    pub step_seconds: f64,
+    /// Crossing-time refinement tolerance, seconds.
+    pub time_tolerance_seconds: f64,
+}
+
+/// Kind of a Moon meridian transit (culmination).
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonMoonTransitKind {
+    /// Upper culmination (azimuth through due south, highest in the sky).
+    Upper = 0,
+    /// Lower culmination (azimuth through due north, lowest in the sky).
+    Lower = 1,
+}
+
+/// One Moon meridian transit (culmination).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonMoonTransit {
+    /// Refined transit instant, Unix microseconds.
+    pub time_unix_us: i64,
+    /// Upper or lower culmination.
+    pub kind: SidereonMoonTransitKind,
+    /// Topocentric Moon elevation at the refined instant, degrees.
+    pub elevation_deg: f64,
+}
+
+fn station_to_core(station: &SidereonGeodeticStation) -> GeodeticStationKm {
+    GeodeticStationKm {
+        latitude_deg: station.latitude_deg,
+        longitude_deg: station.longitude_deg,
+        altitude_km: station.altitude_km,
+    }
+}
+
+fn body_az_el_to_c(azel: sidereon_core::astro::bodies::BodyAzEl) -> SidereonBodyAzEl {
+    SidereonBodyAzEl {
+        azimuth_deg: azel.azimuth_deg,
+        elevation_deg: azel.elevation_deg,
+        range_km: azel.range_km,
+    }
+}
+
+/// Map a ground-observer body error to a status code. A station/frame input
+/// failure reports SIDEREON_STATUS_INVALID_ARGUMENT; an ephemeris or
+/// phase-angle geometry failure reports SIDEREON_STATUS_SOLVE.
+fn map_body_observation_error(fn_name: &str, err: BodyObservationError) -> SidereonStatus {
+    set_last_error(format!("{fn_name}: {err}"));
+    match err {
+        BodyObservationError::FrameTransform(_) => SidereonStatus::InvalidArgument,
+        BodyObservationError::Ephemeris(_) | BodyObservationError::Angle(_) => {
+            SidereonStatus::Solve
+        }
+    }
+}
+
+/// Map an event-finder error to a status code. Its only cause is an invalid
+/// window/cadence input, reported as SIDEREON_STATUS_INVALID_ARGUMENT.
+fn map_event_finder_error(fn_name: &str, err: EventFinderError) -> SidereonStatus {
+    set_last_error(format!("{fn_name}: {err}"));
+    SidereonStatus::InvalidArgument
+}
+
+/// Topocentric azimuth/elevation/range of the Sun from a ground site at an
+/// instant, written to *out. Delegates to the core `sun_az_el`.
+///
+/// Safety: station must point to a SidereonGeodeticStation; out must point to a
+/// SidereonBodyAzEl.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sun_az_el(
+    station: *const SidereonGeodeticStation,
+    time_unix_us: i64,
+    out: *mut SidereonBodyAzEl,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_sun_az_el", SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out, "sidereon_sun_az_el", "out"));
+        *out = SidereonBodyAzEl {
+            azimuth_deg: 0.0,
+            elevation_deg: 0.0,
+            range_km: 0.0,
+        };
+        let station = c_try!(require_ref(station, "sidereon_sun_az_el", "station"));
+        let time = UtcInstant::from_unix_microseconds(time_unix_us);
+        match core_sun_az_el(&station_to_core(station), time) {
+            Ok(azel) => {
+                *out = body_az_el_to_c(azel);
+                SidereonStatus::Ok
+            }
+            Err(err) => map_body_observation_error("sidereon_sun_az_el", err),
+        }
+    })
+}
+
+/// Topocentric azimuth/elevation/range of the Moon from a ground site at an
+/// instant, written to *out (includes topocentric parallax). Delegates to the
+/// core `moon_az_el`.
+///
+/// Safety: station must point to a SidereonGeodeticStation; out must point to a
+/// SidereonBodyAzEl.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_moon_az_el(
+    station: *const SidereonGeodeticStation,
+    time_unix_us: i64,
+    out: *mut SidereonBodyAzEl,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_moon_az_el", SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out, "sidereon_moon_az_el", "out"));
+        *out = SidereonBodyAzEl {
+            azimuth_deg: 0.0,
+            elevation_deg: 0.0,
+            range_km: 0.0,
+        };
+        let station = c_try!(require_ref(station, "sidereon_moon_az_el", "station"));
+        let time = UtcInstant::from_unix_microseconds(time_unix_us);
+        match core_moon_az_el(&station_to_core(station), time) {
+            Ok(azel) => {
+                *out = body_az_el_to_c(azel);
+                SidereonStatus::Ok
+            }
+            Err(err) => map_body_observation_error("sidereon_moon_az_el", err),
+        }
+    })
+}
+
+/// Illuminated fraction and phase angle of the Moon as seen from a ground site
+/// at an instant, written to *out. Delegates to the core `moon_illumination`.
+///
+/// Safety: station must point to a SidereonGeodeticStation; out must point to a
+/// SidereonMoonIllumination.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_moon_illumination(
+    station: *const SidereonGeodeticStation,
+    time_unix_us: i64,
+    out: *mut SidereonMoonIllumination,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_moon_illumination", SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out, "sidereon_moon_illumination", "out"));
+        *out = SidereonMoonIllumination {
+            illuminated_fraction: 0.0,
+            phase_angle_deg: 0.0,
+        };
+        let station = c_try!(require_ref(station, "sidereon_moon_illumination", "station"));
+        let time = UtcInstant::from_unix_microseconds(time_unix_us);
+        match core_moon_illumination(&station_to_core(station), time) {
+            Ok(illum) => {
+                *out = SidereonMoonIllumination {
+                    illuminated_fraction: illum.illuminated_fraction,
+                    phase_angle_deg: illum.phase_angle_deg,
+                };
+                SidereonStatus::Ok
+            }
+            Err(err) => map_body_observation_error("sidereon_moon_illumination", err),
+        }
+    })
+}
+
+/// Topocentric geometric Moon (disk-center) elevation at a station and instant,
+/// degrees, written to *out (includes topocentric parallax). Routes through the
+/// core `moon_az_el` and returns its elevation, so a bad station maps to
+/// SIDEREON_STATUS_INVALID_ARGUMENT rather than tripping the internal `expect`
+/// in the core `moon_elevation_deg` convenience wrapper.
+///
+/// Safety: station must point to a SidereonGeodeticStation; out must point to a
+/// double.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_moon_elevation_deg(
+    station: *const SidereonGeodeticStation,
+    time_unix_us: i64,
+    out: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_moon_elevation_deg", SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out, "sidereon_moon_elevation_deg", "out"));
+        *out = 0.0;
+        let station = c_try!(require_ref(station, "sidereon_moon_elevation_deg", "station"));
+        let time = UtcInstant::from_unix_microseconds(time_unix_us);
+        match core_moon_az_el(&station_to_core(station), time) {
+            Ok(azel) => {
+                *out = azel.elevation_deg;
+                SidereonStatus::Ok
+            }
+            Err(err) => map_body_observation_error("sidereon_moon_elevation_deg", err),
+        }
+    })
+}
+
+unsafe fn moon_elevation_options_from_c(
+    fn_name: &str,
+    options: *const SidereonMoonElevationOptions,
+) -> Result<CoreMoonElevationOptions, SidereonStatus> {
+    if options.is_null() {
+        return Ok(CoreMoonElevationOptions::default());
+    }
+    let options = require_ref(options, fn_name, "options")?;
+    Ok(CoreMoonElevationOptions {
+        elevation_threshold_deg: options.elevation_threshold_deg,
+        step_seconds: options.step_seconds,
+        time_tolerance_seconds: options.time_tolerance_seconds,
+    })
+}
+
+/// Populate *out_options with the engine's default Moon rise/set finder options
+/// (-0.833 deg threshold, 300 s scan step, 1 s refinement tolerance).
+///
+/// Safety: out_options must point to a SidereonMoonElevationOptions.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_moon_elevation_options_init(
+    out_options: *mut SidereonMoonElevationOptions,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_moon_elevation_options_init",
+        SidereonStatus::Panic,
+        || {
+            let out_options = c_try!(require_out(
+                out_options,
+                "sidereon_moon_elevation_options_init",
+                "out_options"
+            ));
+            let defaults = CoreMoonElevationOptions::default();
+            *out_options = SidereonMoonElevationOptions {
+                elevation_threshold_deg: defaults.elevation_threshold_deg,
+                step_seconds: defaults.step_seconds,
+                time_tolerance_seconds: defaults.time_tolerance_seconds,
+            };
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Find Moon elevation threshold crossings (moonrise / moonset) for a station
+/// over a UTC window. Delegates to the core `find_moon_elevation_crossings`.
+/// options may be NULL for the engine defaults. Variable-length output contract:
+/// pass out NULL with len 0 to query the count via *out_required.
+///
+/// Safety: station must point to a SidereonGeodeticStation; options must be NULL
+/// or point to a SidereonMoonElevationOptions; out must point to at least len
+/// writable SidereonMoonElevationCrossing or be NULL when len is 0; out_written
+/// and out_required must point to size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_find_moon_elevation_crossings(
+    station: *const SidereonGeodeticStation,
+    start_unix_us: i64,
+    end_unix_us: i64,
+    options: *const SidereonMoonElevationOptions,
+    out: *mut SidereonMoonElevationCrossing,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_find_moon_elevation_crossings",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_find_moon_elevation_crossings",
+                out_written,
+                out_required
+            ));
+            let station = c_try!(require_ref(
+                station,
+                "sidereon_find_moon_elevation_crossings",
+                "station"
+            ));
+            let opts = c_try!(moon_elevation_options_from_c(
+                "sidereon_find_moon_elevation_crossings",
+                options
+            ));
+            let crossings = match core_find_moon_elevation_crossings(
+                &station_to_core(station),
+                UtcInstant::from_unix_microseconds(start_unix_us),
+                UtcInstant::from_unix_microseconds(end_unix_us),
+                opts,
+            ) {
+                Ok(crossings) => crossings,
+                Err(err) => {
+                    return map_event_finder_error("sidereon_find_moon_elevation_crossings", err)
+                }
+            };
+            let values: Vec<SidereonMoonElevationCrossing> = crossings
+                .iter()
+                .map(|c| SidereonMoonElevationCrossing {
+                    time_unix_us: c.time.unix_microseconds(),
+                    kind: match c.kind {
+                        MoonElevationCrossingKind::Rising => SidereonMoonRiseSetKind::Rising,
+                        MoonElevationCrossingKind::Setting => SidereonMoonRiseSetKind::Setting,
+                    },
+                    elevation_deg: c.elevation_deg,
+                })
+                .collect();
+            c_try!(copy_prefix_to_c(
+                "sidereon_find_moon_elevation_crossings",
+                "out",
+                &values,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Find Moon meridian transits (upper and lower culminations) for a station over
+/// a UTC window. Delegates to the core `find_moon_transits`. Variable-length
+/// output contract: pass out NULL with len 0 to query the count via
+/// *out_required.
+///
+/// Safety: station must point to a SidereonGeodeticStation; out must point to at
+/// least len writable SidereonMoonTransit or be NULL when len is 0; out_written
+/// and out_required must point to size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_find_moon_transits(
+    station: *const SidereonGeodeticStation,
+    start_unix_us: i64,
+    end_unix_us: i64,
+    step_seconds: f64,
+    time_tolerance_seconds: f64,
+    out: *mut SidereonMoonTransit,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_find_moon_transits",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_find_moon_transits",
+                out_written,
+                out_required
+            ));
+            let station = c_try!(require_ref(station, "sidereon_find_moon_transits", "station"));
+            let transits = match core_find_moon_transits(
+                &station_to_core(station),
+                UtcInstant::from_unix_microseconds(start_unix_us),
+                UtcInstant::from_unix_microseconds(end_unix_us),
+                step_seconds,
+                time_tolerance_seconds,
+            ) {
+                Ok(transits) => transits,
+                Err(err) => return map_event_finder_error("sidereon_find_moon_transits", err),
+            };
+            let values: Vec<SidereonMoonTransit> = transits
+                .iter()
+                .map(|t| SidereonMoonTransit {
+                    time_unix_us: t.time.unix_microseconds(),
+                    kind: match t.kind {
+                        MoonTransitKind::Upper => SidereonMoonTransitKind::Upper,
+                        MoonTransitKind::Lower => SidereonMoonTransitKind::Lower,
+                    },
+                    elevation_deg: t.elevation_deg,
+                })
+                .collect();
+            c_try!(copy_prefix_to_c(
+                "sidereon_find_moon_transits",
+                "out",
+                &values,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

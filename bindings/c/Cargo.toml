@@ -1,6 +1,6 @@
 [package]
 name = "sidereon-c"
-version = "0.9.0"
+version = "0.9.1"
 authors = []
 edition = "2021"
 description = "C ABI bindings over the sidereon ergonomic API: opaque handles, integer error codes, caller-allocated buffers"
@@ -20,5 +20,14 @@ crate-type = ["cdylib", "staticlib"]
 # delegates to `sidereon-core`. The numbers are exactly what the engine produces.
 # These resolve to the one canonical published engine so this binding is never a
 # fork of the engine.
-sidereon = "0.9.0"
-sidereon-core = "0.9.0"
+sidereon = "0.9.1"
+sidereon-core = "0.9.1"
+# The generic data-driven trust-region least-squares engine the headline TRLS
+# entry points marshal to. Not re-exported by the `sidereon` facade, so it is a
+# direct dependency.
+trust-region-least-squares = "0.9.1"
+# `nalgebra` (pinned to the core's version) builds the dense `DMatrix` the
+# covariance/Hessian-trace primitives take by reference; this binding owns no
+# modeling math, it only marshals the caller's row-major buffer into the matrix
+# type the core entry points require.
+nalgebra = "0.33"

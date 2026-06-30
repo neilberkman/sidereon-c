@@ -316,3 +316,26 @@ cc -std=c11 -Wall -Wextra -Werror \
 
 echo "== running full_coverage_smoke program =="
 "${full_coverage_out}" "${sp3_path}"
+
+# Newer merged-core capabilities: generic data-driven trust-region least squares
+# (solve + leave-one-out), Jacobian-derived covariance / Hessian trace / error
+# ellipse, DOP with an explicit ENU convention, residual-distribution statistics,
+# batch observable prediction, leap-second accessors, the embedded EGM96 geoid,
+# and ground-observer Sun/Moon geometry. The trust-region and statistics
+# bit-exact-vs-scipy checks are linux-x86_64-pinned inside the program; the rest
+# is closed-form and runs everywhere. Uses the GRG SP3 (SP3 batch observables)
+# and the ESBC broadcast NAV (broadcast batch observables).
+echo "== compiling caps_extra_smoke program =="
+caps_extra_out="${target_dir}/caps_extra_smoke"
+cc -std=c11 -Wall -Wextra -Werror \
+    -I"${binding_root}/include" \
+    -I"${here}" \
+    "${here}/caps_extra_smoke.c" \
+    -L"${lib_dir}" \
+    -lsidereon \
+    -Wl,-rpath,"${lib_dir}" \
+    -lm \
+    -o "${caps_extra_out}"
+
+echo "== running caps_extra_smoke program =="
+"${caps_extra_out}" "${sp3_path}" "${nav_path}"

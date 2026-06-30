@@ -46,8 +46,8 @@
 
 #define SIDEREON_VERSION_MAJOR 0
 #define SIDEREON_VERSION_MINOR 9
-#define SIDEREON_VERSION_PATCH 0
-#define SIDEREON_VERSION_STRING "0.9.0"
+#define SIDEREON_VERSION_PATCH 1
+#define SIDEREON_VERSION_STRING "0.9.1"
 
 /**
  * Maximum number of VMF1 site-wise samples carried in
@@ -515,6 +515,34 @@ typedef enum SidereonRtcmMsmKind {
      */
     SIDEREON_RTCM_MSM_KIND_MSM7 = 1,
 } SidereonRtcmMsmKind;
+
+/**
+ * Direction of a Moon elevation threshold crossing.
+ */
+typedef enum SidereonMoonRiseSetKind {
+    /**
+     * The Moon crossed upward through the threshold (moonrise).
+     */
+    SIDEREON_MOON_RISE_SET_KIND_RISING = 0,
+    /**
+     * The Moon crossed downward through the threshold (moonset).
+     */
+    SIDEREON_MOON_RISE_SET_KIND_SETTING = 1,
+} SidereonMoonRiseSetKind;
+
+/**
+ * Kind of a Moon meridian transit (culmination).
+ */
+typedef enum SidereonMoonTransitKind {
+    /**
+     * Upper culmination (azimuth through due south, highest in the sky).
+     */
+    SIDEREON_MOON_TRANSIT_KIND_UPPER = 0,
+    /**
+     * Lower culmination (azimuth through due north, lowest in the sky).
+     */
+    SIDEREON_MOON_TRANSIT_KIND_LOWER = 1,
+} SidereonMoonTransitKind;
 
 /**
  * A time scale, tagging the system a time reading is expressed in. Pass as a
@@ -1086,6 +1114,103 @@ typedef enum SidereonCdmObjectStringField {
 } SidereonCdmObjectStringField;
 
 /**
+ * Which built-in residual a [`SidereonDataProblem`] fits. Selects the meaning
+ * of the data arrays the problem carries.
+ */
+typedef enum SidereonTrlsKind {
+    /**
+     * Dense linear least squares `r_i = (row_i . x) - b_i`. Uses `a` (row-major
+     * `m`-by-`n`) and `b` (length `m`); `m` and `n` set the shape.
+     */
+    SIDEREON_TRLS_KIND_LINEAR = 0,
+    /**
+     * Polynomial fit of `degree` (so `n = degree + 1` coefficients, lowest
+     * order first): `r_i = horner(x, t_i) - y_i`. Uses `t` and `y`.
+     */
+    SIDEREON_TRLS_KIND_POLYNOMIAL = 1,
+    /**
+     * Exponential model with `n = 3` parameters `[amp, rate, offset]`:
+     * `r_i = (x0 exp(x1 t_i) + x2) - y_i`. Uses `t` and `y`.
+     */
+    SIDEREON_TRLS_KIND_EXPONENTIAL = 2,
+} SidereonTrlsKind;
+
+/**
+ * SciPy `loss` selector for a [`SidereonDataProblem`].
+ */
+typedef enum SidereonTrlsLoss {
+    /**
+     * Identity loss (ordinary least squares); the default.
+     */
+    SIDEREON_TRLS_LOSS_LINEAR = 0,
+    /**
+     * SciPy `soft_l1`.
+     */
+    SIDEREON_TRLS_LOSS_SOFT_L1 = 1,
+    /**
+     * SciPy `huber`.
+     */
+    SIDEREON_TRLS_LOSS_HUBER = 2,
+    /**
+     * SciPy `cauchy`.
+     */
+    SIDEREON_TRLS_LOSS_CAUCHY = 3,
+    /**
+     * SciPy `arctan`.
+     */
+    SIDEREON_TRLS_LOSS_ARCTAN = 4,
+} SidereonTrlsLoss;
+
+/**
+ * SciPy `x_scale` mode for a [`SidereonDataProblem`].
+ */
+typedef enum SidereonTrlsXScale {
+    /**
+     * Unit per-parameter scale (`x_scale = 1.0`); the default.
+     */
+    SIDEREON_TRLS_X_SCALE_UNIT = 0,
+    /**
+     * Jacobian-derived adaptive scale (`x_scale = 'jac'`).
+     */
+    SIDEREON_TRLS_X_SCALE_JAC = 1,
+    /**
+     * Explicit per-parameter scale read from `x_scale_values` (length `n`).
+     */
+    SIDEREON_TRLS_X_SCALE_VALUES = 2,
+} SidereonTrlsXScale;
+
+/**
+ * Which linear-algebra backend drives the trust-region iteration.
+ */
+typedef enum SidereonTrlsBackend {
+    /**
+     * Pure-Rust in-crate SVD (works everywhere; not bit-identical to SciPy).
+     */
+    SIDEREON_TRLS_BACKEND_NATIVE = 0,
+    /**
+     * Host LAPACK/BLAS resolved from the environment
+     * (`TRUST_REGION_LEAST_SQUARES_LAPACK_PATH`), for bit-for-bit SciPy parity.
+     */
+    SIDEREON_TRLS_BACKEND_HOST_LAPACK = 1,
+} SidereonTrlsBackend;
+
+/**
+ * The local ENU convention used for the DOP horizontal/vertical split.
+ */
+typedef enum SidereonEnuConvention {
+    /**
+     * Geodetic-ellipsoid-normal ENU (the GNSS-standard default, RTKLIB
+     * `xyz2enu`); identical to sidereon_dop.
+     */
+    SIDEREON_ENU_CONVENTION_GEODETIC_NORMAL = 0,
+    /**
+     * Geocentric-radial ENU whose up is `position / |position|`; changes only
+     * HDOP/VDOP (GDOP/PDOP/TDOP are identical).
+     */
+    SIDEREON_ENU_CONVENTION_GEOCENTRIC_RADIAL = 1,
+} SidereonEnuConvention;
+
+/**
  * A single ANTEX antenna calibration block (receiver or satellite), owned
  * independently of the parent product. Obtain one with sidereon_antex_antenna
  * and release it with sidereon_antenna_free.
@@ -1467,6 +1592,19 @@ typedef struct SidereonTleFile SidereonTleFile;
  * sidereon_tle_propagate and release with sidereon_tle_propagation_free.
  */
 typedef struct SidereonTlePropagation SidereonTlePropagation;
+
+/**
+ * Opaque handle to a leave-one-out (RAIM/FDE) report: the base solve plus one
+ * re-solve per dropped residual row. Release with
+ * [`sidereon_trls_drop_one_free`].
+ */
+typedef struct SidereonTrlsDropOne SidereonTrlsDropOne;
+
+/**
+ * Opaque handle to a converged TRLS solution. Release with
+ * [`sidereon_trls_solution_free`].
+ */
+typedef struct SidereonTrlsSolution SidereonTrlsSolution;
 
 /**
  * A receiver velocity / clock-drift solution. Create with
@@ -8445,6 +8583,362 @@ typedef struct SidereonRtkInnovationScreen {
      */
     bool coasted;
 } SidereonRtkInnovationScreen;
+
+/**
+ * A fully specified data-driven least-squares problem, flat for FFI.
+ *
+ * Fill the kind-specific data pointers and lengths, the starting point `x0`,
+ * and the SciPy-style configuration; the residual and Jacobian for every
+ * iteration are evaluated entirely in the core, so the solve crosses the C
+ * boundary once in and once out. Initialize with
+ * [`sidereon_data_problem_init`] for the SciPy defaults, then set the data
+ * pointers. The core validates every shape before iterating.
+ */
+typedef struct SidereonDataProblem {
+    /**
+     * Residual kind, selecting which data arrays are read. Stored as a
+     * uint32_t; use the SidereonTrlsKind discriminants.
+     */
+    uint32_t kind;
+    /**
+     * Linear design matrix, row-major `m`-by-`n` (Linear only). May be NULL for
+     * the other kinds.
+     */
+    const double *a;
+    /**
+     * Length of `a` (must equal `m * n` for Linear).
+     */
+    size_t a_len;
+    /**
+     * Linear right-hand side, length `m` (Linear only).
+     */
+    const double *b;
+    /**
+     * Length of `b` (must equal `m` for Linear).
+     */
+    size_t b_len;
+    /**
+     * Sample abscissae `t` (Polynomial / Exponential only).
+     */
+    const double *t;
+    /**
+     * Length of `t`.
+     */
+    size_t t_len;
+    /**
+     * Sample ordinates `y` (Polynomial / Exponential only).
+     */
+    const double *y;
+    /**
+     * Length of `y` (must equal `t_len`).
+     */
+    size_t y_len;
+    /**
+     * Residual-row count `m` (Linear only; for Polynomial/Exponential the row
+     * count is `t_len`).
+     */
+    size_t m;
+    /**
+     * Parameter count `n` (Linear only; derived from `degree`/`3` otherwise).
+     */
+    size_t n;
+    /**
+     * Polynomial degree (Polynomial only; coefficients `n = degree + 1`).
+     */
+    size_t degree;
+    /**
+     * Starting parameter vector, length equal to the kind's parameter count.
+     */
+    const double *x0;
+    /**
+     * Length of `x0`.
+     */
+    size_t x0_len;
+    /**
+     * SciPy `loss`. Stored as a uint32_t; use the SidereonTrlsLoss
+     * discriminants.
+     */
+    uint32_t loss;
+    /**
+     * SciPy `f_scale` (only consulted for a robust loss).
+     */
+    double f_scale;
+    /**
+     * SciPy `x_scale` mode. Stored as a uint32_t; use the SidereonTrlsXScale
+     * discriminants.
+     */
+    uint32_t x_scale_mode;
+    /**
+     * Per-parameter scale values, length `n` (read only when
+     * `x_scale_mode == Values`).
+     */
+    const double *x_scale_values;
+    /**
+     * Length of `x_scale_values`.
+     */
+    size_t x_scale_values_len;
+    /**
+     * SciPy `max_nfev`; a negative value selects the default `100 * n`.
+     */
+    int64_t max_nfev;
+    /**
+     * SciPy `ftol`.
+     */
+    double ftol;
+    /**
+     * SciPy `xtol`.
+     */
+    double xtol;
+    /**
+     * SciPy `gtol`.
+     */
+    double gtol;
+    /**
+     * Linear-algebra backend. Stored as a uint32_t; use the
+     * SidereonTrlsBackend discriminants.
+     */
+    uint32_t backend;
+} SidereonDataProblem;
+
+/**
+ * Scalar summary of a converged trust-region solve.
+ */
+typedef struct SidereonTrlsSummary {
+    /**
+     * Final cost `0.5 * sum(residual^2)`.
+     */
+    double cost;
+    /**
+     * First-order optimality `||J^T f||_inf` at the solution.
+     */
+    double optimality;
+    /**
+     * Residual-evaluation count.
+     */
+    size_t nfev;
+    /**
+     * Jacobian-evaluation count.
+     */
+    size_t njev;
+    /**
+     * SciPy status: 0 max-eval, 1 gtol, 2 ftol, 3 xtol, 4 ftol+xtol.
+     */
+    int32_t status;
+    /**
+     * Whether the solve converged (status > 0).
+     */
+    bool success;
+    /**
+     * Parameter count `n` (length of the solution vector).
+     */
+    size_t n;
+    /**
+     * Residual count `m`.
+     */
+    size_t m;
+} SidereonTrlsSummary;
+
+/**
+ * A 2D confidence ellipse from a 2x2 covariance block. Mirrors the core
+ * `ErrorEllipse2`.
+ */
+typedef struct SidereonErrorEllipse2 {
+    /**
+     * Confidence level used to scale the axes, in `[0, 1)`.
+     */
+    double confidence;
+    /**
+     * Two-DOF chi-square quantile `-2 ln(1 - confidence)`.
+     */
+    double chi_square_scale;
+    /**
+     * Semi-major axis length.
+     */
+    double semi_major;
+    /**
+     * Semi-minor axis length.
+     */
+    double semi_minor;
+    /**
+     * Orientation of the major axis, radians.
+     */
+    double orientation_rad;
+} SidereonErrorEllipse2;
+
+/**
+ * Sample mean, variance, skewness, and kurtosis of a residual set. Mirrors the
+ * core `MomentStats`.
+ */
+typedef struct SidereonResidualMoments {
+    /**
+     * Arithmetic mean.
+     */
+    double mean;
+    /**
+     * Population (biased) variance, the second central moment.
+     */
+    double variance;
+    /**
+     * Sample skewness (biased or bias-corrected per the request).
+     */
+    double skewness;
+    /**
+     * Sample kurtosis: excess (Gaussian -> 0) when fisher, Pearson otherwise.
+     */
+    double kurtosis_excess;
+} SidereonResidualMoments;
+
+/**
+ * Jarque-Bera normality test result.
+ */
+typedef struct SidereonJarqueBera {
+    /**
+     * Test statistic `n/6 * (S^2 + K^2/4)`.
+     */
+    double statistic;
+    /**
+     * Upper-tail chi-square(2) p-value `exp(-statistic/2)`.
+     */
+    double p_value;
+} SidereonJarqueBera;
+
+/**
+ * Shapiro-Wilk normality test result.
+ */
+typedef struct SidereonShapiroWilk {
+    /**
+     * The `W` statistic in `(0, 1]`.
+     */
+    double w;
+    /**
+     * Upper-tail p-value for the normality null.
+     */
+    double p_value;
+} SidereonShapiroWilk;
+
+/**
+ * One batch observable-prediction request: the satellite token, the static
+ * receiver ECEF position (meters), and the receive epoch (seconds since J2000).
+ */
+typedef struct SidereonPredictRequest {
+    /**
+     * Null-terminated satellite token (e.g. "G01").
+     */
+    const char *sat_id;
+    /**
+     * Receiver ECEF position, meters.
+     */
+    double receiver_ecef_m[3];
+    /**
+     * Receive epoch, seconds since J2000.
+     */
+    double t_rx_j2000_s;
+} SidereonPredictRequest;
+
+/**
+ * A geodetic ground station for the Sun/Moon observation helpers.
+ */
+typedef struct SidereonGeodeticStation {
+    /**
+     * Geodetic latitude, degrees (positive north).
+     */
+    double latitude_deg;
+    /**
+     * Geodetic longitude, degrees (positive east).
+     */
+    double longitude_deg;
+    /**
+     * Height above the ellipsoid, kilometers.
+     */
+    double altitude_km;
+} SidereonGeodeticStation;
+
+/**
+ * Topocentric look angle of a body (Sun or Moon) from a ground site.
+ */
+typedef struct SidereonBodyAzEl {
+    /**
+     * Azimuth, degrees clockwise from north on [0, 360).
+     */
+    double azimuth_deg;
+    /**
+     * Elevation above the local horizon, degrees on [-90, 90].
+     */
+    double elevation_deg;
+    /**
+     * Slant range from the site to the body, kilometers.
+     */
+    double range_km;
+} SidereonBodyAzEl;
+
+/**
+ * The Moon's illuminated state as seen from a ground site.
+ */
+typedef struct SidereonMoonIllumination {
+    /**
+     * Sunlit fraction of the lunar disk on [0, 1] (0 = new, 1 = full).
+     */
+    double illuminated_fraction;
+    /**
+     * Sun-Moon-observer phase angle, degrees on [0, 180] (0 = full).
+     */
+    double phase_angle_deg;
+} SidereonMoonIllumination;
+
+/**
+ * Options for the Moon rise/set finder. Pass NULL for the engine defaults
+ * (-0.833 deg threshold, 300 s scan step, 1 s refinement tolerance).
+ */
+typedef struct SidereonMoonElevationOptions {
+    /**
+     * Topocentric Moon (disk-center) elevation threshold, degrees.
+     */
+    double elevation_threshold_deg;
+    /**
+     * Uniform event-finder scan step, seconds.
+     */
+    double step_seconds;
+    /**
+     * Crossing-time refinement tolerance, seconds.
+     */
+    double time_tolerance_seconds;
+} SidereonMoonElevationOptions;
+
+/**
+ * One Moon elevation threshold crossing (moonrise / moonset).
+ */
+typedef struct SidereonMoonElevationCrossing {
+    /**
+     * Refined crossing instant, Unix microseconds.
+     */
+    int64_t time_unix_us;
+    /**
+     * Crossing direction.
+     */
+    enum SidereonMoonRiseSetKind kind;
+    /**
+     * Topocentric Moon elevation at the refined instant, degrees.
+     */
+    double elevation_deg;
+} SidereonMoonElevationCrossing;
+
+/**
+ * One Moon meridian transit (culmination).
+ */
+typedef struct SidereonMoonTransit {
+    /**
+     * Refined transit instant, Unix microseconds.
+     */
+    int64_t time_unix_us;
+    /**
+     * Upper or lower culmination.
+     */
+    enum SidereonMoonTransitKind kind;
+    /**
+     * Topocentric Moon elevation at the refined instant, degrees.
+     */
+    double elevation_deg;
+} SidereonMoonTransit;
 
 #ifdef __cplusplus
 extern "C" {
@@ -16254,6 +16748,529 @@ enum SidereonStatus sidereon_cdm_object_velocity_covariance(const struct Sidereo
                                                             uint32_t object_index,
                                                             double *out_covariance,
                                                             bool *out_present);
+
+/**
+ * Populate `*out_problem` with the SciPy `least_squares` defaults for `kind`:
+ * linear loss, `f_scale = 1`, unit `x_scale`, default evaluation budget, the
+ * SciPy `ftol = xtol = 1e-8` / `gtol = 1e-10` tolerances, and the native
+ * backend. All data pointers are zeroed; set them (and `m`/`n`/`degree`) before
+ * solving.
+ *
+ * Safety: out_problem must point to a SidereonDataProblem.
+ */
+enum SidereonStatus sidereon_data_problem_init(uint32_t kind,
+                                               struct SidereonDataProblem *out_problem);
+
+/**
+ * Solve a data-driven least-squares problem, transferring a solution handle to
+ * `*out_solution`. Delegates to the core `solve_data_problem` (native backend)
+ * or `solve_data_problem_with` (host-LAPACK backend). The trust-region loop
+ * runs entirely in the core; read the result with the
+ * sidereon_trls_solution_* accessors and release it with
+ * sidereon_trls_solution_free.
+ *
+ * Safety: problem must point to a SidereonDataProblem whose data pointers are
+ * valid for their stated lengths; out_solution must point to storage for a
+ * SidereonTrlsSolution*.
+ */
+enum SidereonStatus sidereon_solve_data_problem(const struct SidereonDataProblem *problem,
+                                                struct SidereonTrlsSolution **out_solution);
+
+/**
+ * Copy the scalar summary (cost, optimality, evaluation counts, status, shape)
+ * into *out_summary.
+ *
+ * Safety: sol must be a live handle; out_summary must point to a
+ * SidereonTrlsSummary.
+ */
+enum SidereonStatus sidereon_trls_solution_summary(const struct SidereonTrlsSolution *sol,
+                                                   struct SidereonTrlsSummary *out_summary);
+
+/**
+ * Copy the solution vector `x` (length `n`) into out. Variable-length output
+ * contract: pass out NULL with len 0 to query the count via *out_required.
+ *
+ * Safety: sol must be a live handle; out must point to at least len writable
+ * doubles or be NULL when len is 0; out_written and out_required must point to
+ * size_t values.
+ */
+enum SidereonStatus sidereon_trls_solution_x(const struct SidereonTrlsSolution *sol,
+                                             double *out,
+                                             size_t len,
+                                             size_t *out_written,
+                                             size_t *out_required);
+
+/**
+ * Copy the residual vector `fun` (length `m`) at the solution into out. Same
+ * variable-length output contract as sidereon_trls_solution_x.
+ *
+ * Safety: sol must be a live handle; out must point to at least len writable
+ * doubles or be NULL when len is 0; out_written and out_required must point to
+ * size_t values.
+ */
+enum SidereonStatus sidereon_trls_solution_residuals(const struct SidereonTrlsSolution *sol,
+                                                     double *out,
+                                                     size_t len,
+                                                     size_t *out_written,
+                                                     size_t *out_required);
+
+/**
+ * Copy the gradient `J^T f` (length `n`) at the solution into out. Same
+ * variable-length output contract as sidereon_trls_solution_x.
+ *
+ * Safety: sol must be a live handle; out must point to at least len writable
+ * doubles or be NULL when len is 0; out_written and out_required must point to
+ * size_t values.
+ */
+enum SidereonStatus sidereon_trls_solution_gradient(const struct SidereonTrlsSolution *sol,
+                                                    double *out,
+                                                    size_t len,
+                                                    size_t *out_written,
+                                                    size_t *out_required);
+
+/**
+ * Copy the row-major `m`-by-`n` Jacobian at the solution into out (length
+ * `m * n`). Same variable-length output contract as sidereon_trls_solution_x.
+ *
+ * Safety: sol must be a live handle; out must point to at least len writable
+ * doubles or be NULL when len is 0; out_written and out_required must point to
+ * size_t values.
+ */
+enum SidereonStatus sidereon_trls_solution_jacobian(const struct SidereonTrlsSolution *sol,
+                                                    double *out,
+                                                    size_t len,
+                                                    size_t *out_written,
+                                                    size_t *out_required);
+
+/**
+ * Release a TRLS solution handle. Null is a no-op.
+ *
+ * Safety: sol must be NULL or a live handle from sidereon_solve_data_problem,
+ * freed exactly once.
+ */
+void sidereon_trls_solution_free(struct SidereonTrlsSolution *sol);
+
+/**
+ * Solve a data-driven problem and every leave-one-out re-solve (RAIM / FDE),
+ * transferring a report handle to *out_report. Delegates to the core
+ * `solve_data_problem_drop_one` (native) or `_with` (host-LAPACK). The report
+ * carries the base solve, one re-solve per masked residual row, and the cost
+ * delta for each masked row.
+ *
+ * Safety: problem must point to a SidereonDataProblem whose data pointers are
+ * valid for their stated lengths; out_report must point to storage for a
+ * SidereonTrlsDropOne*.
+ */
+enum SidereonStatus sidereon_solve_data_problem_drop_one(const struct SidereonDataProblem *problem,
+                                                         struct SidereonTrlsDropOne **out_report);
+
+/**
+ * Write the number of dropped-row re-solves (equal to the residual count `m`)
+ * into *out_count.
+ *
+ * Safety: report must be a live handle; out_count must point to a size_t.
+ */
+enum SidereonStatus sidereon_trls_drop_one_count(const struct SidereonTrlsDropOne *report,
+                                                 size_t *out_count);
+
+/**
+ * Copy the base (all-rows) solve summary into *out_summary.
+ *
+ * Safety: report must be a live handle; out_summary must point to a
+ * SidereonTrlsSummary.
+ */
+enum SidereonStatus sidereon_trls_drop_one_base_summary(const struct SidereonTrlsDropOne *report,
+                                                        struct SidereonTrlsSummary *out_summary);
+
+/**
+ * Copy the summary of the re-solve with residual row `index` masked into
+ * *out_summary. `index` must be less than sidereon_trls_drop_one_count.
+ *
+ * Safety: report must be a live handle; out_summary must point to a
+ * SidereonTrlsSummary.
+ */
+enum SidereonStatus sidereon_trls_drop_one_drop_summary(const struct SidereonTrlsDropOne *report,
+                                                        size_t index,
+                                                        struct SidereonTrlsSummary *out_summary);
+
+/**
+ * Copy the solution vector of the re-solve with residual row `index` masked
+ * into out. Same variable-length output contract as sidereon_trls_solution_x.
+ *
+ * Safety: report must be a live handle; out must point to at least len writable
+ * doubles or be NULL when len is 0; out_written and out_required must point to
+ * size_t values.
+ */
+enum SidereonStatus sidereon_trls_drop_one_drop_x(const struct SidereonTrlsDropOne *report,
+                                                  size_t index,
+                                                  double *out,
+                                                  size_t len,
+                                                  size_t *out_written,
+                                                  size_t *out_required);
+
+/**
+ * Copy the per-row cost deltas (`drops[i].cost - base.cost`, length `m`) into
+ * out: how much the optimum cost moves when each row is removed, the influence
+ * signal for fault detection. Same variable-length output contract as
+ * sidereon_trls_solution_x.
+ *
+ * Safety: report must be a live handle; out must point to at least len writable
+ * doubles or be NULL when len is 0; out_written and out_required must point to
+ * size_t values.
+ */
+enum SidereonStatus sidereon_trls_drop_one_cost_delta(const struct SidereonTrlsDropOne *report,
+                                                      double *out,
+                                                      size_t len,
+                                                      size_t *out_written,
+                                                      size_t *out_required);
+
+/**
+ * Release a leave-one-out report handle. Null is a no-op.
+ *
+ * Safety: report must be NULL or a live handle from
+ * sidereon_solve_data_problem_drop_one, freed exactly once.
+ */
+void sidereon_trls_drop_one_free(struct SidereonTrlsDropOne *report);
+
+/**
+ * Parameter covariance `variance_scale * (J^T J)^-1` from a row-major `m`-by-`n`
+ * design (Jacobian) matrix, written row-major (`n * n`) into out. Delegates to
+ * the core `normal_covariance` (SVD of J, so the conditioning is `cond(J)`, not
+ * `cond(J)^2`). A rank-deficient Jacobian returns SIDEREON_STATUS_SOLVE. Same
+ * variable-length output contract as the other array readers (query with out
+ * NULL, len 0).
+ *
+ * Safety: jacobian must point to m*n readable doubles (or be NULL when m*n is
+ * 0); out must point to at least len writable doubles or be NULL when len is 0;
+ * out_written and out_required must point to size_t values.
+ */
+enum SidereonStatus sidereon_normal_covariance(const double *jacobian,
+                                               size_t m,
+                                               size_t n,
+                                               double variance_scale,
+                                               double *out,
+                                               size_t len,
+                                               size_t *out_written,
+                                               size_t *out_required);
+
+/**
+ * Trace of the Gauss-Newton Hessian approximation `J^T J` (the sum of squared
+ * column norms) of a row-major `m`-by-`n` Jacobian, written to *out. Delegates
+ * to the core `hessian_trace`; forms no inverse.
+ *
+ * Safety: jacobian must point to m*n readable doubles (or be NULL when m*n is
+ * 0); out must point to a double.
+ */
+enum SidereonStatus sidereon_hessian_trace(const double *jacobian, size_t m, size_t n, double *out);
+
+/**
+ * Fitted parameter covariance from a converged fit: `(J^T J)^-1` scaled by the
+ * post-fit reduced chi-square `s_sq = 2 * cost / (m - n)`, the same quantity
+ * `scipy.optimize.curve_fit` reports as `pcov`. Forms the covariance straight
+ * from the row-major `m`-by-`n` design (Jacobian) matrix and the final cost via
+ * the core `covariance_from_jacobian`, with the redundancy taken from the
+ * Jacobian's own shape; requires positive redundancy `m > n`. Writes the
+ * `n`-by-`n` covariance row-major into out. Same variable-length output contract
+ * as sidereon_normal_covariance.
+ *
+ * Safety: jacobian must point to m*n readable doubles (or be NULL when m*n is
+ * 0); out must point to at least len writable doubles or be NULL when len is 0;
+ * out_written and out_required must point to size_t values.
+ */
+enum SidereonStatus sidereon_covariance_from_jacobian(const double *jacobian,
+                                                      size_t m,
+                                                      size_t n,
+                                                      double cost,
+                                                      double *out,
+                                                      size_t len,
+                                                      size_t *out_written,
+                                                      size_t *out_required);
+
+/**
+ * Confidence ellipse from a 2x2 covariance block (row-major `[c00, c01, c10,
+ * c11]`) at `confidence` in `[0, 1)`, written to *out_ellipse. Delegates to the
+ * core `error_ellipse_2x2` (closed-form symmetric 2x2 eigensolve). A
+ * non-positive-semidefinite block or out-of-range confidence returns
+ * SIDEREON_STATUS_INVALID_ARGUMENT.
+ *
+ * Safety: covariance must point to 4 readable doubles; out_ellipse must point
+ * to a SidereonErrorEllipse2.
+ */
+enum SidereonStatus sidereon_error_ellipse_2x2(const double *covariance,
+                                               double confidence,
+                                               struct SidereonErrorEllipse2 *out_ellipse);
+
+/**
+ * Dilution-of-precision scalars with an explicit ENU convention. Like
+ * sidereon_dop but the horizontal/vertical split uses `convention`. Delegates
+ * to the core `dop_with_convention`.
+ *
+ * Safety: los and weights must each point to count readable entries (or be
+ * NULL when count is 0); out_dop must point to a SidereonDop.
+ */
+enum SidereonStatus sidereon_dop_with_convention(const struct SidereonLineOfSight *los,
+                                                 const double *weights,
+                                                 size_t count,
+                                                 struct SidereonGeodetic receiver,
+                                                 uint32_t convention,
+                                                 struct SidereonDop *out_dop);
+
+/**
+ * Sample skewness of a residual set, written to *out. `bias = true` is the
+ * Fisher-Pearson coefficient `g1` (scipy.stats.skew default); `bias = false`
+ * applies the sample correction (needs at least three values). Delegates to the
+ * core `skewness`.
+ *
+ * Safety: x must point to len readable doubles (or be NULL when len is 0); out
+ * must point to a double.
+ */
+enum SidereonStatus sidereon_residual_skewness(const double *x, size_t len, bool bias, double *out);
+
+/**
+ * Sample kurtosis of a residual set, written to *out. `fisher = true` returns
+ * excess kurtosis (Gaussian -> 0, scipy default); `fisher = false` the Pearson
+ * kurtosis. `bias = false` applies the sample correction (needs at least four
+ * values). Delegates to the core `kurtosis`.
+ *
+ * Safety: x must point to len readable doubles (or be NULL when len is 0); out
+ * must point to a double.
+ */
+enum SidereonStatus sidereon_residual_kurtosis(const double *x,
+                                               size_t len,
+                                               bool fisher,
+                                               bool bias,
+                                               double *out);
+
+/**
+ * Mean, variance, skewness, and kurtosis of a residual set in one pass, written
+ * to *out_moments. `fisher`/`bias` select the kurtosis convention and the
+ * bias correction as in sidereon_residual_skewness/kurtosis. Delegates to the
+ * core `moments`.
+ *
+ * Safety: x must point to len readable doubles (or be NULL when len is 0);
+ * out_moments must point to a SidereonResidualMoments.
+ */
+enum SidereonStatus sidereon_residual_moments(const double *x,
+                                              size_t len,
+                                              bool fisher,
+                                              bool bias,
+                                              struct SidereonResidualMoments *out_moments);
+
+/**
+ * Jarque-Bera normality test on a residual set, written to *out. Uses the
+ * biased skewness and excess kurtosis (scipy.stats.jarque_bera). Needs at least
+ * two values. Delegates to the core `jarque_bera`.
+ *
+ * Safety: x must point to len readable doubles (or be NULL when len is 0); out
+ * must point to a SidereonJarqueBera.
+ */
+enum SidereonStatus sidereon_residual_jarque_bera(const double *x,
+                                                  size_t len,
+                                                  struct SidereonJarqueBera *out);
+
+/**
+ * Shapiro-Wilk W normality test on a residual set, written to *out (Royston AS
+ * R94, the scipy.stats.shapiro algorithm). Needs at least three values; all
+ * equal values return SIDEREON_STATUS_INVALID_ARGUMENT. Delegates to the core
+ * `shapiro_wilk`.
+ *
+ * Safety: x must point to len readable doubles (or be NULL when len is 0); out
+ * must point to a SidereonShapiroWilk.
+ */
+enum SidereonStatus sidereon_residual_shapiro_wilk(const double *x,
+                                                   size_t len,
+                                                   struct SidereonShapiroWilk *out);
+
+/**
+ * Predict observables for many `(satellite, receiver, epoch)` requests from a
+ * loaded SP3 product in one call. Delegates to the core serial `predict_batch`.
+ * `out` and `out_ok` are caller arrays of `count` entries: `out[i]` holds the
+ * observables for `requests[i]` and `out_ok[i]` is true on success. A
+ * per-request failure (e.g. no ephemeris) sets `out_ok[i]` false and zeroes
+ * `out[i]`; the call still returns SIDEREON_STATUS_OK. options may be NULL for
+ * the engine defaults.
+ *
+ * Safety: sp3 must be a live handle; requests must point to count entries (each
+ * with a valid sat_id); out and out_ok must each point to count writable
+ * entries (or be NULL when count is 0); options must be NULL or point to a
+ * SidereonObservablesOptions.
+ */
+enum SidereonStatus sidereon_sp3_observables_batch(const struct SidereonSp3 *sp3,
+                                                   const struct SidereonPredictRequest *requests,
+                                                   size_t count,
+                                                   const struct SidereonObservablesOptions *options,
+                                                   struct SidereonPredictedObservables *out,
+                                                   bool *out_ok);
+
+/**
+ * Predict observables for many `(satellite, receiver, epoch)` requests from a
+ * loaded broadcast (navigation message) source in one call. Mirror of
+ * sidereon_sp3_observables_batch for the broadcast source; same per-request
+ * out/out_ok contract. Delegates to the core serial `predict_batch`.
+ *
+ * Safety: broadcast must be a live handle; requests must point to count entries
+ * (each with a valid sat_id); out and out_ok must each point to count writable
+ * entries (or be NULL when count is 0); options must be NULL or point to a
+ * SidereonObservablesOptions.
+ */
+enum SidereonStatus sidereon_broadcast_observables_batch(const struct SidereonBroadcastEphemeris *broadcast,
+                                                         const struct SidereonPredictRequest *requests,
+                                                         size_t count,
+                                                         const struct SidereonObservablesOptions *options,
+                                                         struct SidereonPredictedObservables *out,
+                                                         bool *out_ok);
+
+/**
+ * GPS - UTC (the GNSS leap-second offset a GPS receiver applies, IS-GPS-200) at
+ * a UTC Julian date, written to *out. 18 s from 2017-01-01. Delegates to the
+ * core `gps_utc_offset_s`. This is NOT TAI - UTC (use
+ * sidereon_tai_utc_offset_s); the two differ by a constant 19 s.
+ *
+ * Safety: out must point to a double.
+ */
+enum SidereonStatus sidereon_gps_utc_offset_s(double jd_utc, double *out);
+
+/**
+ * TAI - UTC (the IERS / Bulletin C leap-second count) at a UTC Julian date,
+ * written to *out. 37 s from 2017-01-01. Delegates to the core
+ * `tai_utc_offset_s`. For the GNSS "GPS - UTC" quantity use
+ * sidereon_gps_utc_offset_s instead.
+ *
+ * Safety: out must point to a double.
+ */
+enum SidereonStatus sidereon_tai_utc_offset_s(double jd_utc, double *out);
+
+/**
+ * Geoid undulation `N` (meters above the WGS84 ellipsoid) at a geodetic
+ * position in radians, from the embedded genuine EGM96 1-degree grid, written
+ * to *out. Latitude positive north, longitude positive east. Delegates to the
+ * core `egm96_undulation`.
+ *
+ * Safety: out must point to a double.
+ */
+enum SidereonStatus sidereon_egm96_undulation(double lat_rad, double lon_rad, double *out);
+
+/**
+ * Orthometric height `H = h - N` (meters above mean sea level) from an
+ * ellipsoidal height and a geodetic position in radians, using the embedded
+ * genuine EGM96 model, written to *out. Delegates to the core
+ * `egm96_orthometric_height_m`.
+ *
+ * Safety: out must point to a double.
+ */
+enum SidereonStatus sidereon_egm96_orthometric_height_m(double ellipsoidal_height_m,
+                                                        double lat_rad,
+                                                        double lon_rad,
+                                                        double *out);
+
+/**
+ * Ellipsoidal height `h = H + N` (meters above the WGS84 ellipsoid) from an
+ * orthometric height and a geodetic position in radians, using the embedded
+ * genuine EGM96 model, written to *out. Delegates to the core
+ * `egm96_ellipsoidal_height_m`.
+ *
+ * Safety: out must point to a double.
+ */
+enum SidereonStatus sidereon_egm96_ellipsoidal_height_m(double orthometric_height_m,
+                                                        double lat_rad,
+                                                        double lon_rad,
+                                                        double *out);
+
+/**
+ * Topocentric azimuth/elevation/range of the Sun from a ground site at an
+ * instant, written to *out. Delegates to the core `sun_az_el`.
+ *
+ * Safety: station must point to a SidereonGeodeticStation; out must point to a
+ * SidereonBodyAzEl.
+ */
+enum SidereonStatus sidereon_sun_az_el(const struct SidereonGeodeticStation *station,
+                                       int64_t time_unix_us,
+                                       struct SidereonBodyAzEl *out);
+
+/**
+ * Topocentric azimuth/elevation/range of the Moon from a ground site at an
+ * instant, written to *out (includes topocentric parallax). Delegates to the
+ * core `moon_az_el`.
+ *
+ * Safety: station must point to a SidereonGeodeticStation; out must point to a
+ * SidereonBodyAzEl.
+ */
+enum SidereonStatus sidereon_moon_az_el(const struct SidereonGeodeticStation *station,
+                                        int64_t time_unix_us,
+                                        struct SidereonBodyAzEl *out);
+
+/**
+ * Illuminated fraction and phase angle of the Moon as seen from a ground site
+ * at an instant, written to *out. Delegates to the core `moon_illumination`.
+ *
+ * Safety: station must point to a SidereonGeodeticStation; out must point to a
+ * SidereonMoonIllumination.
+ */
+enum SidereonStatus sidereon_moon_illumination(const struct SidereonGeodeticStation *station,
+                                               int64_t time_unix_us,
+                                               struct SidereonMoonIllumination *out);
+
+/**
+ * Topocentric geometric Moon (disk-center) elevation at a station and instant,
+ * degrees, written to *out (includes topocentric parallax). Routes through the
+ * core `moon_az_el` and returns its elevation, so a bad station maps to
+ * SIDEREON_STATUS_INVALID_ARGUMENT rather than tripping the internal `expect`
+ * in the core `moon_elevation_deg` convenience wrapper.
+ *
+ * Safety: station must point to a SidereonGeodeticStation; out must point to a
+ * double.
+ */
+enum SidereonStatus sidereon_moon_elevation_deg(const struct SidereonGeodeticStation *station,
+                                                int64_t time_unix_us,
+                                                double *out);
+
+/**
+ * Populate *out_options with the engine's default Moon rise/set finder options
+ * (-0.833 deg threshold, 300 s scan step, 1 s refinement tolerance).
+ *
+ * Safety: out_options must point to a SidereonMoonElevationOptions.
+ */
+enum SidereonStatus sidereon_moon_elevation_options_init(struct SidereonMoonElevationOptions *out_options);
+
+/**
+ * Find Moon elevation threshold crossings (moonrise / moonset) for a station
+ * over a UTC window. Delegates to the core `find_moon_elevation_crossings`.
+ * options may be NULL for the engine defaults. Variable-length output contract:
+ * pass out NULL with len 0 to query the count via *out_required.
+ *
+ * Safety: station must point to a SidereonGeodeticStation; options must be NULL
+ * or point to a SidereonMoonElevationOptions; out must point to at least len
+ * writable SidereonMoonElevationCrossing or be NULL when len is 0; out_written
+ * and out_required must point to size_t values.
+ */
+enum SidereonStatus sidereon_find_moon_elevation_crossings(const struct SidereonGeodeticStation *station,
+                                                           int64_t start_unix_us,
+                                                           int64_t end_unix_us,
+                                                           const struct SidereonMoonElevationOptions *options,
+                                                           struct SidereonMoonElevationCrossing *out,
+                                                           size_t len,
+                                                           size_t *out_written,
+                                                           size_t *out_required);
+
+/**
+ * Find Moon meridian transits (upper and lower culminations) for a station over
+ * a UTC window. Delegates to the core `find_moon_transits`. Variable-length
+ * output contract: pass out NULL with len 0 to query the count via
+ * *out_required.
+ *
+ * Safety: station must point to a SidereonGeodeticStation; out must point to at
+ * least len writable SidereonMoonTransit or be NULL when len is 0; out_written
+ * and out_required must point to size_t values.
+ */
+enum SidereonStatus sidereon_find_moon_transits(const struct SidereonGeodeticStation *station,
+                                                int64_t start_unix_us,
+                                                int64_t end_unix_us,
+                                                double step_seconds,
+                                                double time_tolerance_seconds,
+                                                struct SidereonMoonTransit *out,
+                                                size_t len,
+                                                size_t *out_written,
+                                                size_t *out_required);
 
 #ifdef __cplusplus
 }  // extern "C"

@@ -58,8 +58,8 @@ after_includes = """
 
 #define SIDEREON_VERSION_MAJOR 0
 #define SIDEREON_VERSION_MINOR 9
-#define SIDEREON_VERSION_PATCH 0
-#define SIDEREON_VERSION_STRING "0.9.0\""""
+#define SIDEREON_VERSION_PATCH 1
+#define SIDEREON_VERSION_STRING "0.9.1\""""
 
 [enum]
 # Idiomatic C enum constants: SidereonStatus::Ok -> SIDEREON_STATUS_OK.
@@ -308,4 +308,26 @@ include = [
     "SidereonOmm",
     "SidereonCompareWindow",
     "SidereonCdmObjectStringField",
+    "SidereonTrlsKind",
+    "SidereonTrlsLoss",
+    "SidereonTrlsXScale",
+    "SidereonTrlsBackend",
+    "SidereonDataProblem",
+    "SidereonTrlsSummary",
+    "SidereonTrlsSolution",
+    "SidereonTrlsDropOne",
+    "SidereonErrorEllipse2",
+    "SidereonEnuConvention",
+    "SidereonResidualMoments",
+    "SidereonJarqueBera",
+    "SidereonShapiroWilk",
+    "SidereonPredictRequest",
+    "SidereonGeodeticStation",
+    "SidereonBodyAzEl",
+    "SidereonMoonIllumination",
+    "SidereonMoonRiseSetKind",
+    "SidereonMoonElevationCrossing",
+    "SidereonMoonElevationOptions",
+    "SidereonMoonTransitKind",
+    "SidereonMoonTransit",
 ]
