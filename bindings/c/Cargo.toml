@@ -1,0 +1,24 @@
+[package]
+name = "sidereon-c"
+version = "0.9.0"
+authors = []
+edition = "2021"
+description = "C ABI bindings over the sidereon ergonomic API: opaque handles, integer error codes, caller-allocated buffers"
+license = "MIT"
+publish = false
+
+[lib]
+# Built as a C shared library `libsidereon.{dylib,so}` (and a static archive for
+# fully static links). The C header is generated from this crate's source with
+# cbindgen into `include/sidereon.h`.
+name = "sidereon"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+# The thin ergonomic engine surface this binding marshals to. No modeling logic
+# lives here: every solve delegates to a `sidereon` entry point, which in turn
+# delegates to `sidereon-core`. The numbers are exactly what the engine produces.
+# These resolve to the one canonical published engine so this binding is never a
+# fork of the engine.
+sidereon = "0.9.0"
+sidereon-core = "0.9.0"

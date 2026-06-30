@@ -1,0 +1,25 @@
+# Manual fixture generator for the C velocity smoke test. Not part of the
+# binding workspace (own empty [workspace] table), so a plain `cargo build` /
+# `cargo test` of the binding never pulls it in. Run it by hand to regenerate
+# bindings/c/tests/velocity_fixture.h after a core velocity change:
+#
+#     cargo run --release --manifest-path bindings/c/tests/velgen/Cargo.toml \
+#         > bindings/c/tests/velocity_fixture.h
+#
+# It reproduces sidereon-core's own velocity range_rate/doppler golden scenario
+# (the velocity.rs module test) against the same published core the binding
+# consumes and emits the engine-synthesized observations plus the frozen solution
+# as a C header.
+[package]
+name = "velgen"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+# Same published core the binding consumes, so regenerated fixtures match the
+# engine the binding builds against and regeneration is reproducible from this
+# repo alone.
+sidereon-core = "0.9.0"

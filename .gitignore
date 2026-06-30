@@ -1,0 +1,16 @@
+/target
+# Cargo build output of the out-of-workspace fixture-generator crates.
+bindings/**/target
+**/*.rs.bk
+
+# Built C shared libraries.
+*.so
+*.dylib
+
+# JPL ephemeris kernels downloaded at runtime by fixture generators. The small,
+# committed test kernel under tests/fixtures is an explicit exception below.
+*.bsp
+!bindings/c/tests/fixtures/**/*.bsp
+
+# Local working journal for the iterative dev loop (not shipped).
+PROGRESS.md

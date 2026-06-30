@@ -1,0 +1,22 @@
+# Manual fixture generator for the C RINEX-OBS smoke test. Own empty
+# [workspace] so a plain binding build never pulls it in. Regenerate with:
+#
+#     cargo run --release --manifest-path bindings/c/tests/rinexgen/Cargo.toml \
+#         > bindings/c/tests/rinex_fixture.h
+#
+# It parses the committed reference .rnx (the crx2rnx-decoded ESBC obs file) via
+# sidereon-core and emits the version, epoch count, and sampled observation
+# values as a C header so the binding reproduces them bit-for-bit.
+[package]
+name = "rinexgen"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+# Same published core the binding consumes, so regenerated fixtures match the
+# engine the binding builds against and regeneration is reproducible from this
+# repo alone.
+sidereon-core = "0.9.0"

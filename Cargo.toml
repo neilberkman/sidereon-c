@@ -1,0 +1,14 @@
+# Workspace root.
+#
+# This repository hosts the C ABI binding over the canonical Sidereon engine. The
+# engine itself lives in ONE place: the published crates `sidereon-core` and
+# `sidereon` on crates.io. It is consumed as a registry dependency, never
+# vendored here, so there is a single source of truth for the modeling code.
+[workspace]
+resolver = "2"
+members = ["bindings/c"]
+# The Python (PyO3) binding is a cdylib built by its own toolchain (maturin) and
+# links against a Python interpreter, so a plain `cargo build`/`cargo test` of
+# this workspace must not pull it in. It carries its own lockfile and consumes
+# the same canonical engine over git.
+exclude = ["bindings/python"]

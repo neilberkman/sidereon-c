@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: cargo test / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace --verbose
+      # The 0-ULP parity tests are certified only for the pinned target
+      # (macOS / Apple libm + Accelerate). Other libm/FMA implementations
+      # legitimately differ in the last bits, so the test suite (which reads the
+      # repo-local vendored fixtures) runs on macOS; other platforms get a build
+      # check only.
+      - run: cargo test --workspace --verbose
+        if: runner.os == 'macOS'
