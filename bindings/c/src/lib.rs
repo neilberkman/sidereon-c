@@ -76,8 +76,8 @@ use sidereon_core::astro::time::scales::{
     find_leap_seconds, julian_day_number, leap_second_table, ut1_coverage,
 };
 use sidereon_core::astro::time::{
-    timescale_offset_at_s, timescale_offset_s, GnssWeekTow, Instant, InstantRepr, TimeOffsetError,
-    TimeScale,
+    split_julian_date_from_j2000_seconds, timescale_offset_at_s, timescale_offset_s, GnssWeekTow,
+    Instant, InstantRepr, JulianDateSplit, TimeOffsetError, TimeScale,
 };
 use sidereon_core::astro::{Spk, SpkError, SpkState};
 use sidereon_core::atmosphere::ionosphere::{
@@ -95,10 +95,12 @@ use sidereon_core::constellation::{
     Diff as ConstDiff, FieldChange as ConstFieldChange, Record as ConstRecord,
     Validation as ConstValidation,
 };
+use sidereon_core::constants::SECONDS_PER_DAY;
 use sidereon_core::ephemeris::BroadcastEphemeris;
 use sidereon_core::ephemeris::{
     align_clock_reference, clock_reference_offset, merge, EpochAgreement, MergeCombine, MergeFlag,
-    MergeOptions, MergeReport, Sp3, Sp3State,
+    MergeOptions, MergeReport, PreciseEphemerisSample, PreciseEphemerisSamples, PreciseSamplesError,
+    Sp3, Sp3State,
 };
 use sidereon_core::frame::{
     geocentric_neu_basis, geodetic_to_itrf, itrf_to_geodetic, ItrfPositionM, Wgs84Geodetic,
@@ -114,7 +116,9 @@ use sidereon_core::geometry::{
 };
 use sidereon_core::ils::{bounded_ils_search, lambda_ils_search, IlsError, IlsResult};
 use sidereon_core::observables::{
-    predict as observables_predict, ObservablesError, PredictOptions, PredictedObservables,
+    predict as observables_predict, predict_ranges as observables_predict_ranges,
+    ObservableEphemerisSource, ObservablesError, PredictOptions, PredictedObservables,
+    RangePrediction, RangePredictionRequest,
 };
 use sidereon_core::orbit::{
     drift as reduced_orbit_drift_core,
@@ -2709,6 +2713,15 @@ fn sp3_merge_flag_to_c(flag: &MergeFlag) -> SidereonSp3MergeFlag {
 /// sidereon_sp3_load or sidereon_sp3_merge and release with sidereon_sp3_free.
 pub struct SidereonSp3 {
     inner: Sp3,
+}
+
+/// A sample-backed precise-ephemeris source, built from canonical
+/// position/clock samples rather than parsed SP3 text. Opaque to C. Create with
+/// sidereon_precise_ephemeris_samples_from_samples and release with
+/// sidereon_precise_ephemeris_samples_free. Interpolates and predicts ranges
+/// through the same substrate as a loaded SP3 product.
+pub struct SidereonPreciseEphemerisSamples {
+    inner: PreciseEphemerisSamples,
 }
 
 /// An SP3 merge audit report. Opaque to C. Create with sidereon_sp3_merge and
@@ -38355,6 +38368,414 @@ pub unsafe extern "C" fn sidereon_broadcast_observables_batch(
             let results = core_predict_batch(&broadcast.inner, &parsed, opts);
             write_predict_batch_results(&results, out, out_ok);
             SidereonStatus::Ok
+        },
+    )
+}
+
+// --- Precise-ephemeris samples + batch range prediction ---------------------
+
+/// One canonical precise-ephemeris sample: a satellite's ECEF position (and
+/// optional clock) at one epoch, in SI units. This is the serialization-
+/// independent element behind an SP3 record; sidereon_sp3_precise_ephemeris_samples
+/// extracts them and sidereon_precise_ephemeris_samples_from_samples rebuilds an
+/// interpolatable source from them.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonPreciseEphemerisSample {
+    /// Satellite this sample describes, as a null-terminated token (e.g. G01).
+    pub sat: SidereonSatelliteToken,
+    /// Time scale the epoch is expressed in (a SidereonTimeScale code as
+    /// uint32_t). Every sample in one source must share this scale.
+    pub time_scale: u32,
+    /// Sample epoch, seconds since J2000 in the sample's time scale.
+    pub epoch_j2000_s: f64,
+    /// Satellite ECEF position in the ITRF/IGS frame, meters.
+    pub position_ecef_m: [f64; 3],
+    /// Whether clock_s carries a satellite clock estimate.
+    pub has_clock_s: bool,
+    /// Satellite clock offset, seconds, when has_clock_s is true.
+    pub clock_s: f64,
+    /// Whether this epoch carries the SP3 E clock-event flag: true splits the
+    /// clock interpolation arc here (a clock reset takes effect at this epoch).
+    pub clock_event: bool,
+}
+
+/// One batch range-prediction request: the satellite token, the static receiver
+/// ECEF position (meters), and the receive epoch (seconds since J2000).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonRangePredictionRequest {
+    /// Null-terminated satellite token (e.g. "G01").
+    pub sat_id: *const c_char,
+    /// Receiver ECEF position, meters.
+    pub receiver_ecef_m: [f64; 3],
+    /// Receive epoch, seconds since J2000.
+    pub t_rx_j2000_s: f64,
+}
+
+/// The geometry-only result of one range-prediction request: the transmit-time
+/// geometry a range-only consumer needs, without Doppler or topocentric fields.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonRangePrediction {
+    /// Geometric range after optional Sagnac transport, meters.
+    pub geometric_range_m: f64,
+    /// Whether sat_clock_s is present.
+    pub has_sat_clock_s: bool,
+    /// Satellite clock offset at transmit time, seconds, when present.
+    pub sat_clock_s: f64,
+    /// Transmit time, seconds since J2000.
+    pub transmit_time_j2000_s: f64,
+    /// Sagnac-transported satellite ECEF position, meters.
+    pub sat_pos_ecef_m: [f64; 3],
+}
+
+fn map_precise_samples_error(fn_name: &str, err: PreciseSamplesError) -> SidereonStatus {
+    set_last_error(format!("{fn_name}: {err}"));
+    SidereonStatus::InvalidArgument
+}
+
+/// Reconstruct an [`Instant`] from seconds since J2000 in a given scale, using
+/// the same split the SP3/IONEX readers carry: the whole-second count fixes the
+/// integer JD boundary and the residual within-day seconds become the fraction
+/// (carrying any sub-second part). The floored node axis the sample source builds
+/// therefore matches the SP3 path exactly, while the unfloored query stays
+/// faithful.
+fn instant_from_j2000_seconds(
+    fn_name: &str,
+    arg_name: &str,
+    scale: TimeScale,
+    j2000_s: f64,
+) -> Result<Instant, SidereonStatus> {
+    if !j2000_s.is_finite() {
+        set_last_error(format!("{fn_name}: {arg_name} epoch is not finite"));
+        return Err(SidereonStatus::InvalidArgument);
+    }
+    let whole_s = j2000_s.floor();
+    // `whole_s as i64` saturates for finite magnitudes outside i64's range,
+    // which would silently clamp an absurd epoch instead of rejecting it. Guard
+    // the range before the cast. `i64::MAX as f64` rounds up to 2^63, so `>=`
+    // there also rejects the single saturating positive value 2^63; `i64::MIN as
+    // f64` is exactly -2^63 and stays valid.
+    if whole_s < i64::MIN as f64 || whole_s >= i64::MAX as f64 {
+        set_last_error(format!("{fn_name}: {arg_name} epoch is out of range"));
+        return Err(SidereonStatus::InvalidArgument);
+    }
+    let (jd_whole, day_fraction) = split_julian_date_from_j2000_seconds(whole_s as i64);
+    let fraction = day_fraction + (j2000_s - whole_s) / SECONDS_PER_DAY;
+    let split = JulianDateSplit::new(jd_whole, fraction).map_err(|err| {
+        set_last_error(format!("{fn_name}: {arg_name} epoch: {err}"));
+        SidereonStatus::InvalidArgument
+    })?;
+    Ok(Instant::from_julian_date(scale, split))
+}
+
+fn precise_sample_to_c(sample: &PreciseEphemerisSample) -> SidereonPreciseEphemerisSample {
+    SidereonPreciseEphemerisSample {
+        sat: satellite_token(sample.sat),
+        time_scale: time_scale_to_c_code(sample.epoch.scale),
+        epoch_j2000_s: instant_to_j2000_seconds(&sample.epoch).unwrap_or(f64::NAN),
+        position_ecef_m: sample.position_ecef_m,
+        has_clock_s: sample.clock_s.is_some(),
+        clock_s: sample.clock_s.unwrap_or(0.0),
+        clock_event: sample.clock_event,
+    }
+}
+
+unsafe fn precise_sample_from_c(
+    fn_name: &str,
+    sample: &SidereonPreciseEphemerisSample,
+) -> Result<PreciseEphemerisSample, SidereonStatus> {
+    let sat = parse_satellite_token(fn_name, sample.sat.bytes.as_ptr())?;
+    let scale = time_scale_from_c_code(fn_name, "sample.time_scale", sample.time_scale)?;
+    let epoch = instant_from_j2000_seconds(fn_name, "sample", scale, sample.epoch_j2000_s)?;
+    let clock_s = if sample.has_clock_s {
+        Some(sample.clock_s)
+    } else {
+        None
+    };
+    Ok(PreciseEphemerisSample {
+        sat,
+        epoch,
+        position_ecef_m: sample.position_ecef_m,
+        clock_s,
+        clock_event: sample.clock_event,
+    })
+}
+
+fn range_prediction_to_c(pred: &RangePrediction) -> SidereonRangePrediction {
+    SidereonRangePrediction {
+        geometric_range_m: pred.geometric_range_m,
+        has_sat_clock_s: pred.sat_clock_s.is_some(),
+        sat_clock_s: pred.sat_clock_s.unwrap_or(0.0),
+        transmit_time_j2000_s: pred.transmit_time_j2000_s,
+        sat_pos_ecef_m: pred.sat_pos_ecef_m,
+    }
+}
+
+fn zero_range_prediction() -> SidereonRangePrediction {
+    SidereonRangePrediction {
+        geometric_range_m: 0.0,
+        has_sat_clock_s: false,
+        sat_clock_s: 0.0,
+        transmit_time_j2000_s: 0.0,
+        sat_pos_ecef_m: [0.0; 3],
+    }
+}
+
+fn zero_range_prediction_core() -> RangePrediction {
+    RangePrediction {
+        geometric_range_m: 0.0,
+        sat_clock_s: None,
+        transmit_time_j2000_s: 0.0,
+        sat_pos_ecef_m: [0.0; 3],
+    }
+}
+
+unsafe fn range_prediction_requests_from_c(
+    fn_name: &str,
+    requests: &[SidereonRangePredictionRequest],
+) -> Result<Vec<RangePredictionRequest>, SidereonStatus> {
+    let mut parsed = Vec::with_capacity(requests.len());
+    for request in requests {
+        let sat = parse_satellite_token(fn_name, request.sat_id)?;
+        parsed.push(RangePredictionRequest {
+            sat,
+            receiver_ecef_m: request.receiver_ecef_m,
+            t_rx_j2000_s: request.t_rx_j2000_s,
+        });
+    }
+    Ok(parsed)
+}
+
+/// Shared batch range-prediction body over any observable source. Delegates to
+/// sidereon_core::observables::predict_ranges, so out[i] is exactly the geometry
+/// for requests[i]. A per-request failure (invalid input or missing ephemeris)
+/// aborts the batch, records the error, and returns its status; out is then the
+/// pre-zeroed prefix. options may be NULL for the engine defaults.
+unsafe fn predict_ranges_into(
+    fn_name: &str,
+    source: &dyn ObservableEphemerisSource,
+    requests: *const SidereonRangePredictionRequest,
+    count: usize,
+    options: *const SidereonObservablesOptions,
+    out: *mut SidereonRangePrediction,
+) -> SidereonStatus {
+    let raw = c_try!(require_slice(requests, count, fn_name, "requests"));
+    // Validate the caller-owned output pointer directly. The C contract only
+    // guarantees `out` is writable, not readable or initialized, so we must not
+    // form a `&[T]`/`&mut [T]` over it (that would assert initialized elements
+    // and is UB). Mirror require_slice's checks by hand: non-null when count >
+    // 0, and no element-count/size overflow. Every write below goes through the
+    // raw pointer.
+    if count > 0 && out.is_null() {
+        set_last_error(format!("{fn_name}: null out"));
+        return SidereonStatus::NullPointer;
+    }
+    c_try!(validate_element_count::<SidereonRangePrediction>(
+        fn_name, "out", count
+    ));
+    // Pre-zero the output via raw writes so an aborted batch leaves defined
+    // values, never reading the uninitialized destination.
+    for idx in 0..count {
+        out.add(idx).write(zero_range_prediction());
+    }
+    let opts = c_try!(predict_options_from_c(fn_name, options));
+    let parsed = c_try!(range_prediction_requests_from_c(fn_name, raw));
+    let mut results = vec![zero_range_prediction_core(); count];
+    match observables_predict_ranges(source, &parsed, opts, &mut results) {
+        Ok(()) => {}
+        Err(err) => return map_observables_error(fn_name, err),
+    }
+    for (idx, pred) in results.iter().enumerate() {
+        out.add(idx).write(range_prediction_to_c(pred));
+    }
+    SidereonStatus::Ok
+}
+
+/// Extract a loaded SP3 product as its canonical precise-ephemeris samples, in
+/// SI units, one per real position record in ascending epoch order. Round-tripping
+/// through sidereon_precise_ephemeris_samples_from_samples rebuilds the same
+/// interpolatable source. Uses the variable-length output contract documented at
+/// the top of the header.
+///
+/// Safety: sp3 must be a live handle; out must point to at least len writable
+/// SidereonPreciseEphemerisSample or be NULL when len is 0; out_written and
+/// out_required must point to size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sp3_precise_ephemeris_samples(
+    sp3: *const SidereonSp3,
+    out: *mut SidereonPreciseEphemerisSample,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_sp3_precise_ephemeris_samples",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_sp3_precise_ephemeris_samples",
+                out_written,
+                out_required
+            ));
+            let sp3 = c_try!(require_ref(
+                sp3,
+                "sidereon_sp3_precise_ephemeris_samples",
+                "sp3"
+            ));
+            let samples = sp3.inner.precise_ephemeris_samples();
+            let values: Vec<SidereonPreciseEphemerisSample> =
+                samples.iter().map(precise_sample_to_c).collect();
+            c_try!(copy_prefix_to_c(
+                "sidereon_sp3_precise_ephemeris_samples",
+                "out",
+                &values,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Build a sample-backed precise-ephemeris source from count canonical samples.
+/// On success writes a newly owned handle to *out_handle; release it with
+/// sidereon_precise_ephemeris_samples_free. Validation failures (no samples, a
+/// single-sample satellite, non-monotonic epochs, mixed time scales, a
+/// non-representable epoch, or a non-finite value) return
+/// SIDEREON_STATUS_INVALID_ARGUMENT.
+///
+/// Safety: samples must point to count entries (each with a valid sat token) or
+/// be NULL when count is 0; out_handle must point to storage for a
+/// SidereonPreciseEphemerisSamples*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_precise_ephemeris_samples_from_samples(
+    samples: *const SidereonPreciseEphemerisSample,
+    count: usize,
+    out_handle: *mut *mut SidereonPreciseEphemerisSamples,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_precise_ephemeris_samples_from_samples",
+        SidereonStatus::Panic,
+        || {
+            let out_handle = c_try!(require_out(
+                out_handle,
+                "sidereon_precise_ephemeris_samples_from_samples",
+                "out_handle"
+            ));
+            *out_handle = ptr::null_mut();
+            let raw = c_try!(require_slice(
+                samples,
+                count,
+                "sidereon_precise_ephemeris_samples_from_samples",
+                "samples"
+            ));
+            let mut parsed = Vec::with_capacity(raw.len());
+            for sample in raw {
+                parsed.push(c_try!(precise_sample_from_c(
+                    "sidereon_precise_ephemeris_samples_from_samples",
+                    sample
+                )));
+            }
+            let inner = match PreciseEphemerisSamples::from_samples(parsed) {
+                Ok(inner) => inner,
+                Err(err) => {
+                    return map_precise_samples_error(
+                        "sidereon_precise_ephemeris_samples_from_samples",
+                        err,
+                    )
+                }
+            };
+            write_boxed_handle(out_handle, SidereonPreciseEphemerisSamples { inner });
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Release a precise-ephemeris samples handle. Null is a no-op. A non-null handle
+/// must come from sidereon_precise_ephemeris_samples_from_samples and must be
+/// freed exactly once with this function.
+///
+/// Safety: samples must be NULL or a live handle from
+/// sidereon_precise_ephemeris_samples_from_samples. Passing a handle after it has
+/// already been freed is invalid.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_precise_ephemeris_samples_free(
+    samples: *mut SidereonPreciseEphemerisSamples,
+) {
+    ffi_boundary("sidereon_precise_ephemeris_samples_free", (), || {
+        free_boxed(samples);
+    });
+}
+
+/// Predict geometric ranges for many (satellite, receiver, epoch) requests from a
+/// loaded SP3 product in one call, writing out[i] for requests[i]. Delegates to
+/// sidereon_core::observables::predict_ranges. options may be NULL for the engine
+/// defaults.
+///
+/// Safety: sp3 must be a live handle; requests must point to count entries (each
+/// with a valid sat_id); out must point to count writable entries (or be NULL
+/// when count is 0); options must be NULL or point to a
+/// SidereonObservablesOptions.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sp3_predict_ranges(
+    sp3: *const SidereonSp3,
+    requests: *const SidereonRangePredictionRequest,
+    count: usize,
+    options: *const SidereonObservablesOptions,
+    out: *mut SidereonRangePrediction,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_sp3_predict_ranges", SidereonStatus::Panic, || {
+        let sp3 = c_try!(require_ref(sp3, "sidereon_sp3_predict_ranges", "sp3"));
+        predict_ranges_into(
+            "sidereon_sp3_predict_ranges",
+            &sp3.inner,
+            requests,
+            count,
+            options,
+            out,
+        )
+    })
+}
+
+/// Predict geometric ranges for many (satellite, receiver, epoch) requests from a
+/// sample-backed precise-ephemeris source in one call. Mirror of
+/// sidereon_sp3_predict_ranges for the samples source; same per-request out
+/// contract. Delegates to sidereon_core::observables::predict_ranges.
+///
+/// Safety: samples must be a live handle from
+/// sidereon_precise_ephemeris_samples_from_samples; requests must point to count
+/// entries (each with a valid sat_id); out must point to count writable entries
+/// (or be NULL when count is 0); options must be NULL or point to a
+/// SidereonObservablesOptions.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_precise_ephemeris_samples_predict_ranges(
+    samples: *const SidereonPreciseEphemerisSamples,
+    requests: *const SidereonRangePredictionRequest,
+    count: usize,
+    options: *const SidereonObservablesOptions,
+    out: *mut SidereonRangePrediction,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_precise_ephemeris_samples_predict_ranges",
+        SidereonStatus::Panic,
+        || {
+            let samples = c_try!(require_ref(
+                samples,
+                "sidereon_precise_ephemeris_samples_predict_ranges",
+                "samples"
+            ));
+            predict_ranges_into(
+                "sidereon_precise_ephemeris_samples_predict_ranges",
+                &samples.inner,
+                requests,
+                count,
+                options,
+                out,
+            )
         },
     )
 }

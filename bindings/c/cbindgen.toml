@@ -58,8 +58,8 @@ after_includes = """
 
 #define SIDEREON_VERSION_MAJOR 0
 #define SIDEREON_VERSION_MINOR 9
-#define SIDEREON_VERSION_PATCH 1
-#define SIDEREON_VERSION_STRING "0.9.1\""""
+#define SIDEREON_VERSION_PATCH 2
+#define SIDEREON_VERSION_STRING "0.9.2\""""
 
 [enum]
 # Idiomatic C enum constants: SidereonStatus::Ok -> SIDEREON_STATUS_OK.
@@ -330,4 +330,8 @@ include = [
     "SidereonMoonElevationOptions",
     "SidereonMoonTransitKind",
     "SidereonMoonTransit",
+    "SidereonPreciseEphemerisSample",
+    "SidereonPreciseEphemerisSamples",
+    "SidereonRangePredictionRequest",
+    "SidereonRangePrediction",
 ]

@@ -339,3 +339,23 @@ cc -std=c11 -Wall -Wextra -Werror \
 
 echo "== running caps_extra_smoke program =="
 "${caps_extra_out}" "${sp3_path}" "${nav_path}"
+
+# Sample-backed precise-ephemeris source + batch range prediction: extract an
+# SP3 product's canonical samples, rebuild an interpolatable source from them,
+# and assert the batch range predictor and interpolated states agree with the
+# SP3-parsed source (round-trip tolerance), the one-call batch equals per-request
+# calls, and the validation-error paths report InvalidArgument. Uses the GRG SP3.
+echo "== compiling precise_samples_smoke program =="
+precise_samples_out="${target_dir}/precise_samples_smoke"
+cc -std=c11 -Wall -Wextra -Werror \
+    -I"${binding_root}/include" \
+    -I"${here}" \
+    "${here}/precise_samples_smoke.c" \
+    -L"${lib_dir}" \
+    -lsidereon \
+    -Wl,-rpath,"${lib_dir}" \
+    -lm \
+    -o "${precise_samples_out}"
+
+echo "== running precise_samples_smoke program =="
+"${precise_samples_out}" "${sp3_path}"

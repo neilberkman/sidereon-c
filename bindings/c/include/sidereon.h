@@ -46,8 +46,8 @@
 
 #define SIDEREON_VERSION_MAJOR 0
 #define SIDEREON_VERSION_MINOR 9
-#define SIDEREON_VERSION_PATCH 1
-#define SIDEREON_VERSION_STRING "0.9.1"
+#define SIDEREON_VERSION_PATCH 2
+#define SIDEREON_VERSION_STRING "0.9.2"
 
 /**
  * Maximum number of VMF1 site-wise samples carried in
@@ -1388,6 +1388,15 @@ typedef struct SidereonPppFixedSolution SidereonPppFixedSolution;
  * sidereon_solve_ppp_float and release with sidereon_ppp_float_solution_free.
  */
 typedef struct SidereonPppFloatSolution SidereonPppFloatSolution;
+
+/**
+ * A sample-backed precise-ephemeris source, built from canonical
+ * position/clock samples rather than parsed SP3 text. Opaque to C. Create with
+ * sidereon_precise_ephemeris_samples_from_samples and release with
+ * sidereon_precise_ephemeris_samples_free. Interpolates and predicts ranges
+ * through the same substrate as a loaded SP3 product.
+ */
+typedef struct SidereonPreciseEphemerisSamples SidereonPreciseEphemerisSamples;
 
 /**
  * Result of sidereon_raim_fde_design. Opaque to C. Read with the
@@ -8834,6 +8843,92 @@ typedef struct SidereonPredictRequest {
      */
     double t_rx_j2000_s;
 } SidereonPredictRequest;
+
+/**
+ * One canonical precise-ephemeris sample: a satellite's ECEF position (and
+ * optional clock) at one epoch, in SI units. This is the serialization-
+ * independent element behind an SP3 record; sidereon_sp3_precise_ephemeris_samples
+ * extracts them and sidereon_precise_ephemeris_samples_from_samples rebuilds an
+ * interpolatable source from them.
+ */
+typedef struct SidereonPreciseEphemerisSample {
+    /**
+     * Satellite this sample describes, as a null-terminated token (e.g. G01).
+     */
+    struct SidereonSatelliteToken sat;
+    /**
+     * Time scale the epoch is expressed in (a SidereonTimeScale code as
+     * uint32_t). Every sample in one source must share this scale.
+     */
+    uint32_t time_scale;
+    /**
+     * Sample epoch, seconds since J2000 in the sample's time scale.
+     */
+    double epoch_j2000_s;
+    /**
+     * Satellite ECEF position in the ITRF/IGS frame, meters.
+     */
+    double position_ecef_m[3];
+    /**
+     * Whether clock_s carries a satellite clock estimate.
+     */
+    bool has_clock_s;
+    /**
+     * Satellite clock offset, seconds, when has_clock_s is true.
+     */
+    double clock_s;
+    /**
+     * Whether this epoch carries the SP3 E clock-event flag: true splits the
+     * clock interpolation arc here (a clock reset takes effect at this epoch).
+     */
+    bool clock_event;
+} SidereonPreciseEphemerisSample;
+
+/**
+ * One batch range-prediction request: the satellite token, the static receiver
+ * ECEF position (meters), and the receive epoch (seconds since J2000).
+ */
+typedef struct SidereonRangePredictionRequest {
+    /**
+     * Null-terminated satellite token (e.g. "G01").
+     */
+    const char *sat_id;
+    /**
+     * Receiver ECEF position, meters.
+     */
+    double receiver_ecef_m[3];
+    /**
+     * Receive epoch, seconds since J2000.
+     */
+    double t_rx_j2000_s;
+} SidereonRangePredictionRequest;
+
+/**
+ * The geometry-only result of one range-prediction request: the transmit-time
+ * geometry a range-only consumer needs, without Doppler or topocentric fields.
+ */
+typedef struct SidereonRangePrediction {
+    /**
+     * Geometric range after optional Sagnac transport, meters.
+     */
+    double geometric_range_m;
+    /**
+     * Whether sat_clock_s is present.
+     */
+    bool has_sat_clock_s;
+    /**
+     * Satellite clock offset at transmit time, seconds, when present.
+     */
+    double sat_clock_s;
+    /**
+     * Transmit time, seconds since J2000.
+     */
+    double transmit_time_j2000_s;
+    /**
+     * Sagnac-transported satellite ECEF position, meters.
+     */
+    double sat_pos_ecef_m[3];
+} SidereonRangePrediction;
 
 /**
  * A geodetic ground station for the Sun/Moon observation helpers.
@@ -17119,6 +17214,85 @@ enum SidereonStatus sidereon_broadcast_observables_batch(const struct SidereonBr
                                                          const struct SidereonObservablesOptions *options,
                                                          struct SidereonPredictedObservables *out,
                                                          bool *out_ok);
+
+/**
+ * Extract a loaded SP3 product as its canonical precise-ephemeris samples, in
+ * SI units, one per real position record in ascending epoch order. Round-tripping
+ * through sidereon_precise_ephemeris_samples_from_samples rebuilds the same
+ * interpolatable source. Uses the variable-length output contract documented at
+ * the top of the header.
+ *
+ * Safety: sp3 must be a live handle; out must point to at least len writable
+ * SidereonPreciseEphemerisSample or be NULL when len is 0; out_written and
+ * out_required must point to size_t values.
+ */
+enum SidereonStatus sidereon_sp3_precise_ephemeris_samples(const struct SidereonSp3 *sp3,
+                                                           struct SidereonPreciseEphemerisSample *out,
+                                                           size_t len,
+                                                           size_t *out_written,
+                                                           size_t *out_required);
+
+/**
+ * Build a sample-backed precise-ephemeris source from count canonical samples.
+ * On success writes a newly owned handle to *out_handle; release it with
+ * sidereon_precise_ephemeris_samples_free. Validation failures (no samples, a
+ * single-sample satellite, non-monotonic epochs, mixed time scales, a
+ * non-representable epoch, or a non-finite value) return
+ * SIDEREON_STATUS_INVALID_ARGUMENT.
+ *
+ * Safety: samples must point to count entries (each with a valid sat token) or
+ * be NULL when count is 0; out_handle must point to storage for a
+ * SidereonPreciseEphemerisSamples*.
+ */
+enum SidereonStatus sidereon_precise_ephemeris_samples_from_samples(const struct SidereonPreciseEphemerisSample *samples,
+                                                                    size_t count,
+                                                                    struct SidereonPreciseEphemerisSamples **out_handle);
+
+/**
+ * Release a precise-ephemeris samples handle. Null is a no-op. A non-null handle
+ * must come from sidereon_precise_ephemeris_samples_from_samples and must be
+ * freed exactly once with this function.
+ *
+ * Safety: samples must be NULL or a live handle from
+ * sidereon_precise_ephemeris_samples_from_samples. Passing a handle after it has
+ * already been freed is invalid.
+ */
+void sidereon_precise_ephemeris_samples_free(struct SidereonPreciseEphemerisSamples *samples);
+
+/**
+ * Predict geometric ranges for many (satellite, receiver, epoch) requests from a
+ * loaded SP3 product in one call, writing out[i] for requests[i]. Delegates to
+ * sidereon_core::observables::predict_ranges. options may be NULL for the engine
+ * defaults.
+ *
+ * Safety: sp3 must be a live handle; requests must point to count entries (each
+ * with a valid sat_id); out must point to count writable entries (or be NULL
+ * when count is 0); options must be NULL or point to a
+ * SidereonObservablesOptions.
+ */
+enum SidereonStatus sidereon_sp3_predict_ranges(const struct SidereonSp3 *sp3,
+                                                const struct SidereonRangePredictionRequest *requests,
+                                                size_t count,
+                                                const struct SidereonObservablesOptions *options,
+                                                struct SidereonRangePrediction *out);
+
+/**
+ * Predict geometric ranges for many (satellite, receiver, epoch) requests from a
+ * sample-backed precise-ephemeris source in one call. Mirror of
+ * sidereon_sp3_predict_ranges for the samples source; same per-request out
+ * contract. Delegates to sidereon_core::observables::predict_ranges.
+ *
+ * Safety: samples must be a live handle from
+ * sidereon_precise_ephemeris_samples_from_samples; requests must point to count
+ * entries (each with a valid sat_id); out must point to count writable entries
+ * (or be NULL when count is 0); options must be NULL or point to a
+ * SidereonObservablesOptions.
+ */
+enum SidereonStatus sidereon_precise_ephemeris_samples_predict_ranges(const struct SidereonPreciseEphemerisSamples *samples,
+                                                                      const struct SidereonRangePredictionRequest *requests,
+                                                                      size_t count,
+                                                                      const struct SidereonObservablesOptions *options,
+                                                                      struct SidereonRangePrediction *out);
 
 /**
  * GPS - UTC (the GNSS leap-second offset a GPS receiver applies, IS-GPS-200) at
