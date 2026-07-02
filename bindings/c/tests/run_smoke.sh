@@ -46,6 +46,12 @@ rinex_clk_path="${fixtures}/clk/synthetic_rinex_clock.clk"
 # Universal-parity additions: a single-object OMM (KVN/XML/JSON serializers) from
 # the canonical engine checkout.
 omm_kvn_path="${fixtures}/omm/24876.kvn"
+local_core_fixtures="/tmp/sid-integration/crates/sidereon-core/tests/fixtures"
+observe_spk_path="${local_core_fixtures}/almanac/almanac_de421.spk"
+dted_root_path="${local_core_fixtures}/dted/tiles"
+dted_tile_path="${dted_root_path}/n36_w107_1arc_v3.dt2"
+dcb_path="${local_core_fixtures}/bias/P1C1_RINEX.DCB"
+bias_gz_path="${local_core_fixtures}/bias/COD0OPSFIN_20261330000_01D_01D_OSB.BIA.gz"
 
 echo "== building cdylib =="
 cargo build --release
@@ -359,3 +365,21 @@ cc -std=c11 -Wall -Wextra -Werror \
 
 echo "== running precise_samples_smoke program =="
 "${precise_samples_out}" "${sp3_path}"
+
+# Phase B local-core additions: new ASTRO, terrain, drag, sample-grid, bias,
+# SBAS, SSR, and shared-label API.
+echo "== compiling phaseb_smoke program =="
+phaseb_out="${target_dir}/phaseb_smoke"
+cc -std=c11 -Wall -Wextra -Werror \
+    -I"${binding_root}/include" \
+    -I"${here}" \
+    "${here}/phaseb_smoke.c" \
+    -L"${lib_dir}" \
+    -lsidereon \
+    -Wl,-rpath,"${lib_dir}" \
+    -lm \
+    -o "${phaseb_out}"
+
+echo "== running phaseb_smoke program =="
+"${phaseb_out}" "${sp3_path}" "${observe_spk_path}" "${dted_root_path}" "${dted_tile_path}" \
+    "${dcb_path}" "${bias_gz_path}"

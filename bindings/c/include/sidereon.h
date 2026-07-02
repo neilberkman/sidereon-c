@@ -45,9 +45,9 @@
 #include <stdlib.h>
 
 #define SIDEREON_VERSION_MAJOR 0
-#define SIDEREON_VERSION_MINOR 9
-#define SIDEREON_VERSION_PATCH 2
-#define SIDEREON_VERSION_STRING "0.9.2"
+#define SIDEREON_VERSION_MINOR 10
+#define SIDEREON_VERSION_PATCH 0
+#define SIDEREON_VERSION_STRING "0.10.0"
 
 /**
  * Maximum number of VMF1 site-wise samples carried in
@@ -86,6 +86,14 @@
  * Slip reason: Melbourne-Wubbena step exceeded the threshold.
  */
 #define SIDEREON_SLIP_REASON_MELBOURNE_WUBBENA 8
+
+#define MAX_BIAS_OBS_BYTES 16
+
+#define BIAS_OBS_C_BYTES (MAX_BIAS_OBS_BYTES + 1)
+
+#define MAX_BIAS_TEXT_BYTES 64
+
+#define BIAS_TEXT_C_BYTES (MAX_BIAS_TEXT_BYTES + 1)
 
 /**
  * Number of ocean-loading tidal constituents in a BLQ block (matches
@@ -228,6 +236,14 @@ typedef enum SidereonSppRejectionReason {
      * The satellite was below the elevation mask.
      */
     SIDEREON_SPP_REJECTION_REASON_LOW_ELEVATION = 1,
+    /**
+     * The SBAS correction has withdrawn this satellite.
+     */
+    SIDEREON_SPP_REJECTION_REASON_SBAS_WITHDRAWN = 2,
+    /**
+     * The SBAS ionosphere grid does not cover this line of sight.
+     */
+    SIDEREON_SPP_REJECTION_REASON_SBAS_IONO_UNCOVERED = 3,
 } SidereonSppRejectionReason;
 
 /**
@@ -456,6 +472,69 @@ typedef enum SidereonEclipseStatus {
     SIDEREON_ECLIPSE_STATUS_UMBRA = 2,
 } SidereonEclipseStatus;
 
+typedef enum SidereonBiasMode {
+    SIDEREON_BIAS_MODE_ABSOLUTE = 0,
+    SIDEREON_BIAS_MODE_RELATIVE = 1,
+    SIDEREON_BIAS_MODE_UNSPECIFIED = 2,
+} SidereonBiasMode;
+
+typedef enum SidereonBiasKind {
+    SIDEREON_BIAS_KIND_OSB = 0,
+    SIDEREON_BIAS_KIND_DSB = 1,
+    SIDEREON_BIAS_KIND_ISB = 2,
+} SidereonBiasKind;
+
+typedef enum SidereonBiasTargetKind {
+    SIDEREON_BIAS_TARGET_KIND_SYSTEM = 0,
+    SIDEREON_BIAS_TARGET_KIND_SATELLITE = 1,
+    SIDEREON_BIAS_TARGET_KIND_RECEIVER = 2,
+    SIDEREON_BIAS_TARGET_KIND_SATELLITE_RECEIVER = 3,
+} SidereonBiasTargetKind;
+
+typedef enum SidereonSeasonKind {
+    SIDEREON_SEASON_KIND_MARCH_EQUINOX = 0,
+    SIDEREON_SEASON_KIND_JUNE_SOLSTICE = 1,
+    SIDEREON_SEASON_KIND_SEPTEMBER_EQUINOX = 2,
+    SIDEREON_SEASON_KIND_DECEMBER_SOLSTICE = 3,
+} SidereonSeasonKind;
+
+typedef enum SidereonMoonPhaseKind {
+    SIDEREON_MOON_PHASE_KIND_NEW = 0,
+    SIDEREON_MOON_PHASE_KIND_FIRST_QUARTER = 1,
+    SIDEREON_MOON_PHASE_KIND_FULL = 2,
+    SIDEREON_MOON_PHASE_KIND_LAST_QUARTER = 3,
+} SidereonMoonPhaseKind;
+
+typedef enum SidereonPlanet {
+    SIDEREON_PLANET_MERCURY = 0,
+    SIDEREON_PLANET_VENUS = 1,
+    SIDEREON_PLANET_MARS = 2,
+    SIDEREON_PLANET_JUPITER = 3,
+    SIDEREON_PLANET_SATURN = 4,
+    SIDEREON_PLANET_URANUS = 5,
+    SIDEREON_PLANET_NEPTUNE = 6,
+} SidereonPlanet;
+
+typedef enum SidereonPlanetaryEventKind {
+    SIDEREON_PLANETARY_EVENT_KIND_CONJUNCTION = 0,
+    SIDEREON_PLANETARY_EVENT_KIND_OPPOSITION = 1,
+} SidereonPlanetaryEventKind;
+
+typedef enum SidereonCulminationKind {
+    SIDEREON_CULMINATION_KIND_UPPER = 0,
+    SIDEREON_CULMINATION_KIND_LOWER = 1,
+} SidereonCulminationKind;
+
+typedef enum SidereonAlmanacEclipseKind {
+    SIDEREON_ALMANAC_ECLIPSE_KIND_LUNAR_PENUMBRAL = 0,
+    SIDEREON_ALMANAC_ECLIPSE_KIND_LUNAR_PARTIAL = 1,
+    SIDEREON_ALMANAC_ECLIPSE_KIND_LUNAR_TOTAL = 2,
+    SIDEREON_ALMANAC_ECLIPSE_KIND_SOLAR_PARTIAL = 3,
+    SIDEREON_ALMANAC_ECLIPSE_KIND_SOLAR_ANNULAR = 4,
+    SIDEREON_ALMANAC_ECLIPSE_KIND_SOLAR_TOTAL = 5,
+    SIDEREON_ALMANAC_ECLIPSE_KIND_SOLAR_HYBRID = 6,
+} SidereonAlmanacEclipseKind;
+
 /**
  * Integer ambiguity verdict for a moving-baseline epoch, mirroring
  * sidereon_core::rtk_filter::moving_baseline::MovingBaselineStatus.
@@ -496,9 +575,13 @@ typedef enum SidereonRtcmMessageKind {
      */
     SIDEREON_RTCM_MESSAGE_KIND_GLONASS_EPHEMERIS = 4,
     /**
+     * An SSR correction message.
+     */
+    SIDEREON_RTCM_MESSAGE_KIND_SSR = 5,
+    /**
      * A recognized-but-undecoded message, preserved verbatim.
      */
-    SIDEREON_RTCM_MESSAGE_KIND_UNSUPPORTED = 5,
+    SIDEREON_RTCM_MESSAGE_KIND_UNSUPPORTED = 6,
 } SidereonRtcmMessageKind;
 
 /**
@@ -515,6 +598,48 @@ typedef enum SidereonRtcmMsmKind {
      */
     SIDEREON_RTCM_MSM_KIND_MSM7 = 1,
 } SidereonRtcmMsmKind;
+
+typedef enum SidereonSbasWireForm {
+    SIDEREON_SBAS_WIRE_FORM_FRAMED250 = 0,
+    SIDEREON_SBAS_WIRE_FORM_BODY226 = 1,
+} SidereonSbasWireForm;
+
+typedef enum SidereonSbasMessageKind {
+    SIDEREON_SBAS_MESSAGE_KIND_DO_NOT_USE = 0,
+    SIDEREON_SBAS_MESSAGE_KIND_PRN_MASK = 1,
+    SIDEREON_SBAS_MESSAGE_KIND_FAST_CORRECTIONS = 2,
+    SIDEREON_SBAS_MESSAGE_KIND_INTEGRITY = 3,
+    SIDEREON_SBAS_MESSAGE_KIND_FAST_DEGRADATION = 4,
+    SIDEREON_SBAS_MESSAGE_KIND_GEO_NAV = 5,
+    SIDEREON_SBAS_MESSAGE_KIND_NETWORK_TIME = 6,
+    SIDEREON_SBAS_MESSAGE_KIND_GEO_ALMANAC = 7,
+    SIDEREON_SBAS_MESSAGE_KIND_IGP_MASK = 8,
+    SIDEREON_SBAS_MESSAGE_KIND_MIXED_CORRECTIONS = 9,
+    SIDEREON_SBAS_MESSAGE_KIND_LONG_TERM_CORRECTIONS = 10,
+    SIDEREON_SBAS_MESSAGE_KIND_IONO_DELAYS = 11,
+    SIDEREON_SBAS_MESSAGE_KIND_UNSUPPORTED = 12,
+} SidereonSbasMessageKind;
+
+typedef enum SidereonRtcmSsrKind {
+    SIDEREON_RTCM_SSR_KIND_ORBIT = 0,
+    SIDEREON_RTCM_SSR_KIND_CLOCK = 1,
+    SIDEREON_RTCM_SSR_KIND_COMBINED_ORBIT_CLOCK = 2,
+    SIDEREON_RTCM_SSR_KIND_CODE_BIAS = 3,
+    SIDEREON_RTCM_SSR_KIND_PHASE_BIAS = 4,
+    SIDEREON_RTCM_SSR_KIND_URA = 5,
+    SIDEREON_RTCM_SSR_KIND_HIGH_RATE_CLOCK = 6,
+    SIDEREON_RTCM_SSR_KIND_VTEC = 7,
+} SidereonRtcmSsrKind;
+
+typedef enum SidereonSsrReferencePoint {
+    SIDEREON_SSR_REFERENCE_POINT_ANTENNA_PHASE_CENTER = 0,
+    SIDEREON_SSR_REFERENCE_POINT_CENTER_OF_MASS = 1,
+} SidereonSsrReferencePoint;
+
+typedef enum SidereonEphemerisSampleStatus {
+    SIDEREON_EPHEMERIS_SAMPLE_STATUS_VALID = 0,
+    SIDEREON_EPHEMERIS_SAMPLE_STATUS_GAP = 1,
+} SidereonEphemerisSampleStatus;
 
 /**
  * Direction of a Moon elevation threshold crossing.
@@ -924,6 +1049,36 @@ typedef enum SidereonOrbitType {
     SIDEREON_ORBIT_TYPE_CIRCULAR_EQUATORIAL = 3,
 } SidereonOrbitType;
 
+typedef enum SidereonRetrogradeFactor {
+    SIDEREON_RETROGRADE_FACTOR_PROGRADE = 0,
+    SIDEREON_RETROGRADE_FACTOR_RETROGRADE = 1,
+} SidereonRetrogradeFactor;
+
+typedef enum SidereonRelativeFrame {
+    SIDEREON_RELATIVE_FRAME_RSW = 0,
+    SIDEREON_RELATIVE_FRAME_RTN = 1,
+    SIDEREON_RELATIVE_FRAME_RIC = 2,
+    SIDEREON_RELATIVE_FRAME_LVLH = 3,
+} SidereonRelativeFrame;
+
+typedef enum SidereonObserveTargetKind {
+    SIDEREON_OBSERVE_TARGET_KIND_SUN = 0,
+    SIDEREON_OBSERVE_TARGET_KIND_MOON = 1,
+    SIDEREON_OBSERVE_TARGET_KIND_SPK = 2,
+    SIDEREON_OBSERVE_TARGET_KIND_BARYCENTRIC_STATE = 3,
+} SidereonObserveTargetKind;
+
+typedef enum SidereonTransitBodyKind {
+    SIDEREON_TRANSIT_BODY_KIND_SUN = 0,
+    SIDEREON_TRANSIT_BODY_KIND_MOON = 1,
+    SIDEREON_TRANSIT_BODY_KIND_PLANET = 2,
+} SidereonTransitBodyKind;
+
+typedef enum SidereonDtedInterpolation {
+    SIDEREON_DTED_INTERPOLATION_NEAREST_POSTING = 0,
+    SIDEREON_DTED_INTERPOLATION_BILINEAR = 1,
+} SidereonDtedInterpolation;
+
 /**
  * Selects which antenna-descriptor string field a reader returns. Pass as a
  * uint32_t.
@@ -1210,6 +1365,16 @@ typedef enum SidereonEnuConvention {
     SIDEREON_ENU_CONVENTION_GEOCENTRIC_RADIAL = 1,
 } SidereonEnuConvention;
 
+typedef enum SidereonSbasSolveMode {
+    SIDEREON_SBAS_SOLVE_MODE_MIXED_AUGMENTATION = 0,
+    SIDEREON_SBAS_SOLVE_MODE_SBAS_ONLY = 1,
+} SidereonSbasSolveMode;
+
+typedef enum SidereonSsrMissingCorrectionAction {
+    SIDEREON_SSR_MISSING_CORRECTION_ACTION_DECLINE = 0,
+    SIDEREON_SSR_MISSING_CORRECTION_ACTION_FALL_BACK_TO_BROADCAST = 1,
+} SidereonSsrMissingCorrectionAction;
+
 /**
  * A single ANTEX antenna calibration block (receiver or satellite), owned
  * independently of the parent product. Obtain one with sidereon_antex_antenna
@@ -1222,6 +1387,8 @@ typedef struct SidereonAntenna SidereonAntenna;
  * and release with sidereon_antex_free.
  */
 typedef struct SidereonAntex SidereonAntex;
+
+typedef struct SidereonBiasSet SidereonBiasSet;
 
 /**
  * A broadcast-vs-precise comparison report. Opaque to C. Create with
@@ -1282,6 +1449,10 @@ typedef struct SidereonDgnssCorrections SidereonDgnssCorrections;
  * sidereon_dgnss_position_solve; release with sidereon_dgnss_solution_free.
  */
 typedef struct SidereonDgnssSolution SidereonDgnssSolution;
+
+typedef struct SidereonDtedTerrain SidereonDtedTerrain;
+
+typedef struct SidereonDtedTile SidereonDtedTile;
 
 /**
  * Numerical Cartesian-state ephemeris. Opaque to C. Create with
@@ -1529,6 +1700,10 @@ typedef struct SidereonSatelliteConstellationLookAngles SidereonSatelliteConstel
  */
 typedef struct SidereonSatelliteConstellationPasses SidereonSatelliteConstellationPasses;
 
+typedef struct SidereonSbasBlock SidereonSbasBlock;
+
+typedef struct SidereonSbasCorrectionStore SidereonSbasCorrectionStore;
+
 /**
  * A receiver solution paired with the ephemeris-source provenance that produced
  * it. Opaque to C. Create with sidereon_solve_with_fallback and release with
@@ -1569,6 +1744,8 @@ typedef struct SidereonSppBatch SidereonSppBatch;
  * sidereon_solve_spp_v2 and release with sidereon_spp_solution_free.
  */
 typedef struct SidereonSppSolution SidereonSppSolution;
+
+typedef struct SidereonSsrCorrectionStore SidereonSsrCorrectionStore;
 
 /**
  * A parsed TLE and initialized SGP4 satellite. Opaque to C. Create with
@@ -1647,6 +1824,42 @@ typedef struct SidereonPassFinderOptions {
 } SidereonPassFinderOptions;
 
 /**
+ * Space-weather inputs used by the drag model.
+ */
+typedef struct SidereonSpaceWeather {
+    /**
+     * Daily F10.7 from the previous day.
+     */
+    double f107;
+    /**
+     * 81-day centered average F10.7.
+     */
+    double f107a;
+    /**
+     * Daily Ap index.
+     */
+    double ap;
+} SidereonSpaceWeather;
+
+/**
+ * Validated drag parameters stored on propagation and decay configs.
+ */
+typedef struct SidereonDragParameters {
+    /**
+     * Drag factor B = C_D * A / m, m^2/kg.
+     */
+    double bc_factor_m2_kg;
+    /**
+     * Space-weather inputs.
+     */
+    struct SidereonSpaceWeather space_weather;
+    /**
+     * Density cutoff altitude, km.
+     */
+    double cutoff_altitude_km;
+} SidereonDragParameters;
+
+/**
  * Numerical state propagation controls. Initialize with
  * sidereon_state_propagation_config_init before overriding fields.
  */
@@ -1703,7 +1916,121 @@ typedef struct SidereonStatePropagationConfig {
      * Gravitational parameter in km^3/s^2 when enabled.
      */
     double mu_km3_s2;
+    /**
+     * Whether drag is enabled.
+     */
+    bool has_drag;
+    /**
+     * Drag parameters when has_drag is true.
+     */
+    struct SidereonDragParameters drag;
 } SidereonStatePropagationConfig;
+
+/**
+ * One ECI Cartesian state from numerical propagation.
+ */
+typedef struct SidereonCartesianState {
+    /**
+     * Output epoch in absolute TDB seconds.
+     */
+    double epoch_s;
+    /**
+     * ECI position in kilometers.
+     */
+    double position_km[3];
+    /**
+     * ECI velocity in kilometers per second.
+     */
+    double velocity_km_s[3];
+} SidereonCartesianState;
+
+/**
+ * Orbital decay estimate controls. Initialize with sidereon_decay_config_init.
+ */
+typedef struct SidereonDecayConfig {
+    /**
+     * Gravity model under drag, one of SidereonPropagationForceModel.
+     */
+    uint32_t force_model;
+    /**
+     * One of SidereonPropagationIntegrator.
+     */
+    uint32_t integrator;
+    /**
+     * Absolute tolerance.
+     */
+    double abs_tol;
+    /**
+     * Relative tolerance.
+     */
+    double rel_tol;
+    /**
+     * Initial integration step in seconds.
+     */
+    double initial_step_s;
+    /**
+     * Minimum integration step in seconds.
+     */
+    double min_step_s;
+    /**
+     * Maximum integration step in seconds.
+     */
+    double max_step_s;
+    /**
+     * Maximum internal integrator steps.
+     */
+    uint32_t max_steps;
+    /**
+     * Whether mu_km3_s2 overrides the selected model.
+     */
+    bool mu_km3_s2_enabled;
+    /**
+     * Optional gravitational parameter override, km^3/s^2.
+     */
+    double mu_km3_s2;
+    /**
+     * Validated drag parameters.
+     */
+    struct SidereonDragParameters drag;
+    /**
+     * Reentry threshold altitude, km.
+     */
+    double reentry_altitude_km;
+    /**
+     * Coarse scan step, s.
+     */
+    double scan_step_s;
+    /**
+     * Bisection time tolerance, s.
+     */
+    double crossing_tolerance_s;
+    /**
+     * Maximum elapsed scan horizon, s.
+     */
+    double max_duration_s;
+    /**
+     * Maximum coarse scan samples.
+     */
+    uint32_t max_scan_samples;
+} SidereonDecayConfig;
+
+/**
+ * Result of a drag-decay estimate.
+ */
+typedef struct SidereonDecayEstimate {
+    /**
+     * Seconds from the initial epoch to reentry.
+     */
+    double time_to_decay_s;
+    /**
+     * State at reentry.
+     */
+    struct SidereonCartesianState reentry_state;
+    /**
+     * Geodetic altitude at the reported state, km.
+     */
+    double reentry_altitude_km;
+} SidereonDecayEstimate;
 
 /**
  * Fixed-size null-terminated TLE line storage. Values returned by Sidereon are
@@ -1978,24 +2305,6 @@ typedef struct SidereonTlePair {
      */
     const char *line2;
 } SidereonTlePair;
-
-/**
- * One ECI Cartesian state from numerical propagation.
- */
-typedef struct SidereonCartesianState {
-    /**
-     * Output epoch in absolute TDB seconds.
-     */
-    double epoch_s;
-    /**
-     * ECI position in kilometers.
-     */
-    double position_km[3];
-    /**
-     * ECI velocity in kilometers per second.
-     */
-    double velocity_km_s[3];
-} SidereonCartesianState;
 
 /**
  * One pass in a sidereon_satellite_constellation_passes result: the pass
@@ -5940,6 +6249,47 @@ typedef struct SidereonSlipResult {
     bool skipped;
 } SidereonSlipResult;
 
+typedef struct SidereonCodeDcbOptions {
+    const char *obs1;
+    const char *obs2;
+    int32_t year;
+    uint8_t month;
+    uint32_t time_scale;
+    bool has_receiver_system;
+    uint32_t receiver_system;
+} SidereonCodeDcbOptions;
+
+typedef struct SidereonBiasEpoch {
+    int32_t year;
+    uint16_t day_of_year;
+    uint32_t second_of_day;
+} SidereonBiasEpoch;
+
+typedef struct SidereonBiasRecord {
+    enum SidereonBiasKind kind;
+    enum SidereonBiasTargetKind target_kind;
+    enum SidereonGnssSystem system;
+    bool has_sat_id;
+    struct SidereonSatelliteToken sat_id;
+    char station[BIAS_TEXT_C_BYTES];
+    char svn[BIAS_TEXT_C_BYTES];
+    char obs1[BIAS_OBS_C_BYTES];
+    bool has_obs2;
+    char obs2[BIAS_OBS_C_BYTES];
+    bool has_valid_from;
+    struct SidereonBiasEpoch valid_from;
+    bool has_valid_until;
+    struct SidereonBiasEpoch valid_until;
+    double value;
+    bool has_sigma;
+    double sigma;
+    bool has_slope;
+    double slope;
+    bool has_slope_sigma;
+    double slope_sigma;
+    bool is_phase;
+} SidereonBiasRecord;
+
 /**
  * Ocean-loading BLQ coefficients, mirroring
  * sidereon_core::ppp_corrections::OceanLoadingBlq. Both arrays are
@@ -6004,6 +6354,14 @@ typedef struct SidereonPppCorrectionObservation {
      * Band-2 carrier frequency, Hz.
      */
     double freq2_hz;
+    /**
+     * Whether glonass_channel is present.
+     */
+    bool has_glonass_channel;
+    /**
+     * GLONASS FDMA frequency channel, used when has_glonass_channel.
+     */
+    int8_t glonass_channel;
 } SidereonPppCorrectionObservation;
 
 /**
@@ -6148,6 +6506,36 @@ typedef struct SidereonSatelliteAntennaOptions {
     size_t antenna_count;
 } SidereonSatelliteAntennaOptions;
 
+typedef struct SidereonPppCodeBiasSystemPair {
+    /**
+     * GNSS system code, one of SidereonGnssSystem.
+     */
+    uint32_t system;
+    /**
+     * First RINEX observable code.
+     */
+    const char *obs1;
+    /**
+     * Second RINEX observable code.
+     */
+    const char *obs2;
+} SidereonPppCodeBiasSystemPair;
+
+typedef struct SidereonPppCodeBiasSatellitePair {
+    /**
+     * Null-terminated satellite token.
+     */
+    const char *sat_id;
+    /**
+     * First RINEX observable code.
+     */
+    const char *obs1;
+    /**
+     * Second RINEX observable code.
+     */
+    const char *obs2;
+} SidereonPppCodeBiasSatellitePair;
+
 /**
  * PPP correction precompute switches, mirroring
  * sidereon_core::ppp_corrections::PppCorrectionsOptions. The has_* flags gate
@@ -6186,6 +6574,42 @@ typedef struct SidereonPppCorrectionsOptions {
      * Pointer to a SidereonSatelliteAntennaOptions when has_satellite_antenna.
      */
     const struct SidereonSatelliteAntennaOptions *satellite_antenna;
+    /**
+     * Whether code_bias is enabled.
+     */
+    bool has_code_bias;
+    /**
+     * Parsed Bias-SINEX or DCB product when has_code_bias.
+     */
+    const struct SidereonBiasSet *code_bias;
+    /**
+     * System default observable pairs.
+     */
+    const struct SidereonPppCodeBiasSystemPair *code_bias_system_pairs;
+    /**
+     * Number of system default observable pairs.
+     */
+    size_t code_bias_system_pair_count;
+    /**
+     * Per-satellite observable-pair overrides.
+     */
+    const struct SidereonPppCodeBiasSatellitePair *code_bias_satellite_pairs;
+    /**
+     * Number of per-satellite observable-pair overrides.
+     */
+    size_t code_bias_satellite_pair_count;
+    /**
+     * Whether code_bias_clock_reference_pairs overrides the product metadata.
+     */
+    bool has_code_bias_clock_reference;
+    /**
+     * Optional clock-reference observable pairs by system.
+     */
+    const struct SidereonPppCodeBiasSystemPair *code_bias_clock_reference_pairs;
+    /**
+     * Number of clock-reference observable pairs.
+     */
+    size_t code_bias_clock_reference_pair_count;
 } SidereonPppCorrectionsOptions;
 
 /**
@@ -6554,6 +6978,126 @@ typedef struct SidereonClassicalElements {
     uint32_t orbit_type;
 } SidereonClassicalElements;
 
+typedef struct SidereonKeplerSolution {
+    double anomaly_rad;
+    size_t iterations;
+} SidereonKeplerSolution;
+
+typedef struct SidereonEquinoctialElements {
+    double a;
+    double h;
+    double k;
+    double p;
+    double q;
+    double lambda;
+    uint32_t retrograde;
+} SidereonEquinoctialElements;
+
+typedef struct SidereonModifiedEquinoctialElements {
+    double p;
+    double f;
+    double g;
+    double h;
+    double k;
+    double l;
+    uint32_t retrograde;
+} SidereonModifiedEquinoctialElements;
+
+typedef struct SidereonRefraction {
+    double pressure_mbar;
+    double temperature_c;
+} SidereonRefraction;
+
+typedef struct SidereonObserveOptions {
+    bool has_polar_motion;
+    double xp_rad;
+    double yp_rad;
+    bool has_refraction;
+    struct SidereonRefraction refraction;
+    bool deflection;
+    bool aberration;
+} SidereonObserveOptions;
+
+/**
+ * A geodetic ground station for the Sun/Moon observation helpers.
+ */
+typedef struct SidereonGeodeticStation {
+    /**
+     * Geodetic latitude, degrees (positive north).
+     */
+    double latitude_deg;
+    /**
+     * Geodetic longitude, degrees (positive east).
+     */
+    double longitude_deg;
+    /**
+     * Height above the ellipsoid, kilometers.
+     */
+    double altitude_km;
+} SidereonGeodeticStation;
+
+typedef struct SidereonEquatorial {
+    double right_ascension_deg;
+    double right_ascension_hours;
+    double declination_deg;
+    double distance_km;
+} SidereonEquatorial;
+
+typedef struct SidereonHorizontal {
+    double azimuth_deg;
+    double elevation_deg;
+    double range_km;
+} SidereonHorizontal;
+
+typedef struct SidereonEcliptic {
+    double longitude_deg;
+    double latitude_deg;
+    double distance_km;
+} SidereonEcliptic;
+
+typedef struct SidereonBodyObservation {
+    struct SidereonEquatorial astrometric;
+    struct SidereonEquatorial apparent_icrs;
+    struct SidereonEquatorial apparent;
+    struct SidereonHorizontal horizontal;
+    double hour_angle_deg;
+    double hour_angle_hours;
+    struct SidereonEcliptic ecliptic;
+    bool reduced;
+} SidereonBodyObservation;
+
+typedef struct SidereonSeasonEvent {
+    int64_t time_unix_us;
+    enum SidereonSeasonKind kind;
+} SidereonSeasonEvent;
+
+typedef struct SidereonMoonPhaseEvent {
+    int64_t time_unix_us;
+    enum SidereonMoonPhaseKind kind;
+} SidereonMoonPhaseEvent;
+
+typedef struct SidereonPlanetaryEvent {
+    int64_t time_unix_us;
+    enum SidereonPlanet planet;
+    enum SidereonPlanetaryEventKind kind;
+    double elongation_deg;
+} SidereonPlanetaryEvent;
+
+typedef struct SidereonMeridianTransit {
+    int64_t time_unix_us;
+    enum SidereonCulminationKind kind;
+    double altitude_deg;
+} SidereonMeridianTransit;
+
+typedef struct SidereonAlmanacEclipseEvent {
+    int64_t time_maximum_unix_us;
+    enum SidereonAlmanacEclipseKind kind;
+    double magnitude;
+    double moon_latitude_deg;
+    double gamma;
+    bool uncertain;
+} SidereonAlmanacEclipseEvent;
+
 /**
  * A surface point as geocentric latitude/longitude (degrees), mirroring
  * sidereon_core::astro::observation::SurfacePoint.
@@ -6568,6 +7112,10 @@ typedef struct SidereonSurfacePoint {
      */
     double longitude_deg;
 } SidereonSurfacePoint;
+
+typedef struct SidereonDtedLookupOptions {
+    uint32_t interpolation;
+} SidereonDtedLookupOptions;
 
 /**
  * One moving-baseline epoch: the base receiver's own ECEF position this epoch,
@@ -7242,6 +7790,145 @@ typedef struct SidereonRtcmGlonassEphemeris {
      */
     uint8_t reserved;
 } SidereonRtcmGlonassEphemeris;
+
+typedef struct SidereonSbasMessageInfo {
+    enum SidereonSbasWireForm form;
+    enum SidereonSbasMessageKind kind;
+    uint8_t message_type;
+    uint8_t preamble;
+    size_t fast_count;
+    size_t long_term_count;
+    size_t iono_delay_count;
+} SidereonSbasMessageInfo;
+
+typedef struct SidereonSbasFastCorrection {
+    double prc_m;
+    double rrc_m_s;
+    uint8_t udrei;
+    double t_of_j2000_s;
+    uint8_t iodf;
+} SidereonSbasFastCorrection;
+
+typedef struct SidereonSbasLongTermCorrection {
+    uint8_t iode;
+    double delta_ecef_m[3];
+    double delta_ecef_rate_m_s[3];
+    double delta_af0_s;
+    double delta_af1_s_s;
+    double t0_j2000_s;
+} SidereonSbasLongTermCorrection;
+
+typedef struct SidereonSbasGeoState {
+    double position_ecef_m[3];
+    double velocity_ecef_m_s[3];
+    double acceleration_ecef_m_s2[3];
+    double clock_offset_s;
+    double clock_drift_s_s;
+    double t0_j2000_s;
+} SidereonSbasGeoState;
+
+typedef struct SidereonSbasIgp {
+    double lat_deg;
+    double lon_deg;
+    double vertical_delay_m;
+    bool has_give_variance_m2;
+    double give_variance_m2;
+} SidereonSbasIgp;
+
+typedef struct SidereonRtcmSsrHeader {
+    uint32_t epoch_time_s;
+    uint8_t update_interval;
+    bool multiple_message;
+    uint8_t iod_ssr;
+    uint16_t provider_id;
+    uint8_t solution_id;
+    bool has_satellite_reference_datum;
+    bool satellite_reference_datum;
+    bool has_dispersive_bias_consistency;
+    bool dispersive_bias_consistency;
+    bool has_mw_consistency;
+    bool mw_consistency;
+    uint8_t satellite_count;
+} SidereonRtcmSsrHeader;
+
+typedef struct SidereonRtcmSsrInfo {
+    uint16_t message_number;
+    enum SidereonGnssSystem system;
+    enum SidereonRtcmSsrKind kind;
+    struct SidereonRtcmSsrHeader header;
+    size_t orbit_count;
+    size_t clock_count;
+    size_t ura_count;
+    size_t code_bias_count;
+    size_t phase_bias_count;
+} SidereonRtcmSsrInfo;
+
+typedef struct SidereonRtcmSsrOrbitRecord {
+    uint8_t satellite_id;
+    uint32_t iode;
+    int32_t delta_radial;
+    int32_t delta_along;
+    int32_t delta_cross;
+    int32_t dot_delta_radial;
+    int32_t dot_delta_along;
+    int32_t dot_delta_cross;
+} SidereonRtcmSsrOrbitRecord;
+
+typedef struct SidereonRtcmSsrClockRecord {
+    uint8_t satellite_id;
+    int32_t c0;
+    int32_t c1;
+    int32_t c2;
+} SidereonRtcmSsrClockRecord;
+
+typedef struct SidereonRtcmSsrUraRecord {
+    uint8_t satellite_id;
+    uint8_t ura_index;
+} SidereonRtcmSsrUraRecord;
+
+typedef struct SidereonSsrOrbitCorrection {
+    uint32_t source;
+    uint16_t provider_id;
+    uint8_t solution_id;
+    uint32_t iode;
+    uint8_t iod_ssr;
+    bool crs_regional;
+    enum SidereonSsrReferencePoint reference_point;
+    double radial_m;
+    double along_m;
+    double cross_m;
+    double radial_rate_m_s;
+    double along_rate_m_s;
+    double cross_rate_m_s;
+    double ref_epoch_j2000_s;
+    double update_interval_s;
+} SidereonSsrOrbitCorrection;
+
+typedef struct SidereonSsrClockCorrection {
+    uint32_t source;
+    uint16_t provider_id;
+    uint8_t solution_id;
+    uint8_t iod_ssr;
+    double c0_m;
+    double c1_m_s;
+    double c2_m_s2;
+    double ref_epoch_j2000_s;
+    double update_interval_s;
+    bool has_high_rate;
+    double high_rate_c0_m;
+    double high_rate_ref_epoch_j2000_s;
+    double high_rate_update_interval_s;
+} SidereonSsrClockCorrection;
+
+typedef struct SidereonEphemerisSampleRow {
+    struct SidereonSatelliteToken sat_id;
+    double epoch_j2000_s;
+    enum SidereonEphemerisSampleStatus status;
+    bool has_position_ecef_m;
+    double position_ecef_m[3];
+    bool has_clock_s;
+    double clock_s;
+} SidereonEphemerisSampleRow;
 
 /**
  * Receiver/satellite ray geometry and epoch for a full NeQuick-G evaluation,
@@ -8931,24 +9618,6 @@ typedef struct SidereonRangePrediction {
 } SidereonRangePrediction;
 
 /**
- * A geodetic ground station for the Sun/Moon observation helpers.
- */
-typedef struct SidereonGeodeticStation {
-    /**
-     * Geodetic latitude, degrees (positive north).
-     */
-    double latitude_deg;
-    /**
-     * Geodetic longitude, degrees (positive east).
-     */
-    double longitude_deg;
-    /**
-     * Height above the ellipsoid, kilometers.
-     */
-    double altitude_km;
-} SidereonGeodeticStation;
-
-/**
  * Topocentric look angle of a body (Sun or Moon) from a ground site.
  */
 typedef struct SidereonBodyAzEl {
@@ -9090,6 +9759,72 @@ enum SidereonStatus sidereon_pass_finder_options_init(struct SidereonPassFinderO
  * Safety: out_config must point to a SidereonStatePropagationConfig.
  */
 enum SidereonStatus sidereon_state_propagation_config_init(struct SidereonStatePropagationConfig *out_config);
+
+/**
+ * Fill *out_weather with the core default quiet-Sun drag inputs.
+ *
+ * Safety: out_weather must point to a SidereonSpaceWeather.
+ */
+enum SidereonStatus sidereon_space_weather_default(struct SidereonSpaceWeather *out_weather);
+
+/**
+ * Build validated drag parameters from drag coefficient, area, and mass.
+ *
+ * Safety: out_drag must point to a SidereonDragParameters.
+ */
+enum SidereonStatus sidereon_drag_parameters_from_area_mass(double cd,
+                                                            double area_m2,
+                                                            double mass_kg,
+                                                            struct SidereonSpaceWeather weather,
+                                                            double cutoff_altitude_km,
+                                                            struct SidereonDragParameters *out_drag);
+
+/**
+ * Build validated drag parameters from B = C_D * A / m in m^2/kg.
+ *
+ * Safety: out_drag must point to a SidereonDragParameters.
+ */
+enum SidereonStatus sidereon_drag_parameters_from_bc_factor(double bc_factor_m2_kg,
+                                                            struct SidereonSpaceWeather weather,
+                                                            double cutoff_altitude_km,
+                                                            struct SidereonDragParameters *out_drag);
+
+/**
+ * Build validated drag parameters from reciprocal ballistic coefficient.
+ *
+ * Safety: out_drag must point to a SidereonDragParameters.
+ */
+enum SidereonStatus sidereon_drag_parameters_from_ballistic_coefficient(double bc_kg_m2,
+                                                                        struct SidereonSpaceWeather weather,
+                                                                        double cutoff_altitude_km,
+                                                                        struct SidereonDragParameters *out_drag);
+
+/**
+ * Evaluate atmospheric-drag acceleration for one ECI Cartesian state.
+ *
+ * Safety: drag and state must point to valid structs; out_accel_km_s2 must
+ * point to 3 doubles.
+ */
+enum SidereonStatus sidereon_drag_force_acceleration(const struct SidereonDragParameters *drag,
+                                                     const struct SidereonCartesianState *state,
+                                                     double *out_accel_km_s2);
+
+/**
+ * Initialize decay-estimate controls with core defaults.
+ *
+ * Safety: out_config must point to a SidereonDecayConfig.
+ */
+enum SidereonStatus sidereon_decay_config_init(struct SidereonDecayConfig *out_config);
+
+/**
+ * Estimate time to reentry using drag-perturbed numerical propagation.
+ *
+ * Safety: initial and config must point to valid structs; out_estimate must
+ * point to a SidereonDecayEstimate.
+ */
+enum SidereonStatus sidereon_estimate_decay(const struct SidereonCartesianState *initial,
+                                            const struct SidereonDecayConfig *config,
+                                            struct SidereonDecayEstimate *out_estimate);
 
 /**
  * Parse a TLE line pair and initialize an SGP4 satellite. opsmode is one of
@@ -12239,6 +12974,18 @@ enum SidereonStatus sidereon_fde_solve_broadcast(const struct SidereonBroadcastE
                                                  const struct SidereonFdeOptions *options,
                                                  struct SidereonFdeSolution **out_solution);
 
+enum SidereonStatus sidereon_robust_fde_solve_spp(const struct SidereonSp3 *sp3,
+                                                  const struct SidereonSppInputs *inputs,
+                                                  const struct SidereonSppRobustConfig *robust,
+                                                  const struct SidereonFdeOptions *options,
+                                                  struct SidereonFdeSolution **out_solution);
+
+enum SidereonStatus sidereon_robust_fde_solve_broadcast(const struct SidereonBroadcastEphemeris *broadcast,
+                                                        const struct SidereonSppInputs *inputs,
+                                                        const struct SidereonSppRobustConfig *robust,
+                                                        const struct SidereonFdeOptions *options,
+                                                        struct SidereonFdeSolution **out_solution);
+
 /**
  * Copy the surviving receiver solution out of an FDE solution into a newly owned
  * SidereonSppSolution, so the full spp solution accessors apply. Release the new
@@ -13257,6 +14004,24 @@ enum SidereonStatus sidereon_rf_dish_gain(double diameter_m,
                                           double frequency_hz,
                                           double efficiency,
                                           double *out);
+
+/**
+ * Copy the core conventional GNSS system label into out.
+ */
+enum SidereonStatus sidereon_gnss_system_label(uint32_t system,
+                                               uint8_t *out,
+                                               size_t len,
+                                               size_t *out_written,
+                                               size_t *out_required);
+
+/**
+ * Copy the core carrier-band label into out.
+ */
+enum SidereonStatus sidereon_carrier_band_label(uint32_t band,
+                                                uint8_t *out,
+                                                size_t len,
+                                                size_t *out_written,
+                                                size_t *out_required);
 
 /**
  * Carrier frequency in Hz for a (system, band) pair, or
@@ -14866,6 +15631,77 @@ enum SidereonStatus sidereon_detect_cycle_slips(const struct SidereonArcEpoch *a
                                                 size_t *out_written,
                                                 size_t *out_required);
 
+enum SidereonStatus sidereon_bias_sinex_parse(const uint8_t *bytes,
+                                              size_t len,
+                                              struct SidereonBiasSet **out);
+
+enum SidereonStatus sidereon_bias_sinex_parse_lossy(const uint8_t *bytes,
+                                                    size_t len,
+                                                    struct SidereonBiasSet **out);
+
+enum SidereonStatus sidereon_bias_sinex_load(const char *path, struct SidereonBiasSet **out);
+
+enum SidereonStatus sidereon_bias_sinex_load_lossy(const char *path, struct SidereonBiasSet **out);
+
+enum SidereonStatus sidereon_code_dcb_parse(const uint8_t *bytes,
+                                            size_t len,
+                                            const struct SidereonCodeDcbOptions *options,
+                                            struct SidereonBiasSet **out);
+
+enum SidereonStatus sidereon_code_dcb_parse_lossy(const uint8_t *bytes,
+                                                  size_t len,
+                                                  const struct SidereonCodeDcbOptions *options,
+                                                  struct SidereonBiasSet **out);
+
+enum SidereonStatus sidereon_code_dcb_load(const char *path,
+                                           const struct SidereonCodeDcbOptions *options,
+                                           struct SidereonBiasSet **out);
+
+enum SidereonStatus sidereon_code_dcb_load_lossy(const char *path,
+                                                 const struct SidereonCodeDcbOptions *options,
+                                                 struct SidereonBiasSet **out);
+
+enum SidereonStatus sidereon_bias_set_record_count(const struct SidereonBiasSet *set,
+                                                   size_t *out_count);
+
+enum SidereonStatus sidereon_bias_set_skipped_record_count(const struct SidereonBiasSet *set,
+                                                           size_t *out_count);
+
+enum SidereonStatus sidereon_bias_set_warning_count(const struct SidereonBiasSet *set,
+                                                    size_t *out_count);
+
+enum SidereonStatus sidereon_bias_set_mode(const struct SidereonBiasSet *set,
+                                           enum SidereonBiasMode *out_mode,
+                                           uint32_t *out_time_scale);
+
+enum SidereonStatus sidereon_bias_set_record(const struct SidereonBiasSet *set,
+                                             size_t index,
+                                             struct SidereonBiasRecord *out_record);
+
+enum SidereonStatus sidereon_bias_set_code_osb_seconds(const struct SidereonBiasSet *set,
+                                                       const char *sat_id,
+                                                       const char *obs,
+                                                       struct SidereonBiasEpoch epoch,
+                                                       bool *out_present,
+                                                       double *out_seconds);
+
+enum SidereonStatus sidereon_bias_set_phase_osb_cycles(const struct SidereonBiasSet *set,
+                                                       const char *sat_id,
+                                                       const char *obs,
+                                                       struct SidereonBiasEpoch epoch,
+                                                       bool *out_present,
+                                                       double *out_cycles);
+
+enum SidereonStatus sidereon_bias_set_code_dsb_seconds(const struct SidereonBiasSet *set,
+                                                       const char *sat_id,
+                                                       const char *obs1,
+                                                       const char *obs2,
+                                                       struct SidereonBiasEpoch epoch,
+                                                       bool *out_present,
+                                                       double *out_seconds);
+
+void sidereon_bias_set_free(struct SidereonBiasSet *set);
+
 /**
  * Solid-earth tide displacement of an ITRF station, metres ECEF. Delegates to
  * sidereon_core::tides::solid_earth_tide.
@@ -15007,6 +15843,20 @@ enum SidereonStatus sidereon_ppp_corrections_sat_pcv(const struct SidereonPppCor
                                                      size_t len,
                                                      size_t *out_written,
                                                      size_t *out_required);
+
+/**
+ * Copy the per-satellite code-bias correction table (scalars, meters).
+ * Variable-length output contract.
+ *
+ * Safety: corrections is a live handle; out points to len
+ * SidereonSatScalarCorrection or NULL when len is 0; out_written and
+ * out_required point to size_t.
+ */
+enum SidereonStatus sidereon_ppp_corrections_code_bias(const struct SidereonPppCorrections *corrections,
+                                                       struct SidereonSatScalarCorrection *out,
+                                                       size_t len,
+                                                       size_t *out_written,
+                                                       size_t *out_required);
 
 /**
  * Copy the epoch-indexed per-satellite antenna phase-center-offset vector table.
@@ -15271,6 +16121,199 @@ enum SidereonStatus sidereon_coe2rv(const struct SidereonClassicalElements *coe,
                                     double *out_r_km,
                                     double *out_v_km_s);
 
+enum SidereonStatus sidereon_mean_to_eccentric_anomaly(double mean_anomaly_rad,
+                                                       double eccentricity,
+                                                       double *out);
+
+enum SidereonStatus sidereon_eccentric_to_mean_anomaly(double eccentric_anomaly_rad,
+                                                       double eccentricity,
+                                                       double *out);
+
+enum SidereonStatus sidereon_eccentric_to_true_anomaly(double eccentric_anomaly_rad,
+                                                       double eccentricity,
+                                                       double *out);
+
+enum SidereonStatus sidereon_true_to_eccentric_anomaly(double true_anomaly_rad,
+                                                       double eccentricity,
+                                                       double *out);
+
+enum SidereonStatus sidereon_mean_to_true_anomaly(double mean_anomaly_rad,
+                                                  double eccentricity,
+                                                  double *out);
+
+enum SidereonStatus sidereon_true_to_mean_anomaly(double true_anomaly_rad,
+                                                  double eccentricity,
+                                                  double *out);
+
+enum SidereonStatus sidereon_solve_kepler(double mean_anomaly_rad,
+                                          double eccentricity,
+                                          struct SidereonKeplerSolution *out);
+
+enum SidereonStatus sidereon_propagate_kepler(const struct SidereonClassicalElements *coe,
+                                              double mu_km3_s2,
+                                              double dt_s,
+                                              struct SidereonClassicalElements *out);
+
+enum SidereonStatus sidereon_coe2eq(const struct SidereonClassicalElements *coe,
+                                    uint32_t retrograde,
+                                    struct SidereonEquinoctialElements *out);
+
+enum SidereonStatus sidereon_eq2coe(const struct SidereonEquinoctialElements *eq,
+                                    struct SidereonClassicalElements *out);
+
+enum SidereonStatus sidereon_coe2mee(const struct SidereonClassicalElements *coe,
+                                     uint32_t retrograde,
+                                     struct SidereonModifiedEquinoctialElements *out);
+
+enum SidereonStatus sidereon_mee2coe(const struct SidereonModifiedEquinoctialElements *mee,
+                                     struct SidereonClassicalElements *out);
+
+enum SidereonStatus sidereon_rv2eq(const double *r_km,
+                                   const double *v_km_s,
+                                   double mu_km3_s2,
+                                   uint32_t retrograde,
+                                   struct SidereonEquinoctialElements *out);
+
+enum SidereonStatus sidereon_eq2rv(const struct SidereonEquinoctialElements *eq,
+                                   double mu_km3_s2,
+                                   double *out_r_km,
+                                   double *out_v_km_s);
+
+enum SidereonStatus sidereon_rv2mee(const double *r_km,
+                                    const double *v_km_s,
+                                    double mu_km3_s2,
+                                    uint32_t retrograde,
+                                    struct SidereonModifiedEquinoctialElements *out);
+
+enum SidereonStatus sidereon_mee2rv(const struct SidereonModifiedEquinoctialElements *mee,
+                                    double mu_km3_s2,
+                                    double *out_r_km,
+                                    double *out_v_km_s);
+
+enum SidereonStatus sidereon_angular_separation_deg(const double *a, const double *b, double *out);
+
+enum SidereonStatus sidereon_angular_separation_coords_deg(double a_lon_deg,
+                                                           double a_lat_deg,
+                                                           double b_lon_deg,
+                                                           double b_lat_deg,
+                                                           double *out);
+
+enum SidereonStatus sidereon_position_angle_deg(double from_lon_deg,
+                                                double from_lat_deg,
+                                                double to_lon_deg,
+                                                double to_lat_deg,
+                                                double *out);
+
+enum SidereonStatus sidereon_beta_angle_deg(const double *orbit_normal,
+                                            const double *sun,
+                                            double *out);
+
+enum SidereonStatus sidereon_beta_angle_from_state_deg(const double *r_km,
+                                                       const double *v_km_s,
+                                                       const double *sun_km,
+                                                       double *out);
+
+enum SidereonStatus sidereon_relative_rotation(uint32_t frame,
+                                               const struct SidereonCartesianState *chief,
+                                               double *out_row_major,
+                                               size_t len);
+
+enum SidereonStatus sidereon_relative_state(const struct SidereonCartesianState *chief,
+                                            const struct SidereonCartesianState *deputy,
+                                            struct SidereonCartesianState *out);
+
+enum SidereonStatus sidereon_absolute_from_relative(const struct SidereonCartesianState *chief,
+                                                    const struct SidereonCartesianState *rel,
+                                                    struct SidereonCartesianState *out);
+
+enum SidereonStatus sidereon_cw_stm(double mean_motion_rad_s,
+                                    double dt_s,
+                                    double *out_row_major,
+                                    size_t len);
+
+enum SidereonStatus sidereon_cw_propagate(const struct SidereonCartesianState *rel,
+                                          double mean_motion_rad_s,
+                                          double dt_s,
+                                          struct SidereonCartesianState *out);
+
+enum SidereonStatus sidereon_relative_mean_motion_circular(double radius_km, double *out);
+
+enum SidereonStatus sidereon_relative_mean_motion_from_state(const struct SidereonCartesianState *chief,
+                                                             double *out);
+
+enum SidereonStatus sidereon_observe_options_init(struct SidereonObserveOptions *out);
+
+enum SidereonStatus sidereon_observe(const struct SidereonGeodeticStation *station,
+                                     int64_t time_unix_us,
+                                     uint32_t target_kind,
+                                     const struct SidereonSpk *spk,
+                                     int32_t naif_id,
+                                     const double *barycentric_position_km,
+                                     const double *barycentric_velocity_km_s,
+                                     const struct SidereonObserveOptions *options,
+                                     struct SidereonBodyObservation *out);
+
+enum SidereonStatus sidereon_observe_spk_body(const struct SidereonGeodeticStation *station,
+                                              int64_t time_unix_us,
+                                              const struct SidereonSpk *spk,
+                                              int32_t naif_id,
+                                              struct SidereonBodyObservation *out);
+
+enum SidereonStatus sidereon_almanac_seasons(const struct SidereonSpk *spk,
+                                             int64_t start_unix_us,
+                                             int64_t end_unix_us,
+                                             double step_seconds,
+                                             double time_tolerance_seconds,
+                                             struct SidereonSeasonEvent *out,
+                                             size_t len,
+                                             size_t *out_written,
+                                             size_t *out_required);
+
+enum SidereonStatus sidereon_almanac_moon_phases(const struct SidereonSpk *spk,
+                                                 int64_t start_unix_us,
+                                                 int64_t end_unix_us,
+                                                 double step_seconds,
+                                                 double time_tolerance_seconds,
+                                                 struct SidereonMoonPhaseEvent *out,
+                                                 size_t len,
+                                                 size_t *out_written,
+                                                 size_t *out_required);
+
+enum SidereonStatus sidereon_almanac_planetary_events(const struct SidereonSpk *spk,
+                                                      uint32_t planet,
+                                                      uint32_t kind,
+                                                      int64_t start_unix_us,
+                                                      int64_t end_unix_us,
+                                                      double step_seconds,
+                                                      double time_tolerance_seconds,
+                                                      struct SidereonPlanetaryEvent *out,
+                                                      size_t len,
+                                                      size_t *out_written,
+                                                      size_t *out_required);
+
+enum SidereonStatus sidereon_almanac_meridian_transits(const struct SidereonSpk *spk,
+                                                       uint32_t body_kind,
+                                                       uint32_t planet,
+                                                       const struct SidereonGeodeticStation *station,
+                                                       int64_t start_unix_us,
+                                                       int64_t end_unix_us,
+                                                       double step_seconds,
+                                                       double time_tolerance_seconds,
+                                                       struct SidereonMeridianTransit *out,
+                                                       size_t len,
+                                                       size_t *out_written,
+                                                       size_t *out_required);
+
+enum SidereonStatus sidereon_almanac_lunar_solar_eclipses(const struct SidereonSpk *spk,
+                                                          int64_t start_unix_us,
+                                                          int64_t end_unix_us,
+                                                          double step_seconds,
+                                                          double time_tolerance_seconds,
+                                                          struct SidereonAlmanacEclipseEvent *out,
+                                                          size_t len,
+                                                          size_t *out_written,
+                                                          size_t *out_required);
+
 /**
  * Sub-solar point: the geographic point where the Sun is at the zenith.
  * `sun_ecef` is the geocentric Sun position in an Earth-fixed frame (only its
@@ -15426,6 +16469,33 @@ enum SidereonStatus sidereon_geoid_grid_undulation_rad(const struct SidereonGeoi
  * Safety: grid must be a handle from a sidereon_geoid_grid_* constructor or NULL.
  */
 void sidereon_geoid_grid_free(struct SidereonGeoidGrid *grid);
+
+enum SidereonStatus sidereon_dted_lookup_options_init(struct SidereonDtedLookupOptions *out_options);
+
+enum SidereonStatus sidereon_dted_terrain_new(const char *root,
+                                              struct SidereonDtedTerrain **out_terrain);
+
+enum SidereonStatus sidereon_dted_terrain_height_m(struct SidereonDtedTerrain *terrain,
+                                                   double longitude_deg,
+                                                   double latitude_deg,
+                                                   double *out_height_m);
+
+enum SidereonStatus sidereon_dted_terrain_height_m_with_options(struct SidereonDtedTerrain *terrain,
+                                                                double longitude_deg,
+                                                                double latitude_deg,
+                                                                const struct SidereonDtedLookupOptions *options,
+                                                                double *out_height_m);
+
+void sidereon_dted_terrain_free(struct SidereonDtedTerrain *terrain);
+
+enum SidereonStatus sidereon_dted_tile_load(const char *path, struct SidereonDtedTile **out_tile);
+
+enum SidereonStatus sidereon_dted_tile_get_elevation(const struct SidereonDtedTile *tile,
+                                                     double longitude_deg,
+                                                     double latitude_deg,
+                                                     int16_t *out_elevation_m);
+
+void sidereon_dted_tile_free(struct SidereonDtedTile *tile);
 
 /**
  * Build a UTC Instant from civil-calendar fields and report its split Julian
@@ -15731,6 +16801,196 @@ enum SidereonStatus sidereon_rtcm_frame_body(const struct SidereonRtcmFrames *fr
  * Safety: frames must be a handle from sidereon_rtcm_scan_frames or NULL.
  */
 void sidereon_rtcm_frames_free(struct SidereonRtcmFrames *frames);
+
+enum SidereonStatus sidereon_sbas_block_decode(const uint8_t *bytes,
+                                               size_t len,
+                                               uint32_t form,
+                                               struct SidereonSbasBlock **out_block);
+
+enum SidereonStatus sidereon_sbas_block_info(const struct SidereonSbasBlock *block,
+                                             struct SidereonSbasMessageInfo *out_info);
+
+enum SidereonStatus sidereon_sbas_block_encode(const struct SidereonSbasBlock *block,
+                                               uint8_t *out,
+                                               size_t len,
+                                               size_t *out_written,
+                                               size_t *out_required);
+
+void sidereon_sbas_block_free(struct SidereonSbasBlock *block);
+
+enum SidereonStatus sidereon_sbas_store_new(struct SidereonSbasCorrectionStore **out_store);
+
+enum SidereonStatus sidereon_sbas_store_ingest(struct SidereonSbasCorrectionStore *store,
+                                               const struct SidereonSbasBlock *block,
+                                               const char *geo_sat_id,
+                                               const struct SidereonGnssWeekTow *epoch);
+
+enum SidereonStatus sidereon_sbas_store_ready_geos(const struct SidereonSbasCorrectionStore *store,
+                                                   double t_j2000_s,
+                                                   struct SidereonSatelliteToken *out,
+                                                   size_t len,
+                                                   size_t *out_written,
+                                                   size_t *out_required);
+
+enum SidereonStatus sidereon_sbas_store_preferred_geo(const struct SidereonSbasCorrectionStore *store,
+                                                      double t_j2000_s,
+                                                      bool *out_present,
+                                                      struct SidereonSatelliteToken *out_geo);
+
+enum SidereonStatus sidereon_sbas_store_fast_correction(const struct SidereonSbasCorrectionStore *store,
+                                                        const char *geo_sat_id,
+                                                        const char *sat_id,
+                                                        bool *out_present,
+                                                        struct SidereonSbasFastCorrection *out_correction);
+
+enum SidereonStatus sidereon_sbas_store_long_term_correction(const struct SidereonSbasCorrectionStore *store,
+                                                             const char *geo_sat_id,
+                                                             const char *sat_id,
+                                                             bool *out_present,
+                                                             struct SidereonSbasLongTermCorrection *out_correction);
+
+enum SidereonStatus sidereon_sbas_store_geo_nav(const struct SidereonSbasCorrectionStore *store,
+                                                const char *geo_sat_id,
+                                                bool *out_present,
+                                                struct SidereonSbasGeoState *out_state);
+
+enum SidereonStatus sidereon_sbas_store_iono_grid_igps(const struct SidereonSbasCorrectionStore *store,
+                                                       const char *geo_sat_id,
+                                                       struct SidereonSbasIgp *out,
+                                                       size_t len,
+                                                       size_t *out_written,
+                                                       size_t *out_required);
+
+enum SidereonStatus sidereon_sbas_store_iono_slant_delay_m(const struct SidereonSbasCorrectionStore *store,
+                                                           const char *geo_sat_id,
+                                                           const struct SidereonGeodetic *receiver,
+                                                           double elevation_rad,
+                                                           double azimuth_rad,
+                                                           double frequency_hz,
+                                                           bool *out_present,
+                                                           double *out_delay_m);
+
+enum SidereonStatus sidereon_sbas_corrected_state(const struct SidereonBroadcastEphemeris *broadcast,
+                                                  const struct SidereonSbasCorrectionStore *store,
+                                                  const char *geo_sat_id,
+                                                  uint32_t mode,
+                                                  const char *sat_id,
+                                                  double t_j2000_s,
+                                                  bool *out_present,
+                                                  double *out_position_ecef_m,
+                                                  double *out_clock_s);
+
+enum SidereonStatus sidereon_sbas_solve_broadcast(const struct SidereonBroadcastEphemeris *broadcast,
+                                                  const struct SidereonSbasCorrectionStore *store,
+                                                  const char *geo_sat_id,
+                                                  uint32_t mode,
+                                                  const struct SidereonSppInputs *inputs,
+                                                  struct SidereonSppSolution **out_solution);
+
+void sidereon_sbas_store_free(struct SidereonSbasCorrectionStore *store);
+
+enum SidereonStatus sidereon_rtcm_message_ssr_info(const struct SidereonRtcmMessages *messages,
+                                                   size_t index,
+                                                   struct SidereonRtcmSsrInfo *out_info);
+
+enum SidereonStatus sidereon_rtcm_message_ssr_orbits(const struct SidereonRtcmMessages *messages,
+                                                     size_t index,
+                                                     struct SidereonRtcmSsrOrbitRecord *out,
+                                                     size_t len,
+                                                     size_t *out_written,
+                                                     size_t *out_required);
+
+enum SidereonStatus sidereon_rtcm_message_ssr_clocks(const struct SidereonRtcmMessages *messages,
+                                                     size_t index,
+                                                     struct SidereonRtcmSsrClockRecord *out,
+                                                     size_t len,
+                                                     size_t *out_written,
+                                                     size_t *out_required);
+
+enum SidereonStatus sidereon_rtcm_message_ssr_ura(const struct SidereonRtcmMessages *messages,
+                                                  size_t index,
+                                                  struct SidereonRtcmSsrUraRecord *out,
+                                                  size_t len,
+                                                  size_t *out_written,
+                                                  size_t *out_required);
+
+enum SidereonStatus sidereon_ssr_store_new(uint32_t reference_point,
+                                           struct SidereonSsrCorrectionStore **out_store);
+
+enum SidereonStatus sidereon_ssr_store_from_rtcm(const uint8_t *bytes,
+                                                 size_t len,
+                                                 const struct SidereonGnssWeekTow *epoch,
+                                                 struct SidereonSsrCorrectionStore **out_store);
+
+enum SidereonStatus sidereon_ssr_store_ingest_messages(struct SidereonSsrCorrectionStore *store,
+                                                       const struct SidereonRtcmMessages *messages,
+                                                       const struct SidereonGnssWeekTow *epoch);
+
+enum SidereonStatus sidereon_ssr_store_orbit(const struct SidereonSsrCorrectionStore *store,
+                                             const char *sat_id,
+                                             bool *out_present,
+                                             struct SidereonSsrOrbitCorrection *out_orbit);
+
+enum SidereonStatus sidereon_ssr_store_clock(const struct SidereonSsrCorrectionStore *store,
+                                             const char *sat_id,
+                                             bool *out_present,
+                                             struct SidereonSsrClockCorrection *out_clock);
+
+enum SidereonStatus sidereon_ssr_store_ura_index(const struct SidereonSsrCorrectionStore *store,
+                                                 const char *sat_id,
+                                                 bool *out_present,
+                                                 uint8_t *out_ura_index);
+
+enum SidereonStatus sidereon_ssr_store_code_bias_m(const struct SidereonSsrCorrectionStore *store,
+                                                   const char *sat_id,
+                                                   uint8_t signal,
+                                                   bool *out_present,
+                                                   double *out_bias_m);
+
+enum SidereonStatus sidereon_ssr_store_phase_bias_m(const struct SidereonSsrCorrectionStore *store,
+                                                    const char *sat_id,
+                                                    uint8_t signal,
+                                                    bool *out_present,
+                                                    double *out_bias_m);
+
+enum SidereonStatus sidereon_ssr_corrected_state(const struct SidereonBroadcastEphemeris *broadcast,
+                                                 const struct SidereonSsrCorrectionStore *store,
+                                                 const char *sat_id,
+                                                 double t_j2000_s,
+                                                 double staleness_s,
+                                                 uint32_t missing_action,
+                                                 bool allow_regional_provider,
+                                                 uint16_t regional_provider_id,
+                                                 bool *out_present,
+                                                 double *out_position_ecef_m,
+                                                 double *out_clock_s);
+
+enum SidereonStatus sidereon_ssr_solve_broadcast(const struct SidereonBroadcastEphemeris *broadcast,
+                                                 const struct SidereonSsrCorrectionStore *store,
+                                                 double staleness_s,
+                                                 uint32_t missing_action,
+                                                 bool allow_regional_provider,
+                                                 uint16_t regional_provider_id,
+                                                 const struct SidereonSppInputs *inputs,
+                                                 struct SidereonSppSolution **out_solution);
+
+enum SidereonStatus sidereon_ssr_ephemeris_sample(const struct SidereonBroadcastEphemeris *broadcast,
+                                                  const struct SidereonSsrCorrectionStore *store,
+                                                  double staleness_s,
+                                                  uint32_t missing_action,
+                                                  bool allow_regional_provider,
+                                                  uint16_t regional_provider_id,
+                                                  const char *const *satellites,
+                                                  size_t satellite_count,
+                                                  double start_j2000_s,
+                                                  double stop_j2000_s,
+                                                  double step_s,
+                                                  struct SidereonEphemerisSampleRow *out,
+                                                  size_t len,
+                                                  size_t *out_written,
+                                                  size_t *out_required);
+
+void sidereon_ssr_store_free(struct SidereonSsrCorrectionStore *store);
 
 /**
  * Full NeQuick-G slant total electron content along the ray, in TECU. Delegates
@@ -17258,6 +18518,60 @@ enum SidereonStatus sidereon_precise_ephemeris_samples_from_samples(const struct
  * already been freed is invalid.
  */
 void sidereon_precise_ephemeris_samples_free(struct SidereonPreciseEphemerisSamples *samples);
+
+/**
+ * Sample a loaded SP3 source over a regular satellite/epoch grid.
+ *
+ * Safety: sp3 must be a live handle; satellites points to satellite_count
+ * null-terminated tokens; out points to len SidereonEphemerisSampleRow or NULL
+ * when len is 0; out_written and out_required point to size_t.
+ */
+enum SidereonStatus sidereon_sp3_ephemeris_sample(const struct SidereonSp3 *sp3,
+                                                  const char *const *satellites,
+                                                  size_t satellite_count,
+                                                  double start_j2000_s,
+                                                  double stop_j2000_s,
+                                                  double step_s,
+                                                  struct SidereonEphemerisSampleRow *out,
+                                                  size_t len,
+                                                  size_t *out_written,
+                                                  size_t *out_required);
+
+/**
+ * Sample a loaded broadcast-navigation source over a regular grid.
+ *
+ * Safety: broadcast must be a live handle; satellites points to satellite_count
+ * null-terminated tokens; out points to len SidereonEphemerisSampleRow or NULL
+ * when len is 0; out_written and out_required point to size_t.
+ */
+enum SidereonStatus sidereon_broadcast_ephemeris_sample(const struct SidereonBroadcastEphemeris *broadcast,
+                                                        const char *const *satellites,
+                                                        size_t satellite_count,
+                                                        double start_j2000_s,
+                                                        double stop_j2000_s,
+                                                        double step_s,
+                                                        struct SidereonEphemerisSampleRow *out,
+                                                        size_t len,
+                                                        size_t *out_written,
+                                                        size_t *out_required);
+
+/**
+ * Sample a sample-backed precise-ephemeris source over a regular grid.
+ *
+ * Safety: samples must be a live handle; satellites points to satellite_count
+ * null-terminated tokens; out points to len SidereonEphemerisSampleRow or NULL
+ * when len is 0; out_written and out_required point to size_t.
+ */
+enum SidereonStatus sidereon_precise_ephemeris_samples_sample(const struct SidereonPreciseEphemerisSamples *samples,
+                                                              const char *const *satellites,
+                                                              size_t satellite_count,
+                                                              double start_j2000_s,
+                                                              double stop_j2000_s,
+                                                              double step_s,
+                                                              struct SidereonEphemerisSampleRow *out,
+                                                              size_t len,
+                                                              size_t *out_written,
+                                                              size_t *out_required);
 
 /**
  * Predict geometric ranges for many (satellite, receiver, epoch) requests from a
