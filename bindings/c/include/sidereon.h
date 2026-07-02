@@ -46,8 +46,8 @@
 
 #define SIDEREON_VERSION_MAJOR 0
 #define SIDEREON_VERSION_MINOR 10
-#define SIDEREON_VERSION_PATCH 0
-#define SIDEREON_VERSION_STRING "0.10.0"
+#define SIDEREON_VERSION_PATCH 1
+#define SIDEREON_VERSION_STRING "0.10.1"
 
 /**
  * Maximum number of VMF1 site-wise samples carried in

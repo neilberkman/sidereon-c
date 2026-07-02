@@ -282,25 +282,51 @@ code, and per-function ownership note) lives in `bindings/c/include/sidereon.h`.
 
 ## Capabilities
 
-- **Orbit propagation.** SGP4 from TLE/OMM, numerical state propagation, batch
-  and constellation propagation, pass prediction, look angles, ground tracks,
-  and coverage grids.
-- **GNSS positioning.** Single-point positioning (SPP), RTK float and fixed, PPP
-  float and fixed, DGNSS, RAIM / FDE fault detection, robust solving, and DOP.
+- **Orbit propagation.** SGP4 from TLE/OMM, numerical state propagation with
+  atmospheric drag and orbital decay estimation, Kepler two-body propagation,
+  batch and constellation propagation, pass prediction, look angles, ground
+  tracks, and coverage grids.
+- **GNSS positioning.** Single-point positioning (SPP), RTK float and fixed
+  (static, kinematic, and moving baseline), PPP float and fixed, DGNSS,
+  velocity solving, RAIM / FDE fault detection and exclusion, robust solving,
+  and DOP.
+- **GNSS corrections and biases.** SBAS message decode and corrected solving,
+  SSR orbit / clock / bias corrections from RTCM SSR or Galileo HAS,
+  Bias-SINEX DCB and OSB products, and DGNSS pseudorange corrections.
+- **GNSS measurements.** Carrier-phase combinations (wide-lane, narrow-lane,
+  Melbourne-Wubbena, ionosphere-free), cycle-slip detection, carrier smoothing,
+  Doppler, and C/A-code generation, correlation, and acquisition search.
 - **Ephemeris and time.** Broadcast ephemeris with fallback selection, SP3
-  precise products, JPL SPK (DAF/.bsp) sampling, scale-aware time conversions,
-  and Earth-orientation handling.
+  precise products, JPL SPK (DAF/.bsp) sampling, one sampling contract across
+  broadcast, precise, and SSR-corrected sources, solving with
+  precise-to-broadcast fallback and staleness reporting, scale-aware time
+  conversions, and Earth-orientation handling.
+- **Orbital mechanics.** Classical, equinoctial, and modified-equinoctial
+  element conversions, anomaly conversions, Lambert transfer solutions, initial
+  orbit determination (Gauss, Gibbs, Herrick-Gibbs), and relative motion in
+  RSW / RTN / RIC / LVLH frames with Clohessy-Wiltshire propagation.
 - **Geometry and events.** Coordinate-frame transforms, look angles, eclipse,
-  conjunction screening with collision probability, initial orbit determination,
-  and classical orbital elements.
-- **Atmosphere.** Klobuchar and NeQuick-G ionosphere, IONEX maps, and
-  troposphere delay models.
+  conjunction screening with collision probability, and angular measures:
+  separation, position angle, phase angle, beta angle, parallactic angle.
+- **Observation and almanac.** Astrometric and apparent places (RA/Dec,
+  azimuth/elevation with optional refraction, aberration, and light deflection)
+  for the Sun, Moon, and any SPK body, sub-solar and sub-observer points, Moon
+  rise/set and transit finding, satellite visual magnitude, and almanac events:
+  seasons, moon phases, meridian transits, lunar and solar eclipses, and
+  planetary events.
+- **Atmosphere.** Klobuchar and NeQuick-G ionosphere, IONEX maps, troposphere
+  delay models, and NRLMSISE-00 density.
+- **Terrain and geoid.** DTED elevation lookup on tiles you supply, EGM96 geoid
+  undulation, and orthometric / ellipsoidal height conversion.
 - **RF.** Link-budget computation.
 - **Formats.** Parsing and serialization for TLE/OMM, CCSDS (OEM/OPM/CDM),
-  RINEX, CRINEX, SP3, IONEX, ANTEX, and RTCM 3.
+  RINEX (observation, navigation, clock), CRINEX, SP3, IONEX, ANTEX,
+  Bias-SINEX, RTCM 3, and SBAS messages.
 
 Every result is exactly what the engine computes; the binding adds no modeling
-of its own.
+of its own, and no data acquisition either: every product it consumes (orbit
+files, bias products, ionosphere maps, terrain tiles) arrives as a buffer or
+file you supply.
 
 ## How it's validated
 
