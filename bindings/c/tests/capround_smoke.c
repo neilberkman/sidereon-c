@@ -408,6 +408,71 @@ static void test_rtcm(void) {
               msm_sigs[0].has_fine_phase_range_rate,
           "rtcm msm signals");
 
+    uint8_t loss_bit = 0;
+    uint8_t half_bit = 0;
+    check(sidereon_rtcm_lli_bits(&loss_bit, &half_bit) == SIDEREON_STATUS_OK &&
+              loss_bit == 1 && half_bit == 2,
+          "rtcm lli bits");
+
+    bool has_min = false;
+    uint32_t min_lock_ms = 0;
+    check(sidereon_rtcm_minimum_lock_time_ms(SIDEREON_RTCM_MSM_KIND_MSM7, 64, &has_min,
+                                             &min_lock_ms) == SIDEREON_STATUS_OK &&
+              has_min && min_lock_ms == 64,
+          "rtcm minimum lock time msm7");
+    check(sidereon_rtcm_minimum_lock_time_ms(SIDEREON_RTCM_MSM_KIND_MSM7, 705, &has_min,
+                                             &min_lock_ms) == SIDEREON_STATUS_OK &&
+              !has_min && min_lock_ms == 0,
+          "rtcm minimum lock time reserved");
+
+    SidereonRtcmPreviousLock previous_lock;
+    memset(&previous_lock, 0, sizeof(previous_lock));
+    previous_lock.has_min_lock_time_ms = true;
+    previous_lock.min_lock_time_ms = 512;
+    previous_lock.elapsed_ms = 1000;
+    uint8_t lli = 0;
+    check(sidereon_rtcm_derive_lli(&previous_lock, true, 512, true, &lli) ==
+              SIDEREON_STATUS_OK &&
+              lli == (loss_bit | half_bit),
+          "rtcm derive lli uncovered gap and half-cycle");
+
+    uint64_t elapsed_ms = 0;
+    check(sidereon_rtcm_msm_epoch_dt_ms(SIDEREON_GNSS_SYSTEM_GPS, 604799000, 500,
+                                        &elapsed_ms) == SIDEREON_STATUS_OK &&
+              elapsed_ms == 1500,
+          "rtcm msm epoch rollover");
+
+    char rinex_code[8];
+    written = 0;
+    required = 0;
+    check(sidereon_rtcm_msm_signal_rinex_code(SIDEREON_GNSS_SYSTEM_GPS, 2,
+                                              (uint8_t *)rinex_code, sizeof(rinex_code),
+                                              &written, &required) == SIDEREON_STATUS_OK &&
+              required == 2 && written == 2,
+          "rtcm msm signal rinex code");
+    rinex_code[written] = '\0';
+    check(strcmp(rinex_code, "1C") == 0, "rtcm msm signal rinex code value");
+
+    SidereonRtcmLockTimeTracker *tracker = NULL;
+    check(sidereon_rtcm_lock_time_tracker_new(&tracker) == SIDEREON_STATUS_OK &&
+              tracker != NULL,
+          "rtcm lock time tracker new");
+    if (tracker) {
+        SidereonRtcmCellLli lli_rows[2];
+        written = 0;
+        required = 0;
+        check(sidereon_rtcm_lock_time_tracker_observe(tracker, messages, 4, lli_rows, 2,
+                                                      &written, &required) ==
+                  SIDEREON_STATUS_OK &&
+                  required == 1 && written == 1 && lli_rows[0].satellite_id == 8 &&
+                  lli_rows[0].signal_id == 2 && lli_rows[0].lli == 0 &&
+                  lli_rows[0].has_min_lock_time_ms,
+              "rtcm lock time tracker observe");
+        check(sidereon_rtcm_lock_time_tracker_reset(tracker) == SIDEREON_STATUS_OK,
+              "rtcm lock time tracker reset");
+        sidereon_rtcm_lock_time_tracker_free(tracker);
+    }
+
     /* Re-encode message 0 to a frame and confirm it matches the first 27 bytes of
      * the input stream (the 1006 frame), proving the encode path round-trips. */
     uint8_t reframe[64];
@@ -429,6 +494,58 @@ static void test_rtcm(void) {
           "rtcm message_encode body length");
 
     sidereon_rtcm_messages_free(messages);
+
+    const uint8_t truncated_msm_body[2] = {0x43, 0x50};
+    uint8_t truncated_msm_frame[16];
+    size_t truncated_written = 0, truncated_required = 0;
+    check(sidereon_rtcm_encode_frame(truncated_msm_body, sizeof(truncated_msm_body),
+                                     truncated_msm_frame, sizeof(truncated_msm_frame),
+                                     &truncated_written, &truncated_required) ==
+              SIDEREON_STATUS_OK &&
+              truncated_written == truncated_required,
+          "rtcm encode truncated msm frame");
+    uint8_t noisy_stream[2 + sizeof(truncated_msm_frame) + RTCM_STREAM_LEN];
+    noisy_stream[0] = 0x11;
+    noisy_stream[1] = 0x22;
+    memcpy(noisy_stream + 2, truncated_msm_frame, truncated_written);
+    memcpy(noisy_stream + 2 + truncated_written, RTCM_STREAM, RTCM_STREAM_LEN);
+    SidereonRtcmMessages *stream_messages = NULL;
+    SidereonRtcmStreamDiagnostics *diagnostics = NULL;
+    check(sidereon_rtcm_decode_stream(noisy_stream, 2 + truncated_written + RTCM_STREAM_LEN,
+                                      &stream_messages, &diagnostics) == SIDEREON_STATUS_OK &&
+              stream_messages != NULL && diagnostics != NULL,
+          "rtcm_decode_stream");
+    if (stream_messages && diagnostics) {
+        size_t stream_count = 0;
+        check(sidereon_rtcm_messages_count(stream_messages, &stream_count) ==
+                      SIDEREON_STATUS_OK &&
+                  stream_count == 5,
+              "rtcm_decode_stream message count");
+        size_t resync_bytes = 0;
+        check(sidereon_rtcm_stream_diagnostics_resync_bytes(diagnostics, &resync_bytes) ==
+                      SIDEREON_STATUS_OK &&
+                  resync_bytes == 2,
+              "rtcm stream diagnostics resync bytes");
+        size_t skipped = 0;
+        check(sidereon_rtcm_stream_diagnostics_skipped_frames_count(diagnostics, &skipped) ==
+                      SIDEREON_STATUS_OK &&
+                  skipped == 1,
+              "rtcm stream diagnostics skipped count");
+        SidereonRtcmFrameSkip skip;
+        check(sidereon_rtcm_stream_diagnostics_skipped_frame(diagnostics, 0, &skip) ==
+                      SIDEREON_STATUS_OK &&
+                  skip.offset == 2 && skip.has_message_number && skip.message_number == 1077 &&
+                  skip.reason == SIDEREON_RTCM_FRAME_SKIP_REASON_TRUNCATED,
+              "rtcm stream diagnostics skipped frame");
+        written = 123;
+        required = 123;
+        check(sidereon_rtcm_stream_diagnostics_skipped_frame_message(
+                  diagnostics, 0, NULL, 0, &written, &required) == SIDEREON_STATUS_OK &&
+                  written == 0 && required == 0,
+              "rtcm stream diagnostics truncated message text");
+    }
+    sidereon_rtcm_messages_free(stream_messages);
+    sidereon_rtcm_stream_diagnostics_free(diagnostics);
 
     /* Frame scanner over the whole stream: five frames, first frame_len 27. */
     SidereonRtcmFrames *frames = NULL;

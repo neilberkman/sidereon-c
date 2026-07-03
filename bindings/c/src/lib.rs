@@ -28,6 +28,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 use std::slice;
 use std::str::{self, FromStr};
+use std::sync::Arc;
 
 use sidereon::passes::{
     find_passes_for_satellite, ground_track, look_angle_arc, look_angle_batch_parallel,
@@ -58,6 +59,7 @@ use sidereon_core::astro::coverage::{
 use sidereon_core::astro::elements::{coe2rv, rv2coe, ClassicalElements, ElementsError, OrbitType};
 use sidereon_core::astro::error::PropagationError;
 use sidereon_core::astro::forces::drag::{DragForce, DragParameters, SpaceWeather};
+use sidereon_core::astro::forces::SpaceWeatherSource;
 use sidereon_core::astro::forces::{ForceModel, J2Gravity, TwoBodyGravity};
 use sidereon_core::astro::frames::transforms::FrameTransformError;
 use sidereon_core::astro::math::least_squares::Status;
@@ -187,11 +189,13 @@ use sidereon_core::rinex::observations::{
 };
 use sidereon_core::rtcm::{
     self, AntennaDescriptor as RtcmAntennaDescriptor, GlonassEphemeris as RtcmGlonassEphemeris,
-    GpsEphemeris as RtcmGpsEphemeris, Message as RtcmMessage, MsmKind as RtcmMsmKind,
-    MsmMessage as RtcmMsmMessage, MsmSatellite as RtcmMsmSatellite, MsmSignal as RtcmMsmSignal,
+    GpsEphemeris as RtcmGpsEphemeris, LockTimeTracker as RtcmLockTimeTracker,
+    Message as RtcmMessage, MsmKind as RtcmMsmKind, MsmMessage as RtcmMsmMessage,
+    MsmSatellite as RtcmMsmSatellite, MsmSignal as RtcmMsmSignal, PreviousLock as RtcmPreviousLock,
     SsrClockRecord as RtcmSsrClockRecord, SsrHeader as RtcmSsrHeader, SsrKind as RtcmSsrKind,
     SsrMessage as RtcmSsrMessage, SsrOrbitRecord as RtcmSsrOrbitRecord,
-    StationCoordinates as RtcmStationCoordinates,
+    StationCoordinates as RtcmStationCoordinates, StreamDiagnostics as RtcmStreamDiagnostics,
+    LLI_HALF_CYCLE as RTCM_LLI_HALF_CYCLE, LLI_LOSS_OF_LOCK as RTCM_LLI_LOSS_OF_LOCK,
 };
 use sidereon_core::rtk::{BaselineReferenceSelection, CycleSlipReceiver};
 use sidereon_core::rtk_filter::defaults::{
@@ -274,7 +278,7 @@ const PPP_ID_C_BYTES: usize = MAX_PPP_ID_BYTES + 1;
 const MAX_PPP_ANTENNA_FREQ_LABEL_BYTES: usize = 32;
 const MAX_TLE_LINE_BYTES: usize = 128;
 const TLE_LINE_C_BYTES: usize = MAX_TLE_LINE_BYTES + 1;
-const TLE_FIELD_C_BYTES: usize = 32;
+pub const TLE_FIELD_C_BYTES: usize = 32;
 /// Usable byte length of a visible-satellite id (excluding the terminator). The
 /// caller-supplied id in a SidereonVisibleSatellite is stored null-terminated in
 /// a fixed buffer; the input is rejected when longer (see
@@ -425,6 +429,17 @@ unsafe fn require_ref<'a, T>(
     arg_name: &str,
 ) -> Result<&'a T, SidereonStatus> {
     ptr.as_ref().ok_or_else(|| {
+        set_last_error(format!("{fn_name}: null {arg_name}"));
+        SidereonStatus::NullPointer
+    })
+}
+
+unsafe fn require_mut<'a, T>(
+    ptr: *mut T,
+    fn_name: &str,
+    arg_name: &str,
+) -> Result<&'a mut T, SidereonStatus> {
+    ptr.as_mut().ok_or_else(|| {
         set_last_error(format!("{fn_name}: null {arg_name}"));
         SidereonStatus::NullPointer
     })
@@ -29737,6 +29752,7 @@ pub unsafe extern "C" fn sidereon_find_tca_conjunctions_with_propagated_covarian
                 force_model,
                 integrator,
                 integrator_options,
+                process_noise: sidereon_core::astro::propagator::ProcessNoise::None,
             };
             let conjunctions = match tca::find_tca_conjunctions_with_propagated_covariance_from_tles(
                 tca::TcaTle::new(&p1, &p2),
@@ -33430,6 +33446,20 @@ pub struct SidereonRtcmFrames {
     frames: Vec<RtcmFrameRecord>,
 }
 
+/// Diagnostics from forgiving RTCM stream decoding. Opaque to C. Create with
+/// sidereon_rtcm_decode_stream; release with
+/// sidereon_rtcm_stream_diagnostics_free.
+pub struct SidereonRtcmStreamDiagnostics {
+    diagnostics: RtcmStreamDiagnostics,
+}
+
+/// Stateful MSM lock-time tracker for deriving RINEX LLI continuity bits.
+/// Create with sidereon_rtcm_lock_time_tracker_new; release with
+/// sidereon_rtcm_lock_time_tracker_free.
+pub struct SidereonRtcmLockTimeTracker {
+    tracker: RtcmLockTimeTracker,
+}
+
 struct RtcmFrameRecord {
     body: Vec<u8>,
     frame_len: usize,
@@ -33464,6 +33494,58 @@ pub enum SidereonRtcmMsmKind {
     Msm4 = 0,
     /// MSM7: pseudorange + phase range + phase-range-rate, extended resolution.
     Msm7 = 1,
+}
+
+/// Why a CRC-valid RTCM frame could not be decoded into the message IR.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonRtcmFrameSkipReason {
+    /// The body ended before all required fields of its recognized type.
+    Truncated = 0,
+    /// The body is internally inconsistent for its recognized type.
+    Malformed = 1,
+}
+
+/// One CRC-valid frame skipped by sidereon_rtcm_decode_stream.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonRtcmFrameSkip {
+    /// Byte offset of the frame preamble in the scanned input buffer.
+    pub offset: usize,
+    /// Whether message_number is present.
+    pub has_message_number: bool,
+    /// RTCM message number when present, otherwise 0.
+    pub message_number: u16,
+    /// Skip reason.
+    pub reason: SidereonRtcmFrameSkipReason,
+}
+
+/// Previous MSM lock-state input for sidereon_rtcm_derive_lli.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonRtcmPreviousLock {
+    /// Whether min_lock_time_ms is present.
+    pub has_min_lock_time_ms: bool,
+    /// Previous minimum continuous-lock time in milliseconds when present.
+    pub min_lock_time_ms: u32,
+    /// Elapsed milliseconds between previous and current observations.
+    pub elapsed_ms: u64,
+}
+
+/// Derived RINEX LLI for one MSM signal cell.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonRtcmCellLli {
+    /// Satellite id from the MSM signal cell.
+    pub satellite_id: u8,
+    /// Signal id from the MSM signal cell.
+    pub signal_id: u8,
+    /// Derived RINEX LLI value. Bits 0 and 1 are set by the RTCM MSM rules.
+    pub lli: u8,
+    /// Whether min_lock_time_ms is present.
+    pub has_min_lock_time_ms: bool,
+    /// Current normalized minimum lock time in milliseconds when present.
+    pub min_lock_time_ms: u32,
 }
 
 /// A decoded 1005 / 1006 station antenna reference point, mirroring
@@ -33902,6 +33984,43 @@ fn rtcm_msm_signal_to_c(signal: &RtcmMsmSignal) -> SidereonRtcmMsmSignal {
     }
 }
 
+fn rtcm_msm_kind_from_c_code(
+    fn_name: &str,
+    arg_name: &str,
+    kind: u32,
+) -> Result<RtcmMsmKind, SidereonStatus> {
+    match kind {
+        value if value == SidereonRtcmMsmKind::Msm4 as u32 => Ok(RtcmMsmKind::Msm4),
+        value if value == SidereonRtcmMsmKind::Msm7 as u32 => Ok(RtcmMsmKind::Msm7),
+        _ => {
+            set_last_error(format!("{fn_name}: invalid {arg_name} RTCM MSM kind"));
+            Err(SidereonStatus::InvalidArgument)
+        }
+    }
+}
+
+fn rtcm_frame_skip_to_c(skip: &rtcm::FrameSkip) -> SidereonRtcmFrameSkip {
+    SidereonRtcmFrameSkip {
+        offset: skip.offset,
+        has_message_number: skip.message_number.is_some(),
+        message_number: skip.message_number.unwrap_or(0),
+        reason: match skip.reason {
+            rtcm::FrameSkipReason::Truncated => SidereonRtcmFrameSkipReason::Truncated,
+            rtcm::FrameSkipReason::Malformed(_) => SidereonRtcmFrameSkipReason::Malformed,
+        },
+    }
+}
+
+fn rtcm_cell_lli_to_c(cell: &rtcm::CellLli) -> SidereonRtcmCellLli {
+    SidereonRtcmCellLli {
+        satellite_id: cell.satellite_id,
+        signal_id: cell.signal_id,
+        lli: cell.lli,
+        has_min_lock_time_ms: cell.min_lock_time_ms.is_some(),
+        min_lock_time_ms: cell.min_lock_time_ms.unwrap_or(0),
+    }
+}
+
 fn rtcm_gps_ephemeris_to_c(eph: &RtcmGpsEphemeris) -> SidereonRtcmGpsEphemeris {
     SidereonRtcmGpsEphemeris {
         satellite_id: eph.satellite_id,
@@ -34012,6 +34131,232 @@ pub unsafe extern "C" fn sidereon_rtcm_decode_messages(
             SidereonStatus::Ok
         },
     )
+}
+
+/// Decode an RTCM 3 byte stream into messages plus forgiving stream diagnostics.
+/// Bad CRC frames and incomplete trailing bytes count as resync bytes; CRC-valid
+/// frames with undecodable bodies are reported in diagnostics. On success writes
+/// newly owned handles to *out_messages and *out_diagnostics. Release them with
+/// sidereon_rtcm_messages_free and sidereon_rtcm_stream_diagnostics_free.
+///
+/// Safety: bytes points to len readable bytes; out_messages points to a
+/// SidereonRtcmMessages*; out_diagnostics points to a
+/// SidereonRtcmStreamDiagnostics*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtcm_decode_stream(
+    bytes: *const u8,
+    len: usize,
+    out_messages: *mut *mut SidereonRtcmMessages,
+    out_diagnostics: *mut *mut SidereonRtcmStreamDiagnostics,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_rtcm_decode_stream", SidereonStatus::Panic, || {
+        let out_messages = c_try!(require_out(
+            out_messages,
+            "sidereon_rtcm_decode_stream",
+            "out_messages"
+        ));
+        *out_messages = ptr::null_mut();
+        let out_diagnostics = c_try!(require_out(
+            out_diagnostics,
+            "sidereon_rtcm_decode_stream",
+            "out_diagnostics"
+        ));
+        *out_diagnostics = ptr::null_mut();
+        let data = c_try!(require_slice(
+            bytes,
+            len,
+            "sidereon_rtcm_decode_stream",
+            "bytes"
+        ));
+        let stream = rtcm::decode_stream(data);
+        write_boxed_handle(
+            out_messages,
+            SidereonRtcmMessages {
+                messages: stream.messages,
+            },
+        );
+        write_boxed_handle(
+            out_diagnostics,
+            SidereonRtcmStreamDiagnostics {
+                diagnostics: stream.diagnostics,
+            },
+        );
+        SidereonStatus::Ok
+    })
+}
+
+/// Copy the number of bytes skipped while resynchronizing during stream decode.
+///
+/// Safety: diagnostics is a live handle; out_resync_bytes points to a size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtcm_stream_diagnostics_resync_bytes(
+    diagnostics: *const SidereonRtcmStreamDiagnostics,
+    out_resync_bytes: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtcm_stream_diagnostics_resync_bytes",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_resync_bytes,
+                "sidereon_rtcm_stream_diagnostics_resync_bytes",
+                "out_resync_bytes"
+            ));
+            *out = 0;
+            let diagnostics = c_try!(require_ref(
+                diagnostics,
+                "sidereon_rtcm_stream_diagnostics_resync_bytes",
+                "diagnostics"
+            ));
+            *out = diagnostics.diagnostics.resync_bytes;
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy the number of CRC-valid frames skipped because their bodies could not
+/// be decoded.
+///
+/// Safety: diagnostics is a live handle; out_count points to a size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtcm_stream_diagnostics_skipped_frames_count(
+    diagnostics: *const SidereonRtcmStreamDiagnostics,
+    out_count: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtcm_stream_diagnostics_skipped_frames_count",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_count,
+                "sidereon_rtcm_stream_diagnostics_skipped_frames_count",
+                "out_count"
+            ));
+            *out = 0;
+            let diagnostics = c_try!(require_ref(
+                diagnostics,
+                "sidereon_rtcm_stream_diagnostics_skipped_frames_count",
+                "diagnostics"
+            ));
+            *out = diagnostics.diagnostics.skipped_frames.len();
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy one skipped-frame diagnostic row into *out.
+///
+/// Safety: diagnostics is a live handle; out points to a
+/// SidereonRtcmFrameSkip.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtcm_stream_diagnostics_skipped_frame(
+    diagnostics: *const SidereonRtcmStreamDiagnostics,
+    index: usize,
+    out: *mut SidereonRtcmFrameSkip,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtcm_stream_diagnostics_skipped_frame",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out,
+                "sidereon_rtcm_stream_diagnostics_skipped_frame",
+                "out"
+            ));
+            *out = SidereonRtcmFrameSkip {
+                offset: 0,
+                has_message_number: false,
+                message_number: 0,
+                reason: SidereonRtcmFrameSkipReason::Truncated,
+            };
+            let diagnostics = c_try!(require_ref(
+                diagnostics,
+                "sidereon_rtcm_stream_diagnostics_skipped_frame",
+                "diagnostics"
+            ));
+            let skip = match diagnostics.diagnostics.skipped_frames.get(index) {
+                Some(skip) => skip,
+                None => {
+                    set_last_error(format!(
+                        "sidereon_rtcm_stream_diagnostics_skipped_frame: index {index} out of range ({} skipped frames)",
+                        diagnostics.diagnostics.skipped_frames.len()
+                    ));
+                    return SidereonStatus::InvalidArgument;
+                }
+            };
+            *out = rtcm_frame_skip_to_c(skip);
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy the malformed-frame detail string for one skipped-frame row. Truncated
+/// rows have an empty message. Variable-length output contract.
+///
+/// Safety: diagnostics is a live handle; out points to len writable bytes or
+/// NULL when len is 0; out_written and out_required point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtcm_stream_diagnostics_skipped_frame_message(
+    diagnostics: *const SidereonRtcmStreamDiagnostics,
+    index: usize,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtcm_stream_diagnostics_skipped_frame_message",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_rtcm_stream_diagnostics_skipped_frame_message",
+                out_written,
+                out_required
+            ));
+            let diagnostics = c_try!(require_ref(
+                diagnostics,
+                "sidereon_rtcm_stream_diagnostics_skipped_frame_message",
+                "diagnostics"
+            ));
+            let skip = match diagnostics.diagnostics.skipped_frames.get(index) {
+                Some(skip) => skip,
+                None => {
+                    set_last_error(format!(
+                        "sidereon_rtcm_stream_diagnostics_skipped_frame_message: index {index} out of range ({} skipped frames)",
+                        diagnostics.diagnostics.skipped_frames.len()
+                    ));
+                    return SidereonStatus::InvalidArgument;
+                }
+            };
+            let message = match &skip.reason {
+                rtcm::FrameSkipReason::Truncated => "",
+                rtcm::FrameSkipReason::Malformed(message) => message.as_str(),
+            };
+            c_try!(copy_prefix_to_c(
+                "sidereon_rtcm_stream_diagnostics_skipped_frame_message",
+                "out",
+                message.as_bytes(),
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Release a stream diagnostics handle from sidereon_rtcm_decode_stream. Passing
+/// NULL is a no-op.
+///
+/// Safety: diagnostics must be NULL or a live diagnostics handle.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtcm_stream_diagnostics_free(
+    diagnostics: *mut SidereonRtcmStreamDiagnostics,
+) {
+    ffi_boundary("sidereon_rtcm_stream_diagnostics_free", (), || {
+        free_boxed(diagnostics);
+    });
 }
 
 /// Number of messages in a decoded RTCM list.
@@ -34377,6 +34722,317 @@ pub unsafe extern "C" fn sidereon_rtcm_message_msm_signals(
             SidereonStatus::Ok
         },
     )
+}
+
+/// Copy the RINEX LLI bit constants derived from RTCM MSM fields: loss of lock
+/// bit and half-cycle bit.
+///
+/// Safety: out_loss_of_lock and out_half_cycle point to uint8_t storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtcm_lli_bits(
+    out_loss_of_lock: *mut u8,
+    out_half_cycle: *mut u8,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_rtcm_lli_bits", SidereonStatus::Panic, || {
+        let out_loss_of_lock = c_try!(require_out(
+            out_loss_of_lock,
+            "sidereon_rtcm_lli_bits",
+            "out_loss_of_lock"
+        ));
+        let out_half_cycle = c_try!(require_out(
+            out_half_cycle,
+            "sidereon_rtcm_lli_bits",
+            "out_half_cycle"
+        ));
+        *out_loss_of_lock = RTCM_LLI_LOSS_OF_LOCK;
+        *out_half_cycle = RTCM_LLI_HALF_CYCLE;
+        SidereonStatus::Ok
+    })
+}
+
+/// Decode an MSM4/7 lock-time indicator to its minimum continuous-lock time.
+/// kind is a SidereonRtcmMsmKind value encoded as uint32_t. Reserved or
+/// out-of-range indicators return OK with *out_present false.
+///
+/// Safety: out_present points to bool storage; out_min_lock_time_ms points to
+/// uint32_t storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtcm_minimum_lock_time_ms(
+    kind: u32,
+    indicator: u16,
+    out_present: *mut bool,
+    out_min_lock_time_ms: *mut u32,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtcm_minimum_lock_time_ms",
+        SidereonStatus::Panic,
+        || {
+            let out_present = c_try!(require_out(
+                out_present,
+                "sidereon_rtcm_minimum_lock_time_ms",
+                "out_present"
+            ));
+            *out_present = false;
+            let out_min_lock_time_ms = c_try!(require_out(
+                out_min_lock_time_ms,
+                "sidereon_rtcm_minimum_lock_time_ms",
+                "out_min_lock_time_ms"
+            ));
+            *out_min_lock_time_ms = 0;
+            let kind = c_try!(rtcm_msm_kind_from_c_code(
+                "sidereon_rtcm_minimum_lock_time_ms",
+                "kind",
+                kind
+            ));
+            if let Some(value) = rtcm::minimum_lock_time_ms(kind, indicator) {
+                *out_present = true;
+                *out_min_lock_time_ms = value;
+            }
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Derive the RINEX LLI value for one MSM signal cell. Pass previous as NULL
+/// when there is no previous observation for the cell. If
+/// has_current_min_lock_time_ms is false, current_min_lock_time_ms is ignored.
+///
+/// Safety: previous is NULL or points to a SidereonRtcmPreviousLock; out_lli
+/// points to uint8_t storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtcm_derive_lli(
+    previous: *const SidereonRtcmPreviousLock,
+    has_current_min_lock_time_ms: bool,
+    current_min_lock_time_ms: u32,
+    half_cycle_ambiguity: bool,
+    out_lli: *mut u8,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_rtcm_derive_lli", SidereonStatus::Panic, || {
+        let out_lli = c_try!(require_out(out_lli, "sidereon_rtcm_derive_lli", "out_lli"));
+        *out_lli = 0;
+        let previous = if previous.is_null() {
+            None
+        } else {
+            let previous = c_try!(require_ref(
+                previous,
+                "sidereon_rtcm_derive_lli",
+                "previous"
+            ));
+            Some(RtcmPreviousLock {
+                min_lock_time_ms: previous
+                    .has_min_lock_time_ms
+                    .then_some(previous.min_lock_time_ms),
+                elapsed_ms: previous.elapsed_ms,
+            })
+        };
+        let current = has_current_min_lock_time_ms.then_some(current_min_lock_time_ms);
+        *out_lli = rtcm::derive_lli(previous, current, half_cycle_ambiguity);
+        SidereonStatus::Ok
+    })
+}
+
+/// Compute elapsed milliseconds between two raw MSM epoch-time fields for one
+/// constellation. system is a SidereonGnssSystem value encoded as uint32_t.
+///
+/// Safety: out_elapsed_ms points to uint64_t storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtcm_msm_epoch_dt_ms(
+    system: u32,
+    previous_epoch_time: u32,
+    current_epoch_time: u32,
+    out_elapsed_ms: *mut u64,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtcm_msm_epoch_dt_ms",
+        SidereonStatus::Panic,
+        || {
+            let out_elapsed_ms = c_try!(require_out(
+                out_elapsed_ms,
+                "sidereon_rtcm_msm_epoch_dt_ms",
+                "out_elapsed_ms"
+            ));
+            *out_elapsed_ms = 0;
+            let system = c_try!(gnss_system_from_c_code(
+                "sidereon_rtcm_msm_epoch_dt_ms",
+                "system",
+                system
+            ));
+            *out_elapsed_ms =
+                rtcm::msm_epoch_dt_ms(system, previous_epoch_time, current_epoch_time);
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy the RINEX 3 observation-code suffix for one MSM signal id. For example,
+/// GPS signal id 2 returns "1C". Reserved signal ids report *out_required 0 and
+/// write nothing. system is a SidereonGnssSystem value encoded as uint32_t.
+/// Variable-length output contract.
+///
+/// Safety: out points to len writable bytes or NULL when len is 0; out_written
+/// and out_required point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtcm_msm_signal_rinex_code(
+    system: u32,
+    signal_id: u8,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtcm_msm_signal_rinex_code",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_rtcm_msm_signal_rinex_code",
+                out_written,
+                out_required
+            ));
+            let system = c_try!(gnss_system_from_c_code(
+                "sidereon_rtcm_msm_signal_rinex_code",
+                "system",
+                system
+            ));
+            let value = rtcm::msm_signal_rinex_code(system, signal_id).unwrap_or("");
+            c_try!(copy_prefix_to_c(
+                "sidereon_rtcm_msm_signal_rinex_code",
+                "out",
+                value.as_bytes(),
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Create a stateful RTCM MSM lock-time tracker for RINEX LLI derivation.
+///
+/// Safety: out_tracker points to storage for a SidereonRtcmLockTimeTracker*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtcm_lock_time_tracker_new(
+    out_tracker: *mut *mut SidereonRtcmLockTimeTracker,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtcm_lock_time_tracker_new",
+        SidereonStatus::Panic,
+        || {
+            let out_tracker = c_try!(require_out(
+                out_tracker,
+                "sidereon_rtcm_lock_time_tracker_new",
+                "out_tracker"
+            ));
+            *out_tracker = ptr::null_mut();
+            write_boxed_handle(
+                out_tracker,
+                SidereonRtcmLockTimeTracker {
+                    tracker: RtcmLockTimeTracker::new(),
+                },
+            );
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Reset all per-cell lock history in a tracker.
+///
+/// Safety: tracker is a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtcm_lock_time_tracker_reset(
+    tracker: *mut SidereonRtcmLockTimeTracker,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtcm_lock_time_tracker_reset",
+        SidereonStatus::Panic,
+        || {
+            let tracker = c_try!(require_out(
+                tracker,
+                "sidereon_rtcm_lock_time_tracker_reset",
+                "tracker"
+            ));
+            tracker.tracker.reset();
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Derive LLI rows for one decoded MSM message and advance tracker state.
+/// Variable-length output contract.
+///
+/// Safety: tracker is a live handle; messages is a live message-list handle; out
+/// points to len writable SidereonRtcmCellLli entries or NULL when len is 0;
+/// out_written and out_required point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtcm_lock_time_tracker_observe(
+    tracker: *mut SidereonRtcmLockTimeTracker,
+    messages: *const SidereonRtcmMessages,
+    index: usize,
+    out: *mut SidereonRtcmCellLli,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtcm_lock_time_tracker_observe",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_rtcm_lock_time_tracker_observe",
+                out_written,
+                out_required
+            ));
+            let tracker = c_try!(require_out(
+                tracker,
+                "sidereon_rtcm_lock_time_tracker_observe",
+                "tracker"
+            ));
+            let message = c_try!(rtcm_message_at(
+                "sidereon_rtcm_lock_time_tracker_observe",
+                messages,
+                index
+            ));
+            let msm = match message {
+                RtcmMessage::Msm(msm) => msm,
+                _ => {
+                    return rtcm_wrong_kind(
+                        "sidereon_rtcm_lock_time_tracker_observe",
+                        "an MSM observation",
+                    )
+                }
+            };
+            let rows: Vec<SidereonRtcmCellLli> = tracker
+                .tracker
+                .observe(msm)
+                .iter()
+                .map(rtcm_cell_lli_to_c)
+                .collect();
+            c_try!(copy_prefix_to_c(
+                "sidereon_rtcm_lock_time_tracker_observe",
+                "out",
+                &rows,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Release a lock-time tracker handle. Passing NULL is a no-op.
+///
+/// Safety: tracker must be NULL or a live tracker handle.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtcm_lock_time_tracker_free(
+    tracker: *mut SidereonRtcmLockTimeTracker,
+) {
+    ffi_boundary("sidereon_rtcm_lock_time_tracker_free", (), || {
+        free_boxed(tracker);
+    });
 }
 
 /// Copy a decoded 1019 GPS broadcast ephemeris into *out.
@@ -45152,6 +45808,5380 @@ pub unsafe extern "C" fn sidereon_find_moon_transits(
         ));
         SidereonStatus::Ok
     })
+}
+
+// === Round-2 covariance propagation and transport ===========================
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonCovarianceMatrix6 {
+    pub values: [[f64; 6]; 6],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonCovarianceFrame {
+    Inertial = 0,
+    Rtn = 1,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonProcessNoiseKind {
+    None = 0,
+    RtnAccelerationPsd = 1,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonProcessNoise {
+    pub kind: u32,
+    pub q_radial_km2_s3: f64,
+    pub q_transverse_km2_s3: f64,
+    pub q_normal_km2_s3: f64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonCovariancePropagationOptions {
+    pub input_frame: u32,
+    pub output_frame: u32,
+    pub process_noise: SidereonProcessNoise,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonCovarianceTransportSegment {
+    pub stm: SidereonCovarianceMatrix6,
+    pub dt_seconds: f64,
+    pub q_rotation_state: SidereonCartesianState,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonCovarianceNode {
+    pub state: SidereonCartesianState,
+    pub covariance: SidereonCovarianceMatrix6,
+    pub frame: u32,
+}
+
+pub struct SidereonCovarianceEphemeris {
+    inner: sidereon_core::astro::propagator::CovarianceEphemeris,
+}
+
+fn covariance_matrix_from_c(
+    fn_name: &str,
+    value: &SidereonCovarianceMatrix6,
+) -> Result<Covariance6, SidereonStatus> {
+    Covariance6::try_from_matrix(value.values).map_err(|err| {
+        set_last_error(format!("{fn_name}: covariance is invalid: {err:?}"));
+        SidereonStatus::InvalidArgument
+    })
+}
+
+fn covariance_matrix_to_c(value: &Covariance6) -> SidereonCovarianceMatrix6 {
+    SidereonCovarianceMatrix6 {
+        values: *value.as_matrix(),
+    }
+}
+
+fn covariance_frame_from_c(
+    fn_name: &str,
+    value: u32,
+) -> Result<sidereon_core::astro::propagator::CovarianceFrame, SidereonStatus> {
+    match value {
+        x if x == SidereonCovarianceFrame::Inertial as u32 => {
+            Ok(sidereon_core::astro::propagator::CovarianceFrame::Inertial)
+        }
+        x if x == SidereonCovarianceFrame::Rtn as u32 => {
+            Ok(sidereon_core::astro::propagator::CovarianceFrame::Rtn)
+        }
+        _ => {
+            set_last_error(format!("{fn_name}: invalid covariance frame {value}"));
+            Err(SidereonStatus::InvalidArgument)
+        }
+    }
+}
+
+fn process_noise_from_c(
+    fn_name: &str,
+    value: SidereonProcessNoise,
+) -> Result<sidereon_core::astro::propagator::ProcessNoise, SidereonStatus> {
+    match value.kind {
+        x if x == SidereonProcessNoiseKind::None as u32 => {
+            Ok(sidereon_core::astro::propagator::ProcessNoise::None)
+        }
+        x if x == SidereonProcessNoiseKind::RtnAccelerationPsd as u32 => Ok(
+            sidereon_core::astro::propagator::ProcessNoise::RtnAccelerationPsd {
+                q_radial_km2_s3: value.q_radial_km2_s3,
+                q_transverse_km2_s3: value.q_transverse_km2_s3,
+                q_normal_km2_s3: value.q_normal_km2_s3,
+            },
+        ),
+        _ => {
+            set_last_error(format!(
+                "{fn_name}: invalid process noise kind {}",
+                value.kind
+            ));
+            Err(SidereonStatus::InvalidArgument)
+        }
+    }
+}
+
+fn map_covariance_propagation_error(fn_name: &str, err: PropagationError) -> SidereonStatus {
+    set_last_error(format!("{fn_name}: {err}"));
+    match err {
+        PropagationError::InvalidInput(_) => SidereonStatus::InvalidArgument,
+        _ => SidereonStatus::Solve,
+    }
+}
+
+fn covariance_node_to_c(
+    node: &sidereon_core::astro::propagator::CovarianceNode,
+) -> SidereonCovarianceNode {
+    let frame = match node.frame {
+        sidereon_core::astro::propagator::CovarianceFrame::Inertial => {
+            SidereonCovarianceFrame::Inertial as u32
+        }
+        sidereon_core::astro::propagator::CovarianceFrame::Rtn => {
+            SidereonCovarianceFrame::Rtn as u32
+        }
+    };
+    SidereonCovarianceNode {
+        state: cartesian_state_to_c(&node.state),
+        covariance: covariance_matrix_to_c(&node.covariance),
+        frame,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_covariance_transport(
+    covariance0: *const SidereonCovarianceMatrix6,
+    segments: *const SidereonCovarianceTransportSegment,
+    segment_count: usize,
+    process_noise: SidereonProcessNoise,
+    out: *mut SidereonCovarianceMatrix6,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_covariance_transport",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_covariance_transport",
+                out_written,
+                out_required
+            ));
+            let covariance0 = c_try!(require_ref(
+                covariance0,
+                "sidereon_covariance_transport",
+                "covariance0"
+            ));
+            let covariance0 = c_try!(covariance_matrix_from_c(
+                "sidereon_covariance_transport",
+                covariance0
+            ));
+            let raw_segments = c_try!(require_slice(
+                segments,
+                segment_count,
+                "sidereon_covariance_transport",
+                "segments"
+            ));
+            let segments: Vec<_> = raw_segments
+                .iter()
+                .map(
+                    |segment| sidereon_core::astro::propagator::CovarianceSegment {
+                        stm: segment.stm.values,
+                        dt_seconds: segment.dt_seconds,
+                        q_rotation_state: cartesian_state_from_c(&segment.q_rotation_state),
+                    },
+                )
+                .collect();
+            let process_noise = c_try!(process_noise_from_c(
+                "sidereon_covariance_transport",
+                process_noise
+            ));
+            let covariances = match sidereon_core::astro::propagator::transport_covariance(
+                covariance0,
+                &segments,
+                process_noise,
+            ) {
+                Ok(values) => values,
+                Err(err) => {
+                    return map_covariance_propagation_error("sidereon_covariance_transport", err)
+                }
+            };
+            let values: Vec<_> = covariances.iter().map(covariance_matrix_to_c).collect();
+            c_try!(copy_prefix_to_c(
+                "sidereon_covariance_transport",
+                "out",
+                &values,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_propagate_covariance(
+    config: *const SidereonStatePropagationConfig,
+    covariance0: *const SidereonCovarianceMatrix6,
+    epochs_s: *const f64,
+    epoch_count: usize,
+    options: SidereonCovariancePropagationOptions,
+    out_ephemeris: *mut *mut SidereonCovarianceEphemeris,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_propagate_covariance",
+        SidereonStatus::Panic,
+        || {
+            let out_ephemeris = c_try!(require_out(
+                out_ephemeris,
+                "sidereon_propagate_covariance",
+                "out_ephemeris"
+            ));
+            *out_ephemeris = ptr::null_mut();
+            let config = c_try!(require_ref(
+                config,
+                "sidereon_propagate_covariance",
+                "config"
+            ));
+            let covariance0 = c_try!(require_ref(
+                covariance0,
+                "sidereon_propagate_covariance",
+                "covariance0"
+            ));
+            let covariance0 = c_try!(covariance_matrix_from_c(
+                "sidereon_propagate_covariance",
+                covariance0
+            ));
+            let epochs = c_try!(times_from_c(
+                "sidereon_propagate_covariance",
+                epochs_s,
+                epoch_count
+            ));
+            let propagation_config = c_try!(state_propagation_config_from_c(
+                "sidereon_propagate_covariance",
+                config
+            ));
+            let input_frame = c_try!(covariance_frame_from_c(
+                "sidereon_propagate_covariance",
+                options.input_frame
+            ));
+            let output_frame = c_try!(covariance_frame_from_c(
+                "sidereon_propagate_covariance",
+                options.output_frame
+            ));
+            let process_noise = c_try!(process_noise_from_c(
+                "sidereon_propagate_covariance",
+                options.process_noise
+            ));
+            let result = match propagation_config.to_propagator().propagate_covariance(
+                sidereon_core::astro::propagator::LabeledCovariance6 {
+                    covariance: covariance0,
+                    frame: input_frame,
+                },
+                epochs,
+                &sidereon_core::astro::propagator::CovariancePropagationOptions {
+                    process_noise,
+                    output_frame,
+                },
+            ) {
+                Ok(result) => result,
+                Err(err) => {
+                    return map_covariance_propagation_error("sidereon_propagate_covariance", err)
+                }
+            };
+            write_boxed_handle(out_ephemeris, SidereonCovarianceEphemeris { inner: result });
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_covariance_ephemeris_count(
+    ephemeris: *const SidereonCovarianceEphemeris,
+    out_count: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_covariance_ephemeris_count",
+        SidereonStatus::Panic,
+        || {
+            let out_count = c_try!(require_out(
+                out_count,
+                "sidereon_covariance_ephemeris_count",
+                "out_count"
+            ));
+            *out_count = 0;
+            let ephemeris = c_try!(require_ref(
+                ephemeris,
+                "sidereon_covariance_ephemeris_count",
+                "ephemeris"
+            ));
+            *out_count = ephemeris.inner.len();
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_covariance_ephemeris_nodes(
+    ephemeris: *const SidereonCovarianceEphemeris,
+    out: *mut SidereonCovarianceNode,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_covariance_ephemeris_nodes",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_covariance_ephemeris_nodes",
+                out_written,
+                out_required
+            ));
+            let ephemeris = c_try!(require_ref(
+                ephemeris,
+                "sidereon_covariance_ephemeris_nodes",
+                "ephemeris"
+            ));
+            let nodes: Vec<_> = ephemeris
+                .inner
+                .nodes()
+                .iter()
+                .map(covariance_node_to_c)
+                .collect();
+            c_try!(copy_prefix_to_c(
+                "sidereon_covariance_ephemeris_nodes",
+                "out",
+                &nodes,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_covariance_ephemeris_covariance_at(
+    ephemeris: *const SidereonCovarianceEphemeris,
+    epoch_s: f64,
+    out_covariance: *mut SidereonCovarianceMatrix6,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_covariance_ephemeris_covariance_at",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_covariance,
+                "sidereon_covariance_ephemeris_covariance_at",
+                "out_covariance"
+            ));
+            *out = SidereonCovarianceMatrix6 {
+                values: [[0.0; 6]; 6],
+            };
+            let ephemeris = c_try!(require_ref(
+                ephemeris,
+                "sidereon_covariance_ephemeris_covariance_at",
+                "ephemeris"
+            ));
+            match ephemeris.inner.covariance_at(epoch_s) {
+                Ok(value) => {
+                    *out = covariance_matrix_to_c(&value);
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_covariance_propagation_error(
+                    "sidereon_covariance_ephemeris_covariance_at",
+                    err,
+                ),
+            }
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_covariance_ephemeris_free(
+    ephemeris: *mut SidereonCovarianceEphemeris,
+) {
+    free_boxed(ephemeris);
+}
+
+// === Round-2 geoid batches and grid conversions =============================
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonGeoidPoint {
+    pub latitude: f64,
+    pub longitude: f64,
+}
+
+fn geoid_points_from_c(
+    fn_name: &str,
+    points: *const SidereonGeoidPoint,
+    point_count: usize,
+) -> Result<Vec<(f64, f64)>, SidereonStatus> {
+    let points = unsafe { require_slice(points, point_count, fn_name, "points") }?;
+    Ok(points
+        .iter()
+        .map(|point| (point.latitude, point.longitude))
+        .collect())
+}
+
+unsafe fn copy_geoid_values(
+    fn_name: &str,
+    values: &[f64],
+    out: *mut f64,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    c_try!(copy_prefix_to_c(
+        fn_name,
+        "out",
+        values,
+        out,
+        len,
+        out_written,
+        out_required,
+    ));
+    SidereonStatus::Ok
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_geoid_undulations_rad(
+    points: *const SidereonGeoidPoint,
+    point_count: usize,
+    out: *mut f64,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_geoid_undulations_rad",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_geoid_undulations_rad",
+                out_written,
+                out_required
+            ));
+            let points = c_try!(geoid_points_from_c(
+                "sidereon_geoid_undulations_rad",
+                points,
+                point_count
+            ));
+            let values = sidereon_core::geoid::geoid_undulations_rad(&points);
+            copy_geoid_values(
+                "sidereon_geoid_undulations_rad",
+                &values,
+                out,
+                len,
+                out_written,
+                out_required,
+            )
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_geoid_undulations_deg(
+    points: *const SidereonGeoidPoint,
+    point_count: usize,
+    out: *mut f64,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_geoid_undulations_deg",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_geoid_undulations_deg",
+                out_written,
+                out_required
+            ));
+            let points = c_try!(geoid_points_from_c(
+                "sidereon_geoid_undulations_deg",
+                points,
+                point_count
+            ));
+            let values = sidereon_core::geoid::geoid_undulations_deg(&points);
+            copy_geoid_values(
+                "sidereon_geoid_undulations_deg",
+                &values,
+                out,
+                len,
+                out_written,
+                out_required,
+            )
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_egm96_undulations_rad(
+    points: *const SidereonGeoidPoint,
+    point_count: usize,
+    out: *mut f64,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_egm96_undulations_rad",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_egm96_undulations_rad",
+                out_written,
+                out_required
+            ));
+            let points = c_try!(geoid_points_from_c(
+                "sidereon_egm96_undulations_rad",
+                points,
+                point_count
+            ));
+            let values = sidereon_core::geoid::egm96_undulations_rad(&points);
+            copy_geoid_values(
+                "sidereon_egm96_undulations_rad",
+                &values,
+                out,
+                len,
+                out_written,
+                out_required,
+            )
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_egm96_undulations_deg(
+    points: *const SidereonGeoidPoint,
+    point_count: usize,
+    out: *mut f64,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_egm96_undulations_deg",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_egm96_undulations_deg",
+                out_written,
+                out_required
+            ));
+            let points = c_try!(geoid_points_from_c(
+                "sidereon_egm96_undulations_deg",
+                points,
+                point_count
+            ));
+            let values = sidereon_core::geoid::egm96_undulations_deg(&points);
+            copy_geoid_values(
+                "sidereon_egm96_undulations_deg",
+                &values,
+                out,
+                len,
+                out_written,
+                out_required,
+            )
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_geoid_grid_from_egm96_dac(
+    data: *const u8,
+    len: usize,
+    out_grid: *mut *mut SidereonGeoidGrid,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_geoid_grid_from_egm96_dac",
+        SidereonStatus::Panic,
+        || {
+            let out_grid = c_try!(require_out(
+                out_grid,
+                "sidereon_geoid_grid_from_egm96_dac",
+                "out_grid"
+            ));
+            *out_grid = ptr::null_mut();
+            let bytes = c_try!(require_slice(
+                data,
+                len,
+                "sidereon_geoid_grid_from_egm96_dac",
+                "data"
+            ));
+            match GeoidGrid::from_egm96_dac(bytes) {
+                Ok(inner) => {
+                    write_boxed_handle(out_grid, SidereonGeoidGrid { inner });
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_geoid_error("sidereon_geoid_grid_from_egm96_dac", err),
+            }
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_geoid_grid_undulations_rad(
+    grid: *const SidereonGeoidGrid,
+    points: *const SidereonGeoidPoint,
+    point_count: usize,
+    out: *mut f64,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_geoid_grid_undulations_rad",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_geoid_grid_undulations_rad",
+                out_written,
+                out_required
+            ));
+            let grid = c_try!(require_ref(
+                grid,
+                "sidereon_geoid_grid_undulations_rad",
+                "grid"
+            ));
+            let points = c_try!(geoid_points_from_c(
+                "sidereon_geoid_grid_undulations_rad",
+                points,
+                point_count
+            ));
+            let values = grid.inner.undulations_rad(&points);
+            copy_geoid_values(
+                "sidereon_geoid_grid_undulations_rad",
+                &values,
+                out,
+                len,
+                out_written,
+                out_required,
+            )
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_geoid_grid_undulations_deg(
+    grid: *const SidereonGeoidGrid,
+    points: *const SidereonGeoidPoint,
+    point_count: usize,
+    out: *mut f64,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_geoid_grid_undulations_deg",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_geoid_grid_undulations_deg",
+                out_written,
+                out_required
+            ));
+            let grid = c_try!(require_ref(
+                grid,
+                "sidereon_geoid_grid_undulations_deg",
+                "grid"
+            ));
+            let points = c_try!(geoid_points_from_c(
+                "sidereon_geoid_grid_undulations_deg",
+                points,
+                point_count
+            ));
+            let values = grid.inner.undulations_deg(&points);
+            copy_geoid_values(
+                "sidereon_geoid_grid_undulations_deg",
+                &values,
+                out,
+                len,
+                out_written,
+                out_required,
+            )
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_geoid_grid_orthometric_height_rad(
+    grid: *const SidereonGeoidGrid,
+    ellipsoidal_height_m: f64,
+    lat_rad: f64,
+    lon_rad: f64,
+    out_height_m: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_geoid_grid_orthometric_height_rad",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_height_m,
+                "sidereon_geoid_grid_orthometric_height_rad",
+                "out_height_m"
+            ));
+            let grid = c_try!(require_ref(
+                grid,
+                "sidereon_geoid_grid_orthometric_height_rad",
+                "grid"
+            ));
+            *out = grid
+                .inner
+                .orthometric_height_rad(ellipsoidal_height_m, lat_rad, lon_rad);
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_geoid_grid_ellipsoidal_height_rad(
+    grid: *const SidereonGeoidGrid,
+    orthometric_height_m: f64,
+    lat_rad: f64,
+    lon_rad: f64,
+    out_height_m: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_geoid_grid_ellipsoidal_height_rad",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_height_m,
+                "sidereon_geoid_grid_ellipsoidal_height_rad",
+                "out_height_m"
+            ));
+            let grid = c_try!(require_ref(
+                grid,
+                "sidereon_geoid_grid_ellipsoidal_height_rad",
+                "grid"
+            ));
+            *out = grid
+                .inner
+                .ellipsoidal_height_rad(orthometric_height_m, lat_rad, lon_rad);
+            SidereonStatus::Ok
+        },
+    )
+}
+
+// === Round-2 CNAV and RINEX-4 broadcast accessors ===========================
+
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonNavMessage {
+    GpsLnav = 0,
+    GpsCnav = 1,
+    GpsCnav2 = 2,
+    QzssCnav = 3,
+    QzssCnav2 = 4,
+    GalileoInav = 5,
+    GalileoFnav = 6,
+    BeidouD1 = 7,
+    BeidouD2 = 8,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonNavMessagePreference {
+    PreferLegacy = 0,
+    PreferModern = 1,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonBroadcastGroupDelayTerm {
+    GpsTgd = 0,
+    GalileoBgdE5aE1 = 1,
+    GalileoBgdE5bE1 = 2,
+    BeidouTgd1 = 3,
+    BeidouTgd2 = 4,
+    CnavIscL1Ca = 5,
+    CnavIscL2C = 6,
+    CnavIscL5I5 = 7,
+    CnavIscL5Q5 = 8,
+    CnavIscL1Cd = 9,
+    CnavIscL1Cp = 10,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonCnavSignal {
+    L1Ca = 0,
+    L2C = 1,
+    L5I5 = 2,
+    L5Q5 = 3,
+    L1Cp = 4,
+    L1Cd = 5,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonCnavParameters {
+    pub present: bool,
+    pub adot_m_s: f64,
+    pub delta_n0_dot_rad_s2: f64,
+    pub top_week: u32,
+    pub top_tow_s: f64,
+    pub ura_ed_index: i8,
+    pub ura_ned0_index: i8,
+    pub ura_ned1_index: u8,
+    pub ura_ned2_index: u8,
+    pub transmission_time_sow: f64,
+    pub has_flags: bool,
+    pub flags: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonBroadcastRecordInfo {
+    pub sat_id: SidereonSatelliteToken,
+    pub message: u32,
+    pub issue: u32,
+    pub issue_message: u32,
+    pub week: u32,
+    pub toe_week: u32,
+    pub toe_tow_s: f64,
+    pub toc_week: u32,
+    pub toc_tow_s: f64,
+    pub sv_health: f64,
+    pub sv_accuracy_m: f64,
+    pub has_fit_interval_s: bool,
+    pub fit_interval_s: f64,
+    pub default_group_delay_s: f64,
+    pub cnav: SidereonCnavParameters,
+}
+
+fn empty_cnav_parameters() -> SidereonCnavParameters {
+    SidereonCnavParameters {
+        present: false,
+        adot_m_s: 0.0,
+        delta_n0_dot_rad_s2: 0.0,
+        top_week: 0,
+        top_tow_s: 0.0,
+        ura_ed_index: 0,
+        ura_ned0_index: 0,
+        ura_ned1_index: 0,
+        ura_ned2_index: 0,
+        transmission_time_sow: 0.0,
+        has_flags: false,
+        flags: 0,
+    }
+}
+
+fn empty_broadcast_record_info() -> SidereonBroadcastRecordInfo {
+    SidereonBroadcastRecordInfo {
+        sat_id: SidereonSatelliteToken {
+            bytes: [0; SATELLITE_TOKEN_C_BYTES],
+        },
+        message: 0,
+        issue: 0,
+        issue_message: 0,
+        week: 0,
+        toe_week: 0,
+        toe_tow_s: 0.0,
+        toc_week: 0,
+        toc_tow_s: 0.0,
+        sv_health: 0.0,
+        sv_accuracy_m: 0.0,
+        has_fit_interval_s: false,
+        fit_interval_s: 0.0,
+        default_group_delay_s: 0.0,
+        cnav: empty_cnav_parameters(),
+    }
+}
+
+fn nav_message_to_c(message: sidereon_core::rinex::nav::NavMessage) -> u32 {
+    use sidereon_core::rinex::nav::NavMessage as M;
+    match message {
+        M::GpsLnav => SidereonNavMessage::GpsLnav as u32,
+        M::GpsCnav => SidereonNavMessage::GpsCnav as u32,
+        M::GpsCnav2 => SidereonNavMessage::GpsCnav2 as u32,
+        M::QzssCnav => SidereonNavMessage::QzssCnav as u32,
+        M::QzssCnav2 => SidereonNavMessage::QzssCnav2 as u32,
+        M::GalileoInav => SidereonNavMessage::GalileoInav as u32,
+        M::GalileoFnav => SidereonNavMessage::GalileoFnav as u32,
+        M::BeidouD1 => SidereonNavMessage::BeidouD1 as u32,
+        M::BeidouD2 => SidereonNavMessage::BeidouD2 as u32,
+    }
+}
+
+fn nav_message_from_c(
+    fn_name: &str,
+    message: u32,
+) -> Result<sidereon_core::rinex::nav::NavMessage, SidereonStatus> {
+    use sidereon_core::rinex::nav::NavMessage as M;
+    match message {
+        x if x == SidereonNavMessage::GpsLnav as u32 => Ok(M::GpsLnav),
+        x if x == SidereonNavMessage::GpsCnav as u32 => Ok(M::GpsCnav),
+        x if x == SidereonNavMessage::GpsCnav2 as u32 => Ok(M::GpsCnav2),
+        x if x == SidereonNavMessage::QzssCnav as u32 => Ok(M::QzssCnav),
+        x if x == SidereonNavMessage::QzssCnav2 as u32 => Ok(M::QzssCnav2),
+        x if x == SidereonNavMessage::GalileoInav as u32 => Ok(M::GalileoInav),
+        x if x == SidereonNavMessage::GalileoFnav as u32 => Ok(M::GalileoFnav),
+        x if x == SidereonNavMessage::BeidouD1 as u32 => Ok(M::BeidouD1),
+        x if x == SidereonNavMessage::BeidouD2 as u32 => Ok(M::BeidouD2),
+        _ => {
+            set_last_error(format!("{fn_name}: invalid nav message {message}"));
+            Err(SidereonStatus::InvalidArgument)
+        }
+    }
+}
+
+fn group_delay_term_from_c(
+    fn_name: &str,
+    term: u32,
+) -> Result<sidereon_core::rinex::nav::BroadcastGroupDelayTerm, SidereonStatus> {
+    use sidereon_core::rinex::nav::BroadcastGroupDelayTerm as T;
+    match term {
+        x if x == SidereonBroadcastGroupDelayTerm::GpsTgd as u32 => Ok(T::GpsTgd),
+        x if x == SidereonBroadcastGroupDelayTerm::GalileoBgdE5aE1 as u32 => Ok(T::GalileoBgdE5aE1),
+        x if x == SidereonBroadcastGroupDelayTerm::GalileoBgdE5bE1 as u32 => Ok(T::GalileoBgdE5bE1),
+        x if x == SidereonBroadcastGroupDelayTerm::BeidouTgd1 as u32 => Ok(T::BeidouTgd1),
+        x if x == SidereonBroadcastGroupDelayTerm::BeidouTgd2 as u32 => Ok(T::BeidouTgd2),
+        x if x == SidereonBroadcastGroupDelayTerm::CnavIscL1Ca as u32 => Ok(T::CnavIscL1Ca),
+        x if x == SidereonBroadcastGroupDelayTerm::CnavIscL2C as u32 => Ok(T::CnavIscL2C),
+        x if x == SidereonBroadcastGroupDelayTerm::CnavIscL5I5 as u32 => Ok(T::CnavIscL5I5),
+        x if x == SidereonBroadcastGroupDelayTerm::CnavIscL5Q5 as u32 => Ok(T::CnavIscL5Q5),
+        x if x == SidereonBroadcastGroupDelayTerm::CnavIscL1Cd as u32 => Ok(T::CnavIscL1Cd),
+        x if x == SidereonBroadcastGroupDelayTerm::CnavIscL1Cp as u32 => Ok(T::CnavIscL1Cp),
+        _ => {
+            set_last_error(format!("{fn_name}: invalid group-delay term {term}"));
+            Err(SidereonStatus::InvalidArgument)
+        }
+    }
+}
+
+fn cnav_signal_from_c(
+    fn_name: &str,
+    signal: u32,
+) -> Result<sidereon_core::rinex::nav::CnavSignal, SidereonStatus> {
+    use sidereon_core::rinex::nav::CnavSignal as S;
+    match signal {
+        x if x == SidereonCnavSignal::L1Ca as u32 => Ok(S::L1Ca),
+        x if x == SidereonCnavSignal::L2C as u32 => Ok(S::L2C),
+        x if x == SidereonCnavSignal::L5I5 as u32 => Ok(S::L5I5),
+        x if x == SidereonCnavSignal::L5Q5 as u32 => Ok(S::L5Q5),
+        x if x == SidereonCnavSignal::L1Cp as u32 => Ok(S::L1Cp),
+        x if x == SidereonCnavSignal::L1Cd as u32 => Ok(S::L1Cd),
+        _ => {
+            set_last_error(format!("{fn_name}: invalid CNAV signal {signal}"));
+            Err(SidereonStatus::InvalidArgument)
+        }
+    }
+}
+
+fn cnav_parameters_to_c(
+    cnav: Option<sidereon_core::rinex::nav::CnavParameters>,
+) -> SidereonCnavParameters {
+    if let Some(cnav) = cnav {
+        SidereonCnavParameters {
+            present: true,
+            adot_m_s: cnav.adot_m_s,
+            delta_n0_dot_rad_s2: cnav.delta_n0_dot_rad_s2,
+            top_week: cnav.top.week,
+            top_tow_s: cnav.top.tow_s,
+            ura_ed_index: cnav.ura_ed_index,
+            ura_ned0_index: cnav.ura_ned0_index,
+            ura_ned1_index: cnav.ura_ned1_index,
+            ura_ned2_index: cnav.ura_ned2_index,
+            transmission_time_sow: cnav.transmission_time_sow,
+            has_flags: cnav.flags.is_some(),
+            flags: cnav.flags.unwrap_or(0),
+        }
+    } else {
+        empty_cnav_parameters()
+    }
+}
+
+fn broadcast_record_to_c(
+    record: &sidereon_core::rinex::nav::BroadcastRecord,
+) -> SidereonBroadcastRecordInfo {
+    SidereonBroadcastRecordInfo {
+        sat_id: satellite_token(record.satellite_id),
+        message: nav_message_to_c(record.message),
+        issue: record.issue_of_data.issue,
+        issue_message: nav_message_to_c(record.issue_of_data.message),
+        week: record.week,
+        toe_week: record.toe.week,
+        toe_tow_s: record.toe.tow_s,
+        toc_week: record.toc.week,
+        toc_tow_s: record.toc.tow_s,
+        sv_health: record.sv_health,
+        sv_accuracy_m: record.sv_accuracy_m,
+        has_fit_interval_s: record.fit_interval_s.is_some(),
+        fit_interval_s: record.fit_interval_s.unwrap_or(0.0),
+        default_group_delay_s: record.broadcast_clock_group_delay_s(),
+        cnav: cnav_parameters_to_c(record.cnav),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_broadcast_ephemeris_record_count(
+    broadcast: *const SidereonBroadcastEphemeris,
+    out_count: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_broadcast_ephemeris_record_count",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_count,
+                "sidereon_broadcast_ephemeris_record_count",
+                "out_count"
+            ));
+            *out = 0;
+            let broadcast = c_try!(require_ref(
+                broadcast,
+                "sidereon_broadcast_ephemeris_record_count",
+                "broadcast"
+            ));
+            *out = broadcast.inner.records().len();
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_broadcast_ephemeris_records(
+    broadcast: *const SidereonBroadcastEphemeris,
+    out: *mut SidereonBroadcastRecordInfo,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_broadcast_ephemeris_records",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_broadcast_ephemeris_records",
+                out_written,
+                out_required
+            ));
+            let broadcast = c_try!(require_ref(
+                broadcast,
+                "sidereon_broadcast_ephemeris_records",
+                "broadcast"
+            ));
+            let values: Vec<_> = broadcast
+                .inner
+                .records()
+                .iter()
+                .map(broadcast_record_to_c)
+                .collect();
+            c_try!(copy_prefix_to_c(
+                "sidereon_broadcast_ephemeris_records",
+                "out",
+                &values,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_broadcast_ephemeris_set_nav_message_preference(
+    broadcast: *mut SidereonBroadcastEphemeris,
+    preference: u32,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_broadcast_ephemeris_set_nav_message_preference",
+        SidereonStatus::Panic,
+        || {
+            let broadcast = c_try!(require_out(
+                broadcast,
+                "sidereon_broadcast_ephemeris_set_nav_message_preference",
+                "broadcast"
+            ));
+            let preference = match preference {
+                x if x == SidereonNavMessagePreference::PreferLegacy as u32 => {
+                    sidereon_core::rinex::nav::NavMessagePreference::PreferLegacy
+                }
+                x if x == SidereonNavMessagePreference::PreferModern as u32 => {
+                    sidereon_core::rinex::nav::NavMessagePreference::PreferModern
+                }
+                _ => {
+                    set_last_error(format!(
+                        "sidereon_broadcast_ephemeris_set_nav_message_preference: invalid preference {preference}"
+                    ));
+                    return SidereonStatus::InvalidArgument;
+                }
+            };
+            broadcast.inner.set_message_preference(preference);
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_broadcast_ephemeris_nav_message_preference(
+    broadcast: *const SidereonBroadcastEphemeris,
+    out_preference: *mut u32,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_broadcast_ephemeris_nav_message_preference",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_preference,
+                "sidereon_broadcast_ephemeris_nav_message_preference",
+                "out_preference"
+            ));
+            *out = 0;
+            let broadcast = c_try!(require_ref(
+                broadcast,
+                "sidereon_broadcast_ephemeris_nav_message_preference",
+                "broadcast"
+            ));
+            *out = match broadcast.inner.message_preference() {
+                sidereon_core::rinex::nav::NavMessagePreference::PreferLegacy => {
+                    SidereonNavMessagePreference::PreferLegacy as u32
+                }
+                sidereon_core::rinex::nav::NavMessagePreference::PreferModern => {
+                    SidereonNavMessagePreference::PreferModern as u32
+                }
+            };
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_broadcast_ephemeris_record_group_delay(
+    broadcast: *const SidereonBroadcastEphemeris,
+    index: usize,
+    term: u32,
+    out_value_s: *mut f64,
+    out_present: *mut bool,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_broadcast_ephemeris_record_group_delay",
+        SidereonStatus::Panic,
+        || {
+            let out_value = c_try!(require_out(
+                out_value_s,
+                "sidereon_broadcast_ephemeris_record_group_delay",
+                "out_value_s"
+            ));
+            *out_value = 0.0;
+            let out_present = c_try!(require_out(
+                out_present,
+                "sidereon_broadcast_ephemeris_record_group_delay",
+                "out_present"
+            ));
+            *out_present = false;
+            let broadcast = c_try!(require_ref(
+                broadcast,
+                "sidereon_broadcast_ephemeris_record_group_delay",
+                "broadcast"
+            ));
+            let term = c_try!(group_delay_term_from_c(
+                "sidereon_broadcast_ephemeris_record_group_delay",
+                term
+            ));
+            let Some(record) = broadcast.inner.records().get(index) else {
+                set_last_error(format!(
+                    "sidereon_broadcast_ephemeris_record_group_delay: index {index} out of range"
+                ));
+                return SidereonStatus::InvalidArgument;
+            };
+            if let Some(value) = record.group_delays.get(term) {
+                *out_value = value;
+                *out_present = true;
+            }
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_broadcast_ephemeris_record_cnav_correction(
+    broadcast: *const SidereonBroadcastEphemeris,
+    index: usize,
+    signal: u32,
+    out_value_s: *mut f64,
+    out_present: *mut bool,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_broadcast_ephemeris_record_cnav_correction",
+        SidereonStatus::Panic,
+        || {
+            let out_value = c_try!(require_out(
+                out_value_s,
+                "sidereon_broadcast_ephemeris_record_cnav_correction",
+                "out_value_s"
+            ));
+            *out_value = 0.0;
+            let out_present = c_try!(require_out(
+                out_present,
+                "sidereon_broadcast_ephemeris_record_cnav_correction",
+                "out_present"
+            ));
+            *out_present = false;
+            let broadcast = c_try!(require_ref(
+                broadcast,
+                "sidereon_broadcast_ephemeris_record_cnav_correction",
+                "broadcast"
+            ));
+            let signal = c_try!(cnav_signal_from_c(
+                "sidereon_broadcast_ephemeris_record_cnav_correction",
+                signal
+            ));
+            let Some(record) = broadcast.inner.records().get(index) else {
+                set_last_error(format!(
+                    "sidereon_broadcast_ephemeris_record_cnav_correction: index {index} out of range"
+                ));
+                return SidereonStatus::InvalidArgument;
+            };
+            if let Some(value) = record
+                .group_delays
+                .cnav_single_frequency_correction_s(signal)
+            {
+                *out_value = value;
+                *out_present = true;
+            }
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_broadcast_ephemeris_select_by_issue(
+    broadcast: *const SidereonBroadcastEphemeris,
+    sat_id: *const c_char,
+    issue: u32,
+    message: u32,
+    epoch_j2000_s: f64,
+    out_record: *mut SidereonBroadcastRecordInfo,
+    out_present: *mut bool,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_broadcast_ephemeris_select_by_issue",
+        SidereonStatus::Panic,
+        || {
+            let out_record = c_try!(require_out(
+                out_record,
+                "sidereon_broadcast_ephemeris_select_by_issue",
+                "out_record"
+            ));
+            *out_record = empty_broadcast_record_info();
+            let out_present = c_try!(require_out(
+                out_present,
+                "sidereon_broadcast_ephemeris_select_by_issue",
+                "out_present"
+            ));
+            *out_present = false;
+            let broadcast = c_try!(require_ref(
+                broadcast,
+                "sidereon_broadcast_ephemeris_select_by_issue",
+                "broadcast"
+            ));
+            let sat = c_try!(parse_satellite_token(
+                "sidereon_broadcast_ephemeris_select_by_issue",
+                sat_id
+            ));
+            let message = c_try!(nav_message_from_c(
+                "sidereon_broadcast_ephemeris_select_by_issue",
+                message
+            ));
+            let issue = sidereon_core::ephemeris::BroadcastIssue { issue, message };
+            if let Some(record) =
+                broadcast
+                    .inner
+                    .select_by_issue_at(sat, issue, message, epoch_j2000_s)
+            {
+                *out_record = broadcast_record_to_c(record);
+                *out_present = true;
+            }
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_cnav_ura_nominal_m(
+    index: i8,
+    out_value_m: *mut f64,
+    out_present: *mut bool,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_cnav_ura_nominal_m", SidereonStatus::Panic, || {
+        let out_value = c_try!(require_out(
+            out_value_m,
+            "sidereon_cnav_ura_nominal_m",
+            "out_value_m"
+        ));
+        *out_value = 0.0;
+        let out_present = c_try!(require_out(
+            out_present,
+            "sidereon_cnav_ura_nominal_m",
+            "out_present"
+        ));
+        *out_present = false;
+        if let Some(value) = sidereon_core::rinex::nav::cnav_ura_nominal_m(index) {
+            *out_value = value;
+            *out_present = true;
+        }
+        SidereonStatus::Ok
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_cnav_ura_ned_m(
+    params: *const SidereonCnavParameters,
+    query_week: u32,
+    query_tow_s: f64,
+    out_value_m: *mut f64,
+    out_present: *mut bool,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_cnav_ura_ned_m", SidereonStatus::Panic, || {
+        let out_value = c_try!(require_out(
+            out_value_m,
+            "sidereon_cnav_ura_ned_m",
+            "out_value_m"
+        ));
+        *out_value = 0.0;
+        let out_present = c_try!(require_out(
+            out_present,
+            "sidereon_cnav_ura_ned_m",
+            "out_present"
+        ));
+        *out_present = false;
+        let params = c_try!(require_ref(params, "sidereon_cnav_ura_ned_m", "params"));
+        if !params.present {
+            set_last_error("sidereon_cnav_ura_ned_m: params.present is false".to_string());
+            return SidereonStatus::InvalidArgument;
+        }
+        let params = sidereon_core::rinex::nav::CnavParameters {
+            adot_m_s: params.adot_m_s,
+            delta_n0_dot_rad_s2: params.delta_n0_dot_rad_s2,
+            top: GnssWeekTow {
+                system: TimeScale::Gpst,
+                week: params.top_week,
+                tow_s: params.top_tow_s,
+            },
+            ura_ed_index: params.ura_ed_index,
+            ura_ned0_index: params.ura_ned0_index,
+            ura_ned1_index: params.ura_ned1_index,
+            ura_ned2_index: params.ura_ned2_index,
+            transmission_time_sow: params.transmission_time_sow,
+            flags: params.has_flags.then_some(params.flags),
+        };
+        if let Some(value) = sidereon_core::rinex::nav::cnav_ura_ned_m(
+            &params,
+            GnssWeekTow {
+                system: TimeScale::Gpst,
+                week: query_week,
+                tow_s: query_tow_s,
+            },
+        ) {
+            *out_value = value;
+            *out_present = true;
+        }
+        SidereonStatus::Ok
+    })
+}
+
+// === Round-2 SGP4 TLE fitting ===============================================
+
+pub const SGP4_FIT_OBJECT_NAME_C_BYTES: usize = 65;
+
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonSgp4FitEpochKind {
+    Midpoint = 0,
+    First = 1,
+    Last = 2,
+    Sample = 3,
+    Jd = 4,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonSgp4Loss {
+    Linear = 0,
+    SoftL1 = 1,
+    Huber = 2,
+    Cauchy = 3,
+    Arctan = 4,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonSgp4XScaleKind {
+    None = 0,
+    Unit = 1,
+    Values = 2,
+    Jacobian = 3,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonSgp4FitSample {
+    pub jd_whole: f64,
+    pub jd_fraction: f64,
+    pub position_teme_km: [f64; 3],
+    pub has_velocity_teme_km_s: bool,
+    pub velocity_teme_km_s: [f64; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonSgp4FitConfig {
+    pub epoch_kind: u32,
+    pub epoch_sample_index: usize,
+    pub epoch_jd_whole: f64,
+    pub epoch_jd_fraction: f64,
+    pub fit_bstar: bool,
+    pub bstar_seed: f64,
+    pub use_velocity: bool,
+    pub has_velocity_weight_s: bool,
+    pub velocity_weight_s: f64,
+    pub weights: *const f64,
+    pub weight_count: usize,
+    pub opsmode: u32,
+    pub has_ftol: bool,
+    pub ftol: f64,
+    pub has_xtol: bool,
+    pub xtol: f64,
+    pub has_gtol: bool,
+    pub gtol: f64,
+    pub has_max_nfev: bool,
+    pub max_nfev: usize,
+    pub x_scale_kind: u32,
+    pub x_scale_values: *const f64,
+    pub x_scale_value_count: usize,
+    pub loss: u32,
+    pub f_scale: f64,
+    pub catalog_number: u32,
+    pub classification: [c_char; TLE_FIELD_C_BYTES],
+    pub international_designator: [c_char; TLE_FIELD_C_BYTES],
+    pub element_set_number: i32,
+    pub rev_at_epoch: i64,
+    pub object_name: [c_char; SGP4_FIT_OBJECT_NAME_C_BYTES],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonSgp4FitStatistics {
+    pub rms_position_km: f64,
+    pub max_position_km: f64,
+    pub rms_position_axes_km: [f64; 3],
+    pub has_rms_velocity_km_s: bool,
+    pub rms_velocity_km_s: f64,
+    pub tle_rms_position_km: f64,
+    pub status: i32,
+    pub nfev: usize,
+    pub njev: usize,
+    pub cost: f64,
+    pub optimality: f64,
+    pub bstar_observable: bool,
+    pub seed_refine_passes: usize,
+}
+
+pub struct SidereonSgp4TleFit {
+    inner: sidereon_core::astro::sgp4::TleFit,
+}
+
+fn fixed_c_array_to_string(
+    fn_name: &str,
+    field: &str,
+    bytes: &[c_char],
+) -> Result<String, SidereonStatus> {
+    let len = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    let raw: Vec<u8> = bytes[..len].iter().map(|&b| b as u8).collect();
+    str::from_utf8(&raw).map(str::to_owned).map_err(|_| {
+        set_last_error(format!("{fn_name}: {field} is not valid UTF-8"));
+        SidereonStatus::InvalidToken
+    })
+}
+
+fn sgp4_loss_from_c(
+    fn_name: &str,
+    loss: u32,
+) -> Result<sidereon_core::astro::sgp4::Loss, SidereonStatus> {
+    use sidereon_core::astro::sgp4::Loss as L;
+    match loss {
+        x if x == SidereonSgp4Loss::Linear as u32 => Ok(L::Linear),
+        x if x == SidereonSgp4Loss::SoftL1 as u32 => Ok(L::SoftL1),
+        x if x == SidereonSgp4Loss::Huber as u32 => Ok(L::Huber),
+        x if x == SidereonSgp4Loss::Cauchy as u32 => Ok(L::Cauchy),
+        x if x == SidereonSgp4Loss::Arctan as u32 => Ok(L::Arctan),
+        _ => {
+            set_last_error(format!("{fn_name}: invalid loss {loss}"));
+            Err(SidereonStatus::InvalidArgument)
+        }
+    }
+}
+
+unsafe fn sgp4_x_scale_from_c(
+    fn_name: &str,
+    config: &SidereonSgp4FitConfig,
+) -> Result<Option<sidereon_core::astro::sgp4::XScale>, SidereonStatus> {
+    use sidereon_core::astro::sgp4::XScale as X;
+    match config.x_scale_kind {
+        x if x == SidereonSgp4XScaleKind::None as u32 => Ok(None),
+        x if x == SidereonSgp4XScaleKind::Unit as u32 => Ok(Some(X::Unit)),
+        x if x == SidereonSgp4XScaleKind::Jacobian as u32 => Ok(Some(X::Jac)),
+        x if x == SidereonSgp4XScaleKind::Values as u32 => {
+            let values = require_slice(
+                config.x_scale_values,
+                config.x_scale_value_count,
+                fn_name,
+                "x_scale_values",
+            )?;
+            Ok(Some(X::Values(values.to_vec())))
+        }
+        _ => {
+            set_last_error(format!(
+                "{fn_name}: invalid x_scale_kind {}",
+                config.x_scale_kind
+            ));
+            Err(SidereonStatus::InvalidArgument)
+        }
+    }
+}
+
+fn sgp4_fit_epoch_from_c(
+    fn_name: &str,
+    config: &SidereonSgp4FitConfig,
+) -> Result<sidereon_core::astro::sgp4::FitEpoch, SidereonStatus> {
+    use sidereon_core::astro::sgp4::{FitEpoch, JulianDate};
+    match config.epoch_kind {
+        x if x == SidereonSgp4FitEpochKind::Midpoint as u32 => Ok(FitEpoch::Midpoint),
+        x if x == SidereonSgp4FitEpochKind::First as u32 => Ok(FitEpoch::First),
+        x if x == SidereonSgp4FitEpochKind::Last as u32 => Ok(FitEpoch::Last),
+        x if x == SidereonSgp4FitEpochKind::Sample as u32 => {
+            Ok(FitEpoch::Sample(config.epoch_sample_index))
+        }
+        x if x == SidereonSgp4FitEpochKind::Jd as u32 => Ok(FitEpoch::Jd(JulianDate(
+            config.epoch_jd_whole,
+            config.epoch_jd_fraction,
+        ))),
+        _ => {
+            set_last_error(format!(
+                "{fn_name}: invalid epoch_kind {}",
+                config.epoch_kind
+            ));
+            Err(SidereonStatus::InvalidArgument)
+        }
+    }
+}
+
+unsafe fn sgp4_fit_config_from_c(
+    fn_name: &str,
+    config: &SidereonSgp4FitConfig,
+) -> Result<sidereon_core::astro::sgp4::FitConfig, SidereonStatus> {
+    let classification =
+        fixed_c_array_to_string(fn_name, "classification", &config.classification)?;
+    let international_designator = fixed_c_array_to_string(
+        fn_name,
+        "international_designator",
+        &config.international_designator,
+    )?;
+    let object_name = fixed_c_array_to_string(fn_name, "object_name", &config.object_name)?;
+    let weights = if config.weight_count == 0 {
+        None
+    } else {
+        Some(require_slice(config.weights, config.weight_count, fn_name, "weights")?.to_vec())
+    };
+    Ok(sidereon_core::astro::sgp4::FitConfig {
+        epoch: sgp4_fit_epoch_from_c(fn_name, config)?,
+        fit_bstar: config.fit_bstar,
+        bstar_seed: config.bstar_seed,
+        use_velocity: config.use_velocity,
+        velocity_weight_s: config
+            .has_velocity_weight_s
+            .then_some(config.velocity_weight_s),
+        weights,
+        opsmode: tle_ops_mode_from_c(fn_name, config.opsmode)?,
+        ftol: config.has_ftol.then_some(config.ftol),
+        xtol: config.has_xtol.then_some(config.xtol),
+        gtol: config.has_gtol.then_some(config.gtol),
+        max_nfev: config.has_max_nfev.then_some(config.max_nfev),
+        x_scale: sgp4_x_scale_from_c(fn_name, config)?,
+        loss: sgp4_loss_from_c(fn_name, config.loss)?,
+        f_scale: config.f_scale,
+        metadata: sidereon_core::astro::sgp4::TleMetadata {
+            catalog_number: config.catalog_number,
+            classification: if classification.is_empty() {
+                "U".to_string()
+            } else {
+                classification
+            },
+            international_designator,
+            element_set_number: config.element_set_number,
+            rev_at_epoch: config.rev_at_epoch,
+            object_name,
+        },
+    })
+}
+
+fn sgp4_fit_stats_to_c(
+    stats: &sidereon_core::astro::sgp4::FitStatistics,
+) -> SidereonSgp4FitStatistics {
+    SidereonSgp4FitStatistics {
+        rms_position_km: stats.rms_position_km,
+        max_position_km: stats.max_position_km,
+        rms_position_axes_km: stats.rms_position_axes_km,
+        has_rms_velocity_km_s: stats.rms_velocity_km_s.is_some(),
+        rms_velocity_km_s: stats.rms_velocity_km_s.unwrap_or(0.0),
+        tle_rms_position_km: stats.tle_rms_position_km,
+        status: stats.status,
+        nfev: stats.nfev,
+        njev: stats.njev,
+        cost: stats.cost,
+        optimality: stats.optimality,
+        bstar_observable: stats.bstar_observable,
+        seed_refine_passes: stats.seed_refine_passes,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sgp4_fit_config_init(
+    out_config: *mut SidereonSgp4FitConfig,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_sgp4_fit_config_init",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_config,
+                "sidereon_sgp4_fit_config_init",
+                "out_config"
+            ));
+            *out = SidereonSgp4FitConfig {
+                epoch_kind: SidereonSgp4FitEpochKind::Midpoint as u32,
+                epoch_sample_index: 0,
+                epoch_jd_whole: 0.0,
+                epoch_jd_fraction: 0.0,
+                fit_bstar: true,
+                bstar_seed: 0.0,
+                use_velocity: true,
+                has_velocity_weight_s: false,
+                velocity_weight_s: 0.0,
+                weights: ptr::null(),
+                weight_count: 0,
+                opsmode: SidereonTleOpsMode::Improved as u32,
+                has_ftol: false,
+                ftol: 0.0,
+                has_xtol: false,
+                xtol: 0.0,
+                has_gtol: false,
+                gtol: 0.0,
+                has_max_nfev: false,
+                max_nfev: 0,
+                x_scale_kind: SidereonSgp4XScaleKind::None as u32,
+                x_scale_values: ptr::null(),
+                x_scale_value_count: 0,
+                loss: SidereonSgp4Loss::Linear as u32,
+                f_scale: 1.0,
+                catalog_number: 0,
+                classification: fixed_c_chars::<TLE_FIELD_C_BYTES>("U"),
+                international_designator: [0; TLE_FIELD_C_BYTES],
+                element_set_number: 999,
+                rev_at_epoch: 0,
+                object_name: [0; SGP4_FIT_OBJECT_NAME_C_BYTES],
+            };
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sgp4_fit_tle(
+    samples: *const SidereonSgp4FitSample,
+    sample_count: usize,
+    config: *const SidereonSgp4FitConfig,
+    out_fit: *mut *mut SidereonSgp4TleFit,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_sgp4_fit_tle", SidereonStatus::Panic, || {
+        let out_fit = c_try!(require_out(out_fit, "sidereon_sgp4_fit_tle", "out_fit"));
+        *out_fit = ptr::null_mut();
+        let raw_samples = c_try!(require_slice(
+            samples,
+            sample_count,
+            "sidereon_sgp4_fit_tle",
+            "samples"
+        ));
+        let config = c_try!(require_ref(config, "sidereon_sgp4_fit_tle", "config"));
+        let samples: Vec<_> = raw_samples
+            .iter()
+            .map(|sample| sidereon_core::astro::sgp4::FitSample {
+                epoch: sidereon_core::astro::sgp4::JulianDate(sample.jd_whole, sample.jd_fraction),
+                position_teme_km: sample.position_teme_km,
+                velocity_teme_km_s: sample
+                    .has_velocity_teme_km_s
+                    .then_some(sample.velocity_teme_km_s),
+            })
+            .collect();
+        let config = c_try!(sgp4_fit_config_from_c("sidereon_sgp4_fit_tle", config));
+        match sidereon_core::astro::sgp4::fit_tle(&samples, &config) {
+            Ok(inner) => {
+                write_boxed_handle(out_fit, SidereonSgp4TleFit { inner });
+                SidereonStatus::Ok
+            }
+            Err(err) => {
+                set_last_error(format!("sidereon_sgp4_fit_tle: {err}"));
+                match err {
+                    sidereon_core::astro::sgp4::TleFitError::ArcTooShort { .. }
+                    | sidereon_core::astro::sgp4::TleFitError::InvalidInput { .. }
+                    | sidereon_core::astro::sgp4::TleFitError::EpochsNotIncreasing { .. }
+                    | sidereon_core::astro::sgp4::TleFitError::EpochOutsideArc
+                    | sidereon_core::astro::sgp4::TleFitError::MixedVelocityPresence => {
+                        SidereonStatus::InvalidArgument
+                    }
+                    _ => SidereonStatus::Solve,
+                }
+            }
+        }
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sgp4_tle_fit_statistics(
+    fit: *const SidereonSgp4TleFit,
+    out_stats: *mut SidereonSgp4FitStatistics,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_sgp4_tle_fit_statistics",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_stats,
+                "sidereon_sgp4_tle_fit_statistics",
+                "out_stats"
+            ));
+            let fit = c_try!(require_ref(fit, "sidereon_sgp4_tle_fit_statistics", "fit"));
+            *out = sgp4_fit_stats_to_c(&fit.inner.stats);
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sgp4_tle_fit_lines(
+    fit: *const SidereonSgp4TleFit,
+    out_lines: *mut SidereonTleLines,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_sgp4_tle_fit_lines", SidereonStatus::Panic, || {
+        let out = c_try!(require_out(
+            out_lines,
+            "sidereon_sgp4_tle_fit_lines",
+            "out_lines"
+        ));
+        let fit = c_try!(require_ref(fit, "sidereon_sgp4_tle_fit_lines", "fit"));
+        *out = SidereonTleLines {
+            line1: SidereonTleLine {
+                bytes: fixed_c_chars(&fit.inner.line1),
+            },
+            line2: SidereonTleLine {
+                bytes: fixed_c_chars(&fit.inner.line2),
+            },
+        };
+        SidereonStatus::Ok
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sgp4_tle_fit_omm(
+    fit: *const SidereonSgp4TleFit,
+    out_omm: *mut *mut SidereonOmm,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_sgp4_tle_fit_omm", SidereonStatus::Panic, || {
+        let out_omm = c_try!(require_out(out_omm, "sidereon_sgp4_tle_fit_omm", "out_omm"));
+        *out_omm = ptr::null_mut();
+        let fit = c_try!(require_ref(fit, "sidereon_sgp4_tle_fit_omm", "fit"));
+        write_boxed_handle(
+            out_omm,
+            SidereonOmm {
+                inner: fit.inner.omm.clone(),
+            },
+        );
+        SidereonStatus::Ok
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sgp4_tle_fit_free(fit: *mut SidereonSgp4TleFit) {
+    free_boxed(fit);
+}
+
+// === Round-2 RINEX QC, lint, and repair =====================================
+
+pub const RINEX_QC_CODE_C_BYTES: usize = 16;
+pub const RINEX_QC_FIELD_C_BYTES: usize = 65;
+
+pub struct SidereonObservationQcReport {
+    inner: sidereon_core::observation_qc::ObservationQcReport,
+}
+
+pub struct SidereonRinexLintReport {
+    inner: sidereon_core::rinex::qc::LintReport,
+}
+
+pub struct SidereonRinexRepair {
+    text: Vec<u8>,
+    crinex_text: Option<Vec<u8>>,
+    actions: Vec<sidereon_core::rinex::qc::RepairAction>,
+    remaining: sidereon_core::rinex::qc::LintReport,
+    decoded_from_crinex: bool,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonRinexQcSeverity {
+    Fatal = 0,
+    Error = 1,
+    Warning = 2,
+    Info = 3,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonObservationQcIntervalSource {
+    Override = 0,
+    Header = 1,
+    Inferred = 2,
+    Unresolved = 3,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonObservationQcOptions {
+    pub has_interval_override_s: bool,
+    pub interval_override_s: f64,
+    pub gap_factor: f64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonObservationQcSummary {
+    pub total_epoch_records: usize,
+    pub observation_epochs: usize,
+    pub event_records: usize,
+    pub power_failure_epochs: usize,
+    pub skipped_records: usize,
+    pub has_interval_s: bool,
+    pub interval_s: f64,
+    pub interval_source: u32,
+    pub missing_epochs: usize,
+    pub data_gap_count: usize,
+    pub satellite_count: usize,
+    pub satellite_signal_count: usize,
+    pub system_signal_count: usize,
+    pub note_count: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonObservationQcDataGap {
+    pub start_epoch: SidereonCalendarEpoch,
+    pub end_epoch: SidereonCalendarEpoch,
+    pub nominal_interval_s: f64,
+    pub observed_delta_s: f64,
+    pub missing_epochs: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonObservationQcSatellite {
+    pub sat_id: SidereonSatelliteToken,
+    pub epochs_with_observations: usize,
+    pub value_observations: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonObservationQcSignal {
+    pub sat_id: SidereonSatelliteToken,
+    pub system: u32,
+    pub code: [c_char; RINEX_OBS_CODE_C_BYTES],
+    pub value_observations: usize,
+    pub has_ssi: bool,
+    pub ssi_counts: [u64; 10],
+    pub has_snr: bool,
+    pub snr_n: usize,
+    pub snr_mean: f64,
+    pub snr_min: f64,
+    pub snr_max: f64,
+    pub has_snr_std: bool,
+    pub snr_std: f64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonRinexLintSummary {
+    pub finding_count: usize,
+    pub fatal_count: usize,
+    pub error_count: usize,
+    pub warning_count: usize,
+    pub info_count: usize,
+    pub is_clean: bool,
+    pub decoded_from_crinex: bool,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonRinexLintFinding {
+    pub code: [c_char; RINEX_QC_CODE_C_BYTES],
+    pub severity: u32,
+    pub repairable: bool,
+    pub has_epoch_index: bool,
+    pub epoch_index: usize,
+    pub has_satellite: bool,
+    pub satellite: SidereonSatelliteToken,
+    pub has_field: bool,
+    pub field: [c_char; RINEX_QC_FIELD_C_BYTES],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonRinexRepairOptions {
+    pub has_file_stamp: bool,
+    pub file_stamp_program: [c_char; RINEX_QC_FIELD_C_BYTES],
+    pub file_stamp_run_by: [c_char; RINEX_QC_FIELD_C_BYTES],
+    pub file_stamp_date: [c_char; RINEX_QC_FIELD_C_BYTES],
+    pub set_interval: bool,
+    pub set_time_of_last_obs: bool,
+    pub set_obs_counts: bool,
+    pub drop_empty_records: bool,
+    pub sort_records: bool,
+    pub drop_unsupported: bool,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonRinexRepairAction {
+    pub id: [c_char; RINEX_QC_CODE_C_BYTES],
+    pub message: [c_char; RINEX_QC_FIELD_C_BYTES],
+}
+
+fn observation_qc_options_from_c(
+    options: *const SidereonObservationQcOptions,
+) -> sidereon_core::observation_qc::ObservationQcOptions {
+    let options = unsafe { options.as_ref() }
+        .copied()
+        .unwrap_or(SidereonObservationQcOptions {
+            has_interval_override_s: false,
+            interval_override_s: 0.0,
+            gap_factor: 1.5,
+        });
+    sidereon_core::observation_qc::ObservationQcOptions {
+        interval_override_s: options
+            .has_interval_override_s
+            .then_some(options.interval_override_s),
+        gap_factor: options.gap_factor,
+    }
+}
+
+fn qc_interval_source_to_c(source: sidereon_core::observation_qc::IntervalSource) -> u32 {
+    match source {
+        sidereon_core::observation_qc::IntervalSource::Override => {
+            SidereonObservationQcIntervalSource::Override as u32
+        }
+        sidereon_core::observation_qc::IntervalSource::Header => {
+            SidereonObservationQcIntervalSource::Header as u32
+        }
+        sidereon_core::observation_qc::IntervalSource::Inferred => {
+            SidereonObservationQcIntervalSource::Inferred as u32
+        }
+        sidereon_core::observation_qc::IntervalSource::Unresolved => {
+            SidereonObservationQcIntervalSource::Unresolved as u32
+        }
+    }
+}
+
+fn qc_summary_to_c(
+    report: &sidereon_core::observation_qc::ObservationQcReport,
+) -> SidereonObservationQcSummary {
+    SidereonObservationQcSummary {
+        total_epoch_records: report.total_epoch_records,
+        observation_epochs: report.observation_epochs,
+        event_records: report.event_records,
+        power_failure_epochs: report.power_failure_epochs,
+        skipped_records: report.skipped_records,
+        has_interval_s: report.interval_s.is_some(),
+        interval_s: report.interval_s.unwrap_or(0.0),
+        interval_source: qc_interval_source_to_c(report.interval_source),
+        missing_epochs: report.missing_epochs,
+        data_gap_count: report.data_gaps.len(),
+        satellite_count: report.satellites.len(),
+        satellite_signal_count: report.satellite_signals.len(),
+        system_signal_count: report.system_signals.len(),
+        note_count: report.notes.len(),
+    }
+}
+
+fn observation_qc_signal_empty_sat() -> SidereonSatelliteToken {
+    SidereonSatelliteToken {
+        bytes: [0; SATELLITE_TOKEN_C_BYTES],
+    }
+}
+
+fn observation_qc_signal_from_parts(
+    sat_id: SidereonSatelliteToken,
+    system: GnssSystem,
+    code: &str,
+    value_observations: usize,
+    ssi: Option<sidereon_core::observation_qc::SsiHistogram>,
+    snr: Option<sidereon_core::observation_qc::SnrStats>,
+) -> SidereonObservationQcSignal {
+    let mut out = SidereonObservationQcSignal {
+        sat_id,
+        system: gnss_system_to_c(system) as u32,
+        code: fixed_c_chars::<RINEX_OBS_CODE_C_BYTES>(code),
+        value_observations,
+        has_ssi: false,
+        ssi_counts: [0; 10],
+        has_snr: false,
+        snr_n: 0,
+        snr_mean: 0.0,
+        snr_min: 0.0,
+        snr_max: 0.0,
+        has_snr_std: false,
+        snr_std: 0.0,
+    };
+    if let Some(ssi) = ssi {
+        out.has_ssi = true;
+        out.ssi_counts = ssi.counts;
+    }
+    if let Some(snr) = snr {
+        out.has_snr = true;
+        out.snr_n = snr.n;
+        out.snr_mean = snr.mean;
+        out.snr_min = snr.min;
+        out.snr_max = snr.max;
+        out.has_snr_std = snr.std.is_some();
+        out.snr_std = snr.std.unwrap_or(0.0);
+    }
+    out
+}
+
+unsafe fn text_bytes_from_c<'a>(
+    fn_name: &str,
+    data: *const u8,
+    len: usize,
+) -> Result<&'a str, SidereonStatus> {
+    let bytes = require_slice(data, len, fn_name, "data")?;
+    str::from_utf8(bytes).map_err(|_| {
+        set_last_error(format!("{fn_name}: data is not valid UTF-8"));
+        SidereonStatus::InvalidToken
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_observation_qc_options_init(
+    out_options: *mut SidereonObservationQcOptions,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_observation_qc_options_init",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_options,
+                "sidereon_observation_qc_options_init",
+                "out_options"
+            ));
+            let defaults = sidereon_core::observation_qc::ObservationQcOptions::default();
+            *out = SidereonObservationQcOptions {
+                has_interval_override_s: defaults.interval_override_s.is_some(),
+                interval_override_s: defaults.interval_override_s.unwrap_or(0.0),
+                gap_factor: defaults.gap_factor,
+            };
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_observation_qc_from_obs(
+    obs: *const SidereonRinexObs,
+    options: *const SidereonObservationQcOptions,
+    out_report: *mut *mut SidereonObservationQcReport,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_observation_qc_from_obs",
+        SidereonStatus::Panic,
+        || {
+            let out_report = c_try!(require_out(
+                out_report,
+                "sidereon_observation_qc_from_obs",
+                "out_report"
+            ));
+            *out_report = ptr::null_mut();
+            let obs = c_try!(require_ref(obs, "sidereon_observation_qc_from_obs", "obs"));
+            match sidereon_core::observation_qc::observation_qc_with_options(
+                &obs.inner,
+                observation_qc_options_from_c(options),
+            ) {
+                Ok(inner) => {
+                    write_boxed_handle(out_report, SidereonObservationQcReport { inner });
+                    SidereonStatus::Ok
+                }
+                Err(err) => {
+                    set_last_error(format!("sidereon_observation_qc_from_obs: {err}"));
+                    SidereonStatus::InvalidArgument
+                }
+            }
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_observation_qc_parse(
+    data: *const u8,
+    len: usize,
+    options: *const SidereonObservationQcOptions,
+    out_report: *mut *mut SidereonObservationQcReport,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_observation_qc_parse",
+        SidereonStatus::Panic,
+        || {
+            let out_report = c_try!(require_out(
+                out_report,
+                "sidereon_observation_qc_parse",
+                "out_report"
+            ));
+            *out_report = ptr::null_mut();
+            let text = c_try!(text_bytes_from_c(
+                "sidereon_observation_qc_parse",
+                data,
+                len
+            ));
+            let obs = match RinexObs::parse(text) {
+                Ok(obs) => obs,
+                Err(err) => {
+                    set_last_error(format!("sidereon_observation_qc_parse: {err}"));
+                    return SidereonStatus::InvalidArgument;
+                }
+            };
+            match sidereon_core::observation_qc::observation_qc_with_options(
+                &obs,
+                observation_qc_options_from_c(options),
+            ) {
+                Ok(inner) => {
+                    write_boxed_handle(out_report, SidereonObservationQcReport { inner });
+                    SidereonStatus::Ok
+                }
+                Err(err) => {
+                    set_last_error(format!("sidereon_observation_qc_parse: {err}"));
+                    SidereonStatus::InvalidArgument
+                }
+            }
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_observation_qc_summary(
+    report: *const SidereonObservationQcReport,
+    out_summary: *mut SidereonObservationQcSummary,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_observation_qc_summary",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_summary,
+                "sidereon_observation_qc_summary",
+                "out_summary"
+            ));
+            let report = c_try!(require_ref(
+                report,
+                "sidereon_observation_qc_summary",
+                "report"
+            ));
+            *out = qc_summary_to_c(&report.inner);
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_observation_qc_gaps(
+    report: *const SidereonObservationQcReport,
+    out: *mut SidereonObservationQcDataGap,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_observation_qc_gaps",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_observation_qc_gaps",
+                out_written,
+                out_required
+            ));
+            let report = c_try!(require_ref(
+                report,
+                "sidereon_observation_qc_gaps",
+                "report"
+            ));
+            let values: Vec<_> = report
+                .inner
+                .data_gaps
+                .iter()
+                .map(|gap| SidereonObservationQcDataGap {
+                    start_epoch: rinex_epoch_time_to_c(gap.start_epoch),
+                    end_epoch: rinex_epoch_time_to_c(gap.end_epoch),
+                    nominal_interval_s: gap.nominal_interval_s,
+                    observed_delta_s: gap.observed_delta_s,
+                    missing_epochs: gap.missing_epochs,
+                })
+                .collect();
+            c_try!(copy_prefix_to_c(
+                "sidereon_observation_qc_gaps",
+                "out",
+                &values,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_observation_qc_satellites(
+    report: *const SidereonObservationQcReport,
+    out: *mut SidereonObservationQcSatellite,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_observation_qc_satellites",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_observation_qc_satellites",
+                out_written,
+                out_required
+            ));
+            let report = c_try!(require_ref(
+                report,
+                "sidereon_observation_qc_satellites",
+                "report"
+            ));
+            let values: Vec<_> = report
+                .inner
+                .satellites
+                .iter()
+                .map(|row| SidereonObservationQcSatellite {
+                    sat_id: satellite_token(row.satellite),
+                    epochs_with_observations: row.epochs_with_observations,
+                    value_observations: row.value_observations,
+                })
+                .collect();
+            c_try!(copy_prefix_to_c(
+                "sidereon_observation_qc_satellites",
+                "out",
+                &values,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_observation_qc_satellite_signals(
+    report: *const SidereonObservationQcReport,
+    out: *mut SidereonObservationQcSignal,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_observation_qc_satellite_signals",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_observation_qc_satellite_signals",
+                out_written,
+                out_required
+            ));
+            let report = c_try!(require_ref(
+                report,
+                "sidereon_observation_qc_satellite_signals",
+                "report"
+            ));
+            let values: Vec<_> = report
+                .inner
+                .satellite_signals
+                .iter()
+                .map(|row| {
+                    observation_qc_signal_from_parts(
+                        satellite_token(row.satellite),
+                        row.satellite.system,
+                        &row.code,
+                        row.value_observations,
+                        row.ssi,
+                        row.snr,
+                    )
+                })
+                .collect();
+            c_try!(copy_prefix_to_c(
+                "sidereon_observation_qc_satellite_signals",
+                "out",
+                &values,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_observation_qc_system_signals(
+    report: *const SidereonObservationQcReport,
+    out: *mut SidereonObservationQcSignal,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_observation_qc_system_signals",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_observation_qc_system_signals",
+                out_written,
+                out_required
+            ));
+            let report = c_try!(require_ref(
+                report,
+                "sidereon_observation_qc_system_signals",
+                "report"
+            ));
+            let values: Vec<_> = report
+                .inner
+                .system_signals
+                .iter()
+                .map(|row| {
+                    observation_qc_signal_from_parts(
+                        observation_qc_signal_empty_sat(),
+                        row.system,
+                        &row.code,
+                        row.value_observations,
+                        row.ssi,
+                        row.snr,
+                    )
+                })
+                .collect();
+            c_try!(copy_prefix_to_c(
+                "sidereon_observation_qc_system_signals",
+                "out",
+                &values,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_observation_qc_report_free(
+    report: *mut SidereonObservationQcReport,
+) {
+    free_boxed(report);
+}
+
+fn rinex_qc_severity_to_c(severity: sidereon_core::rinex::qc::Severity) -> u32 {
+    match severity {
+        sidereon_core::rinex::qc::Severity::Fatal => SidereonRinexQcSeverity::Fatal as u32,
+        sidereon_core::rinex::qc::Severity::Error => SidereonRinexQcSeverity::Error as u32,
+        sidereon_core::rinex::qc::Severity::Warning => SidereonRinexQcSeverity::Warning as u32,
+        sidereon_core::rinex::qc::Severity::Info => SidereonRinexQcSeverity::Info as u32,
+    }
+}
+
+fn rinex_lint_summary_to_c(
+    report: &sidereon_core::rinex::qc::LintReport,
+) -> SidereonRinexLintSummary {
+    use sidereon_core::rinex::qc::Severity;
+    SidereonRinexLintSummary {
+        finding_count: report.findings.len(),
+        fatal_count: report.count(Severity::Fatal),
+        error_count: report.count(Severity::Error),
+        warning_count: report.count(Severity::Warning),
+        info_count: report.count(Severity::Info),
+        is_clean: report.is_clean(),
+        decoded_from_crinex: report.decoded_from_crinex,
+    }
+}
+
+fn rinex_lint_finding_to_c(
+    finding: &sidereon_core::rinex::qc::Finding,
+) -> SidereonRinexLintFinding {
+    let at = finding.at();
+    SidereonRinexLintFinding {
+        code: fixed_c_chars::<RINEX_QC_CODE_C_BYTES>(finding.code()),
+        severity: rinex_qc_severity_to_c(finding.severity()),
+        repairable: finding.is_repairable(),
+        has_epoch_index: at.epoch_index.is_some(),
+        epoch_index: at.epoch_index.unwrap_or(0),
+        has_satellite: at.satellite.is_some(),
+        satellite: at
+            .satellite
+            .as_deref()
+            .map(satellite_token_from_text)
+            .unwrap_or_else(observation_qc_signal_empty_sat),
+        has_field: at.field.is_some(),
+        field: fixed_c_chars::<RINEX_QC_FIELD_C_BYTES>(at.field.unwrap_or("")),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rinex_lint_obs(
+    data: *const u8,
+    len: usize,
+    out_report: *mut *mut SidereonRinexLintReport,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_rinex_lint_obs", SidereonStatus::Panic, || {
+        let out_report = c_try!(require_out(
+            out_report,
+            "sidereon_rinex_lint_obs",
+            "out_report"
+        ));
+        *out_report = ptr::null_mut();
+        let text = c_try!(text_bytes_from_c("sidereon_rinex_lint_obs", data, len));
+        let inner = sidereon_core::rinex::qc::lint_obs_text(text);
+        write_boxed_handle(out_report, SidereonRinexLintReport { inner });
+        SidereonStatus::Ok
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rinex_lint_nav(
+    data: *const u8,
+    len: usize,
+    out_report: *mut *mut SidereonRinexLintReport,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_rinex_lint_nav", SidereonStatus::Panic, || {
+        let out_report = c_try!(require_out(
+            out_report,
+            "sidereon_rinex_lint_nav",
+            "out_report"
+        ));
+        *out_report = ptr::null_mut();
+        let text = c_try!(text_bytes_from_c("sidereon_rinex_lint_nav", data, len));
+        let inner = sidereon_core::rinex::qc::lint_nav_text(text);
+        write_boxed_handle(out_report, SidereonRinexLintReport { inner });
+        SidereonStatus::Ok
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rinex_lint_summary(
+    report: *const SidereonRinexLintReport,
+    out_summary: *mut SidereonRinexLintSummary,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_rinex_lint_summary", SidereonStatus::Panic, || {
+        let out = c_try!(require_out(
+            out_summary,
+            "sidereon_rinex_lint_summary",
+            "out_summary"
+        ));
+        let report = c_try!(require_ref(report, "sidereon_rinex_lint_summary", "report"));
+        *out = rinex_lint_summary_to_c(&report.inner);
+        SidereonStatus::Ok
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rinex_lint_findings(
+    report: *const SidereonRinexLintReport,
+    out: *mut SidereonRinexLintFinding,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rinex_lint_findings",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_rinex_lint_findings",
+                out_written,
+                out_required
+            ));
+            let report = c_try!(require_ref(
+                report,
+                "sidereon_rinex_lint_findings",
+                "report"
+            ));
+            let values: Vec<_> = report
+                .inner
+                .findings
+                .iter()
+                .map(rinex_lint_finding_to_c)
+                .collect();
+            c_try!(copy_prefix_to_c(
+                "sidereon_rinex_lint_findings",
+                "out",
+                &values,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rinex_lint_report_free(report: *mut SidereonRinexLintReport) {
+    free_boxed(report);
+}
+
+fn repair_options_from_c(
+    fn_name: &str,
+    options: *const SidereonRinexRepairOptions,
+) -> Result<sidereon_core::rinex::qc::RepairOptions, SidereonStatus> {
+    let Some(options) = (unsafe { options.as_ref() }) else {
+        return Ok(sidereon_core::rinex::qc::RepairOptions::default());
+    };
+    let file_stamp = if options.has_file_stamp {
+        Some(sidereon_core::rinex::observations::PgmRunByDate {
+            program: fixed_c_array_to_string(
+                fn_name,
+                "file_stamp_program",
+                &options.file_stamp_program,
+            )?,
+            run_by: fixed_c_array_to_string(
+                fn_name,
+                "file_stamp_run_by",
+                &options.file_stamp_run_by,
+            )?,
+            date: fixed_c_array_to_string(fn_name, "file_stamp_date", &options.file_stamp_date)?,
+        })
+    } else {
+        None
+    };
+    Ok(sidereon_core::rinex::qc::RepairOptions {
+        file_stamp,
+        set_interval: options.set_interval,
+        set_time_of_last_obs: options.set_time_of_last_obs,
+        set_obs_counts: options.set_obs_counts,
+        drop_empty_records: options.drop_empty_records,
+        sort_records: options.sort_records,
+        drop_unsupported: options.drop_unsupported,
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rinex_repair_options_init(
+    out_options: *mut SidereonRinexRepairOptions,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rinex_repair_options_init",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_options,
+                "sidereon_rinex_repair_options_init",
+                "out_options"
+            ));
+            let defaults = sidereon_core::rinex::qc::RepairOptions::default();
+            *out = SidereonRinexRepairOptions {
+                has_file_stamp: false,
+                file_stamp_program: [0; RINEX_QC_FIELD_C_BYTES],
+                file_stamp_run_by: [0; RINEX_QC_FIELD_C_BYTES],
+                file_stamp_date: [0; RINEX_QC_FIELD_C_BYTES],
+                set_interval: defaults.set_interval,
+                set_time_of_last_obs: defaults.set_time_of_last_obs,
+                set_obs_counts: defaults.set_obs_counts,
+                drop_empty_records: defaults.drop_empty_records,
+                sort_records: defaults.sort_records,
+                drop_unsupported: defaults.drop_unsupported,
+            };
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rinex_repair_obs(
+    data: *const u8,
+    len: usize,
+    options: *const SidereonRinexRepairOptions,
+    out_repair: *mut *mut SidereonRinexRepair,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_rinex_repair_obs", SidereonStatus::Panic, || {
+        let out_repair = c_try!(require_out(
+            out_repair,
+            "sidereon_rinex_repair_obs",
+            "out_repair"
+        ));
+        *out_repair = ptr::null_mut();
+        let text = c_try!(text_bytes_from_c("sidereon_rinex_repair_obs", data, len));
+        let options = c_try!(repair_options_from_c("sidereon_rinex_repair_obs", options));
+        match sidereon_core::rinex::qc::repair_obs_text(text, &options) {
+            Ok(repair) => {
+                let crinex_text =
+                    match sidereon_core::rinex::qc::repair_obs_to_crinex_string(&repair) {
+                        Ok(text) => Some(text.into_bytes()),
+                        Err(_) => None,
+                    };
+                let text = repair.repaired.to_rinex_string().into_bytes();
+                write_boxed_handle(
+                    out_repair,
+                    SidereonRinexRepair {
+                        text,
+                        crinex_text,
+                        actions: repair.actions,
+                        remaining: repair.remaining,
+                        decoded_from_crinex: repair.decoded_from_crinex,
+                    },
+                );
+                SidereonStatus::Ok
+            }
+            Err(err) => {
+                set_last_error(format!("sidereon_rinex_repair_obs: {err}"));
+                SidereonStatus::InvalidArgument
+            }
+        }
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rinex_repair_nav(
+    data: *const u8,
+    len: usize,
+    options: *const SidereonRinexRepairOptions,
+    out_repair: *mut *mut SidereonRinexRepair,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_rinex_repair_nav", SidereonStatus::Panic, || {
+        let out_repair = c_try!(require_out(
+            out_repair,
+            "sidereon_rinex_repair_nav",
+            "out_repair"
+        ));
+        *out_repair = ptr::null_mut();
+        let text = c_try!(text_bytes_from_c("sidereon_rinex_repair_nav", data, len));
+        let options = c_try!(repair_options_from_c("sidereon_rinex_repair_nav", options));
+        match sidereon_core::rinex::qc::repair_nav_text(text, &options) {
+            Ok(repair) => {
+                let text = sidereon_core::rinex::nav::encode_nav(&repair.records).into_bytes();
+                write_boxed_handle(
+                    out_repair,
+                    SidereonRinexRepair {
+                        text,
+                        crinex_text: None,
+                        actions: repair.actions,
+                        remaining: repair.remaining,
+                        decoded_from_crinex: false,
+                    },
+                );
+                SidereonStatus::Ok
+            }
+            Err(err) => {
+                set_last_error(format!("sidereon_rinex_repair_nav: {err}"));
+                SidereonStatus::InvalidArgument
+            }
+        }
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rinex_repair_text(
+    repair: *const SidereonRinexRepair,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_rinex_repair_text", SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(
+            "sidereon_rinex_repair_text",
+            out_written,
+            out_required
+        ));
+        let repair = c_try!(require_ref(repair, "sidereon_rinex_repair_text", "repair"));
+        c_try!(copy_prefix_to_c(
+            "sidereon_rinex_repair_text",
+            "out",
+            &repair.text,
+            out,
+            len,
+            out_written,
+            out_required,
+        ));
+        SidereonStatus::Ok
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rinex_repair_crinex_text(
+    repair: *const SidereonRinexRepair,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rinex_repair_crinex_text",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_rinex_repair_crinex_text",
+                out_written,
+                out_required
+            ));
+            let repair = c_try!(require_ref(
+                repair,
+                "sidereon_rinex_repair_crinex_text",
+                "repair"
+            ));
+            let Some(text) = repair.crinex_text.as_ref() else {
+                set_last_error(
+                    "sidereon_rinex_repair_crinex_text: no CRINEX output available".to_string(),
+                );
+                return SidereonStatus::InvalidArgument;
+            };
+            c_try!(copy_prefix_to_c(
+                "sidereon_rinex_repair_crinex_text",
+                "out",
+                text,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rinex_repair_summary(
+    repair: *const SidereonRinexRepair,
+    out_summary: *mut SidereonRinexLintSummary,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rinex_repair_summary",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_summary,
+                "sidereon_rinex_repair_summary",
+                "out_summary"
+            ));
+            let repair = c_try!(require_ref(
+                repair,
+                "sidereon_rinex_repair_summary",
+                "repair"
+            ));
+            *out = rinex_lint_summary_to_c(&repair.remaining);
+            out.decoded_from_crinex = repair.decoded_from_crinex;
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rinex_repair_actions(
+    repair: *const SidereonRinexRepair,
+    out: *mut SidereonRinexRepairAction,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rinex_repair_actions",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_rinex_repair_actions",
+                out_written,
+                out_required
+            ));
+            let repair = c_try!(require_ref(
+                repair,
+                "sidereon_rinex_repair_actions",
+                "repair"
+            ));
+            let values: Vec<_> = repair
+                .actions
+                .iter()
+                .map(|action| SidereonRinexRepairAction {
+                    id: fixed_c_chars::<RINEX_QC_CODE_C_BYTES>(action.id),
+                    message: fixed_c_chars::<RINEX_QC_FIELD_C_BYTES>(&action.message),
+                })
+                .collect();
+            c_try!(copy_prefix_to_c(
+                "sidereon_rinex_repair_actions",
+                "out",
+                &values,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rinex_repair_free(repair: *mut SidereonRinexRepair) {
+    free_boxed(repair);
+}
+
+// === Round-2 NMEA parse, accumulation, and GGA writing =======================
+
+pub const NMEA_TALKER_C_BYTES: usize = 3;
+
+pub struct SidereonNmeaLog {
+    epochs: Vec<sidereon_core::nmea::EpochSnapshot>,
+    sentence_count: usize,
+    skip_count: usize,
+    warning_count: usize,
+}
+
+pub struct SidereonNmeaAccumulator {
+    inner: sidereon_core::nmea::NmeaAccumulator,
+    epochs: Vec<sidereon_core::nmea::EpochSnapshot>,
+    sentence_count: usize,
+    skip_count: usize,
+    warning_count: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonNmeaSummary {
+    pub sentence_count: usize,
+    pub epoch_count: usize,
+    pub skip_count: usize,
+    pub warning_count: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonNmeaChunkSummary {
+    pub sentence_count: usize,
+    pub completed_epoch_count: usize,
+    pub skip_count: usize,
+    pub warning_count: usize,
+    pub retained_len: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonNmeaEpochSummary {
+    pub has_calendar_epoch: bool,
+    pub calendar_epoch: SidereonCalendarEpoch,
+    pub has_position: bool,
+    pub position: SidereonGeodetic,
+    pub has_instant_j2000_s: bool,
+    pub instant_j2000_s: f64,
+    pub has_pdop: bool,
+    pub pdop: f64,
+    pub has_hdop: bool,
+    pub hdop: f64,
+    pub has_vdop: bool,
+    pub vdop: f64,
+    pub used_satellite_count: usize,
+    pub satellites_in_view: usize,
+    pub sentence_count: usize,
+    pub skip_count: usize,
+    pub warning_count: usize,
+    pub has_gga: bool,
+    pub has_rmc: bool,
+    pub has_gll: bool,
+    pub gsa_count: usize,
+    pub gsv_group_count: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonNmeaGgaOptions {
+    pub talker: [c_char; NMEA_TALKER_C_BYTES],
+    pub utc_seconds_of_day: f64,
+    pub position: SidereonGeodetic,
+    pub quality: u32,
+    pub satellites_used: u8,
+    pub hdop: f64,
+    pub coordinate_decimals: u8,
+}
+
+fn nmea_summary(
+    sentence_count: usize,
+    epochs: &[sidereon_core::nmea::EpochSnapshot],
+    skip_count: usize,
+    warning_count: usize,
+) -> SidereonNmeaSummary {
+    SidereonNmeaSummary {
+        sentence_count,
+        epoch_count: epochs.len(),
+        skip_count,
+        warning_count,
+    }
+}
+
+fn nmea_epoch_diagnostic_counts(epoch: &sidereon_core::nmea::EpochSnapshot) -> (usize, usize) {
+    (
+        epoch.diagnostics.skips.len(),
+        epoch.diagnostics.warnings.len(),
+    )
+}
+
+fn nmea_epoch_calendar(
+    epoch: &sidereon_core::nmea::EpochSnapshot,
+) -> Option<SidereonCalendarEpoch> {
+    let date = epoch.date?;
+    let time = epoch.time_of_day?;
+    Some(SidereonCalendarEpoch {
+        year: i32::from(date.year),
+        month: i32::from(date.month),
+        day: i32::from(date.day),
+        hour: i32::from(time.hour),
+        minute: i32::from(time.minute),
+        second: f64::from(time.second) + f64::from(time.nanos) * 1.0e-9,
+    })
+}
+
+fn nmea_epoch_summary_to_c(epoch: &sidereon_core::nmea::EpochSnapshot) -> SidereonNmeaEpochSummary {
+    let calendar_epoch = nmea_epoch_calendar(epoch);
+    let position = epoch.position();
+    let pdop = epoch.pdop();
+    let hdop = epoch.hdop();
+    let vdop = epoch.vdop();
+    let (skip_count, warning_count) = nmea_epoch_diagnostic_counts(epoch);
+    let instant_j2000_s = calendar_epoch
+        .map(|epoch| {
+            sidereon_core::astro::time::civil::j2000_seconds(
+                epoch.year,
+                epoch.month,
+                epoch.day,
+                epoch.hour,
+                epoch.minute,
+                epoch.second,
+            )
+        })
+        .unwrap_or(0.0);
+
+    SidereonNmeaEpochSummary {
+        has_calendar_epoch: calendar_epoch.is_some(),
+        calendar_epoch: calendar_epoch.unwrap_or(SidereonCalendarEpoch {
+            year: 0,
+            month: 0,
+            day: 0,
+            hour: 0,
+            minute: 0,
+            second: 0.0,
+        }),
+        has_position: position.is_some(),
+        position: position
+            .as_ref()
+            .map(geodetic_to_c)
+            .unwrap_or_else(empty_geodetic),
+        has_instant_j2000_s: calendar_epoch.is_some(),
+        instant_j2000_s,
+        has_pdop: pdop.is_some(),
+        pdop: pdop.unwrap_or(0.0),
+        has_hdop: hdop.is_some(),
+        hdop: hdop.unwrap_or(0.0),
+        has_vdop: vdop.is_some(),
+        vdop: vdop.unwrap_or(0.0),
+        used_satellite_count: epoch.used_satellites().count(),
+        satellites_in_view: epoch.satellites_in_view(),
+        sentence_count: epoch.sentence_count,
+        skip_count,
+        warning_count,
+        has_gga: epoch.gga.is_some(),
+        has_rmc: epoch.rmc.is_some(),
+        has_gll: epoch.gll.is_some(),
+        gsa_count: epoch.gsa.len(),
+        gsv_group_count: epoch.gsv.len(),
+    }
+}
+
+fn nmea_gga_quality_from_c(
+    fn_name: &str,
+    quality: u32,
+) -> Result<sidereon_core::nmea::GgaQuality, SidereonStatus> {
+    if quality > u32::from(u8::MAX) {
+        set_last_error(format!("{fn_name}: invalid GGA quality {quality}"));
+        return Err(SidereonStatus::InvalidArgument);
+    }
+    Ok(match quality as u8 {
+        0 => sidereon_core::nmea::GgaQuality::Invalid,
+        1 => sidereon_core::nmea::GgaQuality::GpsSps,
+        2 => sidereon_core::nmea::GgaQuality::Differential,
+        3 => sidereon_core::nmea::GgaQuality::Pps,
+        4 => sidereon_core::nmea::GgaQuality::RtkFixed,
+        5 => sidereon_core::nmea::GgaQuality::RtkFloat,
+        6 => sidereon_core::nmea::GgaQuality::Estimated,
+        7 => sidereon_core::nmea::GgaQuality::Manual,
+        8 => sidereon_core::nmea::GgaQuality::Simulator,
+        other => sidereon_core::nmea::GgaQuality::Other(other),
+    })
+}
+
+fn nmea_talker_from_c(
+    fn_name: &str,
+    talker: &[c_char; NMEA_TALKER_C_BYTES],
+) -> Result<sidereon_core::nmea::NmeaTalker, SidereonStatus> {
+    let talker = fixed_c_array_to_string(fn_name, "talker", talker)?;
+    if talker.len() != 2 || !talker.bytes().all(|byte| byte.is_ascii()) {
+        set_last_error(format!("{fn_name}: talker must be exactly two ASCII bytes"));
+        return Err(SidereonStatus::InvalidArgument);
+    }
+    Ok(sidereon_core::nmea::NmeaTalker::parse(&talker))
+}
+
+fn nmea_log_from_parsed(
+    parsed: sidereon_core::nmea::Parsed<sidereon_core::nmea::NmeaLog>,
+) -> SidereonNmeaLog {
+    let sentence_count = parsed.value.sentences.len();
+    let mut skip_count = parsed.diagnostics.skips.len();
+    let mut warning_count = parsed.diagnostics.warnings.len();
+    let epochs = sidereon_core::nmea::group_epochs(&parsed.value);
+    for epoch in &epochs {
+        let (epoch_skips, epoch_warnings) = nmea_epoch_diagnostic_counts(epoch);
+        skip_count += epoch_skips;
+        warning_count += epoch_warnings;
+    }
+    SidereonNmeaLog {
+        epochs,
+        sentence_count,
+        skip_count,
+        warning_count,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_nmea_parse(
+    data: *const u8,
+    len: usize,
+    out_log: *mut *mut SidereonNmeaLog,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_nmea_parse", SidereonStatus::Panic, || {
+        let out_log = c_try!(require_out(out_log, "sidereon_nmea_parse", "out_log"));
+        *out_log = ptr::null_mut();
+        let bytes = c_try!(require_slice(data, len, "sidereon_nmea_parse", "data"));
+        let log = nmea_log_from_parsed(sidereon_core::nmea::parse_nmea(bytes));
+        write_boxed_handle(out_log, log);
+        SidereonStatus::Ok
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_nmea_log_summary(
+    log: *const SidereonNmeaLog,
+    out_summary: *mut SidereonNmeaSummary,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_nmea_log_summary", SidereonStatus::Panic, || {
+        let out = c_try!(require_out(
+            out_summary,
+            "sidereon_nmea_log_summary",
+            "out_summary"
+        ));
+        let log = c_try!(require_ref(log, "sidereon_nmea_log_summary", "log"));
+        *out = nmea_summary(
+            log.sentence_count,
+            &log.epochs,
+            log.skip_count,
+            log.warning_count,
+        );
+        SidereonStatus::Ok
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_nmea_log_epochs(
+    log: *const SidereonNmeaLog,
+    out: *mut SidereonNmeaEpochSummary,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_nmea_log_epochs", SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(
+            "sidereon_nmea_log_epochs",
+            out_written,
+            out_required
+        ));
+        let log = c_try!(require_ref(log, "sidereon_nmea_log_epochs", "log"));
+        let values: Vec<_> = log.epochs.iter().map(nmea_epoch_summary_to_c).collect();
+        c_try!(copy_prefix_to_c(
+            "sidereon_nmea_log_epochs",
+            "out",
+            &values,
+            out,
+            len,
+            out_written,
+            out_required,
+        ));
+        SidereonStatus::Ok
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_nmea_log_free(log: *mut SidereonNmeaLog) {
+    free_boxed(log);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_nmea_accumulator_new(
+    out_accumulator: *mut *mut SidereonNmeaAccumulator,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_nmea_accumulator_new",
+        SidereonStatus::Panic,
+        || {
+            let out_accumulator = c_try!(require_out(
+                out_accumulator,
+                "sidereon_nmea_accumulator_new",
+                "out_accumulator"
+            ));
+            *out_accumulator = ptr::null_mut();
+            write_boxed_handle(
+                out_accumulator,
+                SidereonNmeaAccumulator {
+                    inner: sidereon_core::nmea::NmeaAccumulator::new(),
+                    epochs: Vec::new(),
+                    sentence_count: 0,
+                    skip_count: 0,
+                    warning_count: 0,
+                },
+            );
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_nmea_accumulator_push(
+    accumulator: *mut SidereonNmeaAccumulator,
+    data: *const u8,
+    len: usize,
+    out_summary: *mut SidereonNmeaChunkSummary,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_nmea_accumulator_push",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_summary,
+                "sidereon_nmea_accumulator_push",
+                "out_summary"
+            ));
+            *out = SidereonNmeaChunkSummary {
+                sentence_count: 0,
+                completed_epoch_count: 0,
+                skip_count: 0,
+                warning_count: 0,
+                retained_len: 0,
+            };
+            let accumulator = c_try!(require_mut(
+                accumulator,
+                "sidereon_nmea_accumulator_push",
+                "accumulator"
+            ));
+            let bytes = c_try!(require_slice(
+                data,
+                len,
+                "sidereon_nmea_accumulator_push",
+                "data"
+            ));
+            let output = accumulator.inner.push_bytes(bytes);
+            let sentence_count = output.sentences.len();
+            let mut skip_count = output.diagnostics.skips.len();
+            let mut warning_count = output.diagnostics.warnings.len();
+            let completed_epoch_count = output.snapshots.len();
+            for epoch in &output.snapshots {
+                let (epoch_skips, epoch_warnings) = nmea_epoch_diagnostic_counts(epoch);
+                skip_count += epoch_skips;
+                warning_count += epoch_warnings;
+            }
+            accumulator.sentence_count += sentence_count;
+            accumulator.skip_count += skip_count;
+            accumulator.warning_count += warning_count;
+            accumulator.epochs.extend(output.snapshots);
+            *out = SidereonNmeaChunkSummary {
+                sentence_count,
+                completed_epoch_count,
+                skip_count,
+                warning_count,
+                retained_len: accumulator.inner.retained_len(),
+            };
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_nmea_accumulator_finish(
+    accumulator: *mut SidereonNmeaAccumulator,
+    out_summary: *mut SidereonNmeaChunkSummary,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_nmea_accumulator_finish",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_summary,
+                "sidereon_nmea_accumulator_finish",
+                "out_summary"
+            ));
+            *out = SidereonNmeaChunkSummary {
+                sentence_count: 0,
+                completed_epoch_count: 0,
+                skip_count: 0,
+                warning_count: 0,
+                retained_len: 0,
+            };
+            let accumulator = c_try!(require_mut(
+                accumulator,
+                "sidereon_nmea_accumulator_finish",
+                "accumulator"
+            ));
+            let Some(epoch) = accumulator.inner.finish() else {
+                return SidereonStatus::Ok;
+            };
+            let (skip_count, warning_count) = nmea_epoch_diagnostic_counts(&epoch);
+            accumulator.skip_count += skip_count;
+            accumulator.warning_count += warning_count;
+            accumulator.epochs.push(epoch);
+            *out = SidereonNmeaChunkSummary {
+                sentence_count: 0,
+                completed_epoch_count: 1,
+                skip_count,
+                warning_count,
+                retained_len: accumulator.inner.retained_len(),
+            };
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_nmea_accumulator_summary(
+    accumulator: *const SidereonNmeaAccumulator,
+    out_summary: *mut SidereonNmeaSummary,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_nmea_accumulator_summary",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_summary,
+                "sidereon_nmea_accumulator_summary",
+                "out_summary"
+            ));
+            let accumulator = c_try!(require_ref(
+                accumulator,
+                "sidereon_nmea_accumulator_summary",
+                "accumulator"
+            ));
+            *out = nmea_summary(
+                accumulator.sentence_count,
+                &accumulator.epochs,
+                accumulator.skip_count,
+                accumulator.warning_count,
+            );
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_nmea_accumulator_epochs(
+    accumulator: *const SidereonNmeaAccumulator,
+    out: *mut SidereonNmeaEpochSummary,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_nmea_accumulator_epochs",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_nmea_accumulator_epochs",
+                out_written,
+                out_required
+            ));
+            let accumulator = c_try!(require_ref(
+                accumulator,
+                "sidereon_nmea_accumulator_epochs",
+                "accumulator"
+            ));
+            let values: Vec<_> = accumulator
+                .epochs
+                .iter()
+                .map(nmea_epoch_summary_to_c)
+                .collect();
+            c_try!(copy_prefix_to_c(
+                "sidereon_nmea_accumulator_epochs",
+                "out",
+                &values,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_nmea_accumulator_retained_len(
+    accumulator: *const SidereonNmeaAccumulator,
+    out_len: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_nmea_accumulator_retained_len",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_len,
+                "sidereon_nmea_accumulator_retained_len",
+                "out_len"
+            ));
+            let accumulator = c_try!(require_ref(
+                accumulator,
+                "sidereon_nmea_accumulator_retained_len",
+                "accumulator"
+            ));
+            *out = accumulator.inner.retained_len();
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_nmea_accumulator_free(accumulator: *mut SidereonNmeaAccumulator) {
+    free_boxed(accumulator);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_nmea_write_gga(
+    options: *const SidereonNmeaGgaOptions,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_nmea_write_gga", SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(
+            "sidereon_nmea_write_gga",
+            out_written,
+            out_required
+        ));
+        let options = c_try!(require_ref(options, "sidereon_nmea_write_gga", "options"));
+        let talker = c_try!(nmea_talker_from_c(
+            "sidereon_nmea_write_gga",
+            &options.talker
+        ));
+        let time = match sidereon_core::nmea::NmeaTime::from_seconds_of_day_floor_centis(
+            options.utc_seconds_of_day,
+        ) {
+            Ok(time) => time,
+            Err(err) => {
+                set_last_error(format!("sidereon_nmea_write_gga: {err}"));
+                return SidereonStatus::InvalidArgument;
+            }
+        };
+        let position = c_try!(geodetic_to_wgs84(
+            "sidereon_nmea_write_gga",
+            "position",
+            options.position
+        ));
+        let quality = c_try!(nmea_gga_quality_from_c(
+            "sidereon_nmea_write_gga",
+            options.quality
+        ));
+        let gga = match sidereon_core::nmea::Gga::vrs_position(
+            position,
+            time,
+            quality,
+            options.satellites_used,
+            options.hdop,
+            options.coordinate_decimals,
+        ) {
+            Ok(gga) => gga,
+            Err(err) => {
+                set_last_error(format!("sidereon_nmea_write_gga: {err}"));
+                return SidereonStatus::InvalidArgument;
+            }
+        };
+        let sentence = match sidereon_core::nmea::write_gga(talker, &gga) {
+            Ok(sentence) => sentence,
+            Err(err) => {
+                set_last_error(format!("sidereon_nmea_write_gga: {err}"));
+                return SidereonStatus::InvalidArgument;
+            }
+        };
+        c_try!(copy_prefix_to_c(
+            "sidereon_nmea_write_gga",
+            "out",
+            sentence.as_bytes(),
+            out,
+            len,
+            out_written,
+            out_required,
+        ));
+        SidereonStatus::Ok
+    })
+}
+
+// === Round-2 space-weather table and table-backed decay ======================
+
+pub struct SidereonSpaceWeatherTable {
+    inner: Arc<sidereon_core::astro::space_weather::SpaceWeatherTable>,
+    skip_count: usize,
+    warning_count: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonSpaceWeatherObservationClass {
+    Observed = 0,
+    Interpolated = 1,
+    DailyPredicted = 2,
+    MonthlyPredicted = 3,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonSpaceWeatherTableSummary {
+    pub day_count: usize,
+    pub monthly_count: usize,
+    pub skip_count: usize,
+    pub warning_count: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonSpaceWeatherCoverage {
+    pub first_j2000_s: f64,
+    pub has_last_observed_j2000_s: bool,
+    pub last_observed_j2000_s: f64,
+    pub has_last_daily_predicted_j2000_s: bool,
+    pub last_daily_predicted_j2000_s: f64,
+    pub end_j2000_s: f64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonSpaceWeatherPolicy {
+    pub allow_interpolated: bool,
+    pub allow_daily_predicted: bool,
+    pub allow_monthly_predicted: bool,
+    pub require_geomagnetic: bool,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonSpaceWeatherSample {
+    pub weather: SidereonSpaceWeather,
+    pub class: u32,
+    pub ap_defaulted: bool,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonSpaceWeatherDay {
+    pub year: i32,
+    pub month: u8,
+    pub day: u8,
+    pub class: u32,
+    pub has_bsrn: bool,
+    pub bsrn: u16,
+    pub has_nd: bool,
+    pub nd: u8,
+    pub has_kp: [bool; 8],
+    pub kp_10: [u16; 8],
+    pub has_kp_sum_10: bool,
+    pub kp_sum_10: u16,
+    pub has_ap: [bool; 8],
+    pub ap: [u16; 8],
+    pub has_ap_avg: bool,
+    pub ap_avg: u16,
+    pub has_cp_10: bool,
+    pub cp_10: u8,
+    pub has_c9: bool,
+    pub c9: u8,
+    pub has_isn: bool,
+    pub isn: u16,
+    pub has_flux_qualifier: bool,
+    pub flux_qualifier: u8,
+    pub has_f107_obs: bool,
+    pub f107_obs: f64,
+    pub has_f107_adj: bool,
+    pub f107_adj: f64,
+    pub has_f107_obs_center81: bool,
+    pub f107_obs_center81: f64,
+    pub has_f107_obs_last81: bool,
+    pub f107_obs_last81: f64,
+    pub has_f107_adj_center81: bool,
+    pub f107_adj_center81: f64,
+    pub has_f107_adj_last81: bool,
+    pub f107_adj_last81: f64,
+}
+
+fn space_weather_observation_class_to_c(
+    class: sidereon_core::astro::space_weather::ObservationClass,
+) -> u32 {
+    match class {
+        sidereon_core::astro::space_weather::ObservationClass::Observed => {
+            SidereonSpaceWeatherObservationClass::Observed as u32
+        }
+        sidereon_core::astro::space_weather::ObservationClass::Interpolated => {
+            SidereonSpaceWeatherObservationClass::Interpolated as u32
+        }
+        sidereon_core::astro::space_weather::ObservationClass::DailyPredicted => {
+            SidereonSpaceWeatherObservationClass::DailyPredicted as u32
+        }
+        sidereon_core::astro::space_weather::ObservationClass::MonthlyPredicted => {
+            SidereonSpaceWeatherObservationClass::MonthlyPredicted as u32
+        }
+    }
+}
+
+fn space_weather_policy_from_c(
+    policy: *const SidereonSpaceWeatherPolicy,
+) -> sidereon_core::astro::space_weather::SpaceWeatherPolicy {
+    let Some(policy) = (unsafe { policy.as_ref() }) else {
+        return sidereon_core::astro::space_weather::SpaceWeatherPolicy::default();
+    };
+    sidereon_core::astro::space_weather::SpaceWeatherPolicy {
+        allow_interpolated: policy.allow_interpolated,
+        allow_daily_predicted: policy.allow_daily_predicted,
+        allow_monthly_predicted: policy.allow_monthly_predicted,
+        require_geomagnetic: policy.require_geomagnetic,
+    }
+}
+
+fn space_weather_sample_to_c(
+    sample: sidereon_core::astro::space_weather::SpaceWeatherSample,
+) -> SidereonSpaceWeatherSample {
+    SidereonSpaceWeatherSample {
+        weather: space_weather_to_c(sample.space_weather),
+        class: space_weather_observation_class_to_c(sample.class),
+        ap_defaulted: sample.ap_defaulted,
+    }
+}
+
+fn option_u16_array_to_c(values: [Option<u16>; 8]) -> ([bool; 8], [u16; 8]) {
+    let mut present = [false; 8];
+    let mut out = [0u16; 8];
+    for (idx, value) in values.into_iter().enumerate() {
+        if let Some(value) = value {
+            present[idx] = true;
+            out[idx] = value;
+        }
+    }
+    (present, out)
+}
+
+fn space_weather_day_to_c(
+    row: &sidereon_core::astro::space_weather::SpaceWeatherDay,
+) -> SidereonSpaceWeatherDay {
+    let (has_kp, kp_10) = option_u16_array_to_c(row.kp_10);
+    let (has_ap, ap) = option_u16_array_to_c(row.ap);
+    SidereonSpaceWeatherDay {
+        year: row.year,
+        month: row.month,
+        day: row.day,
+        class: space_weather_observation_class_to_c(row.class),
+        has_bsrn: row.bsrn.is_some(),
+        bsrn: row.bsrn.unwrap_or(0),
+        has_nd: row.nd.is_some(),
+        nd: row.nd.unwrap_or(0),
+        has_kp,
+        kp_10,
+        has_kp_sum_10: row.kp_sum_10.is_some(),
+        kp_sum_10: row.kp_sum_10.unwrap_or(0),
+        has_ap,
+        ap,
+        has_ap_avg: row.ap_avg.is_some(),
+        ap_avg: row.ap_avg.unwrap_or(0),
+        has_cp_10: row.cp_10.is_some(),
+        cp_10: row.cp_10.unwrap_or(0),
+        has_c9: row.c9.is_some(),
+        c9: row.c9.unwrap_or(0),
+        has_isn: row.isn.is_some(),
+        isn: row.isn.unwrap_or(0),
+        has_flux_qualifier: row.flux_qualifier.is_some(),
+        flux_qualifier: row.flux_qualifier.unwrap_or(0),
+        has_f107_obs: row.f107_obs.is_some(),
+        f107_obs: row.f107_obs.unwrap_or(0.0),
+        has_f107_adj: row.f107_adj.is_some(),
+        f107_adj: row.f107_adj.unwrap_or(0.0),
+        has_f107_obs_center81: row.f107_obs_center81.is_some(),
+        f107_obs_center81: row.f107_obs_center81.unwrap_or(0.0),
+        has_f107_obs_last81: row.f107_obs_last81.is_some(),
+        f107_obs_last81: row.f107_obs_last81.unwrap_or(0.0),
+        has_f107_adj_center81: row.f107_adj_center81.is_some(),
+        f107_adj_center81: row.f107_adj_center81.unwrap_or(0.0),
+        has_f107_adj_last81: row.f107_adj_last81.is_some(),
+        f107_adj_last81: row.f107_adj_last81.unwrap_or(0.0),
+    }
+}
+
+fn space_weather_table_summary(
+    table: &SidereonSpaceWeatherTable,
+) -> SidereonSpaceWeatherTableSummary {
+    SidereonSpaceWeatherTableSummary {
+        day_count: table.inner.days().len(),
+        monthly_count: table.inner.monthly().len(),
+        skip_count: table.skip_count,
+        warning_count: table.warning_count,
+    }
+}
+
+fn space_weather_table_from_parsed(
+    parsed: sidereon_core::astro::space_weather::Parsed<
+        sidereon_core::astro::space_weather::SpaceWeatherTable,
+    >,
+) -> SidereonSpaceWeatherTable {
+    SidereonSpaceWeatherTable {
+        inner: Arc::new(parsed.value),
+        skip_count: parsed.diagnostics.skips.len(),
+        warning_count: parsed.diagnostics.warnings.len(),
+    }
+}
+
+fn map_space_weather_error(
+    fn_name: &str,
+    err: sidereon_core::astro::space_weather::SpaceWeatherError,
+) -> SidereonStatus {
+    set_last_error(format!("{fn_name}: {err}"));
+    match err {
+        sidereon_core::astro::space_weather::SpaceWeatherError::NotText => {
+            SidereonStatus::InvalidToken
+        }
+        _ => SidereonStatus::InvalidArgument,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_space_weather_table_parse(
+    data: *const u8,
+    len: usize,
+    out_table: *mut *mut SidereonSpaceWeatherTable,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_space_weather_table_parse",
+        SidereonStatus::Panic,
+        || {
+            let out_table = c_try!(require_out(
+                out_table,
+                "sidereon_space_weather_table_parse",
+                "out_table"
+            ));
+            *out_table = ptr::null_mut();
+            let bytes = c_try!(require_slice(
+                data,
+                len,
+                "sidereon_space_weather_table_parse",
+                "data"
+            ));
+            match sidereon_core::astro::space_weather::parse(bytes) {
+                Ok(parsed) => {
+                    write_boxed_handle(out_table, space_weather_table_from_parsed(parsed));
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_space_weather_error("sidereon_space_weather_table_parse", err),
+            }
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_space_weather_table_parse_csv(
+    data: *const u8,
+    len: usize,
+    out_table: *mut *mut SidereonSpaceWeatherTable,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_space_weather_table_parse_csv",
+        SidereonStatus::Panic,
+        || {
+            let out_table = c_try!(require_out(
+                out_table,
+                "sidereon_space_weather_table_parse_csv",
+                "out_table"
+            ));
+            *out_table = ptr::null_mut();
+            let text = c_try!(text_bytes_from_c(
+                "sidereon_space_weather_table_parse_csv",
+                data,
+                len
+            ));
+            match sidereon_core::astro::space_weather::parse_csv(text) {
+                Ok(parsed) => {
+                    write_boxed_handle(out_table, space_weather_table_from_parsed(parsed));
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_space_weather_error("sidereon_space_weather_table_parse_csv", err),
+            }
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_space_weather_table_parse_txt(
+    data: *const u8,
+    len: usize,
+    out_table: *mut *mut SidereonSpaceWeatherTable,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_space_weather_table_parse_txt",
+        SidereonStatus::Panic,
+        || {
+            let out_table = c_try!(require_out(
+                out_table,
+                "sidereon_space_weather_table_parse_txt",
+                "out_table"
+            ));
+            *out_table = ptr::null_mut();
+            let text = c_try!(text_bytes_from_c(
+                "sidereon_space_weather_table_parse_txt",
+                data,
+                len
+            ));
+            match sidereon_core::astro::space_weather::parse_txt(text) {
+                Ok(parsed) => {
+                    write_boxed_handle(out_table, space_weather_table_from_parsed(parsed));
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_space_weather_error("sidereon_space_weather_table_parse_txt", err),
+            }
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_space_weather_table_summary(
+    table: *const SidereonSpaceWeatherTable,
+    out_summary: *mut SidereonSpaceWeatherTableSummary,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_space_weather_table_summary",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_summary,
+                "sidereon_space_weather_table_summary",
+                "out_summary"
+            ));
+            let table = c_try!(require_ref(
+                table,
+                "sidereon_space_weather_table_summary",
+                "table"
+            ));
+            *out = space_weather_table_summary(table);
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_space_weather_table_coverage(
+    table: *const SidereonSpaceWeatherTable,
+    out_coverage: *mut SidereonSpaceWeatherCoverage,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_space_weather_table_coverage",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_coverage,
+                "sidereon_space_weather_table_coverage",
+                "out_coverage"
+            ));
+            let table = c_try!(require_ref(
+                table,
+                "sidereon_space_weather_table_coverage",
+                "table"
+            ));
+            let coverage = table.inner.coverage();
+            *out = SidereonSpaceWeatherCoverage {
+                first_j2000_s: coverage.first_j2000_s,
+                has_last_observed_j2000_s: coverage.last_observed_j2000_s.is_some(),
+                last_observed_j2000_s: coverage.last_observed_j2000_s.unwrap_or(0.0),
+                has_last_daily_predicted_j2000_s: coverage.last_daily_predicted_j2000_s.is_some(),
+                last_daily_predicted_j2000_s: coverage.last_daily_predicted_j2000_s.unwrap_or(0.0),
+                end_j2000_s: coverage.end_j2000_s,
+            };
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_space_weather_table_days(
+    table: *const SidereonSpaceWeatherTable,
+    out: *mut SidereonSpaceWeatherDay,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_space_weather_table_days",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_space_weather_table_days",
+                out_written,
+                out_required
+            ));
+            let table = c_try!(require_ref(
+                table,
+                "sidereon_space_weather_table_days",
+                "table"
+            ));
+            let values: Vec<_> = table
+                .inner
+                .days()
+                .iter()
+                .map(space_weather_day_to_c)
+                .collect();
+            c_try!(copy_prefix_to_c(
+                "sidereon_space_weather_table_days",
+                "out",
+                &values,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_space_weather_table_monthly(
+    table: *const SidereonSpaceWeatherTable,
+    out: *mut SidereonSpaceWeatherDay,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_space_weather_table_monthly",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_space_weather_table_monthly",
+                out_written,
+                out_required
+            ));
+            let table = c_try!(require_ref(
+                table,
+                "sidereon_space_weather_table_monthly",
+                "table"
+            ));
+            let values: Vec<_> = table
+                .inner
+                .monthly()
+                .iter()
+                .map(space_weather_day_to_c)
+                .collect();
+            c_try!(copy_prefix_to_c(
+                "sidereon_space_weather_table_monthly",
+                "out",
+                &values,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_space_weather_table_day(
+    table: *const SidereonSpaceWeatherTable,
+    year: i32,
+    month: u8,
+    day: u8,
+    out_present: *mut bool,
+    out_day: *mut SidereonSpaceWeatherDay,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_space_weather_table_day",
+        SidereonStatus::Panic,
+        || {
+            let out_present = c_try!(require_out(
+                out_present,
+                "sidereon_space_weather_table_day",
+                "out_present"
+            ));
+            *out_present = false;
+            let out_day = c_try!(require_out(
+                out_day,
+                "sidereon_space_weather_table_day",
+                "out_day"
+            ));
+            *out_day = SidereonSpaceWeatherDay {
+                year: 0,
+                month: 0,
+                day: 0,
+                class: 0,
+                has_bsrn: false,
+                bsrn: 0,
+                has_nd: false,
+                nd: 0,
+                has_kp: [false; 8],
+                kp_10: [0; 8],
+                has_kp_sum_10: false,
+                kp_sum_10: 0,
+                has_ap: [false; 8],
+                ap: [0; 8],
+                has_ap_avg: false,
+                ap_avg: 0,
+                has_cp_10: false,
+                cp_10: 0,
+                has_c9: false,
+                c9: 0,
+                has_isn: false,
+                isn: 0,
+                has_flux_qualifier: false,
+                flux_qualifier: 0,
+                has_f107_obs: false,
+                f107_obs: 0.0,
+                has_f107_adj: false,
+                f107_adj: 0.0,
+                has_f107_obs_center81: false,
+                f107_obs_center81: 0.0,
+                has_f107_obs_last81: false,
+                f107_obs_last81: 0.0,
+                has_f107_adj_center81: false,
+                f107_adj_center81: 0.0,
+                has_f107_adj_last81: false,
+                f107_adj_last81: 0.0,
+            };
+            let table = c_try!(require_ref(
+                table,
+                "sidereon_space_weather_table_day",
+                "table"
+            ));
+            if let Some(row) = table.inner.day(year, month, day) {
+                *out_present = true;
+                *out_day = space_weather_day_to_c(row);
+            }
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_space_weather_table_sample_at(
+    table: *const SidereonSpaceWeatherTable,
+    epoch_j2000_s: f64,
+    out_sample: *mut SidereonSpaceWeatherSample,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_space_weather_table_sample_at",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_sample,
+                "sidereon_space_weather_table_sample_at",
+                "out_sample"
+            ));
+            *out = SidereonSpaceWeatherSample {
+                weather: SidereonSpaceWeather {
+                    f107: 0.0,
+                    f107a: 0.0,
+                    ap: 0.0,
+                },
+                class: 0,
+                ap_defaulted: false,
+            };
+            let table = c_try!(require_ref(
+                table,
+                "sidereon_space_weather_table_sample_at",
+                "table"
+            ));
+            match table.inner.sample_at(epoch_j2000_s) {
+                Ok(sample) => {
+                    *out = space_weather_sample_to_c(sample);
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_space_weather_error("sidereon_space_weather_table_sample_at", err),
+            }
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_space_weather_table_sample_at_with_policy(
+    table: *const SidereonSpaceWeatherTable,
+    epoch_j2000_s: f64,
+    policy: *const SidereonSpaceWeatherPolicy,
+    out_sample: *mut SidereonSpaceWeatherSample,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_space_weather_table_sample_at_with_policy",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_sample,
+                "sidereon_space_weather_table_sample_at_with_policy",
+                "out_sample"
+            ));
+            *out = SidereonSpaceWeatherSample {
+                weather: SidereonSpaceWeather {
+                    f107: 0.0,
+                    f107a: 0.0,
+                    ap: 0.0,
+                },
+                class: 0,
+                ap_defaulted: false,
+            };
+            let table = c_try!(require_ref(
+                table,
+                "sidereon_space_weather_table_sample_at_with_policy",
+                "table"
+            ));
+            let policy = space_weather_policy_from_c(policy);
+            match table.inner.sample_at_with_policy(epoch_j2000_s, policy) {
+                Ok(sample) => {
+                    *out = space_weather_sample_to_c(sample);
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_space_weather_error(
+                    "sidereon_space_weather_table_sample_at_with_policy",
+                    err,
+                ),
+            }
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_space_weather_table_space_weather_at(
+    table: *const SidereonSpaceWeatherTable,
+    epoch_j2000_s: f64,
+    out_weather: *mut SidereonSpaceWeather,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_space_weather_table_space_weather_at",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_weather,
+                "sidereon_space_weather_table_space_weather_at",
+                "out_weather"
+            ));
+            *out = SidereonSpaceWeather {
+                f107: 0.0,
+                f107a: 0.0,
+                ap: 0.0,
+            };
+            let table = c_try!(require_ref(
+                table,
+                "sidereon_space_weather_table_space_weather_at",
+                "table"
+            ));
+            match table.inner.space_weather_at(epoch_j2000_s) {
+                Ok(weather) => {
+                    *out = space_weather_to_c(weather);
+                    SidereonStatus::Ok
+                }
+                Err(err) => {
+                    map_space_weather_error("sidereon_space_weather_table_space_weather_at", err)
+                }
+            }
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_space_weather_table_ap_array_at(
+    table: *const SidereonSpaceWeatherTable,
+    epoch_j2000_s: f64,
+    out_ap_array: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_space_weather_table_ap_array_at",
+        SidereonStatus::Panic,
+        || {
+            c_try!(require_out(
+                out_ap_array,
+                "sidereon_space_weather_table_ap_array_at",
+                "out_ap_array"
+            ));
+            for idx in 0..SIDEREON_ATMOSPHERE_AP_ARRAY_LEN {
+                *out_ap_array.add(idx) = 0.0;
+            }
+            let table = c_try!(require_ref(
+                table,
+                "sidereon_space_weather_table_ap_array_at",
+                "table"
+            ));
+            match table.inner.ap_array_at(epoch_j2000_s) {
+                Ok(ap) => {
+                    ptr::copy_nonoverlapping(
+                        ap.as_ptr(),
+                        out_ap_array,
+                        SIDEREON_ATMOSPHERE_AP_ARRAY_LEN,
+                    );
+                    SidereonStatus::Ok
+                }
+                Err(err) => {
+                    map_space_weather_error("sidereon_space_weather_table_ap_array_at", err)
+                }
+            }
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_space_weather_table_to_csv(
+    table: *const SidereonSpaceWeatherTable,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_space_weather_table_to_csv",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_space_weather_table_to_csv",
+                out_written,
+                out_required
+            ));
+            let table = c_try!(require_ref(
+                table,
+                "sidereon_space_weather_table_to_csv",
+                "table"
+            ));
+            let text = sidereon_core::astro::space_weather::encode_csv(&table.inner);
+            c_try!(copy_prefix_to_c(
+                "sidereon_space_weather_table_to_csv",
+                "out",
+                text.as_bytes(),
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_space_weather_table_to_txt(
+    table: *const SidereonSpaceWeatherTable,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_space_weather_table_to_txt",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_space_weather_table_to_txt",
+                out_written,
+                out_required
+            ));
+            let table = c_try!(require_ref(
+                table,
+                "sidereon_space_weather_table_to_txt",
+                "table"
+            ));
+            let text = sidereon_core::astro::space_weather::encode_txt(&table.inner);
+            c_try!(copy_prefix_to_c(
+                "sidereon_space_weather_table_to_txt",
+                "out",
+                text.as_bytes(),
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_estimate_decay_with_space_weather_table(
+    initial: *const SidereonCartesianState,
+    config: *const SidereonDecayConfig,
+    table: *const SidereonSpaceWeatherTable,
+    out_estimate: *mut SidereonDecayEstimate,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_estimate_decay_with_space_weather_table",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_estimate,
+                "sidereon_estimate_decay_with_space_weather_table",
+                "out_estimate"
+            ));
+            *out = SidereonDecayEstimate {
+                time_to_decay_s: 0.0,
+                reentry_state: SidereonCartesianState {
+                    epoch_s: 0.0,
+                    position_km: [0.0; 3],
+                    velocity_km_s: [0.0; 3],
+                },
+                reentry_altitude_km: 0.0,
+            };
+            let initial = c_try!(require_ref(
+                initial,
+                "sidereon_estimate_decay_with_space_weather_table",
+                "initial"
+            ));
+            let config = c_try!(require_ref(
+                config,
+                "sidereon_estimate_decay_with_space_weather_table",
+                "config"
+            ));
+            let config = c_try!(decay_config_from_c(
+                "sidereon_estimate_decay_with_space_weather_table",
+                config
+            ));
+            let table = c_try!(require_ref(
+                table,
+                "sidereon_estimate_decay_with_space_weather_table",
+                "table"
+            ));
+            let source = SpaceWeatherSource::Table(table.inner.clone());
+            match sidereon_core::astro::propagator::estimate_decay_with_source(
+                cartesian_state_from_c(initial),
+                &config,
+                &source,
+            ) {
+                Ok(value) => {
+                    *out = decay_estimate_to_c(value);
+                    SidereonStatus::Ok
+                }
+                Err(err) => {
+                    map_decay_error("sidereon_estimate_decay_with_space_weather_table", err)
+                }
+            }
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_space_weather_table_free(table: *mut SidereonSpaceWeatherTable) {
+    free_boxed(table);
+}
+
+// === Round-2 NTRIP sans-IO request, machine, and sourcetable =================
+
+pub const NTRIP_FIELD_C_BYTES: usize = 129;
+pub const NTRIP_MISC_C_BYTES: usize = 257;
+
+pub struct SidereonNtripMachine {
+    inner: sidereon_core::ntrip::NtripClientMachine,
+}
+
+pub struct SidereonNtripEvents {
+    events: Vec<sidereon_core::ntrip::NtripEvent>,
+}
+
+pub struct SidereonNtripSourcetable {
+    inner: sidereon_core::ntrip::Sourcetable,
+}
+
+pub struct SidereonNtripBytes {
+    bytes: Vec<u8>,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonNtripVersion {
+    Rev1 = 1,
+    Rev2 = 2,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonNtripState {
+    Idle = 0,
+    AwaitingStatus = 1,
+    AwaitingHeaders = 2,
+    Streaming = 3,
+    Sourcetable = 4,
+    Closed = 5,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonNtripEventKind {
+    Connected = 0,
+    Payload = 1,
+    Sourcetable = 2,
+    Rejected = 3,
+    StreamCorrupted = 4,
+    StreamEnded = 5,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonNtripRejectionKind {
+    None = 0,
+    Unauthorized = 1,
+    MountpointNotFound = 2,
+    DigestRequired = 3,
+    CasterError = 4,
+    UnexpectedContentType = 5,
+    HttpError = 6,
+    MalformedHandshake = 7,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonNtripSourcetableAuth {
+    None = 0,
+    Basic = 1,
+    Digest = 2,
+    Other = 3,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonNtripConfig {
+    pub host: *const c_char,
+    pub port: u16,
+    pub mountpoint: *const c_char,
+    pub version: u32,
+    pub has_credentials: bool,
+    pub username: *const c_char,
+    pub password: *const c_char,
+    pub user_agent_product: *const c_char,
+    pub has_gga_interval_s: bool,
+    pub gga_interval_s: f64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonNtripGgaPosition {
+    pub lat_deg: f64,
+    pub lon_deg: f64,
+    pub height_m: f64,
+    pub fix_quality: u8,
+    pub num_satellites: u8,
+    pub hdop: f64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonNtripEventInfo {
+    pub kind: u32,
+    pub version: u32,
+    pub chunked: bool,
+    pub header_count: usize,
+    pub payload_len: usize,
+    pub sourcetable_record_count: usize,
+    pub rejection: u32,
+    pub http_status: u16,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonNtripSourcetableSummary {
+    pub record_count: usize,
+    pub stream_count: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonNtripStreamInfo {
+    pub mountpoint: [c_char; NTRIP_FIELD_C_BYTES],
+    pub identifier: [c_char; NTRIP_FIELD_C_BYTES],
+    pub format: [c_char; NTRIP_FIELD_C_BYTES],
+    pub format_details: [c_char; NTRIP_FIELD_C_BYTES],
+    pub has_carrier: bool,
+    pub carrier: u8,
+    pub nav_system: [c_char; NTRIP_FIELD_C_BYTES],
+    pub network: [c_char; NTRIP_FIELD_C_BYTES],
+    pub country: [c_char; NTRIP_FIELD_C_BYTES],
+    pub has_lat_deg: bool,
+    pub lat_deg: f64,
+    pub has_lon_deg: bool,
+    pub lon_deg: f64,
+    pub has_nmea_required: bool,
+    pub nmea_required: bool,
+    pub has_network_solution: bool,
+    pub network_solution: bool,
+    pub generator: [c_char; NTRIP_FIELD_C_BYTES],
+    pub compression: [c_char; NTRIP_FIELD_C_BYTES],
+    pub authentication: u32,
+    pub has_fee: bool,
+    pub fee: bool,
+    pub has_bitrate: bool,
+    pub bitrate: u32,
+    pub misc: [c_char; NTRIP_MISC_C_BYTES],
+}
+
+unsafe fn parse_c_string_allow_empty(
+    fn_name: &str,
+    arg_name: &str,
+    ptr: *const c_char,
+) -> Result<String, SidereonStatus> {
+    if ptr.is_null() {
+        set_last_error(format!("{fn_name}: null {arg_name}"));
+        return Err(SidereonStatus::NullPointer);
+    }
+    match CStr::from_ptr(ptr).to_str() {
+        Ok(value) => Ok(value.to_owned()),
+        Err(_) => {
+            set_last_error(format!("{fn_name}: {arg_name} is not valid UTF-8"));
+            Err(SidereonStatus::InvalidToken)
+        }
+    }
+}
+
+unsafe fn parse_nullable_c_string_allow_empty(
+    fn_name: &str,
+    arg_name: &str,
+    ptr: *const c_char,
+) -> Result<Option<String>, SidereonStatus> {
+    if ptr.is_null() {
+        Ok(None)
+    } else {
+        parse_c_string_allow_empty(fn_name, arg_name, ptr).map(Some)
+    }
+}
+
+fn ntrip_version_from_c(
+    fn_name: &str,
+    version: u32,
+) -> Result<sidereon_core::ntrip::NtripVersion, SidereonStatus> {
+    match version {
+        x if x == SidereonNtripVersion::Rev1 as u32 => Ok(sidereon_core::ntrip::NtripVersion::Rev1),
+        x if x == SidereonNtripVersion::Rev2 as u32 => Ok(sidereon_core::ntrip::NtripVersion::Rev2),
+        _ => {
+            set_last_error(format!("{fn_name}: invalid NTRIP version {version}"));
+            Err(SidereonStatus::InvalidArgument)
+        }
+    }
+}
+
+fn ntrip_version_to_c(version: sidereon_core::ntrip::NtripVersion) -> u32 {
+    match version {
+        sidereon_core::ntrip::NtripVersion::Rev1 => SidereonNtripVersion::Rev1 as u32,
+        sidereon_core::ntrip::NtripVersion::Rev2 => SidereonNtripVersion::Rev2 as u32,
+    }
+}
+
+fn ntrip_state_to_c(state: sidereon_core::ntrip::NtripState) -> u32 {
+    match state {
+        sidereon_core::ntrip::NtripState::Idle => SidereonNtripState::Idle as u32,
+        sidereon_core::ntrip::NtripState::AwaitingStatus => {
+            SidereonNtripState::AwaitingStatus as u32
+        }
+        sidereon_core::ntrip::NtripState::AwaitingHeaders => {
+            SidereonNtripState::AwaitingHeaders as u32
+        }
+        sidereon_core::ntrip::NtripState::Streaming => SidereonNtripState::Streaming as u32,
+        sidereon_core::ntrip::NtripState::Sourcetable => SidereonNtripState::Sourcetable as u32,
+        sidereon_core::ntrip::NtripState::Closed => SidereonNtripState::Closed as u32,
+    }
+}
+
+unsafe fn ntrip_config_from_c(
+    fn_name: &str,
+    config: &SidereonNtripConfig,
+) -> Result<sidereon_core::ntrip::NtripConfig, SidereonStatus> {
+    let defaults = sidereon_core::ntrip::NtripConfig::default();
+    let host = parse_c_string_allow_empty(fn_name, "host", config.host)?;
+    let mountpoint = parse_nullable_c_string_allow_empty(fn_name, "mountpoint", config.mountpoint)?
+        .unwrap_or_default();
+    let user_agent_product = parse_nullable_c_string_allow_empty(
+        fn_name,
+        "user_agent_product",
+        config.user_agent_product,
+    )?
+    .unwrap_or(defaults.user_agent_product);
+    let credentials = if config.has_credentials {
+        Some(sidereon_core::ntrip::NtripCredentials {
+            username: parse_c_string_allow_empty(fn_name, "username", config.username)?,
+            password: parse_c_string_allow_empty(fn_name, "password", config.password)?,
+        })
+    } else {
+        None
+    };
+    Ok(sidereon_core::ntrip::NtripConfig {
+        host,
+        port: config.port,
+        mountpoint,
+        version: ntrip_version_from_c(fn_name, config.version)?,
+        credentials,
+        user_agent_product,
+        gga_interval_s: config.has_gga_interval_s.then_some(config.gga_interval_s),
+    })
+}
+
+fn ntrip_gga_position_from_c(
+    position: &SidereonNtripGgaPosition,
+) -> sidereon_core::ntrip::GgaPosition {
+    sidereon_core::ntrip::GgaPosition {
+        lat_deg: position.lat_deg,
+        lon_deg: position.lon_deg,
+        height_m: position.height_m,
+        fix_quality: position.fix_quality,
+        num_satellites: position.num_satellites,
+        hdop: position.hdop,
+    }
+}
+
+fn ntrip_rejection_kind_to_c(rejection: &sidereon_core::ntrip::NtripRejection) -> u32 {
+    match rejection {
+        sidereon_core::ntrip::NtripRejection::Unauthorized => {
+            SidereonNtripRejectionKind::Unauthorized as u32
+        }
+        sidereon_core::ntrip::NtripRejection::MountpointNotFound => {
+            SidereonNtripRejectionKind::MountpointNotFound as u32
+        }
+        sidereon_core::ntrip::NtripRejection::DigestRequired => {
+            SidereonNtripRejectionKind::DigestRequired as u32
+        }
+        sidereon_core::ntrip::NtripRejection::CasterError { .. } => {
+            SidereonNtripRejectionKind::CasterError as u32
+        }
+        sidereon_core::ntrip::NtripRejection::UnexpectedContentType { .. } => {
+            SidereonNtripRejectionKind::UnexpectedContentType as u32
+        }
+        sidereon_core::ntrip::NtripRejection::HttpError { .. } => {
+            SidereonNtripRejectionKind::HttpError as u32
+        }
+        sidereon_core::ntrip::NtripRejection::MalformedHandshake { .. } => {
+            SidereonNtripRejectionKind::MalformedHandshake as u32
+        }
+    }
+}
+
+fn ntrip_rejection_detail(rejection: &sidereon_core::ntrip::NtripRejection) -> Vec<u8> {
+    match rejection {
+        sidereon_core::ntrip::NtripRejection::Unauthorized => Vec::new(),
+        sidereon_core::ntrip::NtripRejection::MountpointNotFound => Vec::new(),
+        sidereon_core::ntrip::NtripRejection::DigestRequired => Vec::new(),
+        sidereon_core::ntrip::NtripRejection::CasterError { reason } => reason.as_bytes().to_vec(),
+        sidereon_core::ntrip::NtripRejection::UnexpectedContentType { content_type } => {
+            content_type.as_bytes().to_vec()
+        }
+        sidereon_core::ntrip::NtripRejection::HttpError { reason, .. } => {
+            reason.as_bytes().to_vec()
+        }
+        sidereon_core::ntrip::NtripRejection::MalformedHandshake { prefix } => prefix.clone(),
+    }
+}
+
+fn ntrip_event_info(event: &sidereon_core::ntrip::NtripEvent) -> SidereonNtripEventInfo {
+    match event {
+        sidereon_core::ntrip::NtripEvent::Connected(handshake) => SidereonNtripEventInfo {
+            kind: SidereonNtripEventKind::Connected as u32,
+            version: ntrip_version_to_c(handshake.version),
+            chunked: handshake.chunked,
+            header_count: handshake.headers.len(),
+            payload_len: 0,
+            sourcetable_record_count: 0,
+            rejection: SidereonNtripRejectionKind::None as u32,
+            http_status: 0,
+        },
+        sidereon_core::ntrip::NtripEvent::Payload(bytes) => SidereonNtripEventInfo {
+            kind: SidereonNtripEventKind::Payload as u32,
+            version: 0,
+            chunked: false,
+            header_count: 0,
+            payload_len: bytes.len(),
+            sourcetable_record_count: 0,
+            rejection: SidereonNtripRejectionKind::None as u32,
+            http_status: 0,
+        },
+        sidereon_core::ntrip::NtripEvent::Sourcetable(table) => SidereonNtripEventInfo {
+            kind: SidereonNtripEventKind::Sourcetable as u32,
+            version: 0,
+            chunked: false,
+            header_count: 0,
+            payload_len: 0,
+            sourcetable_record_count: table.records.len(),
+            rejection: SidereonNtripRejectionKind::None as u32,
+            http_status: 0,
+        },
+        sidereon_core::ntrip::NtripEvent::Rejected(rejection) => {
+            let status = match rejection {
+                sidereon_core::ntrip::NtripRejection::HttpError { status, .. } => *status,
+                _ => 0,
+            };
+            SidereonNtripEventInfo {
+                kind: SidereonNtripEventKind::Rejected as u32,
+                version: 0,
+                chunked: false,
+                header_count: 0,
+                payload_len: 0,
+                sourcetable_record_count: 0,
+                rejection: ntrip_rejection_kind_to_c(rejection),
+                http_status: status,
+            }
+        }
+        sidereon_core::ntrip::NtripEvent::StreamCorrupted { .. } => SidereonNtripEventInfo {
+            kind: SidereonNtripEventKind::StreamCorrupted as u32,
+            version: 0,
+            chunked: false,
+            header_count: 0,
+            payload_len: 0,
+            sourcetable_record_count: 0,
+            rejection: SidereonNtripRejectionKind::None as u32,
+            http_status: 0,
+        },
+        sidereon_core::ntrip::NtripEvent::StreamEnded => SidereonNtripEventInfo {
+            kind: SidereonNtripEventKind::StreamEnded as u32,
+            version: 0,
+            chunked: false,
+            header_count: 0,
+            payload_len: 0,
+            sourcetable_record_count: 0,
+            rejection: SidereonNtripRejectionKind::None as u32,
+            http_status: 0,
+        },
+    }
+}
+
+fn ntrip_event_detail(event: &sidereon_core::ntrip::NtripEvent) -> Vec<u8> {
+    match event {
+        sidereon_core::ntrip::NtripEvent::Rejected(rejection) => ntrip_rejection_detail(rejection),
+        sidereon_core::ntrip::NtripEvent::StreamCorrupted { detail } => detail.as_bytes().to_vec(),
+        _ => Vec::new(),
+    }
+}
+
+fn ntrip_auth_to_c(auth: &sidereon_core::ntrip::StrAuth) -> u32 {
+    match auth {
+        sidereon_core::ntrip::StrAuth::None => SidereonNtripSourcetableAuth::None as u32,
+        sidereon_core::ntrip::StrAuth::Basic => SidereonNtripSourcetableAuth::Basic as u32,
+        sidereon_core::ntrip::StrAuth::Digest => SidereonNtripSourcetableAuth::Digest as u32,
+        sidereon_core::ntrip::StrAuth::Other(_) => SidereonNtripSourcetableAuth::Other as u32,
+    }
+}
+
+fn ntrip_field_u8(field: &sidereon_core::ntrip::Field<u8>) -> (bool, u8) {
+    field
+        .value()
+        .copied()
+        .map_or((false, 0), |value| (true, value))
+}
+
+fn ntrip_field_u32(field: &sidereon_core::ntrip::Field<u32>) -> (bool, u32) {
+    field
+        .value()
+        .copied()
+        .map_or((false, 0), |value| (true, value))
+}
+
+fn ntrip_field_f64(field: &sidereon_core::ntrip::Field<f64>) -> (bool, f64) {
+    field
+        .value()
+        .copied()
+        .map_or((false, 0.0), |value| (true, value))
+}
+
+fn ntrip_field_bool(field: &sidereon_core::ntrip::Field<bool>) -> (bool, bool) {
+    field
+        .value()
+        .copied()
+        .map_or((false, false), |value| (true, value))
+}
+
+fn ntrip_stream_to_c(stream: &sidereon_core::ntrip::StrRecord) -> SidereonNtripStreamInfo {
+    let (has_carrier, carrier) = ntrip_field_u8(&stream.carrier);
+    let (has_lat_deg, lat_deg) = ntrip_field_f64(&stream.lat_deg);
+    let (has_lon_deg, lon_deg) = ntrip_field_f64(&stream.lon_deg);
+    let (has_nmea_required, nmea_required) = ntrip_field_bool(&stream.nmea_required);
+    let (has_network_solution, network_solution) = ntrip_field_bool(&stream.network_solution);
+    let (has_fee, fee) = ntrip_field_bool(&stream.fee);
+    let (has_bitrate, bitrate) = ntrip_field_u32(&stream.bitrate);
+    SidereonNtripStreamInfo {
+        mountpoint: fixed_c_chars::<NTRIP_FIELD_C_BYTES>(&stream.mountpoint),
+        identifier: fixed_c_chars::<NTRIP_FIELD_C_BYTES>(&stream.identifier),
+        format: fixed_c_chars::<NTRIP_FIELD_C_BYTES>(&stream.format),
+        format_details: fixed_c_chars::<NTRIP_FIELD_C_BYTES>(&stream.format_details),
+        has_carrier,
+        carrier,
+        nav_system: fixed_c_chars::<NTRIP_FIELD_C_BYTES>(&stream.nav_system),
+        network: fixed_c_chars::<NTRIP_FIELD_C_BYTES>(&stream.network),
+        country: fixed_c_chars::<NTRIP_FIELD_C_BYTES>(&stream.country),
+        has_lat_deg,
+        lat_deg,
+        has_lon_deg,
+        lon_deg,
+        has_nmea_required,
+        nmea_required,
+        has_network_solution,
+        network_solution,
+        generator: fixed_c_chars::<NTRIP_FIELD_C_BYTES>(&stream.generator),
+        compression: fixed_c_chars::<NTRIP_FIELD_C_BYTES>(&stream.compression),
+        authentication: ntrip_auth_to_c(&stream.authentication),
+        has_fee,
+        fee,
+        has_bitrate,
+        bitrate,
+        misc: fixed_c_chars::<NTRIP_MISC_C_BYTES>(&stream.misc),
+    }
+}
+
+fn map_ntrip_error(fn_name: &str, err: sidereon_core::Error) -> SidereonStatus {
+    set_last_error(format!("{fn_name}: {err}"));
+    SidereonStatus::InvalidArgument
+}
+
+fn ntrip_sourcetable_summary(
+    table: &sidereon_core::ntrip::Sourcetable,
+) -> SidereonNtripSourcetableSummary {
+    SidereonNtripSourcetableSummary {
+        record_count: table.records.len(),
+        stream_count: table.streams().count(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ntrip_request_bytes(
+    config: *const SidereonNtripConfig,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_ntrip_request_bytes",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_ntrip_request_bytes",
+                out_written,
+                out_required
+            ));
+            let config = c_try!(require_ref(
+                config,
+                "sidereon_ntrip_request_bytes",
+                "config"
+            ));
+            let config = c_try!(ntrip_config_from_c("sidereon_ntrip_request_bytes", config));
+            let bytes = match config.request_bytes() {
+                Ok(bytes) => bytes,
+                Err(err) => return map_ntrip_error("sidereon_ntrip_request_bytes", err),
+            };
+            c_try!(copy_prefix_to_c(
+                "sidereon_ntrip_request_bytes",
+                "out",
+                &bytes,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ntrip_machine_new(
+    config: *const SidereonNtripConfig,
+    out_machine: *mut *mut SidereonNtripMachine,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_ntrip_machine_new", SidereonStatus::Panic, || {
+        let out_machine = c_try!(require_out(
+            out_machine,
+            "sidereon_ntrip_machine_new",
+            "out_machine"
+        ));
+        *out_machine = ptr::null_mut();
+        let config = c_try!(require_ref(config, "sidereon_ntrip_machine_new", "config"));
+        let config = c_try!(ntrip_config_from_c("sidereon_ntrip_machine_new", config));
+        write_boxed_handle(
+            out_machine,
+            SidereonNtripMachine {
+                inner: sidereon_core::ntrip::NtripClientMachine::new(config),
+            },
+        );
+        SidereonStatus::Ok
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ntrip_machine_connection_request(
+    machine: *mut SidereonNtripMachine,
+    out_bytes: *mut *mut SidereonNtripBytes,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_ntrip_machine_connection_request",
+        SidereonStatus::Panic,
+        || {
+            let out_bytes = c_try!(require_out(
+                out_bytes,
+                "sidereon_ntrip_machine_connection_request",
+                "out_bytes"
+            ));
+            *out_bytes = ptr::null_mut();
+            let machine = c_try!(require_mut(
+                machine,
+                "sidereon_ntrip_machine_connection_request",
+                "machine"
+            ));
+            match machine.inner.connection_request() {
+                Ok(bytes) => {
+                    write_boxed_handle(out_bytes, SidereonNtripBytes { bytes });
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_ntrip_error("sidereon_ntrip_machine_connection_request", err),
+            }
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ntrip_machine_push(
+    machine: *mut SidereonNtripMachine,
+    data: *const u8,
+    len: usize,
+    out_events: *mut *mut SidereonNtripEvents,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_ntrip_machine_push", SidereonStatus::Panic, || {
+        let out_events = c_try!(require_out(
+            out_events,
+            "sidereon_ntrip_machine_push",
+            "out_events"
+        ));
+        *out_events = ptr::null_mut();
+        let machine = c_try!(require_mut(
+            machine,
+            "sidereon_ntrip_machine_push",
+            "machine"
+        ));
+        let bytes = c_try!(require_slice(
+            data,
+            len,
+            "sidereon_ntrip_machine_push",
+            "data"
+        ));
+        let events = machine.inner.push(bytes);
+        write_boxed_handle(out_events, SidereonNtripEvents { events });
+        SidereonStatus::Ok
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ntrip_machine_finish(
+    machine: *mut SidereonNtripMachine,
+    out_events: *mut *mut SidereonNtripEvents,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_ntrip_machine_finish",
+        SidereonStatus::Panic,
+        || {
+            let out_events = c_try!(require_out(
+                out_events,
+                "sidereon_ntrip_machine_finish",
+                "out_events"
+            ));
+            *out_events = ptr::null_mut();
+            let machine = c_try!(require_mut(
+                machine,
+                "sidereon_ntrip_machine_finish",
+                "machine"
+            ));
+            let events = machine.inner.finish();
+            write_boxed_handle(out_events, SidereonNtripEvents { events });
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ntrip_machine_try_gga_message(
+    machine: *mut SidereonNtripMachine,
+    now_s: f64,
+    position: *const SidereonNtripGgaPosition,
+    utc_seconds_of_day: f64,
+    out_present: *mut bool,
+    out_bytes: *mut *mut SidereonNtripBytes,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_ntrip_machine_try_gga_message",
+        SidereonStatus::Panic,
+        || {
+            let out_present = c_try!(require_out(
+                out_present,
+                "sidereon_ntrip_machine_try_gga_message",
+                "out_present"
+            ));
+            *out_present = false;
+            let out_bytes = c_try!(require_out(
+                out_bytes,
+                "sidereon_ntrip_machine_try_gga_message",
+                "out_bytes"
+            ));
+            *out_bytes = ptr::null_mut();
+            let machine = c_try!(require_mut(
+                machine,
+                "sidereon_ntrip_machine_try_gga_message",
+                "machine"
+            ));
+            let position = c_try!(require_ref(
+                position,
+                "sidereon_ntrip_machine_try_gga_message",
+                "position"
+            ));
+            let position = ntrip_gga_position_from_c(position);
+            match machine
+                .inner
+                .try_gga_message(now_s, &position, utc_seconds_of_day)
+            {
+                Ok(Some(bytes)) => {
+                    *out_present = true;
+                    write_boxed_handle(out_bytes, SidereonNtripBytes { bytes });
+                    SidereonStatus::Ok
+                }
+                Ok(None) => SidereonStatus::Ok,
+                Err(err) => map_ntrip_error("sidereon_ntrip_machine_try_gga_message", err),
+            }
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ntrip_machine_state(
+    machine: *const SidereonNtripMachine,
+    out_state: *mut u32,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_ntrip_machine_state",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_state,
+                "sidereon_ntrip_machine_state",
+                "out_state"
+            ));
+            let machine = c_try!(require_ref(
+                machine,
+                "sidereon_ntrip_machine_state",
+                "machine"
+            ));
+            *out = ntrip_state_to_c(machine.inner.state());
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ntrip_machine_reset(machine: *mut SidereonNtripMachine) {
+    ffi_boundary("sidereon_ntrip_machine_reset", (), || {
+        if let Some(machine) = machine.as_mut() {
+            machine.inner.reset();
+        }
+    });
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ntrip_machine_free(machine: *mut SidereonNtripMachine) {
+    free_boxed(machine);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ntrip_events_count(
+    events: *const SidereonNtripEvents,
+    out_count: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_ntrip_events_count", SidereonStatus::Panic, || {
+        let out = c_try!(require_out(
+            out_count,
+            "sidereon_ntrip_events_count",
+            "out_count"
+        ));
+        let events = c_try!(require_ref(events, "sidereon_ntrip_events_count", "events"));
+        *out = events.events.len();
+        SidereonStatus::Ok
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ntrip_events_event(
+    events: *const SidereonNtripEvents,
+    index: usize,
+    out_info: *mut SidereonNtripEventInfo,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_ntrip_events_event", SidereonStatus::Panic, || {
+        let out = c_try!(require_out(
+            out_info,
+            "sidereon_ntrip_events_event",
+            "out_info"
+        ));
+        let events = c_try!(require_ref(events, "sidereon_ntrip_events_event", "events"));
+        let Some(event) = events.events.get(index) else {
+            set_last_error(format!(
+                "sidereon_ntrip_events_event: index {index} out of range ({} events)",
+                events.events.len()
+            ));
+            return SidereonStatus::InvalidArgument;
+        };
+        *out = ntrip_event_info(event);
+        SidereonStatus::Ok
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ntrip_events_payload(
+    events: *const SidereonNtripEvents,
+    index: usize,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_ntrip_events_payload",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_ntrip_events_payload",
+                out_written,
+                out_required
+            ));
+            let events = c_try!(require_ref(
+                events,
+                "sidereon_ntrip_events_payload",
+                "events"
+            ));
+            let Some(event) = events.events.get(index) else {
+                set_last_error(format!(
+                    "sidereon_ntrip_events_payload: index {index} out of range ({} events)",
+                    events.events.len()
+                ));
+                return SidereonStatus::InvalidArgument;
+            };
+            let sidereon_core::ntrip::NtripEvent::Payload(bytes) = event else {
+                set_last_error("sidereon_ntrip_events_payload: event is not a payload".to_string());
+                return SidereonStatus::InvalidArgument;
+            };
+            c_try!(copy_prefix_to_c(
+                "sidereon_ntrip_events_payload",
+                "out",
+                bytes,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ntrip_events_detail(
+    events: *const SidereonNtripEvents,
+    index: usize,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_ntrip_events_detail",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_ntrip_events_detail",
+                out_written,
+                out_required
+            ));
+            let events = c_try!(require_ref(
+                events,
+                "sidereon_ntrip_events_detail",
+                "events"
+            ));
+            let Some(event) = events.events.get(index) else {
+                set_last_error(format!(
+                    "sidereon_ntrip_events_detail: index {index} out of range ({} events)",
+                    events.events.len()
+                ));
+                return SidereonStatus::InvalidArgument;
+            };
+            let detail = ntrip_event_detail(event);
+            c_try!(copy_prefix_to_c(
+                "sidereon_ntrip_events_detail",
+                "out",
+                &detail,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ntrip_events_sourcetable(
+    events: *const SidereonNtripEvents,
+    index: usize,
+    out_table: *mut *mut SidereonNtripSourcetable,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_ntrip_events_sourcetable",
+        SidereonStatus::Panic,
+        || {
+            let out_table = c_try!(require_out(
+                out_table,
+                "sidereon_ntrip_events_sourcetable",
+                "out_table"
+            ));
+            *out_table = ptr::null_mut();
+            let events = c_try!(require_ref(
+                events,
+                "sidereon_ntrip_events_sourcetable",
+                "events"
+            ));
+            let Some(event) = events.events.get(index) else {
+                set_last_error(format!(
+                    "sidereon_ntrip_events_sourcetable: index {index} out of range ({} events)",
+                    events.events.len()
+                ));
+                return SidereonStatus::InvalidArgument;
+            };
+            let sidereon_core::ntrip::NtripEvent::Sourcetable(table) = event else {
+                set_last_error(
+                    "sidereon_ntrip_events_sourcetable: event is not a sourcetable".to_string(),
+                );
+                return SidereonStatus::InvalidArgument;
+            };
+            write_boxed_handle(
+                out_table,
+                SidereonNtripSourcetable {
+                    inner: table.clone(),
+                },
+            );
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ntrip_events_free(events: *mut SidereonNtripEvents) {
+    free_boxed(events);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ntrip_bytes(
+    bytes: *const SidereonNtripBytes,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_ntrip_bytes", SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(
+            "sidereon_ntrip_bytes",
+            out_written,
+            out_required
+        ));
+        let bytes = c_try!(require_ref(bytes, "sidereon_ntrip_bytes", "bytes"));
+        c_try!(copy_prefix_to_c(
+            "sidereon_ntrip_bytes",
+            "out",
+            &bytes.bytes,
+            out,
+            len,
+            out_written,
+            out_required,
+        ));
+        SidereonStatus::Ok
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ntrip_bytes_free(bytes: *mut SidereonNtripBytes) {
+    free_boxed(bytes);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ntrip_sourcetable_parse(
+    data: *const u8,
+    len: usize,
+    out_table: *mut *mut SidereonNtripSourcetable,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_ntrip_sourcetable_parse",
+        SidereonStatus::Panic,
+        || {
+            let out_table = c_try!(require_out(
+                out_table,
+                "sidereon_ntrip_sourcetable_parse",
+                "out_table"
+            ));
+            *out_table = ptr::null_mut();
+            let text = c_try!(text_bytes_from_c(
+                "sidereon_ntrip_sourcetable_parse",
+                data,
+                len
+            ));
+            match sidereon_core::ntrip::parse_sourcetable(text) {
+                Ok(inner) => {
+                    write_boxed_handle(out_table, SidereonNtripSourcetable { inner });
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_ntrip_error("sidereon_ntrip_sourcetable_parse", err),
+            }
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ntrip_sourcetable_summary(
+    table: *const SidereonNtripSourcetable,
+    out_summary: *mut SidereonNtripSourcetableSummary,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_ntrip_sourcetable_summary",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_summary,
+                "sidereon_ntrip_sourcetable_summary",
+                "out_summary"
+            ));
+            let table = c_try!(require_ref(
+                table,
+                "sidereon_ntrip_sourcetable_summary",
+                "table"
+            ));
+            *out = ntrip_sourcetable_summary(&table.inner);
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ntrip_sourcetable_streams(
+    table: *const SidereonNtripSourcetable,
+    out: *mut SidereonNtripStreamInfo,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_ntrip_sourcetable_streams",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_ntrip_sourcetable_streams",
+                out_written,
+                out_required
+            ));
+            let table = c_try!(require_ref(
+                table,
+                "sidereon_ntrip_sourcetable_streams",
+                "table"
+            ));
+            let values: Vec<_> = table.inner.streams().map(ntrip_stream_to_c).collect();
+            c_try!(copy_prefix_to_c(
+                "sidereon_ntrip_sourcetable_streams",
+                "out",
+                &values,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ntrip_sourcetable_to_text(
+    table: *const SidereonNtripSourcetable,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_ntrip_sourcetable_to_text",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_ntrip_sourcetable_to_text",
+                out_written,
+                out_required
+            ));
+            let table = c_try!(require_ref(
+                table,
+                "sidereon_ntrip_sourcetable_to_text",
+                "table"
+            ));
+            let text = match table.inner.to_text() {
+                Ok(text) => text,
+                Err(err) => return map_ntrip_error("sidereon_ntrip_sourcetable_to_text", err),
+            };
+            c_try!(copy_prefix_to_c(
+                "sidereon_ntrip_sourcetable_to_text",
+                "out",
+                text.as_bytes(),
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ntrip_sourcetable_free(table: *mut SidereonNtripSourcetable) {
+    free_boxed(table);
 }
 
 #[cfg(test)]

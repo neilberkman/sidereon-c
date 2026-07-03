@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# Build the sidereon cdylib + C header, compile the C smoke program against them,
-# and run it on the canonical engine's own SP3 fixtures. Exits non-zero if any
-# step (or the binding's reference-agreement assertion) fails.
+# Build the sidereon cdylib + C header, compile the C smoke programs against them,
+# and run them on committed and core-owned fixtures. Exits non-zero if any step
+# or reference-agreement assertion fails.
 #
-# The engine is consumed as a published crates.io dependency, whose tarball omits
-# the parity/test fixtures. The fixtures this smoke run needs are therefore
-# vendored alongside it (tests/fixtures) so the repository builds and tests
-# self-contained, with no engine source checkout required.
+# SIDEREON_CORE_FIXTURES may point to crates/sidereon-core/tests/fixtures from a
+# local core checkout. When unset, this script resolves ../sidereon relative to
+# the sidereon-c repository root at run time.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 binding_root="$(cd "${here}/.." && pwd)"
+repo_root="$(cd "${binding_root}/../.." && pwd)"
 
 cd "${binding_root}"
 
@@ -46,7 +46,11 @@ rinex_clk_path="${fixtures}/clk/synthetic_rinex_clock.clk"
 # Universal-parity additions: a single-object OMM (KVN/XML/JSON serializers) from
 # the canonical engine checkout.
 omm_kvn_path="${fixtures}/omm/24876.kvn"
-local_core_fixtures="/tmp/sid-integration/crates/sidereon-core/tests/fixtures"
+if [[ -n "${SIDEREON_CORE_FIXTURES:-}" ]]; then
+    local_core_fixtures="$(cd "${SIDEREON_CORE_FIXTURES}" && pwd)"
+else
+    local_core_fixtures="$(cd "${repo_root}/../sidereon/crates/sidereon-core/tests/fixtures" && pwd)"
+fi
 observe_spk_path="${local_core_fixtures}/almanac/almanac_de421.spk"
 dted_root_path="${local_core_fixtures}/dted/tiles"
 dted_tile_path="${dted_root_path}/n36_w107_1arc_v3.dt2"
@@ -365,6 +369,24 @@ cc -std=c11 -Wall -Wextra -Werror \
 
 echo "== running precise_samples_smoke program =="
 "${precise_samples_out}" "${sp3_path}"
+
+# Round-2 local-core parity sweep: covariance propagation/transport,
+# CNAV/RINEX-4 accessors, SGP4 TLE fitting, RINEX QC/lint/repair, EGM96/geoid
+# batches, NMEA sans-IO, space-weather tables, and NTRIP sans-IO.
+echo "== compiling round2_parity_smoke program =="
+round2_parity_out="${target_dir}/round2_parity_smoke"
+cc -std=c11 -Wall -Wextra -Werror \
+    -I"${binding_root}/include" \
+    -I"${here}" \
+    "${here}/round2_parity_smoke.c" \
+    -L"${lib_dir}" \
+    -lsidereon \
+    -Wl,-rpath,"${lib_dir}" \
+    -lm \
+    -o "${round2_parity_out}"
+
+echo "== running round2_parity_smoke program =="
+"${round2_parity_out}" "${local_core_fixtures}"
 
 # Phase B local-core additions: new ASTRO, terrain, drag, sample-grid, bias,
 # SBAS, SSR, and shared-label API.
