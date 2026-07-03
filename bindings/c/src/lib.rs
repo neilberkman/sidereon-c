@@ -47669,6 +47669,7 @@ pub struct SidereonObservationQcOptions {
     pub has_interval_override_s: bool,
     pub interval_override_s: f64,
     pub gap_factor: f64,
+    pub clock_jump_threshold_s: f64,
 }
 
 #[repr(C)]
@@ -47698,6 +47699,61 @@ pub struct SidereonObservationQcDataGap {
     pub nominal_interval_s: f64,
     pub observed_delta_s: f64,
     pub missing_epochs: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonObservationQcClockJump {
+    pub epoch_index: usize,
+    pub epoch: SidereonCalendarEpoch,
+    pub delta_s: f64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonObservationQcCycleSlips {
+    pub observations: usize,
+    pub total_slips: usize,
+    pub has_observations_per_slip: bool,
+    pub observations_per_slip: f64,
+    pub system_count: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonObservationQcSystemCycleSlip {
+    pub system: u32,
+    pub observations: usize,
+    pub slips: usize,
+    pub has_observations_per_slip: bool,
+    pub observations_per_slip: f64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonObservationQcMpStats {
+    pub n: usize,
+    pub rms_m: f64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonObservationQcSatelliteMultipath {
+    pub sat_id: SidereonSatelliteToken,
+    pub has_mp1: bool,
+    pub mp1: SidereonObservationQcMpStats,
+    pub has_mp2: bool,
+    pub mp2: SidereonObservationQcMpStats,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonObservationQcSystemMultipath {
+    pub system: u32,
+    pub has_mp1: bool,
+    pub mp1: SidereonObservationQcMpStats,
+    pub has_mp2: bool,
+    pub mp2: SidereonObservationQcMpStats,
 }
 
 #[repr(C)]
@@ -47783,12 +47839,14 @@ fn observation_qc_options_from_c(
             has_interval_override_s: false,
             interval_override_s: 0.0,
             gap_factor: 1.5,
+            clock_jump_threshold_s: sidereon_core::observation_qc::DEFAULT_CLOCK_JUMP_THRESHOLD_S,
         });
     sidereon_core::observation_qc::ObservationQcOptions {
         interval_override_s: options
             .has_interval_override_s
             .then_some(options.interval_override_s),
         gap_factor: options.gap_factor,
+        clock_jump_threshold_s: options.clock_jump_threshold_s,
     }
 }
 
@@ -47875,6 +47933,45 @@ fn observation_qc_signal_from_parts(
     out
 }
 
+fn observation_qc_cycle_slips_to_c(
+    cycle_slips: &sidereon_core::observation_qc::CycleSlipQc,
+) -> SidereonObservationQcCycleSlips {
+    SidereonObservationQcCycleSlips {
+        observations: cycle_slips.observations,
+        total_slips: cycle_slips.total_slips,
+        has_observations_per_slip: cycle_slips.observations_per_slip.is_some(),
+        observations_per_slip: cycle_slips.observations_per_slip.unwrap_or(0.0),
+        system_count: cycle_slips.by_system.len(),
+    }
+}
+
+fn observation_qc_system_cycle_slip_to_c(
+    row: &sidereon_core::observation_qc::SystemCycleSlipQc,
+) -> SidereonObservationQcSystemCycleSlip {
+    SidereonObservationQcSystemCycleSlip {
+        system: gnss_system_to_c(row.system) as u32,
+        observations: row.observations,
+        slips: row.slips,
+        has_observations_per_slip: row.observations_per_slip.is_some(),
+        observations_per_slip: row.observations_per_slip.unwrap_or(0.0),
+    }
+}
+
+fn observation_qc_mp_stats_to_c(
+    stats: Option<sidereon_core::observation_qc::MpStats>,
+) -> (bool, SidereonObservationQcMpStats) {
+    match stats {
+        Some(stats) => (
+            true,
+            SidereonObservationQcMpStats {
+                n: stats.n,
+                rms_m: stats.rms_m,
+            },
+        ),
+        None => (false, SidereonObservationQcMpStats { n: 0, rms_m: 0.0 }),
+    }
+}
+
 unsafe fn text_bytes_from_c<'a>(
     fn_name: &str,
     data: *const u8,
@@ -47905,6 +48002,7 @@ pub unsafe extern "C" fn sidereon_observation_qc_options_init(
                 has_interval_override_s: defaults.interval_override_s.is_some(),
                 interval_override_s: defaults.interval_override_s.unwrap_or(0.0),
                 gap_factor: defaults.gap_factor,
+                clock_jump_threshold_s: defaults.clock_jump_threshold_s,
             };
             SidereonStatus::Ok
         },
@@ -48208,6 +48306,369 @@ pub unsafe extern "C" fn sidereon_observation_qc_system_signals(
                 out_required,
             ));
             SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_observation_qc_clock_jumps(
+    report: *const SidereonObservationQcReport,
+    out: *mut SidereonObservationQcClockJump,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_observation_qc_clock_jumps",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_observation_qc_clock_jumps",
+                out_written,
+                out_required
+            ));
+            let report = c_try!(require_ref(
+                report,
+                "sidereon_observation_qc_clock_jumps",
+                "report"
+            ));
+            let values: Vec<_> = report
+                .inner
+                .clock_jumps
+                .iter()
+                .map(|row| SidereonObservationQcClockJump {
+                    epoch_index: row.epoch_index,
+                    epoch: rinex_epoch_time_to_c(row.epoch),
+                    delta_s: row.delta_s,
+                })
+                .collect();
+            c_try!(copy_prefix_to_c(
+                "sidereon_observation_qc_clock_jumps",
+                "out",
+                &values,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_observation_qc_cycle_slips(
+    report: *const SidereonObservationQcReport,
+    out_cycle_slips: *mut SidereonObservationQcCycleSlips,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_observation_qc_cycle_slips",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_cycle_slips,
+                "sidereon_observation_qc_cycle_slips",
+                "out_cycle_slips"
+            ));
+            let report = c_try!(require_ref(
+                report,
+                "sidereon_observation_qc_cycle_slips",
+                "report"
+            ));
+            *out = observation_qc_cycle_slips_to_c(&report.inner.cycle_slips);
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_observation_qc_cycle_slip_systems(
+    report: *const SidereonObservationQcReport,
+    out: *mut SidereonObservationQcSystemCycleSlip,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_observation_qc_cycle_slip_systems",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_observation_qc_cycle_slip_systems",
+                out_written,
+                out_required
+            ));
+            let report = c_try!(require_ref(
+                report,
+                "sidereon_observation_qc_cycle_slip_systems",
+                "report"
+            ));
+            let values: Vec<_> = report
+                .inner
+                .cycle_slips
+                .by_system
+                .iter()
+                .map(observation_qc_system_cycle_slip_to_c)
+                .collect();
+            c_try!(copy_prefix_to_c(
+                "sidereon_observation_qc_cycle_slip_systems",
+                "out",
+                &values,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_observation_qc_multipath_satellites(
+    report: *const SidereonObservationQcReport,
+    out: *mut SidereonObservationQcSatelliteMultipath,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_observation_qc_multipath_satellites",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_observation_qc_multipath_satellites",
+                out_written,
+                out_required
+            ));
+            let report = c_try!(require_ref(
+                report,
+                "sidereon_observation_qc_multipath_satellites",
+                "report"
+            ));
+            let values: Vec<_> = report
+                .inner
+                .multipath
+                .satellites
+                .iter()
+                .map(|row| {
+                    let (has_mp1, mp1) = observation_qc_mp_stats_to_c(row.mp1);
+                    let (has_mp2, mp2) = observation_qc_mp_stats_to_c(row.mp2);
+                    SidereonObservationQcSatelliteMultipath {
+                        sat_id: satellite_token(row.satellite),
+                        has_mp1,
+                        mp1,
+                        has_mp2,
+                        mp2,
+                    }
+                })
+                .collect();
+            c_try!(copy_prefix_to_c(
+                "sidereon_observation_qc_multipath_satellites",
+                "out",
+                &values,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_observation_qc_multipath_systems(
+    report: *const SidereonObservationQcReport,
+    out: *mut SidereonObservationQcSystemMultipath,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_observation_qc_multipath_systems",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_observation_qc_multipath_systems",
+                out_written,
+                out_required
+            ));
+            let report = c_try!(require_ref(
+                report,
+                "sidereon_observation_qc_multipath_systems",
+                "report"
+            ));
+            let values: Vec<_> = report
+                .inner
+                .multipath
+                .systems
+                .iter()
+                .map(|row| {
+                    let (has_mp1, mp1) = observation_qc_mp_stats_to_c(row.mp1);
+                    let (has_mp2, mp2) = observation_qc_mp_stats_to_c(row.mp2);
+                    SidereonObservationQcSystemMultipath {
+                        system: gnss_system_to_c(row.system) as u32,
+                        has_mp1,
+                        mp1,
+                        has_mp2,
+                        mp2,
+                    }
+                })
+                .collect();
+            c_try!(copy_prefix_to_c(
+                "sidereon_observation_qc_multipath_systems",
+                "out",
+                &values,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+unsafe fn observation_qc_copy_string(
+    fn_name: &str,
+    text: String,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    c_try!(copy_prefix_to_c(
+        fn_name,
+        "out",
+        text.as_bytes(),
+        out,
+        len,
+        out_written,
+        out_required,
+    ));
+    SidereonStatus::Ok
+}
+
+/// Render an observation QC report as text. Variable-length output contract.
+/// Delegates to sidereon_core::observation_qc::render_text.
+///
+/// Safety: report is a live handle; out points to len writable bytes or NULL
+/// when len is 0; out_written and out_required point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_observation_qc_render_text(
+    report: *const SidereonObservationQcReport,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_observation_qc_render_text",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_observation_qc_render_text",
+                out_written,
+                out_required
+            ));
+            let report = c_try!(require_ref(
+                report,
+                "sidereon_observation_qc_render_text",
+                "report"
+            ));
+            observation_qc_copy_string(
+                "sidereon_observation_qc_render_text",
+                sidereon_core::observation_qc::render_text(&report.inner),
+                out,
+                len,
+                out_written,
+                out_required,
+            )
+        },
+    )
+}
+
+/// Render an observation QC report as HTML. Variable-length output contract.
+/// Delegates to sidereon_core::observation_qc::render_html.
+///
+/// Safety: report is a live handle; out points to len writable bytes or NULL
+/// when len is 0; out_written and out_required point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_observation_qc_render_html(
+    report: *const SidereonObservationQcReport,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_observation_qc_render_html",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_observation_qc_render_html",
+                out_written,
+                out_required
+            ));
+            let report = c_try!(require_ref(
+                report,
+                "sidereon_observation_qc_render_html",
+                "report"
+            ));
+            observation_qc_copy_string(
+                "sidereon_observation_qc_render_html",
+                sidereon_core::observation_qc::render_html(&report.inner),
+                out,
+                len,
+                out_written,
+                out_required,
+            )
+        },
+    )
+}
+
+/// Serialize an observation QC report as JSON. Variable-length output contract.
+///
+/// Safety: report is a live handle; out points to len writable bytes or NULL
+/// when len is 0; out_written and out_required point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_observation_qc_to_json(
+    report: *const SidereonObservationQcReport,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_observation_qc_to_json",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_observation_qc_to_json",
+                out_written,
+                out_required
+            ));
+            let report = c_try!(require_ref(
+                report,
+                "sidereon_observation_qc_to_json",
+                "report"
+            ));
+            let text = match serde_json::to_string(&report.inner) {
+                Ok(text) => text,
+                Err(err) => {
+                    set_last_error(format!("sidereon_observation_qc_to_json: {err}"));
+                    return SidereonStatus::InvalidArgument;
+                }
+            };
+            observation_qc_copy_string(
+                "sidereon_observation_qc_to_json",
+                text,
+                out,
+                len,
+                out_written,
+                out_required,
+            )
         },
     )
 }

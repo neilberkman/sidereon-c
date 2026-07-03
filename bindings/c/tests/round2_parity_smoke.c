@@ -114,6 +114,34 @@ static uint8_t *read_file(const char *path, size_t *out_len) {
     return buf;
 }
 
+static int token_equals(const SidereonSatelliteToken *token, const char *expected) {
+    return strncmp((const char *)token->bytes, expected, sizeof(token->bytes)) == 0;
+}
+
+typedef SidereonStatus (*ObservationQcStringFn)(const SidereonObservationQcReport *report,
+                                                uint8_t *out, size_t len,
+                                                size_t *out_written,
+                                                size_t *out_required);
+
+static char *copy_qc_report_string(SidereonObservationQcReport *report, ObservationQcStringFn fn,
+                                   const char *what, size_t *out_len) {
+    size_t written = 0, required = 0;
+    check(fn(report, NULL, 0, &written, &required) == SIDEREON_STATUS_OK && written == 0 &&
+              required > 0,
+          what);
+    char *out = (char *)malloc(required + 1);
+    if (!out) {
+        fprintf(stderr, "FAIL: malloc QC string\n");
+        exit(2);
+    }
+    check(fn(report, (uint8_t *)out, required, &written, &required) == SIDEREON_STATUS_OK &&
+              written == required,
+          what);
+    out[written] = '\0';
+    *out_len = written;
+    return out;
+}
+
 static uint8_t *copy_ntrip_bytes(const SidereonNtripBytes *bytes, size_t *out_len) {
     size_t written = 0, required = 0;
     check(sidereon_ntrip_bytes(bytes, NULL, 0, &written, &required) == SIDEREON_STATUS_OK,
@@ -418,6 +446,178 @@ static void test_qc(const char *fixtures) {
               summary.missing_epochs == 0 && summary.data_gap_count == 0 &&
               summary.satellite_signal_count == 659 && summary.system_signal_count == 78,
           "observation QC oracle summary");
+
+    size_t written = 0, required = 0;
+    check(sidereon_observation_qc_clock_jumps(report, NULL, 0, &written, &required) ==
+                  SIDEREON_STATUS_OK &&
+              written == 0 && required == 0,
+          "observation QC clock jumps empty");
+
+    SidereonObservationQcCycleSlips cycle_slips;
+    check(sidereon_observation_qc_cycle_slips(report, &cycle_slips) == SIDEREON_STATUS_OK &&
+              cycle_slips.observations == 4135 && cycle_slips.total_slips == 27 &&
+              cycle_slips.has_observations_per_slip && cycle_slips.system_count == 4,
+          "observation QC cycle-slip summary");
+    check_close(cycle_slips.observations_per_slip, 4135.0 / 27.0, 1e-12,
+                "QC observations per slip");
+
+    SidereonObservationQcSystemCycleSlip slip_systems[4];
+    written = 0;
+    required = 0;
+    check(sidereon_observation_qc_cycle_slip_systems(report, NULL, 0, &written,
+                                                     &required) == SIDEREON_STATUS_OK &&
+              written == 0 && required == 4,
+          "observation QC cycle-slip systems size");
+    check(sidereon_observation_qc_cycle_slip_systems(report, slip_systems, 4, &written,
+                                                     &required) == SIDEREON_STATUS_OK &&
+              written == 4 && required == 4,
+          "observation QC cycle-slip systems copy");
+    int saw_gps_slip = 0;
+    int saw_glonass_slip = 0;
+    int saw_galileo_slip = 0;
+    int saw_beidou_slip = 0;
+    for (size_t i = 0; i < written; i++) {
+        const SidereonObservationQcSystemCycleSlip *row = &slip_systems[i];
+        if (row->system == SIDEREON_GNSS_SYSTEM_GPS) {
+            saw_gps_slip = 1;
+            check(row->observations == 1282 && row->slips == 4 &&
+                      row->has_observations_per_slip,
+                  "QC GPS cycle slips");
+            check_close(row->observations_per_slip, 1282.0 / 4.0, 1e-12,
+                        "QC GPS observations per slip");
+        } else if (row->system == SIDEREON_GNSS_SYSTEM_GLONASS) {
+            saw_glonass_slip = 1;
+            check(row->observations == 784 && row->slips == 10 &&
+                      row->has_observations_per_slip,
+                  "QC GLONASS cycle slips");
+            check_close(row->observations_per_slip, 784.0 / 10.0, 1e-12,
+                        "QC GLONASS observations per slip");
+        } else if (row->system == SIDEREON_GNSS_SYSTEM_GALILEO) {
+            saw_galileo_slip = 1;
+            check(row->observations == 1023 && row->slips == 9 &&
+                      row->has_observations_per_slip,
+                  "QC Galileo cycle slips");
+            check_close(row->observations_per_slip, 1023.0 / 9.0, 1e-12,
+                        "QC Galileo observations per slip");
+        } else if (row->system == SIDEREON_GNSS_SYSTEM_BEI_DOU) {
+            saw_beidou_slip = 1;
+            check(row->observations == 1046 && row->slips == 4 &&
+                      row->has_observations_per_slip,
+                  "QC BeiDou cycle slips");
+            check_close(row->observations_per_slip, 1046.0 / 4.0, 1e-12,
+                        "QC BeiDou observations per slip");
+        }
+    }
+    check(saw_gps_slip && saw_glonass_slip && saw_galileo_slip && saw_beidou_slip,
+          "observation QC cycle-slip systems present");
+
+    SidereonObservationQcSystemMultipath mp_systems[4];
+    written = 0;
+    required = 0;
+    check(sidereon_observation_qc_multipath_systems(report, NULL, 0, &written,
+                                                    &required) == SIDEREON_STATUS_OK &&
+              written == 0 && required == 4,
+          "observation QC multipath systems size");
+    check(sidereon_observation_qc_multipath_systems(report, mp_systems, 4, &written,
+                                                    &required) == SIDEREON_STATUS_OK &&
+              written == 4 && required == 4,
+          "observation QC multipath systems copy");
+    int saw_gps_mp = 0;
+    int saw_glonass_mp = 0;
+    int saw_galileo_mp = 0;
+    int saw_beidou_mp = 0;
+    for (size_t i = 0; i < written; i++) {
+        const SidereonObservationQcSystemMultipath *row = &mp_systems[i];
+        check(row->has_mp1 && row->has_mp2, "QC multipath system has MP1 and MP2");
+        if (row->system == SIDEREON_GNSS_SYSTEM_GPS) {
+            saw_gps_mp = 1;
+            check(row->mp1.n == 1282 && row->mp2.n == 1282, "QC GPS multipath counts");
+            check_close(row->mp1.rms_m, 0.29240479301672934, 1e-12, "QC GPS MP1");
+            check_close(row->mp2.rms_m, 0.28099636987578613, 1e-12, "QC GPS MP2");
+        } else if (row->system == SIDEREON_GNSS_SYSTEM_GLONASS) {
+            saw_glonass_mp = 1;
+            check(row->mp1.n == 784 && row->mp2.n == 784, "QC GLONASS multipath counts");
+            check_close(row->mp1.rms_m, 0.5186943851125804, 1e-12, "QC GLONASS MP1");
+            check_close(row->mp2.rms_m, 0.3144151269762753, 1e-12, "QC GLONASS MP2");
+        } else if (row->system == SIDEREON_GNSS_SYSTEM_GALILEO) {
+            saw_galileo_mp = 1;
+            check(row->mp1.n == 1023 && row->mp2.n == 1023,
+                  "QC Galileo multipath counts");
+            check_close(row->mp1.rms_m, 0.3864051258642349, 1e-12, "QC Galileo MP1");
+            check_close(row->mp2.rms_m, 0.4834568175024186, 1e-12, "QC Galileo MP2");
+        } else if (row->system == SIDEREON_GNSS_SYSTEM_BEI_DOU) {
+            saw_beidou_mp = 1;
+            check(row->mp1.n == 1046 && row->mp2.n == 1046, "QC BeiDou multipath counts");
+            check_close(row->mp1.rms_m, 1.0173872172139768, 1e-12, "QC BeiDou MP1");
+            check_close(row->mp2.rms_m, 1.1736185873490712, 1e-12, "QC BeiDou MP2");
+        }
+    }
+    check(saw_gps_mp && saw_glonass_mp && saw_galileo_mp && saw_beidou_mp,
+          "observation QC multipath systems present");
+
+    written = 0;
+    required = 0;
+    check(sidereon_observation_qc_multipath_satellites(report, NULL, 0, &written,
+                                                       &required) == SIDEREON_STATUS_OK &&
+              written == 0 && required == 40,
+          "observation QC multipath satellites size");
+    SidereonObservationQcSatelliteMultipath *mp_sats =
+        (SidereonObservationQcSatelliteMultipath *)malloc(required * sizeof(*mp_sats));
+    if (!mp_sats) {
+        fprintf(stderr, "FAIL: malloc QC multipath satellites\n");
+        exit(2);
+    }
+    check(sidereon_observation_qc_multipath_satellites(report, mp_sats, required, &written,
+                                                       &required) == SIDEREON_STATUS_OK &&
+              written == required,
+          "observation QC multipath satellites copy");
+    int saw_g08_mp = 0;
+    for (size_t i = 0; i < written; i++) {
+        if (token_equals(&mp_sats[i].sat_id, "G08")) {
+            saw_g08_mp = 1;
+            check(mp_sats[i].has_mp1 && mp_sats[i].has_mp2 && mp_sats[i].mp1.n == 120 &&
+                      mp_sats[i].mp2.n == 120,
+                  "QC G08 multipath counts");
+            check_close(mp_sats[i].mp1.rms_m, 0.45634723176158526, 1e-12,
+                        "QC G08 MP1");
+            check_close(mp_sats[i].mp2.rms_m, 0.6360867914911793, 1e-12,
+                        "QC G08 MP2");
+        }
+    }
+    check(saw_g08_mp, "observation QC multipath satellite G08 present");
+    free(mp_sats);
+
+    size_t text_len = 0;
+    char *text_report =
+        copy_qc_report_string(report, sidereon_observation_qc_render_text, "QC render_text",
+                              &text_len);
+    check(text_len > 100 && strstr(text_report, "G   GPS") != NULL &&
+              strstr(text_report, "R   GLONASS") != NULL &&
+              strstr(text_report, "E   Galileo") != NULL &&
+              strstr(text_report, "C   BeiDou") != NULL &&
+              strstr(text_report, "S   SBAS") != NULL,
+          "observation QC render_text constellation rows");
+    free(text_report);
+
+    size_t html_len = 0;
+    char *html_report =
+        copy_qc_report_string(report, sidereon_observation_qc_render_html, "QC render_html",
+                              &html_len);
+    check(html_len > 100 && strstr(html_report, "<td class=\"text\">GPS</td>") != NULL &&
+              strstr(html_report, "<td>0.292</td>") != NULL &&
+              strstr(html_report, "<td>1.174</td>") != NULL,
+          "observation QC render_html smoke");
+    free(html_report);
+
+    size_t json_len = 0;
+    char *json_report =
+        copy_qc_report_string(report, sidereon_observation_qc_to_json, "QC to_json", &json_len);
+    check(json_len > 100 && strstr(json_report, "\"cycle_slips\"") != NULL &&
+              strstr(json_report, "\"multipath\"") != NULL &&
+              strstr(json_report, "0.29240479301672934") != NULL,
+          "observation QC to_json smoke");
+    free(json_report);
+
     sidereon_observation_qc_report_free(report);
     free(obs);
     free(obs_path);
@@ -452,7 +652,8 @@ static void test_qc(const char *fixtures) {
     check(sidereon_rinex_repair_summary(repair, &rsum) == SIDEREON_STATUS_OK,
           "repair remaining summary");
     check(rsum.finding_count == 0 && rsum.decoded_from_crinex, "repair remaining clean");
-    size_t written = 0, required = 0;
+    written = 0;
+    required = 0;
     check(sidereon_rinex_repair_crinex_text(repair, NULL, 0, &written, &required) ==
               SIDEREON_STATUS_OK &&
               required > 100,

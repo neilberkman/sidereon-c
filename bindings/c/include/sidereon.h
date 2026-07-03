@@ -45,9 +45,9 @@
 #include <stdlib.h>
 
 #define SIDEREON_VERSION_MAJOR 0
-#define SIDEREON_VERSION_MINOR 10
+#define SIDEREON_VERSION_MINOR 11
 #define SIDEREON_VERSION_PATCH 1
-#define SIDEREON_VERSION_STRING "0.10.1"
+#define SIDEREON_VERSION_STRING "0.11.1"
 
 #define TLE_FIELD_C_BYTES 32
 
@@ -9965,6 +9965,7 @@ typedef struct SidereonObservationQcOptions {
     bool has_interval_override_s;
     double interval_override_s;
     double gap_factor;
+    double clock_jump_threshold_s;
 } SidereonObservationQcOptions;
 
 typedef struct SidereonObservationQcSummary {
@@ -10013,6 +10014,49 @@ typedef struct SidereonObservationQcSignal {
     bool has_snr_std;
     double snr_std;
 } SidereonObservationQcSignal;
+
+typedef struct SidereonObservationQcClockJump {
+    size_t epoch_index;
+    struct SidereonCalendarEpoch epoch;
+    double delta_s;
+} SidereonObservationQcClockJump;
+
+typedef struct SidereonObservationQcCycleSlips {
+    size_t observations;
+    size_t total_slips;
+    bool has_observations_per_slip;
+    double observations_per_slip;
+    size_t system_count;
+} SidereonObservationQcCycleSlips;
+
+typedef struct SidereonObservationQcSystemCycleSlip {
+    uint32_t system;
+    size_t observations;
+    size_t slips;
+    bool has_observations_per_slip;
+    double observations_per_slip;
+} SidereonObservationQcSystemCycleSlip;
+
+typedef struct SidereonObservationQcMpStats {
+    size_t n;
+    double rms_m;
+} SidereonObservationQcMpStats;
+
+typedef struct SidereonObservationQcSatelliteMultipath {
+    struct SidereonSatelliteToken sat_id;
+    bool has_mp1;
+    struct SidereonObservationQcMpStats mp1;
+    bool has_mp2;
+    struct SidereonObservationQcMpStats mp2;
+} SidereonObservationQcSatelliteMultipath;
+
+typedef struct SidereonObservationQcSystemMultipath {
+    uint32_t system;
+    bool has_mp1;
+    struct SidereonObservationQcMpStats mp1;
+    bool has_mp2;
+    struct SidereonObservationQcMpStats mp2;
+} SidereonObservationQcSystemMultipath;
 
 typedef struct SidereonRinexLintSummary {
     size_t finding_count;
@@ -19649,6 +19693,71 @@ enum SidereonStatus sidereon_observation_qc_system_signals(const struct Sidereon
                                                            size_t len,
                                                            size_t *out_written,
                                                            size_t *out_required);
+
+enum SidereonStatus sidereon_observation_qc_clock_jumps(const struct SidereonObservationQcReport *report,
+                                                        struct SidereonObservationQcClockJump *out,
+                                                        size_t len,
+                                                        size_t *out_written,
+                                                        size_t *out_required);
+
+enum SidereonStatus sidereon_observation_qc_cycle_slips(const struct SidereonObservationQcReport *report,
+                                                        struct SidereonObservationQcCycleSlips *out_cycle_slips);
+
+enum SidereonStatus sidereon_observation_qc_cycle_slip_systems(const struct SidereonObservationQcReport *report,
+                                                               struct SidereonObservationQcSystemCycleSlip *out,
+                                                               size_t len,
+                                                               size_t *out_written,
+                                                               size_t *out_required);
+
+enum SidereonStatus sidereon_observation_qc_multipath_satellites(const struct SidereonObservationQcReport *report,
+                                                                 struct SidereonObservationQcSatelliteMultipath *out,
+                                                                 size_t len,
+                                                                 size_t *out_written,
+                                                                 size_t *out_required);
+
+enum SidereonStatus sidereon_observation_qc_multipath_systems(const struct SidereonObservationQcReport *report,
+                                                              struct SidereonObservationQcSystemMultipath *out,
+                                                              size_t len,
+                                                              size_t *out_written,
+                                                              size_t *out_required);
+
+/**
+ * Render an observation QC report as text. Variable-length output contract.
+ * Delegates to sidereon_core::observation_qc::render_text.
+ *
+ * Safety: report is a live handle; out points to len writable bytes or NULL
+ * when len is 0; out_written and out_required point to size_t.
+ */
+enum SidereonStatus sidereon_observation_qc_render_text(const struct SidereonObservationQcReport *report,
+                                                        uint8_t *out,
+                                                        size_t len,
+                                                        size_t *out_written,
+                                                        size_t *out_required);
+
+/**
+ * Render an observation QC report as HTML. Variable-length output contract.
+ * Delegates to sidereon_core::observation_qc::render_html.
+ *
+ * Safety: report is a live handle; out points to len writable bytes or NULL
+ * when len is 0; out_written and out_required point to size_t.
+ */
+enum SidereonStatus sidereon_observation_qc_render_html(const struct SidereonObservationQcReport *report,
+                                                        uint8_t *out,
+                                                        size_t len,
+                                                        size_t *out_written,
+                                                        size_t *out_required);
+
+/**
+ * Serialize an observation QC report as JSON. Variable-length output contract.
+ *
+ * Safety: report is a live handle; out points to len writable bytes or NULL
+ * when len is 0; out_written and out_required point to size_t.
+ */
+enum SidereonStatus sidereon_observation_qc_to_json(const struct SidereonObservationQcReport *report,
+                                                    uint8_t *out,
+                                                    size_t len,
+                                                    size_t *out_written,
+                                                    size_t *out_required);
 
 void sidereon_observation_qc_report_free(struct SidereonObservationQcReport *report);
 
