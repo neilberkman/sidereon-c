@@ -52,6 +52,11 @@
 #define TLE_FIELD_C_BYTES 32
 
 /**
+ * Fixed buffer length for terrain store typed error text, including the NUL.
+ */
+#define SIDEREON_TERRAIN_ERROR_TEXT_C_BYTES 512
+
+/**
  * Maximum number of VMF1 site-wise samples carried in
  * SidereonPppTroposphereOptions.vmf_samples. Mirrors the engine
  * VMF_SITE_MAX_SAMPLES (kept a literal so cbindgen emits a usable array bound;
@@ -548,6 +553,16 @@ typedef enum SidereonAlmanacEclipseKind {
     SIDEREON_ALMANAC_ECLIPSE_KIND_SOLAR_TOTAL = 5,
     SIDEREON_ALMANAC_ECLIPSE_KIND_SOLAR_HYBRID = 6,
 } SidereonAlmanacEclipseKind;
+
+/**
+ * Terrain store vertical datum. Terrain store postings are orthometric heights.
+ */
+typedef enum SidereonVerticalDatum {
+    /**
+     * Orthometric height in metres above the EGM96 mean sea level geoid.
+     */
+    SIDEREON_VERTICAL_DATUM_EGM96_MSL_ORTHOMETRIC = 1,
+} SidereonVerticalDatum;
 
 /**
  * Integer ambiguity verdict for a moving-baseline epoch, mirroring
@@ -1102,10 +1117,93 @@ typedef enum SidereonTransitBodyKind {
     SIDEREON_TRANSIT_BODY_KIND_PLANET = 2,
 } SidereonTransitBodyKind;
 
+/**
+ * DTED interpolation mode for orthometric terrain heights.
+ */
 typedef enum SidereonDtedInterpolation {
+    /**
+     * Nearest posting height.
+     */
     SIDEREON_DTED_INTERPOLATION_NEAREST_POSTING = 0,
+    /**
+     * Bilinear interpolation across postings.
+     */
     SIDEREON_DTED_INTERPOLATION_BILINEAR = 1,
 } SidereonDtedInterpolation;
+
+/**
+ * Geoid tier for converting terrain orthometric height to ellipsoidal height.
+ */
+typedef enum SidereonTerrainGeoidModel {
+    /**
+     * Embedded EGM96 1-degree grid, always available in process.
+     */
+    SIDEREON_TERRAIN_GEOID_MODEL_EGM96_ONE_DEGREE = 0,
+    /**
+     * Caller-supplied EGM96 15-arcminute WW15MGH.DAC grid.
+     */
+    SIDEREON_TERRAIN_GEOID_MODEL_EGM96_FIFTEEN_MINUTE = 1,
+} SidereonTerrainGeoidModel;
+
+/**
+ * Terrain store conversion or reader error kind.
+ */
+typedef enum SidereonTerrainStoreErrorKind {
+    /**
+     * No terrain store error is recorded for this thread.
+     */
+    SIDEREON_TERRAIN_STORE_ERROR_KIND_NONE = 0,
+    /**
+     * File or directory I/O failed.
+     */
+    SIDEREON_TERRAIN_STORE_ERROR_KIND_IO = 1,
+    /**
+     * Terrain store bytes or DTED input could not be parsed.
+     */
+    SIDEREON_TERRAIN_STORE_ERROR_KIND_PARSE = 2,
+    /**
+     * Terrain store version is not supported.
+     */
+    SIDEREON_TERRAIN_STORE_ERROR_KIND_UNSUPPORTED_VERSION = 3,
+    /**
+     * Terrain store vertical datum tag is not supported.
+     */
+    SIDEREON_TERRAIN_STORE_ERROR_KIND_UNSUPPORTED_DATUM = 4,
+    /**
+     * Two DTED inputs resolved to the same tile id.
+     */
+    SIDEREON_TERRAIN_STORE_ERROR_KIND_DUPLICATE_TILE = 5,
+    /**
+     * A tile payload checksum did not match its index record.
+     */
+    SIDEREON_TERRAIN_STORE_ERROR_KIND_CHECKSUM = 6,
+} SidereonTerrainStoreErrorKind;
+
+/**
+ * Terrain datum conversion or geoid loading error kind.
+ */
+typedef enum SidereonTerrainDatumErrorKind {
+    /**
+     * No terrain datum error is recorded for this thread.
+     */
+    SIDEREON_TERRAIN_DATUM_ERROR_KIND_NONE = 0,
+    /**
+     * Terrain lookup failed before datum conversion.
+     */
+    SIDEREON_TERRAIN_DATUM_ERROR_KIND_TERRAIN = 1,
+    /**
+     * A geoid grid could not be parsed.
+     */
+    SIDEREON_TERRAIN_DATUM_ERROR_KIND_GEOID = 2,
+    /**
+     * A geoid grid could not be read for a reason other than absence.
+     */
+    SIDEREON_TERRAIN_DATUM_ERROR_KIND_IO = 3,
+    /**
+     * The EGM96 15-arcminute WW15MGH.DAC grid was requested but is absent.
+     */
+    SIDEREON_TERRAIN_DATUM_ERROR_KIND_MISSING_EGM96_DAC = 4,
+} SidereonTerrainDatumErrorKind;
 
 /**
  * Selects which antenna-descriptor string field a reader returns. Pass as a
@@ -1393,6 +1491,86 @@ typedef enum SidereonEnuConvention {
     SIDEREON_ENU_CONVENTION_GEOCENTRIC_RADIAL = 1,
 } SidereonEnuConvention;
 
+/**
+ * Sample input kind for Allan-family clock-stability estimators.
+ */
+typedef enum SidereonAllanSeriesKind {
+    /**
+     * Phase deviations in seconds.
+     */
+    SIDEREON_ALLAN_SERIES_KIND_PHASE_SECONDS = 0,
+    /**
+     * Fractional-frequency samples, dimensionless.
+     */
+    SIDEREON_ALLAN_SERIES_KIND_FRACTIONAL_FREQUENCY = 1,
+    /**
+     * Phase deviations in seconds with missing samples.
+     */
+    SIDEREON_ALLAN_SERIES_KIND_PHASE_SECONDS_WITH_GAPS = 2,
+    /**
+     * Fractional-frequency samples with missing samples.
+     */
+    SIDEREON_ALLAN_SERIES_KIND_FRACTIONAL_FREQUENCY_WITH_GAPS = 3,
+} SidereonAllanSeriesKind;
+
+/**
+ * Averaging-factor grid for Allan-family estimators.
+ */
+typedef enum SidereonAllanTauGrid {
+    /**
+     * `m = 1, 2, 4, 8, ...` while the estimator has terms.
+     */
+    SIDEREON_ALLAN_TAU_GRID_OCTAVE = 0,
+    /**
+     * Every `m = 1..=m_max` while the estimator has terms.
+     */
+    SIDEREON_ALLAN_TAU_GRID_ALL = 1,
+    /**
+     * Caller-supplied averaging factors.
+     */
+    SIDEREON_ALLAN_TAU_GRID_EXPLICIT = 2,
+} SidereonAllanTauGrid;
+
+/**
+ * Missing-sample policy for gapped Allan-family inputs.
+ */
+typedef enum SidereonAllanGapPolicy {
+    /**
+     * Reject any missing sample.
+     */
+    SIDEREON_ALLAN_GAP_POLICY_REJECT = 0,
+    /**
+     * Exclude estimator terms that cross a missing sample.
+     */
+    SIDEREON_ALLAN_GAP_POLICY_OMIT_TERMS = 1,
+} SidereonAllanGapPolicy;
+
+/**
+ * Allan-family estimator selector.
+ */
+typedef enum SidereonAllanEstimator {
+    /**
+     * Plain non-overlapping Allan deviation.
+     */
+    SIDEREON_ALLAN_ESTIMATOR_ADEV = 0,
+    /**
+     * Fully overlapping Allan deviation.
+     */
+    SIDEREON_ALLAN_ESTIMATOR_OVERLAPPING_ADEV = 1,
+    /**
+     * Modified Allan deviation.
+     */
+    SIDEREON_ALLAN_ESTIMATOR_MDEV = 2,
+    /**
+     * Overlapping Hadamard deviation.
+     */
+    SIDEREON_ALLAN_ESTIMATOR_HDEV = 3,
+    /**
+     * Time deviation.
+     */
+    SIDEREON_ALLAN_ESTIMATOR_TDEV = 4,
+} SidereonAllanEstimator;
+
 typedef enum SidereonSbasSolveMode {
     SIDEREON_SBAS_SOLVE_MODE_MIXED_AUGMENTATION = 0,
     SIDEREON_SBAS_SOLVE_MODE_SBAS_ONLY = 1,
@@ -1402,6 +1580,13 @@ typedef enum SidereonSsrMissingCorrectionAction {
     SIDEREON_SSR_MISSING_CORRECTION_ACTION_DECLINE = 0,
     SIDEREON_SSR_MISSING_CORRECTION_ACTION_FALL_BACK_TO_BROADCAST = 1,
 } SidereonSsrMissingCorrectionAction;
+
+/**
+ * Combined Allan-family estimator curves. Opaque to C. Create with
+ * sidereon_clock_compute_allan_deviations and release with
+ * sidereon_clock_allan_deviation_curves_free.
+ */
+typedef struct SidereonAllanDeviationCurves SidereonAllanDeviationCurves;
 
 /**
  * A single ANTEX antenna calibration block (receiver or satellite), owned
@@ -1415,6 +1600,12 @@ typedef struct SidereonAntenna SidereonAntenna;
  * and release with sidereon_antex_free.
  */
 typedef struct SidereonAntex SidereonAntex;
+
+/**
+ * ARAIM protection-level result. Opaque to C. Create with sidereon_araim and
+ * release with sidereon_araim_result_free.
+ */
+typedef struct SidereonAraimResult SidereonAraimResult;
 
 typedef struct SidereonBiasSet SidereonBiasSet;
 
@@ -1480,9 +1671,25 @@ typedef struct SidereonDgnssCorrections SidereonDgnssCorrections;
  */
 typedef struct SidereonDgnssSolution SidereonDgnssSolution;
 
+/**
+ * DTED terrain cache rooted at a tile directory. Create with
+ * sidereon_dted_terrain_new and release with sidereon_dted_terrain_free.
+ */
 typedef struct SidereonDtedTerrain SidereonDtedTerrain;
 
+/**
+ * A loaded DTED tile. Create with sidereon_dted_tile_load and release with
+ * sidereon_dted_tile_free.
+ */
 typedef struct SidereonDtedTile SidereonDtedTile;
+
+/**
+ * Loaded EGM96 15-arcminute geoid grid for terrain datum conversion. Create
+ * with sidereon_egm96_15m_geoid_from_ww15mgh_dac_bytes or
+ * sidereon_egm96_15m_geoid_from_ww15mgh_dac_path, and release with
+ * sidereon_egm96_15m_geoid_free.
+ */
+typedef struct SidereonEgm96FifteenMinuteGeoid SidereonEgm96FifteenMinuteGeoid;
 
 /**
  * Numerical Cartesian-state ephemeris. Opaque to C. Create with
@@ -1529,6 +1736,14 @@ typedef struct SidereonIonoFreePseudoranges SidereonIonoFreePseudoranges;
  * sidereon_tle_look_angles and release with sidereon_look_angles_free.
  */
 typedef struct SidereonLookAngles SidereonLookAngles;
+
+/**
+ * Memory-mappable terrain reader backed by terrain store bytes. Create with
+ * sidereon_mmap_terrain_from_bytes, sidereon_mmap_terrain_from_vec, or
+ * sidereon_mmap_terrain_from_path, and release with sidereon_mmap_terrain_free.
+ * Terrain lookups use longitude, latitude degrees and return orthometric height.
+ */
+typedef struct SidereonMmapTerrain SidereonMmapTerrain;
 
 /**
  * A solved moving-baseline arc. Opaque to C. Create with
@@ -4237,6 +4452,170 @@ typedef struct SidereonVelocityObservation {
 } SidereonVelocityObservation;
 
 /**
+ * Whole-grid IONEX vertical-TEC samples for sidereon_ionex_from_tec_grid_samples.
+ * Arrays are caller-owned. `tec_maps_tecu` is flattened in
+ * `[map][lat][lon]` order with
+ * `map_epoch_count * lat_node_count * lon_node_count` values. RMS maps use the
+ * same order when `has_rms_maps` is true.
+ */
+typedef struct SidereonTecGridSamples {
+    /**
+     * Epoch time scale as SidereonTimeScale.
+     */
+    uint32_t time_scale;
+    /**
+     * Map epochs, seconds since J2000 in `time_scale`.
+     */
+    const double *map_epochs_j2000_s;
+    /**
+     * Number of map epochs.
+     */
+    size_t map_epoch_count;
+    /**
+     * Latitude nodes, degrees, descending.
+     */
+    const double *lat_nodes_deg;
+    /**
+     * Number of latitude nodes.
+     */
+    size_t lat_node_count;
+    /**
+     * Longitude nodes, degrees, ascending.
+     */
+    const double *lon_nodes_deg;
+    /**
+     * Number of longitude nodes.
+     */
+    size_t lon_node_count;
+    /**
+     * Signed latitude step, degrees.
+     */
+    double dlat_deg;
+    /**
+     * Signed longitude step, degrees.
+     */
+    double dlon_deg;
+    /**
+     * Single-layer shell height, kilometers.
+     */
+    double shell_height_km;
+    /**
+     * Mean earth radius used by the IONEX geometry, kilometers.
+     */
+    double base_radius_km;
+    /**
+     * IONEX EXPONENT header value.
+     */
+    int32_t exponent;
+    /**
+     * Flattened VTEC maps, TECU.
+     */
+    const double *tec_maps_tecu;
+    /**
+     * Number of flattened VTEC values.
+     */
+    size_t tec_map_value_count;
+    /**
+     * Whether RMS maps are present.
+     */
+    bool has_rms_maps;
+    /**
+     * Flattened RMS maps, TECU, when has_rms_maps is true.
+     */
+    const double *rms_maps_tecu;
+    /**
+     * Number of flattened RMS values.
+     */
+    size_t rms_map_value_count;
+} SidereonTecGridSamples;
+
+/**
+ * One IONEX vertical-TEC node sample. Angles are degrees, VTEC and RMS are
+ * TECU, and the epoch is seconds since J2000 in `time_scale`.
+ */
+typedef struct SidereonTecSample {
+    /**
+     * Epoch time scale as SidereonTimeScale.
+     */
+    uint32_t time_scale;
+    /**
+     * Node epoch, seconds since J2000 in `time_scale`.
+     */
+    double epoch_j2000_s;
+    /**
+     * Latitude node, degrees.
+     */
+    double lat_deg;
+    /**
+     * Longitude node, degrees.
+     */
+    double lon_deg;
+    /**
+     * Vertical TEC, TECU.
+     */
+    double vtec_tecu;
+    /**
+     * Whether rms_tecu carries an RMS value.
+     */
+    bool has_rms_tecu;
+    /**
+     * RMS value, TECU, when has_rms_tecu is true.
+     */
+    double rms_tecu;
+} SidereonTecSample;
+
+/**
+ * Dimensions and scalar metadata extracted from an IONEX vertical-TEC sample
+ * grid. Heights are kilometers and angular fields are degrees.
+ */
+typedef struct SidereonTecGridSamplesInfo {
+    /**
+     * Number of map epochs.
+     */
+    size_t map_epoch_count;
+    /**
+     * Number of latitude nodes.
+     */
+    size_t lat_node_count;
+    /**
+     * Number of longitude nodes.
+     */
+    size_t lon_node_count;
+    /**
+     * Signed latitude step, degrees.
+     */
+    double dlat_deg;
+    /**
+     * Signed longitude step, degrees.
+     */
+    double dlon_deg;
+    /**
+     * Single-layer shell height, kilometers.
+     */
+    double shell_height_km;
+    /**
+     * Mean earth radius used by the IONEX geometry, kilometers.
+     */
+    double base_radius_km;
+    /**
+     * IONEX EXPONENT header value.
+     */
+    int32_t exponent;
+    /**
+     * Whether RMS maps are present.
+     */
+    bool has_rms_maps;
+    /**
+     * Flattened VTEC value count.
+     */
+    size_t tec_map_value_count;
+    /**
+     * Flattened RMS value count.
+     */
+    size_t rms_map_value_count;
+} SidereonTecGridSamplesInfo;
+
+/**
  * A UTC calendar instant (year, month, day, hour, minute, fractional second).
  */
 typedef struct SidereonCalendarEpoch {
@@ -4473,6 +4852,109 @@ typedef struct SidereonRinexObsCarrierPhase {
      */
     double phase_shift_cycles;
 } SidereonRinexObsCarrierPhase;
+
+/**
+ * Estimators to compute in sidereon_clock_compute_allan_deviations.
+ */
+typedef struct SidereonAllanEstimatorSet {
+    /**
+     * Compute plain non-overlapping Allan deviation.
+     */
+    bool adev;
+    /**
+     * Compute fully overlapping Allan deviation.
+     */
+    bool overlapping_adev;
+    /**
+     * Compute modified Allan deviation.
+     */
+    bool mdev;
+    /**
+     * Compute overlapping Hadamard deviation.
+     */
+    bool hdev;
+    /**
+     * Compute time deviation.
+     */
+    bool tdev;
+} SidereonAllanEstimatorSet;
+
+/**
+ * Options for sidereon_clock_compute_allan_deviations. Initialize with
+ * sidereon_clock_allan_options_init. Explicit averaging factors are read only
+ * when `tau_grid == SIDEREON_ALLAN_TAU_GRID_EXPLICIT`.
+ */
+typedef struct SidereonAllanOptions {
+    /**
+     * Estimators to compute.
+     */
+    struct SidereonAllanEstimatorSet estimators;
+    /**
+     * Tau grid selector as SidereonAllanTauGrid.
+     */
+    uint32_t tau_grid;
+    /**
+     * Gap policy as SidereonAllanGapPolicy.
+     */
+    uint32_t gap_policy;
+    /**
+     * Averaging factors for the explicit tau grid.
+     */
+    const size_t *averaging_factors;
+    /**
+     * Number of explicit averaging factors.
+     */
+    size_t averaging_factor_count;
+} SidereonAllanOptions;
+
+/**
+ * One clock-stability sample. For non-gapped series, `has_value` must be true
+ * for every row. Phase samples are seconds. Fractional-frequency samples are
+ * dimensionless.
+ */
+typedef struct SidereonAllanSample {
+    /**
+     * Whether value carries a sample.
+     */
+    bool has_value;
+    /**
+     * Phase deviation in seconds or fractional frequency, depending on series.
+     */
+    double value;
+} SidereonAllanSample;
+
+/**
+ * One point on an Allan-family estimator curve. `tau_s` is seconds, deviation
+ * is in the estimator's natural units, and `n` is the number of terms used.
+ */
+typedef struct SidereonAllanPoint {
+    /**
+     * Averaging time, seconds.
+     */
+    double tau_s;
+    /**
+     * Deviation value at tau_s.
+     */
+    double deviation;
+    /**
+     * Number of estimator terms used at tau_s.
+     */
+    size_t n;
+} SidereonAllanPoint;
+
+/**
+ * One RINEX receiver-clock phase-deviation sample in seconds.
+ */
+typedef struct SidereonClockPhaseSample {
+    /**
+     * Whether phase_s carries a receiver-clock phase deviation.
+     */
+    bool has_phase_s;
+    /**
+     * Receiver-clock phase deviation, seconds, when present.
+     */
+    double phase_s;
+} SidereonClockPhaseSample;
 
 /**
  * One catalog identity record, read back as a value struct. The SP3/RINEX id
@@ -5720,6 +6202,290 @@ typedef struct SidereonRaimResult {
      */
     char worst_sat[17];
 } SidereonRaimResult;
+
+/**
+ * Integrity and continuity risk allocation for one ARAIM solve.
+ */
+typedef struct SidereonAraimIntegrityAllocation {
+    /**
+     * Total probability of hazardous misleading information.
+     */
+    double phmi_total;
+    /**
+     * Vertical PHMI allocation.
+     */
+    double phmi_vert;
+    /**
+     * Horizontal PHMI allocation.
+     */
+    double phmi_hor;
+    /**
+     * Vertical false-alert allocation.
+     */
+    double pfa_vert;
+    /**
+     * Horizontal false-alert allocation.
+     */
+    double pfa_hor;
+    /**
+     * Maximum acceptable unmonitored fault probability mass.
+     */
+    double p_threshold_unmonitored;
+    /**
+     * Fault-prior threshold used for the effective monitor threshold.
+     */
+    double p_emt;
+    /**
+     * Maximum enumerated satellite-fault order. Zero keeps only fault-free.
+     */
+    size_t max_fault_order;
+} SidereonAraimIntegrityAllocation;
+
+/**
+ * One satellite row in an ARAIM geometry snapshot.
+ */
+typedef struct SidereonAraimRow {
+    /**
+     * Null-terminated satellite token.
+     */
+    const char *sat_id;
+    /**
+     * Receiver-to-satellite ECEF unit line of sight.
+     */
+    struct SidereonLineOfSight line_of_sight;
+    /**
+     * GNSS system as SidereonGnssSystem.
+     */
+    uint32_t system;
+    /**
+     * Elevation angle at the receiver, radians.
+     */
+    double elevation_rad;
+} SidereonAraimRow;
+
+/**
+ * ARAIM geometry input. `rows` and `clock_systems` are caller-owned arrays.
+ */
+typedef struct SidereonAraimGeometry {
+    /**
+     * Satellite rows.
+     */
+    const struct SidereonAraimRow *rows;
+    /**
+     * Number of satellite rows.
+     */
+    size_t row_count;
+    /**
+     * Receiver WGS84 geodetic position.
+     */
+    struct SidereonGeodetic receiver;
+    /**
+     * Receiver-clock systems as SidereonGnssSystem values.
+     */
+    const uint32_t *clock_systems;
+    /**
+     * Number of receiver-clock systems.
+     */
+    size_t clock_system_count;
+} SidereonAraimGeometry;
+
+/**
+ * Per-satellite ARAIM integrity and accuracy model without an identity.
+ */
+typedef struct SidereonAraimSatelliteIsmModel {
+    /**
+     * Integrity one-sigma SIS range error, meters.
+     */
+    double sigma_ura_m;
+    /**
+     * Accuracy and continuity one-sigma SIS range error, meters.
+     */
+    double sigma_ure_m;
+    /**
+     * Whether effective_sigma_int_m overrides the derived integrity sigma.
+     */
+    bool has_effective_sigma_int_m;
+    /**
+     * Effective integrity one-sigma range error after local terms, meters.
+     */
+    double effective_sigma_int_m;
+    /**
+     * Whether effective_sigma_acc_m overrides the derived accuracy sigma.
+     */
+    bool has_effective_sigma_acc_m;
+    /**
+     * Effective accuracy one-sigma range error after local terms, meters.
+     */
+    double effective_sigma_acc_m;
+    /**
+     * Nominal SIS bias bound, meters.
+     */
+    double b_nom_m;
+    /**
+     * Prior probability for a satellite fault.
+     */
+    double p_sat;
+} SidereonAraimSatelliteIsmModel;
+
+/**
+ * Per-constellation ARAIM ISM default.
+ */
+typedef struct SidereonAraimConstellationIsm {
+    /**
+     * GNSS system as SidereonGnssSystem.
+     */
+    uint32_t system;
+    /**
+     * Prior probability for a constellation-wide fault.
+     */
+    double p_const;
+    /**
+     * Default satellite model for this constellation.
+     */
+    struct SidereonAraimSatelliteIsmModel default_sat;
+} SidereonAraimConstellationIsm;
+
+/**
+ * Per-satellite ARAIM ISM override.
+ */
+typedef struct SidereonAraimSatelliteIsm {
+    /**
+     * Null-terminated satellite token.
+     */
+    const char *sat_id;
+    /**
+     * Integrity one-sigma SIS range error, meters.
+     */
+    double sigma_ura_m;
+    /**
+     * Accuracy and continuity one-sigma SIS range error, meters.
+     */
+    double sigma_ure_m;
+    /**
+     * Whether effective_sigma_int_m overrides the derived integrity sigma.
+     */
+    bool has_effective_sigma_int_m;
+    /**
+     * Effective integrity one-sigma range error after local terms, meters.
+     */
+    double effective_sigma_int_m;
+    /**
+     * Whether effective_sigma_acc_m overrides the derived accuracy sigma.
+     */
+    bool has_effective_sigma_acc_m;
+    /**
+     * Effective accuracy one-sigma range error after local terms, meters.
+     */
+    double effective_sigma_acc_m;
+    /**
+     * Nominal SIS bias bound, meters.
+     */
+    double b_nom_m;
+    /**
+     * Prior probability for a satellite fault.
+     */
+    double p_sat;
+} SidereonAraimSatelliteIsm;
+
+/**
+ * ARAIM integrity support message input. Arrays are caller-owned.
+ */
+typedef struct SidereonAraimIsm {
+    /**
+     * Per-constellation defaults.
+     */
+    const struct SidereonAraimConstellationIsm *constellations;
+    /**
+     * Number of constellation rows.
+     */
+    size_t constellation_count;
+    /**
+     * Per-satellite overrides.
+     */
+    const struct SidereonAraimSatelliteIsm *satellites;
+    /**
+     * Number of satellite override rows.
+     */
+    size_t satellite_count;
+} SidereonAraimIsm;
+
+/**
+ * ARAIM protection-level summary. HPL, VPL, EMT, and accuracy sigma fields are
+ * meters.
+ */
+typedef struct SidereonAraimSummary {
+    /**
+     * Horizontal protection level, meters.
+     */
+    double hpl_m;
+    /**
+     * Vertical protection level, meters.
+     */
+    double vpl_m;
+    /**
+     * All-in-view horizontal accuracy sigma, meters.
+     */
+    double sigma_acc_h_m;
+    /**
+     * All-in-view vertical accuracy sigma, meters.
+     */
+    double sigma_acc_v_m;
+    /**
+     * Effective monitor threshold, meters.
+     */
+    double emt_m;
+    /**
+     * Unenumerated plus unmonitorable fault probability mass.
+     */
+    double p_unmonitored;
+    /**
+     * True when the solve met the allocation and all roots converged.
+     */
+    bool availability;
+    /**
+     * Number of fault-mode rows available.
+     */
+    size_t fault_mode_count;
+} SidereonAraimSummary;
+
+/**
+ * One ARAIM fault-mode row. Sigma, bias, and threshold arrays are local
+ * `[east, north, up]` meters.
+ */
+typedef struct SidereonAraimFaultMode {
+    /**
+     * Number of excluded satellites for this mode.
+     */
+    size_t excluded_count;
+    /**
+     * Whether excluded_constellation carries a GNSS system.
+     */
+    bool has_excluded_constellation;
+    /**
+     * Excluded constellation as SidereonGnssSystem when present.
+     */
+    uint32_t excluded_constellation;
+    /**
+     * Fault prior probability for this mode.
+     */
+    double prior;
+    /**
+     * Integrity sigma in local ENU, meters.
+     */
+    double sigma_int_enu_m[3];
+    /**
+     * Nominal bias bound in local ENU, meters.
+     */
+    double bias_enu_m[3];
+    /**
+     * Separation monitor threshold in local ENU, meters.
+     */
+    double threshold_enu_m[3];
+    /**
+     * True when the subset geometry is full rank.
+     */
+    bool monitorable;
+} SidereonAraimFaultMode;
 
 /**
  * One code-only pseudorange observation, mirroring
@@ -7179,9 +7945,208 @@ typedef struct SidereonSurfacePoint {
     double longitude_deg;
 } SidereonSurfacePoint;
 
+/**
+ * Options for DTED lookup. Heights are orthometric meters.
+ */
 typedef struct SidereonDtedLookupOptions {
+    /**
+     * Interpolation selector as SidereonDtedInterpolation.
+     */
     uint32_t interpolation;
 } SidereonDtedLookupOptions;
+
+/**
+ * One longitude-first terrain lookup point, in degrees.
+ */
+typedef struct SidereonLonLatDeg {
+    /**
+     * Longitude, degrees.
+     */
+    double lon_deg;
+    /**
+     * Latitude, degrees.
+     */
+    double lat_deg;
+} SidereonLonLatDeg;
+
+/**
+ * One DTED terrain batch result. When has_height_m is true, height_m is an
+ * orthometric height in meters.
+ */
+typedef struct SidereonDtedHeightResult {
+    /**
+     * Per-point status.
+     */
+    enum SidereonStatus status;
+    /**
+     * Whether height_m carries a valid orthometric height.
+     */
+    bool has_height_m;
+    /**
+     * Orthometric height, meters, when has_height_m is true.
+     */
+    double height_m;
+} SidereonDtedHeightResult;
+
+/**
+ * Last typed terrain store error for this thread.
+ */
+typedef struct SidereonTerrainStoreError {
+    /**
+     * Error selector as SidereonTerrainStoreErrorKind.
+     */
+    uint32_t kind;
+    /**
+     * Path text for I/O errors, NUL-terminated when present.
+     */
+    char path[SIDEREON_TERRAIN_ERROR_TEXT_C_BYTES];
+    /**
+     * Message text for I/O errors, NUL-terminated when present.
+     */
+    char message[SIDEREON_TERRAIN_ERROR_TEXT_C_BYTES];
+    /**
+     * Parse reason text, NUL-terminated when present.
+     */
+    char reason[SIDEREON_TERRAIN_ERROR_TEXT_C_BYTES];
+    /**
+     * Unsupported version tag when kind is UnsupportedVersion.
+     */
+    uint16_t version;
+    /**
+     * Unsupported vertical datum tag when kind is UnsupportedDatum.
+     */
+    uint8_t tag;
+    /**
+     * Tile latitude id for duplicate-tile and checksum errors.
+     */
+    int32_t lat_index;
+    /**
+     * Tile longitude id for duplicate-tile and checksum errors.
+     */
+    int32_t lon_index;
+    /**
+     * Expected checksum for checksum errors.
+     */
+    uint64_t expected_checksum64;
+    /**
+     * Computed checksum for checksum errors.
+     */
+    uint64_t found_checksum64;
+} SidereonTerrainStoreError;
+
+/**
+ * Last typed terrain datum error for this thread.
+ */
+typedef struct SidereonTerrainDatumError {
+    /**
+     * Error selector as SidereonTerrainDatumErrorKind.
+     */
+    uint32_t kind;
+    /**
+     * Path text for I/O or MissingEgm96Dac errors, NUL-terminated when present.
+     */
+    char path[SIDEREON_TERRAIN_ERROR_TEXT_C_BYTES];
+    /**
+     * Error text for Terrain, Geoid, or I/O errors, NUL-terminated when present.
+     */
+    char message[SIDEREON_TERRAIN_ERROR_TEXT_C_BYTES];
+    /**
+     * Remediation text for MissingEgm96Dac, NUL-terminated when present.
+     */
+    char remediation[SIDEREON_TERRAIN_ERROR_TEXT_C_BYTES];
+} SidereonTerrainDatumError;
+
+/**
+ * Orthometric height H in metres above the EGM96 mean sea level geoid.
+ */
+typedef struct SidereonOrthometricHeightM {
+    /**
+     * Orthometric height H, metres.
+     */
+    double value_m;
+} SidereonOrthometricHeightM;
+
+/**
+ * One memory-mappable terrain store batch result.
+ */
+typedef struct SidereonTerrainHeightResult {
+    /**
+     * Per-point status.
+     */
+    enum SidereonStatus status;
+    /**
+     * Whether orthometric_height_m carries a valid terrain height.
+     */
+    bool has_orthometric_height_m;
+    /**
+     * Orthometric height H, metres, when has_orthometric_height_m is true.
+     */
+    struct SidereonOrthometricHeightM orthometric_height_m;
+} SidereonTerrainHeightResult;
+
+/**
+ * Ellipsoidal height h in metres above the WGS84 reference ellipsoid.
+ */
+typedef struct SidereonEllipsoidalHeightM {
+    /**
+     * Ellipsoidal height h, metres.
+     */
+    double value_m;
+} SidereonEllipsoidalHeightM;
+
+/**
+ * One tile index record from a memory-mappable terrain store.
+ */
+typedef struct SidereonTerrainStoreTileIndex {
+    /**
+     * Integer latitude tile id.
+     */
+    int32_t lat_index;
+    /**
+     * Integer longitude tile id.
+     */
+    int32_t lon_index;
+    /**
+     * Western edge longitude, degrees.
+     */
+    double min_longitude_deg;
+    /**
+     * Southern edge latitude, degrees.
+     */
+    double min_latitude_deg;
+    /**
+     * Eastern edge longitude, degrees.
+     */
+    double max_longitude_deg;
+    /**
+     * Northern edge latitude, degrees.
+     */
+    double max_latitude_deg;
+    /**
+     * Number of longitude postings.
+     */
+    uint32_t lon_count;
+    /**
+     * Number of latitude postings.
+     */
+    uint32_t lat_count;
+    /**
+     * Byte offset of this tile's posting payload in the store.
+     */
+    uint64_t data_offset;
+    /**
+     * Byte length of this tile's posting payload in the store.
+     */
+    uint64_t data_len;
+    /**
+     * FNV-1a checksum of this tile's posting payload bytes.
+     */
+    uint64_t checksum64;
+    /**
+     * Vertical datum selector as SidereonVerticalDatum.
+     */
+    uint32_t vertical_datum;
+} SidereonTerrainStoreTileIndex;
 
 /**
  * One moving-baseline epoch: the base receiver's own ECEF position this epoch,
@@ -7932,6 +8897,318 @@ typedef struct SidereonSbasMessageInfo {
     size_t long_term_count;
     size_t iono_delay_count;
 } SidereonSbasMessageInfo;
+
+/**
+ * Decoded SBAS PRN mask message payload.
+ */
+typedef struct SidereonSbasPrnMask {
+    /**
+     * SBAS preamble byte.
+     */
+    uint8_t preamble;
+    /**
+     * IODP value.
+     */
+    uint8_t iodp;
+    /**
+     * PRN mask bits in SBAS broadcast order.
+     */
+    bool mask[210];
+} SidereonSbasPrnMask;
+
+/**
+ * Decoded SBAS fast-correction message payload.
+ */
+typedef struct SidereonSbasRawFastCorrections {
+    /**
+     * SBAS preamble byte.
+     */
+    uint8_t preamble;
+    /**
+     * Message type, 2 through 5.
+     */
+    uint8_t message_type;
+    /**
+     * IODF value.
+     */
+    uint8_t iodf;
+    /**
+     * IODP value.
+     */
+    uint8_t iodp;
+    /**
+     * Raw pseudorange correction fields.
+     */
+    int16_t prc[13];
+    /**
+     * UDREI values.
+     */
+    uint8_t udrei[13];
+} SidereonSbasRawFastCorrections;
+
+/**
+ * Decoded SBAS integrity message payload.
+ */
+typedef struct SidereonSbasIntegrity {
+    /**
+     * SBAS preamble byte.
+     */
+    uint8_t preamble;
+    /**
+     * IODF values.
+     */
+    uint8_t iodf[4];
+    /**
+     * UDREI values.
+     */
+    uint8_t udrei[51];
+} SidereonSbasIntegrity;
+
+/**
+ * Decoded SBAS fast-degradation message payload.
+ */
+typedef struct SidereonSbasFastDegradation {
+    /**
+     * SBAS preamble byte.
+     */
+    uint8_t preamble;
+    /**
+     * System latency, seconds.
+     */
+    uint8_t system_latency_s;
+    /**
+     * IODP value.
+     */
+    uint8_t iodp;
+    /**
+     * Degradation indicator values.
+     */
+    uint8_t ai[51];
+} SidereonSbasFastDegradation;
+
+/**
+ * Decoded SBAS GEO navigation message payload. Position fields are meters,
+ * velocity fields are meters per second, acceleration fields are meters per
+ * second squared, and clock fields are seconds or seconds per second.
+ */
+typedef struct SidereonSbasGeoNavMessage {
+    /**
+     * SBAS preamble byte.
+     */
+    uint8_t preamble;
+    /**
+     * Time of day, seconds.
+     */
+    uint16_t time_of_day_s;
+    /**
+     * URA indicator.
+     */
+    uint8_t ura;
+    /**
+     * Raw X position, scaled by the core store when ingested.
+     */
+    int32_t x_m;
+    /**
+     * Raw Y position, scaled by the core store when ingested.
+     */
+    int32_t y_m;
+    /**
+     * Raw Z position, scaled by the core store when ingested.
+     */
+    int32_t z_m;
+    /**
+     * Raw X velocity field.
+     */
+    int32_t x_rate_m_s;
+    /**
+     * Raw Y velocity field.
+     */
+    int32_t y_rate_m_s;
+    /**
+     * Raw Z velocity field.
+     */
+    int32_t z_rate_m_s;
+    /**
+     * Raw X acceleration field.
+     */
+    int16_t x_accel_m_s2;
+    /**
+     * Raw Y acceleration field.
+     */
+    int16_t y_accel_m_s2;
+    /**
+     * Raw Z acceleration field.
+     */
+    int16_t z_accel_m_s2;
+    /**
+     * Raw clock offset field.
+     */
+    int16_t a_gf0_s;
+    /**
+     * Raw clock drift field.
+     */
+    int16_t a_gf1_s_s;
+} SidereonSbasGeoNavMessage;
+
+/**
+ * Decoded SBAS IGP mask message payload.
+ */
+typedef struct SidereonSbasIgpMask {
+    /**
+     * SBAS preamble byte.
+     */
+    uint8_t preamble;
+    /**
+     * IGP band number.
+     */
+    uint8_t band_number;
+    /**
+     * IODI value.
+     */
+    uint8_t iodi;
+    /**
+     * IGP mask bits in SBAS broadcast order.
+     */
+    bool mask[201];
+} SidereonSbasIgpMask;
+
+/**
+ * Decoded fast-correction part of an SBAS mixed-correction message.
+ */
+typedef struct SidereonSbasMixedFastCorrections {
+    /**
+     * IODF value.
+     */
+    uint8_t iodf;
+    /**
+     * IODP value.
+     */
+    uint8_t iodp;
+    /**
+     * SBAS block id.
+     */
+    uint8_t block_id;
+    /**
+     * Raw pseudorange correction fields.
+     */
+    int16_t prc[6];
+    /**
+     * UDREI values.
+     */
+    uint8_t udrei[6];
+} SidereonSbasMixedFastCorrections;
+
+/**
+ * Metadata for one SBAS long-term-correction half.
+ */
+typedef struct SidereonSbasLongTermHalfInfo {
+    /**
+     * Whether the half carries velocity-code records.
+     */
+    bool velocity_code;
+    /**
+     * IODP value.
+     */
+    uint8_t iodp;
+    /**
+     * Number of long-term records in the half.
+     */
+    size_t record_count;
+} SidereonSbasLongTermHalfInfo;
+
+/**
+ * Decoded SBAS long-term-correction record.
+ */
+typedef struct SidereonSbasLongTermRecord {
+    /**
+     * Monitored satellite index within the active PRN mask.
+     */
+    uint8_t monitored_index;
+    /**
+     * IODE value.
+     */
+    uint8_t iode;
+    /**
+     * Raw X correction field.
+     */
+    int32_t delta_x;
+    /**
+     * Raw Y correction field.
+     */
+    int32_t delta_y;
+    /**
+     * Raw Z correction field.
+     */
+    int32_t delta_z;
+    /**
+     * Raw X-rate correction field.
+     */
+    int32_t delta_x_rate;
+    /**
+     * Raw Y-rate correction field.
+     */
+    int32_t delta_y_rate;
+    /**
+     * Raw Z-rate correction field.
+     */
+    int32_t delta_z_rate;
+    /**
+     * Raw clock-offset correction field.
+     */
+    int32_t delta_a_f0;
+    /**
+     * Raw clock-drift correction field.
+     */
+    int32_t delta_a_f1;
+    /**
+     * Whether time_of_day_s carries a value.
+     */
+    bool has_time_of_day_s;
+    /**
+     * Time of day, seconds, when present.
+     */
+    uint32_t time_of_day_s;
+} SidereonSbasLongTermRecord;
+
+/**
+ * Decoded SBAS ionospheric grid-point delay.
+ */
+typedef struct SidereonSbasIgpDelay {
+    /**
+     * Raw vertical-delay field.
+     */
+    uint16_t vertical_delay;
+    /**
+     * GIVEI value.
+     */
+    uint8_t givei;
+} SidereonSbasIgpDelay;
+
+/**
+ * Decoded SBAS ionospheric-delay message payload.
+ */
+typedef struct SidereonSbasIonoDelays {
+    /**
+     * SBAS preamble byte.
+     */
+    uint8_t preamble;
+    /**
+     * IGP band number.
+     */
+    uint8_t band_number;
+    /**
+     * SBAS block id.
+     */
+    uint8_t block_id;
+    /**
+     * IODI value.
+     */
+    uint8_t iodi;
+    /**
+     * Fifteen decoded grid-point delays.
+     */
+    struct SidereonSbasIgpDelay entries[15];
+} SidereonSbasIonoDelays;
 
 typedef struct SidereonSbasFastCorrection {
     double prc_m;
@@ -12532,6 +13809,93 @@ enum SidereonStatus sidereon_ionex_to_ionex_text(const struct SidereonIonex *ion
 void sidereon_ionex_free(struct SidereonIonex *ionex);
 
 /**
+ * Build an IONEX product from whole-grid TEC samples. On success writes a new
+ * handle to *out_ionex; release it with sidereon_ionex_free.
+ *
+ * Safety: samples must point to a SidereonTecGridSamples whose arrays match its
+ * counts; out_ionex must point to storage for a SidereonIonex*.
+ */
+enum SidereonStatus sidereon_ionex_from_tec_grid_samples(const struct SidereonTecGridSamples *samples,
+                                                         struct SidereonIonex **out_ionex);
+
+/**
+ * Build an IONEX product from one sample per grid node. Angles are degrees,
+ * VTEC/RMS are TECU, shell/base radii are kilometers, and epochs are seconds
+ * since J2000 in each sample's time scale.
+ *
+ * Safety: samples points to count SidereonTecSample entries, or NULL when count
+ * is zero; out_ionex must point to storage for a SidereonIonex*.
+ */
+enum SidereonStatus sidereon_ionex_from_tec_samples(const struct SidereonTecSample *samples,
+                                                    size_t count,
+                                                    double shell_height_km,
+                                                    double base_radius_km,
+                                                    int32_t exponent,
+                                                    struct SidereonIonex **out_ionex);
+
+/**
+ * Read IONEX TEC-grid sample dimensions and scalar metadata. Heights are
+ * kilometers and angular fields are degrees.
+ *
+ * Safety: ionex must be a live handle; out_info must point to a
+ * SidereonTecGridSamplesInfo.
+ */
+enum SidereonStatus sidereon_ionex_tec_grid_samples_info(const struct SidereonIonex *ionex,
+                                                         struct SidereonTecGridSamplesInfo *out_info);
+
+/**
+ * Copy TEC-grid map epochs as seconds since J2000. Uses the variable-length
+ * output contract.
+ *
+ * Safety: ionex must be a live handle; out points to len writable doubles or
+ * NULL when len is 0; out_written and out_required point to size_t.
+ */
+enum SidereonStatus sidereon_ionex_tec_grid_samples_epochs_j2000_s(const struct SidereonIonex *ionex,
+                                                                   double *out,
+                                                                   size_t len,
+                                                                   size_t *out_written,
+                                                                   size_t *out_required);
+
+/**
+ * Copy flattened IONEX VTEC maps in `[map][lat][lon]` order, TECU. Uses the
+ * variable-length output contract.
+ *
+ * Safety: ionex must be a live handle; out points to len writable doubles or
+ * NULL when len is 0; out_written and out_required point to size_t.
+ */
+enum SidereonStatus sidereon_ionex_tec_grid_samples_tec_maps_tecu(const struct SidereonIonex *ionex,
+                                                                  double *out,
+                                                                  size_t len,
+                                                                  size_t *out_written,
+                                                                  size_t *out_required);
+
+/**
+ * Copy flattened IONEX RMS maps in `[map][lat][lon]` order, TECU. If no RMS
+ * maps are present, the required length is zero.
+ *
+ * Safety: ionex must be a live handle; out points to len writable doubles or
+ * NULL when len is 0; out_written and out_required point to size_t.
+ */
+enum SidereonStatus sidereon_ionex_tec_grid_samples_rms_maps_tecu(const struct SidereonIonex *ionex,
+                                                                  double *out,
+                                                                  size_t len,
+                                                                  size_t *out_written,
+                                                                  size_t *out_required);
+
+/**
+ * Copy one IONEX TEC sample per grid node. Uses the variable-length output
+ * contract. Angles are degrees and VTEC/RMS values are TECU.
+ *
+ * Safety: ionex must be a live handle; out points to len SidereonTecSample
+ * entries or NULL when len is 0; out_written and out_required point to size_t.
+ */
+enum SidereonStatus sidereon_ionex_tec_samples(const struct SidereonIonex *ionex,
+                                               struct SidereonTecSample *out,
+                                               size_t len,
+                                               size_t *out_written,
+                                               size_t *out_required);
+
+/**
  * Decode a CRINEX (Hatanaka-compressed) observation byte buffer into RINEX
  * observation text. The output is not null-terminated. Uses the variable-length
  * output contract documented at the top of the header: call once with out=NULL
@@ -12708,6 +14072,166 @@ enum SidereonStatus sidereon_rinex_obs_to_rinex_text(const struct SidereonRinexO
  * has not already been freed.
  */
 void sidereon_rinex_obs_free(struct SidereonRinexObs *obs);
+
+/**
+ * Initialize Allan-family options with the core defaults: standard estimators,
+ * octave tau grid, and gap rejection.
+ *
+ * Safety: out_options must point to a SidereonAllanOptions.
+ */
+enum SidereonStatus sidereon_clock_allan_options_init(struct SidereonAllanOptions *out_options);
+
+/**
+ * Compute selected Allan-family estimator curves from phase seconds or
+ * fractional-frequency samples. `tau0_s` is the sample interval in seconds.
+ * On success writes a handle to *out_curves; release it with
+ * sidereon_clock_allan_deviation_curves_free.
+ *
+ * Safety: samples points to count SidereonAllanSample entries, or NULL when
+ * count is zero; options may be NULL for defaults; out_curves points to a
+ * SidereonAllanDeviationCurves*.
+ */
+enum SidereonStatus sidereon_clock_compute_allan_deviations(const struct SidereonAllanSample *samples,
+                                                            size_t count,
+                                                            uint32_t series_kind,
+                                                            double tau0_s,
+                                                            const struct SidereonAllanOptions *options,
+                                                            struct SidereonAllanDeviationCurves **out_curves);
+
+/**
+ * Report whether a combined Allan-family result contains a curve for the
+ * requested estimator.
+ *
+ * Safety: curves must be a live handle; out_present must point to a bool.
+ */
+enum SidereonStatus sidereon_clock_allan_curve_present(const struct SidereonAllanDeviationCurves *curves,
+                                                       uint32_t estimator,
+                                                       bool *out_present);
+
+/**
+ * Copy one curve from a combined Allan-family result. Missing curves copy zero
+ * points and return OK. Uses the variable-length output contract.
+ *
+ * Safety: curves must be a live handle; out points to len SidereonAllanPoint
+ * entries or NULL when len is 0; out_written and out_required point to size_t.
+ */
+enum SidereonStatus sidereon_clock_allan_curve(const struct SidereonAllanDeviationCurves *curves,
+                                               uint32_t estimator,
+                                               struct SidereonAllanPoint *out,
+                                               size_t len,
+                                               size_t *out_written,
+                                               size_t *out_required);
+
+/**
+ * Release combined Allan-family curves. Passing NULL is a no-op.
+ *
+ * Safety: curves must be NULL or a live handle from
+ * sidereon_clock_compute_allan_deviations.
+ */
+void sidereon_clock_allan_deviation_curves_free(struct SidereonAllanDeviationCurves *curves);
+
+/**
+ * Plain non-overlapping Allan deviation for explicit averaging factors. Each
+ * output point has tau in seconds.
+ *
+ * Safety: samples and averaging_factors point to their counts; out follows the
+ * variable-length output contract.
+ */
+enum SidereonStatus sidereon_clock_allan_deviation(const struct SidereonAllanSample *samples,
+                                                   size_t count,
+                                                   uint32_t series_kind,
+                                                   double tau0_s,
+                                                   const size_t *averaging_factors,
+                                                   size_t averaging_factor_count,
+                                                   struct SidereonAllanPoint *out,
+                                                   size_t len,
+                                                   size_t *out_written,
+                                                   size_t *out_required);
+
+/**
+ * Fully overlapping Allan deviation for explicit averaging factors. Each
+ * output point has tau in seconds.
+ *
+ * Safety: samples and averaging_factors point to their counts; out follows the
+ * variable-length output contract.
+ */
+enum SidereonStatus sidereon_clock_overlapping_adev(const struct SidereonAllanSample *samples,
+                                                    size_t count,
+                                                    uint32_t series_kind,
+                                                    double tau0_s,
+                                                    const size_t *averaging_factors,
+                                                    size_t averaging_factor_count,
+                                                    struct SidereonAllanPoint *out,
+                                                    size_t len,
+                                                    size_t *out_written,
+                                                    size_t *out_required);
+
+/**
+ * Modified Allan deviation for explicit averaging factors. Each output point
+ * has tau in seconds.
+ *
+ * Safety: samples and averaging_factors point to their counts; out follows the
+ * variable-length output contract.
+ */
+enum SidereonStatus sidereon_clock_modified_adev(const struct SidereonAllanSample *samples,
+                                                 size_t count,
+                                                 uint32_t series_kind,
+                                                 double tau0_s,
+                                                 const size_t *averaging_factors,
+                                                 size_t averaging_factor_count,
+                                                 struct SidereonAllanPoint *out,
+                                                 size_t len,
+                                                 size_t *out_written,
+                                                 size_t *out_required);
+
+/**
+ * Overlapping Hadamard deviation for explicit averaging factors. Each output
+ * point has tau in seconds.
+ *
+ * Safety: samples and averaging_factors point to their counts; out follows the
+ * variable-length output contract.
+ */
+enum SidereonStatus sidereon_clock_hadamard_deviation(const struct SidereonAllanSample *samples,
+                                                      size_t count,
+                                                      uint32_t series_kind,
+                                                      double tau0_s,
+                                                      const size_t *averaging_factors,
+                                                      size_t averaging_factor_count,
+                                                      struct SidereonAllanPoint *out,
+                                                      size_t len,
+                                                      size_t *out_written,
+                                                      size_t *out_required);
+
+/**
+ * Time deviation for explicit averaging factors. Tau and deviation are seconds.
+ *
+ * Safety: samples and averaging_factors point to their counts; out follows the
+ * variable-length output contract.
+ */
+enum SidereonStatus sidereon_clock_time_deviation(const struct SidereonAllanSample *samples,
+                                                  size_t count,
+                                                  uint32_t series_kind,
+                                                  double tau0_s,
+                                                  const size_t *averaging_factors,
+                                                  size_t averaging_factor_count,
+                                                  struct SidereonAllanPoint *out,
+                                                  size_t len,
+                                                  size_t *out_written,
+                                                  size_t *out_required);
+
+/**
+ * Extract RINEX receiver-clock offsets as phase deviations in seconds. Event
+ * epochs are returned with `has_phase_s == false`.
+ *
+ * Safety: obs must be a live RINEX OBS handle; out points to len
+ * SidereonClockPhaseSample entries or NULL when len is 0; out_written and
+ * out_required point to size_t.
+ */
+enum SidereonStatus sidereon_rinex_obs_receiver_clock_phase_deviations(const struct SidereonRinexObs *obs,
+                                                                       struct SidereonClockPhaseSample *out,
+                                                                       size_t len,
+                                                                       size_t *out_written,
+                                                                       size_t *out_required);
 
 /**
  * Write the fixed inter-system time-scale offset to_reading - from_reading
@@ -15383,6 +16907,70 @@ enum SidereonStatus sidereon_raim(const char *const *used_sat_ids,
                                   struct SidereonRaimResult *out);
 
 /**
+ * Initialize the ARAIM LPV-200 integrity allocation.
+ *
+ * Safety: out_allocation must point to a SidereonAraimIntegrityAllocation.
+ */
+enum SidereonStatus sidereon_araim_allocation_lpv_200(struct SidereonAraimIntegrityAllocation *out_allocation);
+
+/**
+ * Run the ARAIM multi-hypothesis protection-level solve. HPL, VPL, EMT, and
+ * accuracy sigma outputs are meters and are read from the result summary.
+ *
+ * Safety: geometry, ism, allocation, and out_result must point to their
+ * documented storage.
+ */
+enum SidereonStatus sidereon_araim(const struct SidereonAraimGeometry *geometry,
+                                   const struct SidereonAraimIsm *ism,
+                                   const struct SidereonAraimIntegrityAllocation *allocation,
+                                   struct SidereonAraimResult **out_result);
+
+/**
+ * Read ARAIM result summary fields. HPL, VPL, EMT, and accuracy sigma fields
+ * are meters.
+ *
+ * Safety: result must be a live handle; out_summary must point to a
+ * SidereonAraimSummary.
+ */
+enum SidereonStatus sidereon_araim_result_summary(const struct SidereonAraimResult *result,
+                                                  struct SidereonAraimSummary *out_summary);
+
+/**
+ * Copy ARAIM fault-mode rows. Sigma, bias, and threshold arrays are meters in
+ * local `[east, north, up]` order. Uses the variable-length output contract.
+ *
+ * Safety: result must be a live handle; out points to len SidereonAraimFaultMode
+ * entries or NULL when len is 0; out_written and out_required point to size_t.
+ */
+enum SidereonStatus sidereon_araim_result_fault_modes(const struct SidereonAraimResult *result,
+                                                      struct SidereonAraimFaultMode *out,
+                                                      size_t len,
+                                                      size_t *out_written,
+                                                      size_t *out_required);
+
+/**
+ * Copy excluded satellite tokens for one ARAIM fault mode. Uses the
+ * variable-length output contract.
+ *
+ * Safety: result must be a live handle; out points to len
+ * SidereonSatelliteToken entries or NULL when len is 0; out_written and
+ * out_required point to size_t.
+ */
+enum SidereonStatus sidereon_araim_result_fault_mode_excluded_sats(const struct SidereonAraimResult *result,
+                                                                   size_t mode_index,
+                                                                   struct SidereonSatelliteToken *out,
+                                                                   size_t len,
+                                                                   size_t *out_written,
+                                                                   size_t *out_required);
+
+/**
+ * Release an ARAIM result handle. Passing NULL is a no-op.
+ *
+ * Safety: result must be NULL or a live handle from sidereon_araim.
+ */
+void sidereon_araim_result_free(struct SidereonAraimResult *result);
+
+/**
  * Compute per-satellite DGNSS pseudorange corrections at a base station from an
  * SP3 product. On success writes a newly owned corrections handle. Delegates to
  * sidereon_core::dgnss::pseudorange_corrections (SP3 as the
@@ -16768,14 +18356,34 @@ enum SidereonStatus sidereon_mee2rv(const struct SidereonModifiedEquinoctialElem
                                     double *out_r_km,
                                     double *out_v_km_s);
 
+/**
+ * On-sky angular separation in degrees between two direction vectors. Each
+ * vector must point to three finite doubles and must be non-zero.
+ *
+ * Safety: a and b must point to three doubles; out must point to a double.
+ */
 enum SidereonStatus sidereon_angular_separation_deg(const double *a, const double *b, double *out);
 
+/**
+ * On-sky angular separation in degrees between two coordinate pairs. Inputs are
+ * `(lon_deg, lat_deg)` pairs, which also correspond to `(RA, Dec)` in the
+ * astronomy convention. The second component must be in [-90, 90].
+ *
+ * Safety: out must point to a double.
+ */
 enum SidereonStatus sidereon_angular_separation_coords_deg(double a_lon_deg,
                                                            double a_lat_deg,
                                                            double b_lon_deg,
                                                            double b_lat_deg,
                                                            double *out);
 
+/**
+ * Position angle in degrees, in [0, 360), of the `to` coordinate as seen from
+ * `from`, measured from North through East. Inputs are `(lon_deg, lat_deg)`
+ * pairs, which also correspond to `(RA, Dec)` in the astronomy convention.
+ *
+ * Safety: out must point to a double.
+ */
 enum SidereonStatus sidereon_position_angle_deg(double from_lon_deg,
                                                 double from_lat_deg,
                                                 double to_lon_deg,
@@ -17048,32 +18656,390 @@ enum SidereonStatus sidereon_geoid_grid_undulation_rad(const struct SidereonGeoi
  */
 void sidereon_geoid_grid_free(struct SidereonGeoidGrid *grid);
 
+/**
+ * Initialize DTED lookup options to bilinear interpolation. Heights returned by
+ * DTED lookup functions are orthometric meters.
+ *
+ * Safety: out_options must point to a SidereonDtedLookupOptions.
+ */
 enum SidereonStatus sidereon_dted_lookup_options_init(struct SidereonDtedLookupOptions *out_options);
 
+/**
+ * Create a DTED terrain cache rooted at `root`. Heights returned by this handle
+ * are orthometric meters.
+ *
+ * Safety: root must be a non-empty UTF-8 C string; out_terrain must point to a
+ * SidereonDtedTerrain*.
+ */
 enum SidereonStatus sidereon_dted_terrain_new(const char *root,
                                               struct SidereonDtedTerrain **out_terrain);
 
+/**
+ * Query one terrain height. Inputs are longitude, latitude in degrees. The
+ * returned height is orthometric meters.
+ *
+ * Safety: terrain must be a live handle; out_height_m must point to a double.
+ */
 enum SidereonStatus sidereon_dted_terrain_height_m(struct SidereonDtedTerrain *terrain,
                                                    double longitude_deg,
                                                    double latitude_deg,
                                                    double *out_height_m);
 
+/**
+ * Query one terrain height with interpolation options. Inputs are longitude,
+ * latitude in degrees. The returned height is orthometric meters.
+ *
+ * Safety: terrain must be a live handle; options must point to a
+ * SidereonDtedLookupOptions; out_height_m must point to a double.
+ */
 enum SidereonStatus sidereon_dted_terrain_height_m_with_options(struct SidereonDtedTerrain *terrain,
                                                                 double longitude_deg,
                                                                 double latitude_deg,
                                                                 const struct SidereonDtedLookupOptions *options,
                                                                 double *out_height_m);
 
+/**
+ * Query many terrain points using the same mutable DTED tile cache. Points are
+ * longitude-first `(lon_deg, lat_deg)` pairs. Each successful result carries an
+ * orthometric height in meters. Per-point lookup failures are written into
+ * out[i].status and do not fail the whole call.
+ *
+ * Safety: terrain must be a live handle; points points to count
+ * SidereonLonLatDeg values; options must point to SidereonDtedLookupOptions;
+ * out points to count writable SidereonDtedHeightResult entries, or NULL when
+ * count is zero.
+ */
+enum SidereonStatus sidereon_dted_terrain_height_batch_m(struct SidereonDtedTerrain *terrain,
+                                                         const struct SidereonLonLatDeg *points,
+                                                         size_t count,
+                                                         const struct SidereonDtedLookupOptions *options,
+                                                         struct SidereonDtedHeightResult *out);
+
+/**
+ * Release a DTED terrain cache. Passing NULL is a no-op.
+ *
+ * Safety: terrain must be NULL or a live handle from sidereon_dted_terrain_new.
+ */
 void sidereon_dted_terrain_free(struct SidereonDtedTerrain *terrain);
 
+/**
+ * Load one DTED tile. Tile heights are orthometric meters.
+ *
+ * Safety: path must be a non-empty UTF-8 C string; out_tile must point to a
+ * SidereonDtedTile*.
+ */
 enum SidereonStatus sidereon_dted_tile_load(const char *path, struct SidereonDtedTile **out_tile);
 
+/**
+ * Query the nearest stored posting in a loaded DTED tile. Inputs are longitude,
+ * latitude in degrees. The returned integer elevation is an orthometric height
+ * in meters.
+ *
+ * Safety: tile must be a live handle; out_elevation_m must point to an int16_t.
+ */
 enum SidereonStatus sidereon_dted_tile_get_elevation(const struct SidereonDtedTile *tile,
                                                      double longitude_deg,
                                                      double latitude_deg,
                                                      int16_t *out_elevation_m);
 
+/**
+ * Release a DTED tile. Passing NULL is a no-op.
+ *
+ * Safety: tile must be NULL or a live handle from sidereon_dted_tile_load.
+ */
 void sidereon_dted_tile_free(struct SidereonDtedTile *tile);
+
+/**
+ * Copy the last typed terrain store error for this thread. If no terrain store
+ * error is recorded, kind is SidereonTerrainStoreErrorKind::None.
+ *
+ * Safety: out_error must point to a SidereonTerrainStoreError.
+ */
+enum SidereonStatus sidereon_last_terrain_store_error(struct SidereonTerrainStoreError *out_error);
+
+/**
+ * Copy the last typed terrain datum error for this thread. If no terrain datum
+ * error is recorded, kind is SidereonTerrainDatumErrorKind::None.
+ *
+ * Safety: out_error must point to a SidereonTerrainDatumError.
+ */
+enum SidereonStatus sidereon_last_terrain_datum_error(struct SidereonTerrainDatumError *out_error);
+
+/**
+ * Convert a DTED tile tree rooted at root into memory-mappable terrain store
+ * bytes. The output uses the variable-length output contract. Store postings
+ * are orthometric heights in metres.
+ *
+ * Safety: root must be a non-empty UTF-8 C string; out must point to len bytes
+ * or be NULL when len is 0; out_written and out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_dted_tree_to_mmap_store(const char *root,
+                                                     uint8_t *out,
+                                                     size_t len,
+                                                     size_t *out_written,
+                                                     size_t *out_required);
+
+/**
+ * Convert a DTED tile tree and write memory-mappable terrain store bytes to
+ * out_path. Store postings are orthometric heights in metres.
+ *
+ * Safety: root and out_path must be non-empty UTF-8 C strings.
+ */
+enum SidereonStatus sidereon_write_dted_tree_to_mmap_store(const char *root, const char *out_path);
+
+/**
+ * Return an FNV-1a checksum for terrain store bytes.
+ *
+ * Safety: bytes must point to len readable bytes; out_checksum64 must point to
+ * a uint64_t.
+ */
+enum SidereonStatus sidereon_terrain_store_checksum64(const uint8_t *bytes,
+                                                      size_t len,
+                                                      uint64_t *out_checksum64);
+
+/**
+ * Parse memory-mappable terrain store bytes into an owned reader handle. The C
+ * binding copies the input byte span into handle-owned storage. Terrain lookup
+ * APIs use longitude, latitude degrees and return orthometric height.
+ *
+ * Safety: bytes must point to len readable bytes; out_terrain must point to a
+ * SidereonMmapTerrain*.
+ */
+enum SidereonStatus sidereon_mmap_terrain_from_bytes(const uint8_t *bytes,
+                                                     size_t len,
+                                                     struct SidereonMmapTerrain **out_terrain);
+
+/**
+ * Parse memory-mappable terrain store bytes into an owned reader handle. This
+ * is the same C ownership contract as sidereon_mmap_terrain_from_bytes.
+ *
+ * Safety: bytes must point to len readable bytes; out_terrain must point to a
+ * SidereonMmapTerrain*.
+ */
+enum SidereonStatus sidereon_mmap_terrain_from_vec(const uint8_t *bytes,
+                                                   size_t len,
+                                                   struct SidereonMmapTerrain **out_terrain);
+
+/**
+ * Read and parse a memory-mappable terrain store file. Terrain lookup APIs use
+ * longitude, latitude degrees and return orthometric height.
+ *
+ * Safety: path must be a non-empty UTF-8 C string; out_terrain must point to a
+ * SidereonMmapTerrain*.
+ */
+enum SidereonStatus sidereon_mmap_terrain_from_path(const char *path,
+                                                    struct SidereonMmapTerrain **out_terrain);
+
+/**
+ * Query one bilinear terrain height. Inputs are longitude, latitude degrees.
+ * The returned value is orthometric height H in metres.
+ *
+ * Safety: terrain must be a live handle; out_height_m must point to a
+ * SidereonOrthometricHeightM.
+ */
+enum SidereonStatus sidereon_mmap_terrain_height_m(struct SidereonMmapTerrain *terrain,
+                                                   double longitude_deg,
+                                                   double latitude_deg,
+                                                   struct SidereonOrthometricHeightM *out_height_m);
+
+/**
+ * Query one terrain height with interpolation options. Inputs are longitude,
+ * latitude degrees. The returned value is orthometric height H in metres.
+ *
+ * Safety: terrain must be a live handle; options must point to
+ * SidereonDtedLookupOptions; out_height_m must point to a
+ * SidereonOrthometricHeightM.
+ */
+enum SidereonStatus sidereon_mmap_terrain_height_m_with_options(struct SidereonMmapTerrain *terrain,
+                                                                double longitude_deg,
+                                                                double latitude_deg,
+                                                                const struct SidereonDtedLookupOptions *options,
+                                                                struct SidereonOrthometricHeightM *out_height_m);
+
+/**
+ * Query one typed orthometric terrain height. Inputs are longitude, latitude
+ * degrees. The returned value is orthometric height H in metres.
+ *
+ * Safety: terrain must be a live handle; out_height_m must point to a
+ * SidereonOrthometricHeightM.
+ */
+enum SidereonStatus sidereon_mmap_terrain_orthometric_height_m(const struct SidereonMmapTerrain *terrain,
+                                                               double longitude_deg,
+                                                               double latitude_deg,
+                                                               struct SidereonOrthometricHeightM *out_height_m);
+
+/**
+ * Query one typed orthometric terrain height with interpolation options. Inputs
+ * are longitude, latitude degrees. The returned value is orthometric height H
+ * in metres.
+ *
+ * Safety: terrain must be a live handle; options must point to
+ * SidereonDtedLookupOptions; out_height_m must point to a
+ * SidereonOrthometricHeightM.
+ */
+enum SidereonStatus sidereon_mmap_terrain_orthometric_height_m_with_options(const struct SidereonMmapTerrain *terrain,
+                                                                            double longitude_deg,
+                                                                            double latitude_deg,
+                                                                            const struct SidereonDtedLookupOptions *options,
+                                                                            struct SidereonOrthometricHeightM *out_height_m);
+
+/**
+ * Query many terrain points as orthometric heights H in metres. Points are
+ * longitude, latitude degrees. Per-point failures are written into out[i].status.
+ *
+ * Safety: terrain must be a live handle; points must point to count
+ * SidereonLonLatDeg values; options must point to SidereonDtedLookupOptions;
+ * out must point to count SidereonTerrainHeightResult values or be NULL when
+ * count is zero.
+ */
+enum SidereonStatus sidereon_mmap_terrain_height_batch(struct SidereonMmapTerrain *terrain,
+                                                       const struct SidereonLonLatDeg *points,
+                                                       size_t count,
+                                                       const struct SidereonDtedLookupOptions *options,
+                                                       struct SidereonTerrainHeightResult *out);
+
+/**
+ * Query many terrain points as typed orthometric heights H in metres. Points
+ * are longitude, latitude degrees. Per-point failures are written into
+ * out[i].status.
+ *
+ * Safety: terrain must be a live handle; points must point to count
+ * SidereonLonLatDeg values; options must point to SidereonDtedLookupOptions;
+ * out must point to count SidereonTerrainHeightResult values or be NULL when
+ * count is zero.
+ */
+enum SidereonStatus sidereon_mmap_terrain_orthometric_height_batch(const struct SidereonMmapTerrain *terrain,
+                                                                   const struct SidereonLonLatDeg *points,
+                                                                   size_t count,
+                                                                   const struct SidereonDtedLookupOptions *options,
+                                                                   struct SidereonTerrainHeightResult *out);
+
+/**
+ * Query one ellipsoidal terrain height h in metres using the embedded EGM96
+ * 1-degree geoid grid for h = H + N. Inputs are longitude, latitude degrees.
+ *
+ * Safety: terrain must be a live handle; out_height_m must point to a
+ * SidereonEllipsoidalHeightM.
+ */
+enum SidereonStatus sidereon_mmap_terrain_ellipsoidal_height_m(const struct SidereonMmapTerrain *terrain,
+                                                               double longitude_deg,
+                                                               double latitude_deg,
+                                                               struct SidereonEllipsoidalHeightM *out_height_m);
+
+/**
+ * Query one ellipsoidal terrain height h in metres using the embedded EGM96
+ * 1-degree geoid grid and explicit terrain interpolation options. Inputs are
+ * longitude, latitude degrees.
+ *
+ * Safety: terrain must be a live handle; options must point to
+ * SidereonDtedLookupOptions; out_height_m must point to a
+ * SidereonEllipsoidalHeightM.
+ */
+enum SidereonStatus sidereon_mmap_terrain_ellipsoidal_height_m_with_options(const struct SidereonMmapTerrain *terrain,
+                                                                            double longitude_deg,
+                                                                            double latitude_deg,
+                                                                            const struct SidereonDtedLookupOptions *options,
+                                                                            struct SidereonEllipsoidalHeightM *out_height_m);
+
+/**
+ * Query one ellipsoidal terrain height h in metres using an explicit geoid
+ * tier. The EGM96 15-arcminute tier requires a loaded WW15MGH.DAC handle and
+ * never falls back to the embedded 1-degree grid. Inputs are longitude,
+ * latitude degrees.
+ *
+ * Safety: terrain must be a live handle; options must point to
+ * SidereonDtedLookupOptions; geoid may be NULL only for Egm96OneDegree;
+ * out_height_m must point to a SidereonEllipsoidalHeightM.
+ */
+enum SidereonStatus sidereon_mmap_terrain_ellipsoidal_height_m_with_model(const struct SidereonMmapTerrain *terrain,
+                                                                          double longitude_deg,
+                                                                          double latitude_deg,
+                                                                          const struct SidereonDtedLookupOptions *options,
+                                                                          uint32_t geoid_model,
+                                                                          const struct SidereonEgm96FifteenMinuteGeoid *geoid,
+                                                                          struct SidereonEllipsoidalHeightM *out_height_m);
+
+/**
+ * Copy terrain store tile index rows. Uses the variable-length output contract.
+ * Each row carries the tile bounds, payload location, checksum, and vertical datum.
+ *
+ * Safety: terrain must be a live handle; out must point to len writable rows or
+ * be NULL when len is 0; out_written and out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_mmap_terrain_tile_index(const struct SidereonMmapTerrain *terrain,
+                                                     struct SidereonTerrainStoreTileIndex *out,
+                                                     size_t len,
+                                                     size_t *out_written,
+                                                     size_t *out_required);
+
+/**
+ * Return the store-level vertical datum. Terrain store postings are orthometric
+ * heights in metres.
+ *
+ * Safety: terrain must be a live handle; out_datum must point to a
+ * SidereonVerticalDatum.
+ */
+enum SidereonStatus sidereon_mmap_terrain_vertical_datum(const struct SidereonMmapTerrain *terrain,
+                                                         enum SidereonVerticalDatum *out_datum);
+
+/**
+ * Return an FNV-1a checksum of the full terrain store byte span.
+ *
+ * Safety: terrain must be a live handle; out_checksum64 must point to a
+ * uint64_t.
+ */
+enum SidereonStatus sidereon_mmap_terrain_checksum64(const struct SidereonMmapTerrain *terrain,
+                                                     uint64_t *out_checksum64);
+
+/**
+ * Serialize the parsed terrain store back to bytes. Uses the variable-length
+ * output contract. The output bytes preserve orthometric terrain postings.
+ *
+ * Safety: terrain must be a live handle; out must point to len writable bytes
+ * or be NULL when len is 0; out_written and out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_mmap_terrain_to_bytes(const struct SidereonMmapTerrain *terrain,
+                                                   uint8_t *out,
+                                                   size_t len,
+                                                   size_t *out_written,
+                                                   size_t *out_required);
+
+/**
+ * Release a memory-mappable terrain reader handle. Passing NULL is a no-op.
+ *
+ * Safety: terrain must be NULL or a live handle from sidereon_mmap_terrain_*.
+ */
+void sidereon_mmap_terrain_free(struct SidereonMmapTerrain *terrain);
+
+/**
+ * Load WW15MGH.DAC bytes as an EGM96 15-arcminute geoid grid. This function
+ * does not fall back to the embedded 1-degree grid.
+ *
+ * Safety: bytes must point to len readable bytes; out_geoid must point to a
+ * SidereonEgm96FifteenMinuteGeoid*.
+ */
+enum SidereonStatus sidereon_egm96_15m_geoid_from_ww15mgh_dac_bytes(const uint8_t *bytes,
+                                                                    size_t len,
+                                                                    struct SidereonEgm96FifteenMinuteGeoid **out_geoid);
+
+/**
+ * Read and load WW15MGH.DAC as an EGM96 15-arcminute geoid grid. A missing
+ * file returns SidereonTerrainDatumErrorKind::MissingEgm96Dac through
+ * sidereon_last_terrain_datum_error and does not fall back to the embedded
+ * 1-degree grid.
+ *
+ * Safety: path must be a non-empty UTF-8 C string; out_geoid must point to a
+ * SidereonEgm96FifteenMinuteGeoid*.
+ */
+enum SidereonStatus sidereon_egm96_15m_geoid_from_ww15mgh_dac_path(const char *path,
+                                                                   struct SidereonEgm96FifteenMinuteGeoid **out_geoid);
+
+/**
+ * Release an EGM96 15-arcminute geoid grid handle. Passing NULL is a no-op.
+ *
+ * Safety: geoid must be NULL or a live handle from sidereon_egm96_15m_geoid_*.
+ */
+void sidereon_egm96_15m_geoid_free(struct SidereonEgm96FifteenMinuteGeoid *geoid);
 
 /**
  * Build a UTC Instant from civil-calendar fields and report its split Julian
@@ -17551,6 +19517,137 @@ enum SidereonStatus sidereon_sbas_block_decode(const uint8_t *bytes,
 
 enum SidereonStatus sidereon_sbas_block_info(const struct SidereonSbasBlock *block,
                                              struct SidereonSbasMessageInfo *out_info);
+
+/**
+ * Read a decoded SBAS PRN mask payload. If the block is not a PRN mask,
+ * out_present is false and out_mask is zeroed.
+ *
+ * Safety: block must be a live handle; out_present and out_mask must point to
+ * writable storage.
+ */
+enum SidereonStatus sidereon_sbas_block_prn_mask(const struct SidereonSbasBlock *block,
+                                                 bool *out_present,
+                                                 struct SidereonSbasPrnMask *out_mask);
+
+/**
+ * Read a decoded SBAS fast-correction payload. If the block is not a fast
+ * correction, out_present is false and out_fast is zeroed.
+ *
+ * Safety: block must be a live handle; out_present and out_fast must point to
+ * writable storage.
+ */
+enum SidereonStatus sidereon_sbas_block_fast_corrections(const struct SidereonSbasBlock *block,
+                                                         bool *out_present,
+                                                         struct SidereonSbasRawFastCorrections *out_fast);
+
+/**
+ * Read a decoded SBAS integrity payload. If the block is not an integrity
+ * message, out_present is false and out_integrity is zeroed.
+ *
+ * Safety: block must be a live handle; out_present and out_integrity must point
+ * to writable storage.
+ */
+enum SidereonStatus sidereon_sbas_block_integrity(const struct SidereonSbasBlock *block,
+                                                  bool *out_present,
+                                                  struct SidereonSbasIntegrity *out_integrity);
+
+/**
+ * Read a decoded SBAS fast-degradation payload. If the block is not a
+ * fast-degradation message, out_present is false and out_degradation is zeroed.
+ *
+ * Safety: block must be a live handle; out_present and out_degradation must
+ * point to writable storage.
+ */
+enum SidereonStatus sidereon_sbas_block_fast_degradation(const struct SidereonSbasBlock *block,
+                                                         bool *out_present,
+                                                         struct SidereonSbasFastDegradation *out_degradation);
+
+/**
+ * Read a decoded SBAS GEO navigation payload. If the block is not a GEO
+ * navigation message, out_present is false and out_geo_nav is zeroed.
+ *
+ * Safety: block must be a live handle; out_present and out_geo_nav must point
+ * to writable storage.
+ */
+enum SidereonStatus sidereon_sbas_block_geo_nav(const struct SidereonSbasBlock *block,
+                                                bool *out_present,
+                                                struct SidereonSbasGeoNavMessage *out_geo_nav);
+
+/**
+ * Read a decoded SBAS IGP mask payload. If the block is not an IGP mask,
+ * out_present is false and out_mask is zeroed.
+ *
+ * Safety: block must be a live handle; out_present and out_mask must point to
+ * writable storage.
+ */
+enum SidereonStatus sidereon_sbas_block_igp_mask(const struct SidereonSbasBlock *block,
+                                                 bool *out_present,
+                                                 struct SidereonSbasIgpMask *out_mask);
+
+/**
+ * Read the decoded fast-correction part of an SBAS mixed-correction payload.
+ * If the block is not mixed corrections, out_present is false and out_fast is
+ * zeroed.
+ *
+ * Safety: block must be a live handle; out_present and out_fast must point to
+ * writable storage.
+ */
+enum SidereonStatus sidereon_sbas_block_mixed_fast_corrections(const struct SidereonSbasBlock *block,
+                                                               bool *out_present,
+                                                               struct SidereonSbasMixedFastCorrections *out_fast);
+
+/**
+ * Read long-term half metadata from a long-term or mixed-correction block.
+ * Long-term correction blocks have half_index 0 and 1. Mixed correction blocks
+ * expose their long-term half at half_index 0.
+ *
+ * Safety: block must be a live handle; out_present and out_info must point to
+ * writable storage.
+ */
+enum SidereonStatus sidereon_sbas_block_long_term_half_info(const struct SidereonSbasBlock *block,
+                                                            size_t half_index,
+                                                            bool *out_present,
+                                                            struct SidereonSbasLongTermHalfInfo *out_info);
+
+/**
+ * Copy decoded long-term records from one long-term half. Uses the
+ * variable-length output contract.
+ *
+ * Safety: block must be a live handle; out points to len
+ * SidereonSbasLongTermRecord entries or NULL when len is 0; out_written and
+ * out_required point to size_t.
+ */
+enum SidereonStatus sidereon_sbas_block_long_term_records(const struct SidereonSbasBlock *block,
+                                                          size_t half_index,
+                                                          struct SidereonSbasLongTermRecord *out,
+                                                          size_t len,
+                                                          size_t *out_written,
+                                                          size_t *out_required);
+
+/**
+ * Read a decoded SBAS ionospheric-delay payload. If the block is not an
+ * ionospheric-delay message, out_present is false and out_delays is zeroed.
+ *
+ * Safety: block must be a live handle; out_present and out_delays must point to
+ * writable storage.
+ */
+enum SidereonStatus sidereon_sbas_block_iono_delays(const struct SidereonSbasBlock *block,
+                                                    bool *out_present,
+                                                    struct SidereonSbasIonoDelays *out_delays);
+
+/**
+ * Copy raw 212-bit message data bytes for DoNotUse, NetworkTime, GeoAlmanac,
+ * and unsupported SBAS message blocks. Other decoded message kinds return zero
+ * required bytes.
+ *
+ * Safety: block must be a live handle; out points to len writable bytes or NULL
+ * when len is 0; out_written and out_required point to size_t.
+ */
+enum SidereonStatus sidereon_sbas_block_raw_data(const struct SidereonSbasBlock *block,
+                                                 uint8_t *out,
+                                                 size_t len,
+                                                 size_t *out_written,
+                                                 size_t *out_required);
 
 enum SidereonStatus sidereon_sbas_block_encode(const struct SidereonSbasBlock *block,
                                                uint8_t *out,
