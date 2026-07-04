@@ -50,7 +50,7 @@ tab_width = 4
 style = "both"
 documentation = true
 documentation_style = "doxy"
-sort_by = "None"
+sort_by = "Name"
 usize_is_size_t = true
 # Compile-time version, kept in step with the crate version and the
 # sidereon_version / sidereon_version_string accessors.
