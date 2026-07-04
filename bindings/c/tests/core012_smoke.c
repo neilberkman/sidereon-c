@@ -244,6 +244,171 @@ static void test_terrain_batch(const char *dted_root) {
     }
 }
 
+static void test_mmap_terrain_store(const char *dted_root) {
+    int start = failures;
+    SidereonDtedLookupOptions options;
+    check(sidereon_dted_lookup_options_init(&options) == SIDEREON_STATUS_OK,
+          "mmap terrain options init");
+
+    size_t written = 0;
+    size_t required = 0;
+    check(sidereon_dted_tree_to_mmap_store(dted_root, NULL, 0, &written, &required) ==
+                  SIDEREON_STATUS_OK &&
+              written == 0 && required > 0,
+          "mmap terrain store sizing");
+    if (required == 0) {
+        return;
+    }
+    const size_t store_len = required;
+
+    uint8_t *store = (uint8_t *)malloc(store_len);
+    check(store != NULL, "mmap terrain store allocation");
+    if (store == NULL) {
+        return;
+    }
+    check(sidereon_dted_tree_to_mmap_store(dted_root, store, store_len, &written, &required) ==
+                  SIDEREON_STATUS_OK &&
+              written == store_len && required == store_len,
+          "mmap terrain store build");
+
+    uint64_t byte_checksum = 0;
+    check(sidereon_terrain_store_checksum64(store, store_len, &byte_checksum) ==
+              SIDEREON_STATUS_OK,
+          "mmap terrain store checksum bytes");
+
+    SidereonMmapTerrain *mmap = NULL;
+    check(sidereon_mmap_terrain_from_bytes(store, store_len, &mmap) == SIDEREON_STATUS_OK &&
+              mmap != NULL,
+          "mmap terrain from bytes");
+    SidereonMmapTerrain *mmap_vec = NULL;
+    check(sidereon_mmap_terrain_from_vec(store, store_len, &mmap_vec) == SIDEREON_STATUS_OK &&
+              mmap_vec != NULL,
+          "mmap terrain from vec");
+    sidereon_mmap_terrain_free(mmap_vec);
+
+    const char *store_path = "sidereon_c_terrain_store_test.bin";
+    remove(store_path);
+    check(sidereon_write_dted_tree_to_mmap_store(dted_root, store_path) == SIDEREON_STATUS_OK,
+          "mmap terrain write store");
+    SidereonMmapTerrain *mmap_path = NULL;
+    check(sidereon_mmap_terrain_from_path(store_path, &mmap_path) == SIDEREON_STATUS_OK &&
+              mmap_path != NULL,
+          "mmap terrain from path");
+    sidereon_mmap_terrain_free(mmap_path);
+    remove(store_path);
+
+    if (mmap == NULL) {
+        free(store);
+        return;
+    }
+
+    uint64_t handle_checksum = 0;
+    check(sidereon_mmap_terrain_checksum64(mmap, &handle_checksum) == SIDEREON_STATUS_OK &&
+              handle_checksum == byte_checksum,
+          "mmap terrain checksum handle");
+
+    SidereonVerticalDatum datum = 0;
+    check(sidereon_mmap_terrain_vertical_datum(mmap, &datum) == SIDEREON_STATUS_OK &&
+              datum == SIDEREON_VERTICAL_DATUM_EGM96_MSL_ORTHOMETRIC,
+          "mmap terrain vertical datum");
+
+    written = 0;
+    required = 0;
+    check(sidereon_mmap_terrain_tile_index(mmap, NULL, 0, &written, &required) ==
+                  SIDEREON_STATUS_OK &&
+              written == 0 && required > 0,
+          "mmap terrain tile index sizing");
+    SidereonTerrainStoreTileIndex *index =
+        (SidereonTerrainStoreTileIndex *)calloc(required, sizeof(*index));
+    check(index != NULL, "mmap terrain tile index allocation");
+    if (index != NULL) {
+        check(sidereon_mmap_terrain_tile_index(mmap, index, required, &written, &required) ==
+                      SIDEREON_STATUS_OK &&
+                  written == required && index[0].lon_count > 1 && index[0].lat_count > 1 &&
+                  index[0].vertical_datum == SIDEREON_VERTICAL_DATUM_EGM96_MSL_ORTHOMETRIC,
+              "mmap terrain tile index copy");
+        free(index);
+    }
+
+    size_t roundtrip_required = 0;
+    check(sidereon_mmap_terrain_to_bytes(mmap, NULL, 0, &written, &roundtrip_required) ==
+                  SIDEREON_STATUS_OK &&
+              roundtrip_required == store_len,
+          "mmap terrain to_bytes sizing");
+    uint8_t *roundtrip = (uint8_t *)malloc(roundtrip_required);
+    check(roundtrip != NULL, "mmap terrain to_bytes allocation");
+    if (roundtrip != NULL) {
+        check(sidereon_mmap_terrain_to_bytes(mmap, roundtrip, roundtrip_required, &written,
+                                             &roundtrip_required) == SIDEREON_STATUS_OK &&
+                  written == store_len && roundtrip_required == store_len &&
+                  memcmp(roundtrip, store, store_len) == 0,
+              "mmap terrain to_bytes parity");
+        free(roundtrip);
+    }
+
+    SidereonDtedTerrain *terrain = NULL;
+    check(sidereon_dted_terrain_new(dted_root, &terrain) == SIDEREON_STATUS_OK && terrain != NULL,
+          "mmap terrain DTED reference");
+    SidereonLonLatDeg points[3] = {{-106.5, 36.5}, {-106.25, 36.75}, {-106.5, NAN}};
+    for (size_t i = 0; i < 2 && terrain != NULL; i++) {
+        double reference = 0.0;
+        SidereonOrthometricHeightM scalar = {0.0};
+        check(sidereon_dted_terrain_height_m_with_options(
+                  terrain, points[i].lon_deg, points[i].lat_deg, &options, &reference) ==
+                  SIDEREON_STATUS_OK,
+              "mmap terrain DTED scalar");
+        check(sidereon_mmap_terrain_orthometric_height_m_with_options(
+                  mmap, points[i].lon_deg, points[i].lat_deg, &options, &scalar) ==
+                  SIDEREON_STATUS_OK,
+              "mmap terrain orthometric scalar");
+        check(f64_same(scalar.value_m, reference), "mmap terrain scalar parity");
+    }
+
+    SidereonTerrainHeightResult batch[3];
+    memset(batch, 0, sizeof(batch));
+    check(sidereon_mmap_terrain_orthometric_height_batch(mmap, points, 3, &options, batch) ==
+              SIDEREON_STATUS_OK,
+          "mmap terrain orthometric batch");
+    check(batch[0].status == SIDEREON_STATUS_OK && batch[0].has_orthometric_height_m,
+          "mmap terrain batch first result");
+    check(batch[2].status == SIDEREON_STATUS_INVALID_ARGUMENT &&
+              !batch[2].has_orthometric_height_m,
+          "mmap terrain batch per-point error");
+
+    SidereonEllipsoidalHeightM ellipsoidal = {0.0};
+    check(sidereon_mmap_terrain_ellipsoidal_height_m_with_model(
+              mmap, -106.5, 36.5, &options, SIDEREON_TERRAIN_GEOID_MODEL_EGM96_ONE_DEGREE, NULL,
+              &ellipsoidal) == SIDEREON_STATUS_OK &&
+              isfinite(ellipsoidal.value_m),
+          "mmap terrain ellipsoidal one-degree");
+
+    char missing_dac[512];
+    int missing_len = snprintf(missing_dac, sizeof(missing_dac), "%s/WW15MGH.DAC", dted_root);
+    check(missing_len > 0 && (size_t)missing_len < sizeof(missing_dac),
+          "mmap terrain missing DAC path");
+    SidereonEgm96FifteenMinuteGeoid *geoid = NULL;
+    check(sidereon_egm96_15m_geoid_from_ww15mgh_dac_path(missing_dac, &geoid) ==
+                  SIDEREON_STATUS_INVALID_ARGUMENT &&
+              geoid == NULL,
+          "mmap terrain missing 15-minute geoid");
+    SidereonTerrainDatumError datum_error;
+    memset(&datum_error, 0, sizeof(datum_error));
+    check(sidereon_last_terrain_datum_error(&datum_error) == SIDEREON_STATUS_OK &&
+              datum_error.kind == SIDEREON_TERRAIN_DATUM_ERROR_KIND_MISSING_EGM96_DAC &&
+              strstr((const char *)datum_error.path, "WW15MGH.DAC") != NULL &&
+              strstr((const char *)datum_error.remediation, "WW15MGH.DAC") != NULL,
+          "mmap terrain missing DAC typed error");
+    sidereon_egm96_15m_geoid_free(geoid);
+
+    sidereon_dted_terrain_free(terrain);
+    sidereon_mmap_terrain_free(mmap);
+    free(store);
+
+    if (failures == start) {
+        printf("mmap_terrain_store_smoke: OK (DTED parity, typed missing DAC)\n");
+    }
+}
+
 static bool copy_doubles(SidereonStatus (*fn)(const SidereonIonex *,
                                               double *,
                                               size_t,
@@ -483,38 +648,65 @@ static void test_sbas_decode(void) {
 
 static void test_araim(void) {
     int start = failures;
-    const double inv = 0.5773502691896258;
-    SidereonAraimRow rows[4] = {
-        {"G01", {inv, inv, inv}, SIDEREON_GNSS_SYSTEM_GPS, M_PI / 2.0},
-        {"G02", {inv, -inv, -inv}, SIDEREON_GNSS_SYSTEM_GPS, M_PI / 2.0},
-        {"G03", {-inv, inv, -inv}, SIDEREON_GNSS_SYSTEM_GPS, M_PI / 2.0},
-        {"G04", {-inv, -inv, inv}, SIDEREON_GNSS_SYSTEM_GPS, M_PI / 2.0},
+    SidereonAraimRow rows[10] = {
+        {"G01", {0.0966, -0.0225, -0.9951}, SIDEREON_GNSS_SYSTEM_GPS, M_PI / 2.0},
+        {"G02", {0.2612, -0.6750, 0.6900}, SIDEREON_GNSS_SYSTEM_GPS, M_PI / 2.0},
+        {"G03", {0.7477, -0.0723, 0.6601}, SIDEREON_GNSS_SYSTEM_GPS, M_PI / 2.0},
+        {"G04", {0.2269, 0.9398, -0.2553}, SIDEREON_GNSS_SYSTEM_GPS, M_PI / 2.0},
+        {"G05", {0.2877, 0.5907, 0.7539}, SIDEREON_GNSS_SYSTEM_GPS, M_PI / 2.0},
+        {"E01", {0.9455, 0.3236, 0.0354}, SIDEREON_GNSS_SYSTEM_GALILEO, M_PI / 2.0},
+        {"E02", {0.5957, 0.6748, -0.4356}, SIDEREON_GNSS_SYSTEM_GALILEO, M_PI / 2.0},
+        {"E03", {0.7075, -0.0938, 0.7004}, SIDEREON_GNSS_SYSTEM_GALILEO, M_PI / 2.0},
+        {"E04", {0.7709, -0.5571, -0.3088}, SIDEREON_GNSS_SYSTEM_GALILEO, M_PI / 2.0},
+        {"E05", {0.2780, -0.6622, -0.6958}, SIDEREON_GNSS_SYSTEM_GALILEO, M_PI / 2.0},
     };
-    uint32_t clock_systems[1] = {SIDEREON_GNSS_SYSTEM_GPS};
+    uint32_t clock_systems[2] = {SIDEREON_GNSS_SYSTEM_GPS, SIDEREON_GNSS_SYSTEM_GALILEO};
     SidereonAraimGeometry geometry;
     memset(&geometry, 0, sizeof(geometry));
     geometry.rows = rows;
-    geometry.row_count = 4;
+    geometry.row_count = 10;
     geometry.receiver.lat_rad = 0.0;
     geometry.receiver.lon_rad = 0.0;
     geometry.receiver.height_m = 0.0;
     geometry.clock_systems = clock_systems;
-    geometry.clock_system_count = 1;
+    geometry.clock_system_count = 2;
 
-    SidereonAraimSatelliteIsmModel model = {2.0, 1.0, 0.25, 0.0};
-    SidereonAraimConstellationIsm constellations[1] = {
-        {SIDEREON_GNSS_SYSTEM_GPS, 0.0, model},
+    SidereonAraimSatelliteIsmModel model = {
+        .sigma_ura_m = 0.75,
+        .sigma_ure_m = 0.5,
+        .has_effective_sigma_int_m = false,
+        .effective_sigma_int_m = 0.0,
+        .has_effective_sigma_acc_m = false,
+        .effective_sigma_acc_m = 0.0,
+        .b_nom_m = 0.5,
+        .p_sat = 1.0e-5,
+    };
+    SidereonAraimConstellationIsm constellations[2] = {
+        {SIDEREON_GNSS_SYSTEM_GPS, 1.0e-4, model},
+        {SIDEREON_GNSS_SYSTEM_GALILEO, 1.0e-4, model},
+    };
+    SidereonAraimSatelliteIsm satellites[10] = {
+        {"G01", 0.75, 0.5, true, sqrt(3.8865), true, sqrt(3.5740), 0.5, 1.0e-5},
+        {"G02", 0.75, 0.5, true, sqrt(1.4377), true, sqrt(1.1252), 0.5, 1.0e-5},
+        {"G03", 0.75, 0.5, true, sqrt(0.8604), true, sqrt(0.5479), 0.5, 1.0e-5},
+        {"G04", 0.75, 0.5, true, sqrt(1.6383), true, sqrt(1.3258), 0.5, 1.0e-5},
+        {"G05", 0.75, 0.5, true, sqrt(1.3229), true, sqrt(1.0104), 0.5, 1.0e-5},
+        {"E01", 0.75, 0.5, true, sqrt(0.8434), true, sqrt(0.5309), 0.5, 1.0e-5},
+        {"E02", 0.75, 0.5, true, sqrt(0.8963), true, sqrt(0.5838), 0.5, 1.0e-5},
+        {"E03", 0.75, 0.5, true, sqrt(0.8669), true, sqrt(0.5544), 0.5, 1.0e-5},
+        {"E04", 0.75, 0.5, true, sqrt(0.8573), true, sqrt(0.5448), 0.5, 1.0e-5},
+        {"E05", 0.75, 0.5, true, sqrt(1.3616), true, sqrt(1.0491), 0.5, 1.0e-5},
     };
     SidereonAraimIsm ism;
     memset(&ism, 0, sizeof(ism));
     ism.constellations = constellations;
-    ism.constellation_count = 1;
+    ism.constellation_count = 2;
+    ism.satellites = satellites;
+    ism.satellite_count = 10;
 
     SidereonAraimIntegrityAllocation allocation;
     check(sidereon_araim_allocation_lpv_200(&allocation) == SIDEREON_STATUS_OK,
           "ARAIM allocation init");
-    allocation.p_threshold_unmonitored = 0.0;
-    allocation.max_fault_order = 0;
 
     SidereonAraimResult *result = NULL;
     check(sidereon_araim(&geometry, &ism, &allocation, &result) == SIDEREON_STATUS_OK &&
@@ -527,30 +719,27 @@ static void test_araim(void) {
     SidereonAraimSummary summary;
     check(sidereon_araim_result_summary(result, &summary) == SIDEREON_STATUS_OK,
           "ARAIM summary");
-    check(summary.availability && summary.fault_mode_count == 1 && summary.emt_m == 0.0,
+    check(summary.availability && summary.fault_mode_count == 13,
           "ARAIM summary status");
-    check_close(summary.vpl_m, 9.8709713890552937, 1.0e-10, "ARAIM VPL reference");
-    check_close(summary.hpl_m, 15.630862038940084, 1.0e-10, "ARAIM HPL reference");
-    check_close(summary.p_unmonitored, 0.0, 0.0, "ARAIM unmonitored reference");
+    check_close(summary.vpl_m, 19.2, 0.05, "ARAIM VPL published reference");
+    check_close(summary.hpl_m, 14.5, 0.05, "ARAIM HPL published reference");
+    check_close(summary.emt_m, 7.8, 0.05, "ARAIM EMT published reference");
+    check_close(summary.sigma_acc_v_m, 1.47, 0.02, "ARAIM vertical sigma published reference");
 
-    SidereonAraimFaultMode modes[1];
+    SidereonAraimFaultMode modes[13];
     size_t written = 0;
     size_t required = 0;
-    check(sidereon_araim_result_fault_modes(result, modes, 1, &written, &required) ==
+    check(sidereon_araim_result_fault_modes(result, modes, 13, &written, &required) ==
                   SIDEREON_STATUS_OK &&
-              written == 1 && required == 1,
+              written == 13 && required == 13,
           "ARAIM fault modes");
     check(modes[0].monitorable && modes[0].excluded_count == 0 &&
               !modes[0].has_excluded_constellation,
           "ARAIM fault-free mode");
-    check_close(modes[0].sigma_int_enu_m[0], 1.7705931209625769, 1.0e-12,
-                "ARAIM east sigma reference");
-    check_close(modes[0].bias_enu_m[0], 0.4330127018922194, 1.0e-12,
-                "ARAIM east bias reference");
     sidereon_araim_result_free(result);
 
     if (failures == start) {
-        printf("araim_smoke: OK (fault-free LPV-200 vector)\n");
+        printf("araim_smoke: OK (WG-C Appendix D reference)\n");
     }
 }
 
@@ -583,6 +772,7 @@ int main(int argc, char **argv) {
 
     test_clock_stability();
     test_terrain_batch(argv[2]);
+    test_mmap_terrain_store(argv[2]);
     test_ionex_samples(argv[1]);
     test_sbas_decode();
     test_araim();

@@ -252,6 +252,15 @@ use sidereon_core::staleness::{
     StalenessMetadata, StalenessPolicy,
 };
 use sidereon_core::terrain::{DtedInterpolation, DtedLookupOptions, DtedTerrain, DtedTile};
+use sidereon_core::terrain_store::{
+    dted_tree_to_mmap_store as core_dted_tree_to_mmap_store,
+    terrain_store_checksum64 as core_terrain_store_checksum64,
+    write_dted_tree_to_mmap_store as core_write_dted_tree_to_mmap_store,
+    Egm96FifteenMinuteGeoid as CoreEgm96FifteenMinuteGeoid, MmapTerrain as CoreMmapTerrain,
+    OrthometricHeightM as CoreOrthometricHeightM, TerrainDatumError,
+    TerrainGeoidModel as CoreTerrainGeoidModel, TerrainStoreError,
+    TerrainStoreTileIndex as CoreTerrainStoreTileIndex, VerticalDatum as CoreVerticalDatum,
+};
 use sidereon_core::velocity::{
     VelocityObservable, VelocityObservation, VelocitySolution, VelocitySolveOptions,
 };
@@ -303,6 +312,8 @@ pub const TLE_FIELD_C_BYTES: usize = 32;
 /// sidereon_visible_from_satellites), so it always fits.
 const MAX_VISIBLE_ID_BYTES: usize = 64;
 const VISIBLE_ID_C_BYTES: usize = MAX_VISIBLE_ID_BYTES + 1;
+/// Fixed buffer length for terrain store typed error text, including the NUL.
+pub const SIDEREON_TERRAIN_ERROR_TEXT_C_BYTES: usize = 512;
 
 /// Record the most recent error message for the current thread.
 fn set_last_error(message: impl Into<String>) {
@@ -13366,10 +13377,10 @@ fn allan_points(result: &CoreAllanResult) -> Vec<SidereonAllanPoint> {
         .collect()
 }
 
-fn allan_curve_for_estimator<'a>(
-    curves: &'a CoreAllanDeviationCurves,
+fn allan_curve_for_estimator(
+    curves: &CoreAllanDeviationCurves,
     estimator: CoreAllanEstimator,
-) -> Option<&'a CoreAllanResult> {
+) -> Option<&CoreAllanResult> {
     match estimator {
         CoreAllanEstimator::Adev => curves.adev.as_ref(),
         CoreAllanEstimator::OverlappingAdev => curves.overlapping_adev.as_ref(),
@@ -25308,6 +25319,14 @@ pub struct SidereonAraimSatelliteIsmModel {
     pub sigma_ura_m: f64,
     /// Accuracy and continuity one-sigma SIS range error, meters.
     pub sigma_ure_m: f64,
+    /// Whether effective_sigma_int_m overrides the derived integrity sigma.
+    pub has_effective_sigma_int_m: bool,
+    /// Effective integrity one-sigma range error after local terms, meters.
+    pub effective_sigma_int_m: f64,
+    /// Whether effective_sigma_acc_m overrides the derived accuracy sigma.
+    pub has_effective_sigma_acc_m: bool,
+    /// Effective accuracy one-sigma range error after local terms, meters.
+    pub effective_sigma_acc_m: f64,
     /// Nominal SIS bias bound, meters.
     pub b_nom_m: f64,
     /// Prior probability for a satellite fault.
@@ -25336,6 +25355,14 @@ pub struct SidereonAraimSatelliteIsm {
     pub sigma_ura_m: f64,
     /// Accuracy and continuity one-sigma SIS range error, meters.
     pub sigma_ure_m: f64,
+    /// Whether effective_sigma_int_m overrides the derived integrity sigma.
+    pub has_effective_sigma_int_m: bool,
+    /// Effective integrity one-sigma range error after local terms, meters.
+    pub effective_sigma_int_m: f64,
+    /// Whether effective_sigma_acc_m overrides the derived accuracy sigma.
+    pub has_effective_sigma_acc_m: bool,
+    /// Effective accuracy one-sigma range error after local terms, meters.
+    pub effective_sigma_acc_m: f64,
     /// Nominal SIS bias bound, meters.
     pub b_nom_m: f64,
     /// Prior probability for a satellite fault.
@@ -25372,6 +25399,8 @@ pub struct SidereonAraimIntegrityAllocation {
     pub pfa_hor: f64,
     /// Maximum acceptable unmonitored fault probability mass.
     pub p_threshold_unmonitored: f64,
+    /// Fault-prior threshold used for the effective monitor threshold.
+    pub p_emt: f64,
     /// Maximum enumerated satellite-fault order. Zero keeps only fault-free.
     pub max_fault_order: usize,
 }
@@ -25436,6 +25465,7 @@ fn araim_allocation_to_c(value: IntegrityAllocation) -> SidereonAraimIntegrityAl
         pfa_vert: value.pfa_vert,
         pfa_hor: value.pfa_hor,
         p_threshold_unmonitored: value.p_threshold_unmonitored,
+        p_emt: value.p_emt,
         max_fault_order: value.max_fault_order,
     }
 }
@@ -25448,17 +25478,33 @@ fn araim_allocation_from_c(value: &SidereonAraimIntegrityAllocation) -> Integrit
         pfa_vert: value.pfa_vert,
         pfa_hor: value.pfa_hor,
         p_threshold_unmonitored: value.p_threshold_unmonitored,
+        p_emt: if value.p_emt == 0.0 {
+            1.0e-5
+        } else {
+            value.p_emt
+        },
         max_fault_order: value.max_fault_order,
     }
 }
 
 fn araim_sat_model_from_c(value: SidereonAraimSatelliteIsmModel) -> SatelliteIsmModel {
-    SatelliteIsmModel::new(
-        value.sigma_ura_m,
-        value.sigma_ure_m,
-        value.b_nom_m,
-        value.p_sat,
-    )
+    if value.has_effective_sigma_int_m || value.has_effective_sigma_acc_m {
+        SatelliteIsmModel::new_with_effective_sigmas(
+            value.sigma_ura_m,
+            value.sigma_ure_m,
+            value.b_nom_m,
+            value.p_sat,
+            value.effective_sigma_int_m,
+            value.effective_sigma_acc_m,
+        )
+    } else {
+        SatelliteIsmModel::new(
+            value.sigma_ura_m,
+            value.sigma_ure_m,
+            value.b_nom_m,
+            value.p_sat,
+        )
+    }
 }
 
 unsafe fn araim_geometry_from_c(
@@ -25534,13 +25580,21 @@ unsafe fn araim_ism_from_c(fn_name: &str, value: &SidereonAraimIsm) -> Result<Is
     let mut satellites = Vec::with_capacity(raw_satellites.len());
     for row in raw_satellites {
         let id = parse_satellite_token(fn_name, row.sat_id)?;
-        satellites.push(SatelliteIsm::new(
-            id,
-            row.sigma_ura_m,
-            row.sigma_ure_m,
-            row.b_nom_m,
-            row.p_sat,
-        ));
+        satellites.push(
+            if row.has_effective_sigma_int_m || row.has_effective_sigma_acc_m {
+                SatelliteIsm::new_with_effective_sigmas(
+                    id,
+                    row.sigma_ura_m,
+                    row.sigma_ure_m,
+                    row.b_nom_m,
+                    row.p_sat,
+                    row.effective_sigma_int_m,
+                    row.effective_sigma_acc_m,
+                )
+            } else {
+                SatelliteIsm::new(id, row.sigma_ura_m, row.sigma_ure_m, row.b_nom_m, row.p_sat)
+            },
+        );
     }
     Ok(Ism::new(constellations, satellites))
 }
@@ -35169,6 +35223,1385 @@ pub unsafe extern "C" fn sidereon_dted_tile_get_elevation(
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_dted_tile_free(tile: *mut SidereonDtedTile) {
     free_boxed(tile);
+}
+
+// --- Memory-mappable terrain store (sidereon_core::terrain_store) -----------
+
+/// Terrain store vertical datum. Terrain store postings are orthometric heights.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonVerticalDatum {
+    /// Orthometric height in metres above the EGM96 mean sea level geoid.
+    Egm96MslOrthometric = 1,
+}
+
+/// Geoid tier for converting terrain orthometric height to ellipsoidal height.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonTerrainGeoidModel {
+    /// Embedded EGM96 1-degree grid, always available in process.
+    Egm96OneDegree = 0,
+    /// Caller-supplied EGM96 15-arcminute WW15MGH.DAC grid.
+    Egm96FifteenMinute = 1,
+}
+
+/// Terrain store conversion or reader error kind.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonTerrainStoreErrorKind {
+    /// No terrain store error is recorded for this thread.
+    None = 0,
+    /// File or directory I/O failed.
+    Io = 1,
+    /// Terrain store bytes or DTED input could not be parsed.
+    Parse = 2,
+    /// Terrain store version is not supported.
+    UnsupportedVersion = 3,
+    /// Terrain store vertical datum tag is not supported.
+    UnsupportedDatum = 4,
+    /// Two DTED inputs resolved to the same tile id.
+    DuplicateTile = 5,
+    /// A tile payload checksum did not match its index record.
+    Checksum = 6,
+}
+
+/// Last typed terrain store error for this thread.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonTerrainStoreError {
+    /// Error selector as SidereonTerrainStoreErrorKind.
+    pub kind: u32,
+    /// Path text for I/O errors, NUL-terminated when present.
+    pub path: [c_char; SIDEREON_TERRAIN_ERROR_TEXT_C_BYTES],
+    /// Message text for I/O errors, NUL-terminated when present.
+    pub message: [c_char; SIDEREON_TERRAIN_ERROR_TEXT_C_BYTES],
+    /// Parse reason text, NUL-terminated when present.
+    pub reason: [c_char; SIDEREON_TERRAIN_ERROR_TEXT_C_BYTES],
+    /// Unsupported version tag when kind is UnsupportedVersion.
+    pub version: u16,
+    /// Unsupported vertical datum tag when kind is UnsupportedDatum.
+    pub tag: u8,
+    /// Tile latitude id for duplicate-tile and checksum errors.
+    pub lat_index: i32,
+    /// Tile longitude id for duplicate-tile and checksum errors.
+    pub lon_index: i32,
+    /// Expected checksum for checksum errors.
+    pub expected_checksum64: u64,
+    /// Computed checksum for checksum errors.
+    pub found_checksum64: u64,
+}
+
+/// Terrain datum conversion or geoid loading error kind.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonTerrainDatumErrorKind {
+    /// No terrain datum error is recorded for this thread.
+    None = 0,
+    /// Terrain lookup failed before datum conversion.
+    Terrain = 1,
+    /// A geoid grid could not be parsed.
+    Geoid = 2,
+    /// A geoid grid could not be read for a reason other than absence.
+    Io = 3,
+    /// The EGM96 15-arcminute WW15MGH.DAC grid was requested but is absent.
+    MissingEgm96Dac = 4,
+}
+
+/// Last typed terrain datum error for this thread.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonTerrainDatumError {
+    /// Error selector as SidereonTerrainDatumErrorKind.
+    pub kind: u32,
+    /// Path text for I/O or MissingEgm96Dac errors, NUL-terminated when present.
+    pub path: [c_char; SIDEREON_TERRAIN_ERROR_TEXT_C_BYTES],
+    /// Error text for Terrain, Geoid, or I/O errors, NUL-terminated when present.
+    pub message: [c_char; SIDEREON_TERRAIN_ERROR_TEXT_C_BYTES],
+    /// Remediation text for MissingEgm96Dac, NUL-terminated when present.
+    pub remediation: [c_char; SIDEREON_TERRAIN_ERROR_TEXT_C_BYTES],
+}
+
+/// Orthometric height H in metres above the EGM96 mean sea level geoid.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonOrthometricHeightM {
+    /// Orthometric height H, metres.
+    pub value_m: f64,
+}
+
+/// Ellipsoidal height h in metres above the WGS84 reference ellipsoid.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonEllipsoidalHeightM {
+    /// Ellipsoidal height h, metres.
+    pub value_m: f64,
+}
+
+/// One memory-mappable terrain store batch result.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonTerrainHeightResult {
+    /// Per-point status.
+    pub status: SidereonStatus,
+    /// Whether orthometric_height_m carries a valid terrain height.
+    pub has_orthometric_height_m: bool,
+    /// Orthometric height H, metres, when has_orthometric_height_m is true.
+    pub orthometric_height_m: SidereonOrthometricHeightM,
+}
+
+/// One tile index record from a memory-mappable terrain store.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonTerrainStoreTileIndex {
+    /// Integer latitude tile id.
+    pub lat_index: i32,
+    /// Integer longitude tile id.
+    pub lon_index: i32,
+    /// Western edge longitude, degrees.
+    pub min_longitude_deg: f64,
+    /// Southern edge latitude, degrees.
+    pub min_latitude_deg: f64,
+    /// Eastern edge longitude, degrees.
+    pub max_longitude_deg: f64,
+    /// Northern edge latitude, degrees.
+    pub max_latitude_deg: f64,
+    /// Number of longitude postings.
+    pub lon_count: u32,
+    /// Number of latitude postings.
+    pub lat_count: u32,
+    /// Byte offset of this tile's posting payload in the store.
+    pub data_offset: u64,
+    /// Byte length of this tile's posting payload in the store.
+    pub data_len: u64,
+    /// FNV-1a checksum of this tile's posting payload bytes.
+    pub checksum64: u64,
+    /// Vertical datum selector as SidereonVerticalDatum.
+    pub vertical_datum: u32,
+}
+
+/// Memory-mappable terrain reader backed by terrain store bytes. Create with
+/// sidereon_mmap_terrain_from_bytes, sidereon_mmap_terrain_from_vec, or
+/// sidereon_mmap_terrain_from_path, and release with sidereon_mmap_terrain_free.
+/// Terrain lookups use longitude, latitude degrees and return orthometric height.
+pub struct SidereonMmapTerrain {
+    inner: CoreMmapTerrain<'static>,
+}
+
+/// Loaded EGM96 15-arcminute geoid grid for terrain datum conversion. Create
+/// with sidereon_egm96_15m_geoid_from_ww15mgh_dac_bytes or
+/// sidereon_egm96_15m_geoid_from_ww15mgh_dac_path, and release with
+/// sidereon_egm96_15m_geoid_free.
+pub struct SidereonEgm96FifteenMinuteGeoid {
+    inner: CoreEgm96FifteenMinuteGeoid,
+}
+
+thread_local! {
+    static LAST_TERRAIN_STORE_ERROR: RefCell<Option<SidereonTerrainStoreError>> =
+        const { RefCell::new(None) };
+    static LAST_TERRAIN_DATUM_ERROR: RefCell<Option<SidereonTerrainDatumError>> =
+        const { RefCell::new(None) };
+}
+
+fn empty_terrain_store_error() -> SidereonTerrainStoreError {
+    SidereonTerrainStoreError {
+        kind: SidereonTerrainStoreErrorKind::None as u32,
+        path: [0; SIDEREON_TERRAIN_ERROR_TEXT_C_BYTES],
+        message: [0; SIDEREON_TERRAIN_ERROR_TEXT_C_BYTES],
+        reason: [0; SIDEREON_TERRAIN_ERROR_TEXT_C_BYTES],
+        version: 0,
+        tag: 0,
+        lat_index: 0,
+        lon_index: 0,
+        expected_checksum64: 0,
+        found_checksum64: 0,
+    }
+}
+
+fn empty_terrain_datum_error() -> SidereonTerrainDatumError {
+    SidereonTerrainDatumError {
+        kind: SidereonTerrainDatumErrorKind::None as u32,
+        path: [0; SIDEREON_TERRAIN_ERROR_TEXT_C_BYTES],
+        message: [0; SIDEREON_TERRAIN_ERROR_TEXT_C_BYTES],
+        remediation: [0; SIDEREON_TERRAIN_ERROR_TEXT_C_BYTES],
+    }
+}
+
+fn terrain_store_error_to_c(err: &TerrainStoreError) -> SidereonTerrainStoreError {
+    let mut out = empty_terrain_store_error();
+    match err {
+        TerrainStoreError::Io { path, message } => {
+            out.kind = SidereonTerrainStoreErrorKind::Io as u32;
+            out.path = fixed_c_chars(&path.display().to_string());
+            out.message = fixed_c_chars(message);
+        }
+        TerrainStoreError::Parse { reason } => {
+            out.kind = SidereonTerrainStoreErrorKind::Parse as u32;
+            out.reason = fixed_c_chars(reason);
+        }
+        TerrainStoreError::UnsupportedVersion { version } => {
+            out.kind = SidereonTerrainStoreErrorKind::UnsupportedVersion as u32;
+            out.version = *version;
+        }
+        TerrainStoreError::UnsupportedDatum { tag } => {
+            out.kind = SidereonTerrainStoreErrorKind::UnsupportedDatum as u32;
+            out.tag = *tag;
+        }
+        TerrainStoreError::DuplicateTile {
+            lat_index,
+            lon_index,
+        } => {
+            out.kind = SidereonTerrainStoreErrorKind::DuplicateTile as u32;
+            out.lat_index = *lat_index;
+            out.lon_index = *lon_index;
+        }
+        TerrainStoreError::Checksum {
+            lat_index,
+            lon_index,
+            expected,
+            found,
+        } => {
+            out.kind = SidereonTerrainStoreErrorKind::Checksum as u32;
+            out.lat_index = *lat_index;
+            out.lon_index = *lon_index;
+            out.expected_checksum64 = *expected;
+            out.found_checksum64 = *found;
+        }
+    }
+    out
+}
+
+fn terrain_datum_error_to_c(err: &TerrainDatumError) -> SidereonTerrainDatumError {
+    let mut out = empty_terrain_datum_error();
+    match err {
+        TerrainDatumError::Terrain(err) => {
+            out.kind = SidereonTerrainDatumErrorKind::Terrain as u32;
+            out.message = fixed_c_chars(&err.to_string());
+        }
+        TerrainDatumError::Geoid(err) => {
+            out.kind = SidereonTerrainDatumErrorKind::Geoid as u32;
+            out.message = fixed_c_chars(&err.to_string());
+        }
+        TerrainDatumError::Io { path, message } => {
+            out.kind = SidereonTerrainDatumErrorKind::Io as u32;
+            out.path = fixed_c_chars(&path.display().to_string());
+            out.message = fixed_c_chars(message);
+        }
+        TerrainDatumError::MissingEgm96Dac { path, remediation } => {
+            out.kind = SidereonTerrainDatumErrorKind::MissingEgm96Dac as u32;
+            out.path = fixed_c_chars(&path.display().to_string());
+            out.remediation = fixed_c_chars(remediation);
+        }
+    }
+    out
+}
+
+fn map_terrain_store_error(fn_name: &str, err: TerrainStoreError) -> SidereonStatus {
+    let typed = terrain_store_error_to_c(&err);
+    LAST_TERRAIN_STORE_ERROR.with(|slot| *slot.borrow_mut() = Some(typed));
+    set_last_error(format!("{fn_name}: {err}"));
+    SidereonStatus::InvalidArgument
+}
+
+fn map_terrain_datum_error(fn_name: &str, err: TerrainDatumError) -> SidereonStatus {
+    let typed = terrain_datum_error_to_c(&err);
+    LAST_TERRAIN_DATUM_ERROR.with(|slot| *slot.borrow_mut() = Some(typed));
+    set_last_error(format!("{fn_name}: {err}"));
+    SidereonStatus::InvalidArgument
+}
+
+fn map_terrain_core_error(fn_name: &str, err: CoreError) -> SidereonStatus {
+    set_last_error(format!("{fn_name}: {err}"));
+    SidereonStatus::InvalidArgument
+}
+
+fn vertical_datum_to_c(value: CoreVerticalDatum) -> SidereonVerticalDatum {
+    match value {
+        CoreVerticalDatum::Egm96MslOrthometric => SidereonVerticalDatum::Egm96MslOrthometric,
+    }
+}
+
+fn orthometric_height_to_c(value: CoreOrthometricHeightM) -> SidereonOrthometricHeightM {
+    SidereonOrthometricHeightM {
+        value_m: value.metres(),
+    }
+}
+
+fn ellipsoidal_height_to_c(
+    value: sidereon_core::terrain_store::EllipsoidalHeightM,
+) -> SidereonEllipsoidalHeightM {
+    SidereonEllipsoidalHeightM {
+        value_m: value.metres(),
+    }
+}
+
+fn terrain_height_result_from_f64(
+    result: sidereon_core::Result<f64>,
+) -> SidereonTerrainHeightResult {
+    match result {
+        Ok(value_m) => SidereonTerrainHeightResult {
+            status: SidereonStatus::Ok,
+            has_orthometric_height_m: true,
+            orthometric_height_m: SidereonOrthometricHeightM { value_m },
+        },
+        Err(_) => SidereonTerrainHeightResult {
+            status: SidereonStatus::InvalidArgument,
+            has_orthometric_height_m: false,
+            orthometric_height_m: SidereonOrthometricHeightM { value_m: 0.0 },
+        },
+    }
+}
+
+fn terrain_height_result_from_orthometric(
+    result: sidereon_core::Result<CoreOrthometricHeightM>,
+) -> SidereonTerrainHeightResult {
+    match result {
+        Ok(value) => SidereonTerrainHeightResult {
+            status: SidereonStatus::Ok,
+            has_orthometric_height_m: true,
+            orthometric_height_m: orthometric_height_to_c(value),
+        },
+        Err(_) => SidereonTerrainHeightResult {
+            status: SidereonStatus::InvalidArgument,
+            has_orthometric_height_m: false,
+            orthometric_height_m: SidereonOrthometricHeightM { value_m: 0.0 },
+        },
+    }
+}
+
+fn terrain_store_tile_index_to_c(
+    value: &CoreTerrainStoreTileIndex,
+) -> SidereonTerrainStoreTileIndex {
+    SidereonTerrainStoreTileIndex {
+        lat_index: value.lat_index,
+        lon_index: value.lon_index,
+        min_longitude_deg: value.min_longitude_deg,
+        min_latitude_deg: value.min_latitude_deg,
+        max_longitude_deg: value.max_longitude_deg,
+        max_latitude_deg: value.max_latitude_deg,
+        lon_count: value.lon_count,
+        lat_count: value.lat_count,
+        data_offset: value.data_offset,
+        data_len: value.data_len,
+        checksum64: value.checksum64,
+        vertical_datum: vertical_datum_to_c(value.vertical_datum) as u32,
+    }
+}
+
+unsafe fn terrain_geoid_model_from_c<'a>(
+    fn_name: &str,
+    model: u32,
+    geoid: *const SidereonEgm96FifteenMinuteGeoid,
+) -> Result<CoreTerrainGeoidModel<'a>, SidereonStatus> {
+    match model {
+        value if value == SidereonTerrainGeoidModel::Egm96OneDegree as u32 => {
+            Ok(CoreTerrainGeoidModel::Egm96OneDegree)
+        }
+        value if value == SidereonTerrainGeoidModel::Egm96FifteenMinute as u32 => {
+            let geoid = require_ref(geoid, fn_name, "geoid")?;
+            Ok(CoreTerrainGeoidModel::Egm96FifteenMinute(&geoid.inner))
+        }
+        _ => {
+            set_last_error(format!("{fn_name}: invalid terrain geoid model selector"));
+            Err(SidereonStatus::InvalidArgument)
+        }
+    }
+}
+
+/// Copy the last typed terrain store error for this thread. If no terrain store
+/// error is recorded, kind is SidereonTerrainStoreErrorKind::None.
+///
+/// Safety: out_error must point to a SidereonTerrainStoreError.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_last_terrain_store_error(
+    out_error: *mut SidereonTerrainStoreError,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_last_terrain_store_error",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_error,
+                "sidereon_last_terrain_store_error",
+                "out_error"
+            ));
+            *out = LAST_TERRAIN_STORE_ERROR
+                .with(|slot| *slot.borrow())
+                .unwrap_or_else(empty_terrain_store_error);
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy the last typed terrain datum error for this thread. If no terrain datum
+/// error is recorded, kind is SidereonTerrainDatumErrorKind::None.
+///
+/// Safety: out_error must point to a SidereonTerrainDatumError.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_last_terrain_datum_error(
+    out_error: *mut SidereonTerrainDatumError,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_last_terrain_datum_error",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_error,
+                "sidereon_last_terrain_datum_error",
+                "out_error"
+            ));
+            *out = LAST_TERRAIN_DATUM_ERROR
+                .with(|slot| *slot.borrow())
+                .unwrap_or_else(empty_terrain_datum_error);
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Convert a DTED tile tree rooted at root into memory-mappable terrain store
+/// bytes. The output uses the variable-length output contract. Store postings
+/// are orthometric heights in metres.
+///
+/// Safety: root must be a non-empty UTF-8 C string; out must point to len bytes
+/// or be NULL when len is 0; out_written and out_required must point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_dted_tree_to_mmap_store(
+    root: *const c_char,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_dted_tree_to_mmap_store",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_dted_tree_to_mmap_store",
+                out_written,
+                out_required
+            ));
+            let root = c_try!(parse_c_string(
+                "sidereon_dted_tree_to_mmap_store",
+                "root",
+                root
+            ));
+            let bytes = match core_dted_tree_to_mmap_store(std::path::Path::new(&root)) {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    return map_terrain_store_error("sidereon_dted_tree_to_mmap_store", err)
+                }
+            };
+            c_try!(copy_prefix_to_c(
+                "sidereon_dted_tree_to_mmap_store",
+                "out",
+                &bytes,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Convert a DTED tile tree and write memory-mappable terrain store bytes to
+/// out_path. Store postings are orthometric heights in metres.
+///
+/// Safety: root and out_path must be non-empty UTF-8 C strings.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_write_dted_tree_to_mmap_store(
+    root: *const c_char,
+    out_path: *const c_char,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_write_dted_tree_to_mmap_store",
+        SidereonStatus::Panic,
+        || {
+            let root = c_try!(parse_c_string(
+                "sidereon_write_dted_tree_to_mmap_store",
+                "root",
+                root
+            ));
+            let out_path = c_try!(parse_c_string(
+                "sidereon_write_dted_tree_to_mmap_store",
+                "out_path",
+                out_path
+            ));
+            match core_write_dted_tree_to_mmap_store(
+                std::path::Path::new(&root),
+                std::path::Path::new(&out_path),
+            ) {
+                Ok(()) => SidereonStatus::Ok,
+                Err(err) => map_terrain_store_error("sidereon_write_dted_tree_to_mmap_store", err),
+            }
+        },
+    )
+}
+
+/// Return an FNV-1a checksum for terrain store bytes.
+///
+/// Safety: bytes must point to len readable bytes; out_checksum64 must point to
+/// a uint64_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_terrain_store_checksum64(
+    bytes: *const u8,
+    len: usize,
+    out_checksum64: *mut u64,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_terrain_store_checksum64",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_checksum64,
+                "sidereon_terrain_store_checksum64",
+                "out_checksum64"
+            ));
+            *out = 0;
+            let bytes = c_try!(require_slice(
+                bytes,
+                len,
+                "sidereon_terrain_store_checksum64",
+                "bytes"
+            ));
+            *out = core_terrain_store_checksum64(bytes);
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Parse memory-mappable terrain store bytes into an owned reader handle. The C
+/// binding copies the input byte span into handle-owned storage. Terrain lookup
+/// APIs use longitude, latitude degrees and return orthometric height.
+///
+/// Safety: bytes must point to len readable bytes; out_terrain must point to a
+/// SidereonMmapTerrain*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_mmap_terrain_from_bytes(
+    bytes: *const u8,
+    len: usize,
+    out_terrain: *mut *mut SidereonMmapTerrain,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_mmap_terrain_from_bytes",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_terrain,
+                "sidereon_mmap_terrain_from_bytes",
+                "out_terrain"
+            ));
+            *out = ptr::null_mut();
+            let bytes = c_try!(require_slice(
+                bytes,
+                len,
+                "sidereon_mmap_terrain_from_bytes",
+                "bytes"
+            ));
+            match CoreMmapTerrain::from_vec(bytes.to_vec()) {
+                Ok(inner) => {
+                    write_boxed_handle(out, SidereonMmapTerrain { inner });
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_terrain_store_error("sidereon_mmap_terrain_from_bytes", err),
+            }
+        },
+    )
+}
+
+/// Parse memory-mappable terrain store bytes into an owned reader handle. This
+/// is the same C ownership contract as sidereon_mmap_terrain_from_bytes.
+///
+/// Safety: bytes must point to len readable bytes; out_terrain must point to a
+/// SidereonMmapTerrain*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_mmap_terrain_from_vec(
+    bytes: *const u8,
+    len: usize,
+    out_terrain: *mut *mut SidereonMmapTerrain,
+) -> SidereonStatus {
+    sidereon_mmap_terrain_from_bytes(bytes, len, out_terrain)
+}
+
+/// Read and parse a memory-mappable terrain store file. Terrain lookup APIs use
+/// longitude, latitude degrees and return orthometric height.
+///
+/// Safety: path must be a non-empty UTF-8 C string; out_terrain must point to a
+/// SidereonMmapTerrain*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_mmap_terrain_from_path(
+    path: *const c_char,
+    out_terrain: *mut *mut SidereonMmapTerrain,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_mmap_terrain_from_path",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_terrain,
+                "sidereon_mmap_terrain_from_path",
+                "out_terrain"
+            ));
+            *out = ptr::null_mut();
+            let path = c_try!(parse_c_string(
+                "sidereon_mmap_terrain_from_path",
+                "path",
+                path
+            ));
+            match CoreMmapTerrain::from_path(std::path::Path::new(&path)) {
+                Ok(inner) => {
+                    write_boxed_handle(out, SidereonMmapTerrain { inner });
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_terrain_store_error("sidereon_mmap_terrain_from_path", err),
+            }
+        },
+    )
+}
+
+/// Query one bilinear terrain height. Inputs are longitude, latitude degrees.
+/// The returned value is orthometric height H in metres.
+///
+/// Safety: terrain must be a live handle; out_height_m must point to a
+/// SidereonOrthometricHeightM.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_mmap_terrain_height_m(
+    terrain: *mut SidereonMmapTerrain,
+    longitude_deg: f64,
+    latitude_deg: f64,
+    out_height_m: *mut SidereonOrthometricHeightM,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_mmap_terrain_height_m",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_height_m,
+                "sidereon_mmap_terrain_height_m",
+                "out_height_m"
+            ));
+            *out = SidereonOrthometricHeightM { value_m: 0.0 };
+            let terrain = c_try!(require_out(
+                terrain,
+                "sidereon_mmap_terrain_height_m",
+                "terrain"
+            ));
+            match terrain.inner.height_m(longitude_deg, latitude_deg) {
+                Ok(value_m) => {
+                    *out = SidereonOrthometricHeightM { value_m };
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_terrain_core_error("sidereon_mmap_terrain_height_m", err),
+            }
+        },
+    )
+}
+
+/// Query one terrain height with interpolation options. Inputs are longitude,
+/// latitude degrees. The returned value is orthometric height H in metres.
+///
+/// Safety: terrain must be a live handle; options must point to
+/// SidereonDtedLookupOptions; out_height_m must point to a
+/// SidereonOrthometricHeightM.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_mmap_terrain_height_m_with_options(
+    terrain: *mut SidereonMmapTerrain,
+    longitude_deg: f64,
+    latitude_deg: f64,
+    options: *const SidereonDtedLookupOptions,
+    out_height_m: *mut SidereonOrthometricHeightM,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_mmap_terrain_height_m_with_options",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_height_m,
+                "sidereon_mmap_terrain_height_m_with_options",
+                "out_height_m"
+            ));
+            *out = SidereonOrthometricHeightM { value_m: 0.0 };
+            let terrain = c_try!(require_out(
+                terrain,
+                "sidereon_mmap_terrain_height_m_with_options",
+                "terrain"
+            ));
+            let options = c_try!(require_ref(
+                options,
+                "sidereon_mmap_terrain_height_m_with_options",
+                "options"
+            ));
+            let options = c_try!(dted_options_from_c(
+                "sidereon_mmap_terrain_height_m_with_options",
+                options
+            ));
+            match terrain
+                .inner
+                .height_m_with_options(longitude_deg, latitude_deg, options)
+            {
+                Ok(value_m) => {
+                    *out = SidereonOrthometricHeightM { value_m };
+                    SidereonStatus::Ok
+                }
+                Err(err) => {
+                    map_terrain_core_error("sidereon_mmap_terrain_height_m_with_options", err)
+                }
+            }
+        },
+    )
+}
+
+/// Query one typed orthometric terrain height. Inputs are longitude, latitude
+/// degrees. The returned value is orthometric height H in metres.
+///
+/// Safety: terrain must be a live handle; out_height_m must point to a
+/// SidereonOrthometricHeightM.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_mmap_terrain_orthometric_height_m(
+    terrain: *const SidereonMmapTerrain,
+    longitude_deg: f64,
+    latitude_deg: f64,
+    out_height_m: *mut SidereonOrthometricHeightM,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_mmap_terrain_orthometric_height_m",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_height_m,
+                "sidereon_mmap_terrain_orthometric_height_m",
+                "out_height_m"
+            ));
+            *out = SidereonOrthometricHeightM { value_m: 0.0 };
+            let terrain = c_try!(require_ref(
+                terrain,
+                "sidereon_mmap_terrain_orthometric_height_m",
+                "terrain"
+            ));
+            match terrain
+                .inner
+                .orthometric_height_m(longitude_deg, latitude_deg)
+            {
+                Ok(value) => {
+                    *out = orthometric_height_to_c(value);
+                    SidereonStatus::Ok
+                }
+                Err(err) => {
+                    map_terrain_core_error("sidereon_mmap_terrain_orthometric_height_m", err)
+                }
+            }
+        },
+    )
+}
+
+/// Query one typed orthometric terrain height with interpolation options. Inputs
+/// are longitude, latitude degrees. The returned value is orthometric height H
+/// in metres.
+///
+/// Safety: terrain must be a live handle; options must point to
+/// SidereonDtedLookupOptions; out_height_m must point to a
+/// SidereonOrthometricHeightM.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_mmap_terrain_orthometric_height_m_with_options(
+    terrain: *const SidereonMmapTerrain,
+    longitude_deg: f64,
+    latitude_deg: f64,
+    options: *const SidereonDtedLookupOptions,
+    out_height_m: *mut SidereonOrthometricHeightM,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_mmap_terrain_orthometric_height_m_with_options",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_height_m,
+                "sidereon_mmap_terrain_orthometric_height_m_with_options",
+                "out_height_m"
+            ));
+            *out = SidereonOrthometricHeightM { value_m: 0.0 };
+            let terrain = c_try!(require_ref(
+                terrain,
+                "sidereon_mmap_terrain_orthometric_height_m_with_options",
+                "terrain"
+            ));
+            let options = c_try!(require_ref(
+                options,
+                "sidereon_mmap_terrain_orthometric_height_m_with_options",
+                "options"
+            ));
+            let options = c_try!(dted_options_from_c(
+                "sidereon_mmap_terrain_orthometric_height_m_with_options",
+                options
+            ));
+            match terrain.inner.orthometric_height_m_with_options(
+                longitude_deg,
+                latitude_deg,
+                options,
+            ) {
+                Ok(value) => {
+                    *out = orthometric_height_to_c(value);
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_terrain_core_error(
+                    "sidereon_mmap_terrain_orthometric_height_m_with_options",
+                    err,
+                ),
+            }
+        },
+    )
+}
+
+/// Query many terrain points as orthometric heights H in metres. Points are
+/// longitude, latitude degrees. Per-point failures are written into out[i].status.
+///
+/// Safety: terrain must be a live handle; points must point to count
+/// SidereonLonLatDeg values; options must point to SidereonDtedLookupOptions;
+/// out must point to count SidereonTerrainHeightResult values or be NULL when
+/// count is zero.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_mmap_terrain_height_batch(
+    terrain: *mut SidereonMmapTerrain,
+    points: *const SidereonLonLatDeg,
+    count: usize,
+    options: *const SidereonDtedLookupOptions,
+    out: *mut SidereonTerrainHeightResult,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_mmap_terrain_height_batch",
+        SidereonStatus::Panic,
+        || {
+            let terrain = c_try!(require_out(
+                terrain,
+                "sidereon_mmap_terrain_height_batch",
+                "terrain"
+            ));
+            let raw_points = c_try!(require_slice(
+                points,
+                count,
+                "sidereon_mmap_terrain_height_batch",
+                "points"
+            ));
+            let options = c_try!(require_ref(
+                options,
+                "sidereon_mmap_terrain_height_batch",
+                "options"
+            ));
+            let options = c_try!(dted_options_from_c(
+                "sidereon_mmap_terrain_height_batch",
+                options
+            ));
+            if count > 0 && out.is_null() {
+                set_last_error("sidereon_mmap_terrain_height_batch: null out");
+                return SidereonStatus::NullPointer;
+            }
+            c_try!(validate_element_count::<SidereonTerrainHeightResult>(
+                "sidereon_mmap_terrain_height_batch",
+                "out",
+                count
+            ));
+            for idx in 0..count {
+                out.add(idx).write(SidereonTerrainHeightResult {
+                    status: SidereonStatus::InvalidArgument,
+                    has_orthometric_height_m: false,
+                    orthometric_height_m: SidereonOrthometricHeightM { value_m: 0.0 },
+                });
+            }
+            let points: Vec<(f64, f64)> = raw_points
+                .iter()
+                .map(|point| (point.lon_deg, point.lat_deg))
+                .collect();
+            let results = terrain.inner.height_batch(&points, options);
+            for (idx, result) in results.into_iter().enumerate() {
+                out.add(idx).write(terrain_height_result_from_f64(result));
+            }
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Query many terrain points as typed orthometric heights H in metres. Points
+/// are longitude, latitude degrees. Per-point failures are written into
+/// out[i].status.
+///
+/// Safety: terrain must be a live handle; points must point to count
+/// SidereonLonLatDeg values; options must point to SidereonDtedLookupOptions;
+/// out must point to count SidereonTerrainHeightResult values or be NULL when
+/// count is zero.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_mmap_terrain_orthometric_height_batch(
+    terrain: *const SidereonMmapTerrain,
+    points: *const SidereonLonLatDeg,
+    count: usize,
+    options: *const SidereonDtedLookupOptions,
+    out: *mut SidereonTerrainHeightResult,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_mmap_terrain_orthometric_height_batch",
+        SidereonStatus::Panic,
+        || {
+            let terrain = c_try!(require_ref(
+                terrain,
+                "sidereon_mmap_terrain_orthometric_height_batch",
+                "terrain"
+            ));
+            let raw_points = c_try!(require_slice(
+                points,
+                count,
+                "sidereon_mmap_terrain_orthometric_height_batch",
+                "points"
+            ));
+            let options = c_try!(require_ref(
+                options,
+                "sidereon_mmap_terrain_orthometric_height_batch",
+                "options"
+            ));
+            let options = c_try!(dted_options_from_c(
+                "sidereon_mmap_terrain_orthometric_height_batch",
+                options
+            ));
+            if count > 0 && out.is_null() {
+                set_last_error("sidereon_mmap_terrain_orthometric_height_batch: null out");
+                return SidereonStatus::NullPointer;
+            }
+            c_try!(validate_element_count::<SidereonTerrainHeightResult>(
+                "sidereon_mmap_terrain_orthometric_height_batch",
+                "out",
+                count
+            ));
+            for idx in 0..count {
+                out.add(idx).write(SidereonTerrainHeightResult {
+                    status: SidereonStatus::InvalidArgument,
+                    has_orthometric_height_m: false,
+                    orthometric_height_m: SidereonOrthometricHeightM { value_m: 0.0 },
+                });
+            }
+            let points: Vec<(f64, f64)> = raw_points
+                .iter()
+                .map(|point| (point.lon_deg, point.lat_deg))
+                .collect();
+            let results = terrain.inner.orthometric_height_batch(&points, options);
+            for (idx, result) in results.into_iter().enumerate() {
+                out.add(idx)
+                    .write(terrain_height_result_from_orthometric(result));
+            }
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Query one ellipsoidal terrain height h in metres using the embedded EGM96
+/// 1-degree geoid grid for h = H + N. Inputs are longitude, latitude degrees.
+///
+/// Safety: terrain must be a live handle; out_height_m must point to a
+/// SidereonEllipsoidalHeightM.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_mmap_terrain_ellipsoidal_height_m(
+    terrain: *const SidereonMmapTerrain,
+    longitude_deg: f64,
+    latitude_deg: f64,
+    out_height_m: *mut SidereonEllipsoidalHeightM,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_mmap_terrain_ellipsoidal_height_m",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_height_m,
+                "sidereon_mmap_terrain_ellipsoidal_height_m",
+                "out_height_m"
+            ));
+            *out = SidereonEllipsoidalHeightM { value_m: 0.0 };
+            let terrain = c_try!(require_ref(
+                terrain,
+                "sidereon_mmap_terrain_ellipsoidal_height_m",
+                "terrain"
+            ));
+            match terrain
+                .inner
+                .ellipsoidal_height_m(longitude_deg, latitude_deg)
+            {
+                Ok(value) => {
+                    *out = ellipsoidal_height_to_c(value);
+                    SidereonStatus::Ok
+                }
+                Err(err) => {
+                    map_terrain_datum_error("sidereon_mmap_terrain_ellipsoidal_height_m", err)
+                }
+            }
+        },
+    )
+}
+
+/// Query one ellipsoidal terrain height h in metres using the embedded EGM96
+/// 1-degree geoid grid and explicit terrain interpolation options. Inputs are
+/// longitude, latitude degrees.
+///
+/// Safety: terrain must be a live handle; options must point to
+/// SidereonDtedLookupOptions; out_height_m must point to a
+/// SidereonEllipsoidalHeightM.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_mmap_terrain_ellipsoidal_height_m_with_options(
+    terrain: *const SidereonMmapTerrain,
+    longitude_deg: f64,
+    latitude_deg: f64,
+    options: *const SidereonDtedLookupOptions,
+    out_height_m: *mut SidereonEllipsoidalHeightM,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_mmap_terrain_ellipsoidal_height_m_with_options",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_height_m,
+                "sidereon_mmap_terrain_ellipsoidal_height_m_with_options",
+                "out_height_m"
+            ));
+            *out = SidereonEllipsoidalHeightM { value_m: 0.0 };
+            let terrain = c_try!(require_ref(
+                terrain,
+                "sidereon_mmap_terrain_ellipsoidal_height_m_with_options",
+                "terrain"
+            ));
+            let options = c_try!(require_ref(
+                options,
+                "sidereon_mmap_terrain_ellipsoidal_height_m_with_options",
+                "options"
+            ));
+            let options = c_try!(dted_options_from_c(
+                "sidereon_mmap_terrain_ellipsoidal_height_m_with_options",
+                options
+            ));
+            match terrain.inner.ellipsoidal_height_m_with_options(
+                longitude_deg,
+                latitude_deg,
+                options,
+            ) {
+                Ok(value) => {
+                    *out = ellipsoidal_height_to_c(value);
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_terrain_datum_error(
+                    "sidereon_mmap_terrain_ellipsoidal_height_m_with_options",
+                    err,
+                ),
+            }
+        },
+    )
+}
+
+/// Query one ellipsoidal terrain height h in metres using an explicit geoid
+/// tier. The EGM96 15-arcminute tier requires a loaded WW15MGH.DAC handle and
+/// never falls back to the embedded 1-degree grid. Inputs are longitude,
+/// latitude degrees.
+///
+/// Safety: terrain must be a live handle; options must point to
+/// SidereonDtedLookupOptions; geoid may be NULL only for Egm96OneDegree;
+/// out_height_m must point to a SidereonEllipsoidalHeightM.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_mmap_terrain_ellipsoidal_height_m_with_model(
+    terrain: *const SidereonMmapTerrain,
+    longitude_deg: f64,
+    latitude_deg: f64,
+    options: *const SidereonDtedLookupOptions,
+    geoid_model: u32,
+    geoid: *const SidereonEgm96FifteenMinuteGeoid,
+    out_height_m: *mut SidereonEllipsoidalHeightM,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_mmap_terrain_ellipsoidal_height_m_with_model",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_height_m,
+                "sidereon_mmap_terrain_ellipsoidal_height_m_with_model",
+                "out_height_m"
+            ));
+            *out = SidereonEllipsoidalHeightM { value_m: 0.0 };
+            let terrain = c_try!(require_ref(
+                terrain,
+                "sidereon_mmap_terrain_ellipsoidal_height_m_with_model",
+                "terrain"
+            ));
+            let options = c_try!(require_ref(
+                options,
+                "sidereon_mmap_terrain_ellipsoidal_height_m_with_model",
+                "options"
+            ));
+            let options = c_try!(dted_options_from_c(
+                "sidereon_mmap_terrain_ellipsoidal_height_m_with_model",
+                options
+            ));
+            let model = c_try!(terrain_geoid_model_from_c(
+                "sidereon_mmap_terrain_ellipsoidal_height_m_with_model",
+                geoid_model,
+                geoid
+            ));
+            match terrain.inner.ellipsoidal_height_m_with_model(
+                longitude_deg,
+                latitude_deg,
+                options,
+                model,
+            ) {
+                Ok(value) => {
+                    *out = ellipsoidal_height_to_c(value);
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_terrain_datum_error(
+                    "sidereon_mmap_terrain_ellipsoidal_height_m_with_model",
+                    err,
+                ),
+            }
+        },
+    )
+}
+
+/// Copy terrain store tile index rows. Uses the variable-length output contract.
+/// Each row carries the tile bounds, payload location, checksum, and vertical datum.
+///
+/// Safety: terrain must be a live handle; out must point to len writable rows or
+/// be NULL when len is 0; out_written and out_required must point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_mmap_terrain_tile_index(
+    terrain: *const SidereonMmapTerrain,
+    out: *mut SidereonTerrainStoreTileIndex,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_mmap_terrain_tile_index",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_mmap_terrain_tile_index",
+                out_written,
+                out_required
+            ));
+            let terrain = c_try!(require_ref(
+                terrain,
+                "sidereon_mmap_terrain_tile_index",
+                "terrain"
+            ));
+            let values: Vec<SidereonTerrainStoreTileIndex> = terrain
+                .inner
+                .tile_index()
+                .iter()
+                .map(terrain_store_tile_index_to_c)
+                .collect();
+            c_try!(copy_prefix_to_c(
+                "sidereon_mmap_terrain_tile_index",
+                "out",
+                &values,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Return the store-level vertical datum. Terrain store postings are orthometric
+/// heights in metres.
+///
+/// Safety: terrain must be a live handle; out_datum must point to a
+/// SidereonVerticalDatum.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_mmap_terrain_vertical_datum(
+    terrain: *const SidereonMmapTerrain,
+    out_datum: *mut SidereonVerticalDatum,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_mmap_terrain_vertical_datum",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_datum,
+                "sidereon_mmap_terrain_vertical_datum",
+                "out_datum"
+            ));
+            *out = SidereonVerticalDatum::Egm96MslOrthometric;
+            let terrain = c_try!(require_ref(
+                terrain,
+                "sidereon_mmap_terrain_vertical_datum",
+                "terrain"
+            ));
+            *out = vertical_datum_to_c(terrain.inner.vertical_datum());
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Return an FNV-1a checksum of the full terrain store byte span.
+///
+/// Safety: terrain must be a live handle; out_checksum64 must point to a
+/// uint64_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_mmap_terrain_checksum64(
+    terrain: *const SidereonMmapTerrain,
+    out_checksum64: *mut u64,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_mmap_terrain_checksum64",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_checksum64,
+                "sidereon_mmap_terrain_checksum64",
+                "out_checksum64"
+            ));
+            *out = 0;
+            let terrain = c_try!(require_ref(
+                terrain,
+                "sidereon_mmap_terrain_checksum64",
+                "terrain"
+            ));
+            *out = terrain.inner.checksum64();
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Serialize the parsed terrain store back to bytes. Uses the variable-length
+/// output contract. The output bytes preserve orthometric terrain postings.
+///
+/// Safety: terrain must be a live handle; out must point to len writable bytes
+/// or be NULL when len is 0; out_written and out_required must point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_mmap_terrain_to_bytes(
+    terrain: *const SidereonMmapTerrain,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_mmap_terrain_to_bytes",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_mmap_terrain_to_bytes",
+                out_written,
+                out_required
+            ));
+            let terrain = c_try!(require_ref(
+                terrain,
+                "sidereon_mmap_terrain_to_bytes",
+                "terrain"
+            ));
+            let bytes = terrain.inner.to_bytes();
+            c_try!(copy_prefix_to_c(
+                "sidereon_mmap_terrain_to_bytes",
+                "out",
+                &bytes,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Release a memory-mappable terrain reader handle. Passing NULL is a no-op.
+///
+/// Safety: terrain must be NULL or a live handle from sidereon_mmap_terrain_*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_mmap_terrain_free(terrain: *mut SidereonMmapTerrain) {
+    free_boxed(terrain);
+}
+
+/// Load WW15MGH.DAC bytes as an EGM96 15-arcminute geoid grid. This function
+/// does not fall back to the embedded 1-degree grid.
+///
+/// Safety: bytes must point to len readable bytes; out_geoid must point to a
+/// SidereonEgm96FifteenMinuteGeoid*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_egm96_15m_geoid_from_ww15mgh_dac_bytes(
+    bytes: *const u8,
+    len: usize,
+    out_geoid: *mut *mut SidereonEgm96FifteenMinuteGeoid,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_egm96_15m_geoid_from_ww15mgh_dac_bytes",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_geoid,
+                "sidereon_egm96_15m_geoid_from_ww15mgh_dac_bytes",
+                "out_geoid"
+            ));
+            *out = ptr::null_mut();
+            let bytes = c_try!(require_slice(
+                bytes,
+                len,
+                "sidereon_egm96_15m_geoid_from_ww15mgh_dac_bytes",
+                "bytes"
+            ));
+            match CoreEgm96FifteenMinuteGeoid::from_ww15mgh_dac_bytes(bytes) {
+                Ok(inner) => {
+                    write_boxed_handle(out, SidereonEgm96FifteenMinuteGeoid { inner });
+                    SidereonStatus::Ok
+                }
+                Err(err) => {
+                    map_terrain_datum_error("sidereon_egm96_15m_geoid_from_ww15mgh_dac_bytes", err)
+                }
+            }
+        },
+    )
+}
+
+/// Read and load WW15MGH.DAC as an EGM96 15-arcminute geoid grid. A missing
+/// file returns SidereonTerrainDatumErrorKind::MissingEgm96Dac through
+/// sidereon_last_terrain_datum_error and does not fall back to the embedded
+/// 1-degree grid.
+///
+/// Safety: path must be a non-empty UTF-8 C string; out_geoid must point to a
+/// SidereonEgm96FifteenMinuteGeoid*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_egm96_15m_geoid_from_ww15mgh_dac_path(
+    path: *const c_char,
+    out_geoid: *mut *mut SidereonEgm96FifteenMinuteGeoid,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_egm96_15m_geoid_from_ww15mgh_dac_path",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_geoid,
+                "sidereon_egm96_15m_geoid_from_ww15mgh_dac_path",
+                "out_geoid"
+            ));
+            *out = ptr::null_mut();
+            let path = c_try!(parse_c_string(
+                "sidereon_egm96_15m_geoid_from_ww15mgh_dac_path",
+                "path",
+                path
+            ));
+            match CoreEgm96FifteenMinuteGeoid::from_ww15mgh_dac_path(std::path::Path::new(&path)) {
+                Ok(inner) => {
+                    write_boxed_handle(out, SidereonEgm96FifteenMinuteGeoid { inner });
+                    SidereonStatus::Ok
+                }
+                Err(err) => {
+                    map_terrain_datum_error("sidereon_egm96_15m_geoid_from_ww15mgh_dac_path", err)
+                }
+            }
+        },
+    )
+}
+
+/// Release an EGM96 15-arcminute geoid grid handle. Passing NULL is a no-op.
+///
+/// Safety: geoid must be NULL or a live handle from sidereon_egm96_15m_geoid_*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_egm96_15m_geoid_free(
+    geoid: *mut SidereonEgm96FifteenMinuteGeoid,
+) {
+    free_boxed(geoid);
 }
 
 // --- Civil instant construction (sidereon_core::astro::time::Instant) ---------

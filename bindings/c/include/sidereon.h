@@ -52,6 +52,11 @@
 #define TLE_FIELD_C_BYTES 32
 
 /**
+ * Fixed buffer length for terrain store typed error text, including the NUL.
+ */
+#define SIDEREON_TERRAIN_ERROR_TEXT_C_BYTES 512
+
+/**
  * Maximum number of VMF1 site-wise samples carried in
  * SidereonPppTroposphereOptions.vmf_samples. Mirrors the engine
  * VMF_SITE_MAX_SAMPLES (kept a literal so cbindgen emits a usable array bound;
@@ -548,6 +553,16 @@ typedef enum SidereonAlmanacEclipseKind {
     SIDEREON_ALMANAC_ECLIPSE_KIND_SOLAR_TOTAL = 5,
     SIDEREON_ALMANAC_ECLIPSE_KIND_SOLAR_HYBRID = 6,
 } SidereonAlmanacEclipseKind;
+
+/**
+ * Terrain store vertical datum. Terrain store postings are orthometric heights.
+ */
+typedef enum SidereonVerticalDatum {
+    /**
+     * Orthometric height in metres above the EGM96 mean sea level geoid.
+     */
+    SIDEREON_VERTICAL_DATUM_EGM96_MSL_ORTHOMETRIC = 1,
+} SidereonVerticalDatum;
 
 /**
  * Integer ambiguity verdict for a moving-baseline epoch, mirroring
@@ -1117,6 +1132,80 @@ typedef enum SidereonDtedInterpolation {
 } SidereonDtedInterpolation;
 
 /**
+ * Geoid tier for converting terrain orthometric height to ellipsoidal height.
+ */
+typedef enum SidereonTerrainGeoidModel {
+    /**
+     * Embedded EGM96 1-degree grid, always available in process.
+     */
+    SIDEREON_TERRAIN_GEOID_MODEL_EGM96_ONE_DEGREE = 0,
+    /**
+     * Caller-supplied EGM96 15-arcminute WW15MGH.DAC grid.
+     */
+    SIDEREON_TERRAIN_GEOID_MODEL_EGM96_FIFTEEN_MINUTE = 1,
+} SidereonTerrainGeoidModel;
+
+/**
+ * Terrain store conversion or reader error kind.
+ */
+typedef enum SidereonTerrainStoreErrorKind {
+    /**
+     * No terrain store error is recorded for this thread.
+     */
+    SIDEREON_TERRAIN_STORE_ERROR_KIND_NONE = 0,
+    /**
+     * File or directory I/O failed.
+     */
+    SIDEREON_TERRAIN_STORE_ERROR_KIND_IO = 1,
+    /**
+     * Terrain store bytes or DTED input could not be parsed.
+     */
+    SIDEREON_TERRAIN_STORE_ERROR_KIND_PARSE = 2,
+    /**
+     * Terrain store version is not supported.
+     */
+    SIDEREON_TERRAIN_STORE_ERROR_KIND_UNSUPPORTED_VERSION = 3,
+    /**
+     * Terrain store vertical datum tag is not supported.
+     */
+    SIDEREON_TERRAIN_STORE_ERROR_KIND_UNSUPPORTED_DATUM = 4,
+    /**
+     * Two DTED inputs resolved to the same tile id.
+     */
+    SIDEREON_TERRAIN_STORE_ERROR_KIND_DUPLICATE_TILE = 5,
+    /**
+     * A tile payload checksum did not match its index record.
+     */
+    SIDEREON_TERRAIN_STORE_ERROR_KIND_CHECKSUM = 6,
+} SidereonTerrainStoreErrorKind;
+
+/**
+ * Terrain datum conversion or geoid loading error kind.
+ */
+typedef enum SidereonTerrainDatumErrorKind {
+    /**
+     * No terrain datum error is recorded for this thread.
+     */
+    SIDEREON_TERRAIN_DATUM_ERROR_KIND_NONE = 0,
+    /**
+     * Terrain lookup failed before datum conversion.
+     */
+    SIDEREON_TERRAIN_DATUM_ERROR_KIND_TERRAIN = 1,
+    /**
+     * A geoid grid could not be parsed.
+     */
+    SIDEREON_TERRAIN_DATUM_ERROR_KIND_GEOID = 2,
+    /**
+     * A geoid grid could not be read for a reason other than absence.
+     */
+    SIDEREON_TERRAIN_DATUM_ERROR_KIND_IO = 3,
+    /**
+     * The EGM96 15-arcminute WW15MGH.DAC grid was requested but is absent.
+     */
+    SIDEREON_TERRAIN_DATUM_ERROR_KIND_MISSING_EGM96_DAC = 4,
+} SidereonTerrainDatumErrorKind;
+
+/**
  * Selects which antenna-descriptor string field a reader returns. Pass as a
  * uint32_t.
  */
@@ -1595,6 +1684,14 @@ typedef struct SidereonDtedTerrain SidereonDtedTerrain;
 typedef struct SidereonDtedTile SidereonDtedTile;
 
 /**
+ * Loaded EGM96 15-arcminute geoid grid for terrain datum conversion. Create
+ * with sidereon_egm96_15m_geoid_from_ww15mgh_dac_bytes or
+ * sidereon_egm96_15m_geoid_from_ww15mgh_dac_path, and release with
+ * sidereon_egm96_15m_geoid_free.
+ */
+typedef struct SidereonEgm96FifteenMinuteGeoid SidereonEgm96FifteenMinuteGeoid;
+
+/**
  * Numerical Cartesian-state ephemeris. Opaque to C. Create with
  * sidereon_propagate_state and release with sidereon_ephemeris_free.
  */
@@ -1639,6 +1736,14 @@ typedef struct SidereonIonoFreePseudoranges SidereonIonoFreePseudoranges;
  * sidereon_tle_look_angles and release with sidereon_look_angles_free.
  */
 typedef struct SidereonLookAngles SidereonLookAngles;
+
+/**
+ * Memory-mappable terrain reader backed by terrain store bytes. Create with
+ * sidereon_mmap_terrain_from_bytes, sidereon_mmap_terrain_from_vec, or
+ * sidereon_mmap_terrain_from_path, and release with sidereon_mmap_terrain_free.
+ * Terrain lookups use longitude, latitude degrees and return orthometric height.
+ */
+typedef struct SidereonMmapTerrain SidereonMmapTerrain;
 
 /**
  * A solved moving-baseline arc. Opaque to C. Create with
@@ -6127,6 +6232,10 @@ typedef struct SidereonAraimIntegrityAllocation {
      */
     double p_threshold_unmonitored;
     /**
+     * Fault-prior threshold used for the effective monitor threshold.
+     */
+    double p_emt;
+    /**
      * Maximum enumerated satellite-fault order. Zero keeps only fault-free.
      */
     size_t max_fault_order;
@@ -6193,6 +6302,22 @@ typedef struct SidereonAraimSatelliteIsmModel {
      */
     double sigma_ure_m;
     /**
+     * Whether effective_sigma_int_m overrides the derived integrity sigma.
+     */
+    bool has_effective_sigma_int_m;
+    /**
+     * Effective integrity one-sigma range error after local terms, meters.
+     */
+    double effective_sigma_int_m;
+    /**
+     * Whether effective_sigma_acc_m overrides the derived accuracy sigma.
+     */
+    bool has_effective_sigma_acc_m;
+    /**
+     * Effective accuracy one-sigma range error after local terms, meters.
+     */
+    double effective_sigma_acc_m;
+    /**
      * Nominal SIS bias bound, meters.
      */
     double b_nom_m;
@@ -6236,6 +6361,22 @@ typedef struct SidereonAraimSatelliteIsm {
      * Accuracy and continuity one-sigma SIS range error, meters.
      */
     double sigma_ure_m;
+    /**
+     * Whether effective_sigma_int_m overrides the derived integrity sigma.
+     */
+    bool has_effective_sigma_int_m;
+    /**
+     * Effective integrity one-sigma range error after local terms, meters.
+     */
+    double effective_sigma_int_m;
+    /**
+     * Whether effective_sigma_acc_m overrides the derived accuracy sigma.
+     */
+    bool has_effective_sigma_acc_m;
+    /**
+     * Effective accuracy one-sigma range error after local terms, meters.
+     */
+    double effective_sigma_acc_m;
     /**
      * Nominal SIS bias bound, meters.
      */
@@ -7846,6 +7987,166 @@ typedef struct SidereonDtedHeightResult {
      */
     double height_m;
 } SidereonDtedHeightResult;
+
+/**
+ * Last typed terrain store error for this thread.
+ */
+typedef struct SidereonTerrainStoreError {
+    /**
+     * Error selector as SidereonTerrainStoreErrorKind.
+     */
+    uint32_t kind;
+    /**
+     * Path text for I/O errors, NUL-terminated when present.
+     */
+    char path[SIDEREON_TERRAIN_ERROR_TEXT_C_BYTES];
+    /**
+     * Message text for I/O errors, NUL-terminated when present.
+     */
+    char message[SIDEREON_TERRAIN_ERROR_TEXT_C_BYTES];
+    /**
+     * Parse reason text, NUL-terminated when present.
+     */
+    char reason[SIDEREON_TERRAIN_ERROR_TEXT_C_BYTES];
+    /**
+     * Unsupported version tag when kind is UnsupportedVersion.
+     */
+    uint16_t version;
+    /**
+     * Unsupported vertical datum tag when kind is UnsupportedDatum.
+     */
+    uint8_t tag;
+    /**
+     * Tile latitude id for duplicate-tile and checksum errors.
+     */
+    int32_t lat_index;
+    /**
+     * Tile longitude id for duplicate-tile and checksum errors.
+     */
+    int32_t lon_index;
+    /**
+     * Expected checksum for checksum errors.
+     */
+    uint64_t expected_checksum64;
+    /**
+     * Computed checksum for checksum errors.
+     */
+    uint64_t found_checksum64;
+} SidereonTerrainStoreError;
+
+/**
+ * Last typed terrain datum error for this thread.
+ */
+typedef struct SidereonTerrainDatumError {
+    /**
+     * Error selector as SidereonTerrainDatumErrorKind.
+     */
+    uint32_t kind;
+    /**
+     * Path text for I/O or MissingEgm96Dac errors, NUL-terminated when present.
+     */
+    char path[SIDEREON_TERRAIN_ERROR_TEXT_C_BYTES];
+    /**
+     * Error text for Terrain, Geoid, or I/O errors, NUL-terminated when present.
+     */
+    char message[SIDEREON_TERRAIN_ERROR_TEXT_C_BYTES];
+    /**
+     * Remediation text for MissingEgm96Dac, NUL-terminated when present.
+     */
+    char remediation[SIDEREON_TERRAIN_ERROR_TEXT_C_BYTES];
+} SidereonTerrainDatumError;
+
+/**
+ * Orthometric height H in metres above the EGM96 mean sea level geoid.
+ */
+typedef struct SidereonOrthometricHeightM {
+    /**
+     * Orthometric height H, metres.
+     */
+    double value_m;
+} SidereonOrthometricHeightM;
+
+/**
+ * One memory-mappable terrain store batch result.
+ */
+typedef struct SidereonTerrainHeightResult {
+    /**
+     * Per-point status.
+     */
+    enum SidereonStatus status;
+    /**
+     * Whether orthometric_height_m carries a valid terrain height.
+     */
+    bool has_orthometric_height_m;
+    /**
+     * Orthometric height H, metres, when has_orthometric_height_m is true.
+     */
+    struct SidereonOrthometricHeightM orthometric_height_m;
+} SidereonTerrainHeightResult;
+
+/**
+ * Ellipsoidal height h in metres above the WGS84 reference ellipsoid.
+ */
+typedef struct SidereonEllipsoidalHeightM {
+    /**
+     * Ellipsoidal height h, metres.
+     */
+    double value_m;
+} SidereonEllipsoidalHeightM;
+
+/**
+ * One tile index record from a memory-mappable terrain store.
+ */
+typedef struct SidereonTerrainStoreTileIndex {
+    /**
+     * Integer latitude tile id.
+     */
+    int32_t lat_index;
+    /**
+     * Integer longitude tile id.
+     */
+    int32_t lon_index;
+    /**
+     * Western edge longitude, degrees.
+     */
+    double min_longitude_deg;
+    /**
+     * Southern edge latitude, degrees.
+     */
+    double min_latitude_deg;
+    /**
+     * Eastern edge longitude, degrees.
+     */
+    double max_longitude_deg;
+    /**
+     * Northern edge latitude, degrees.
+     */
+    double max_latitude_deg;
+    /**
+     * Number of longitude postings.
+     */
+    uint32_t lon_count;
+    /**
+     * Number of latitude postings.
+     */
+    uint32_t lat_count;
+    /**
+     * Byte offset of this tile's posting payload in the store.
+     */
+    uint64_t data_offset;
+    /**
+     * Byte length of this tile's posting payload in the store.
+     */
+    uint64_t data_len;
+    /**
+     * FNV-1a checksum of this tile's posting payload bytes.
+     */
+    uint64_t checksum64;
+    /**
+     * Vertical datum selector as SidereonVerticalDatum.
+     */
+    uint32_t vertical_datum;
+} SidereonTerrainStoreTileIndex;
 
 /**
  * One moving-baseline epoch: the base receiver's own ECEF position this epoch,
@@ -18447,6 +18748,298 @@ enum SidereonStatus sidereon_dted_tile_get_elevation(const struct SidereonDtedTi
  * Safety: tile must be NULL or a live handle from sidereon_dted_tile_load.
  */
 void sidereon_dted_tile_free(struct SidereonDtedTile *tile);
+
+/**
+ * Copy the last typed terrain store error for this thread. If no terrain store
+ * error is recorded, kind is SidereonTerrainStoreErrorKind::None.
+ *
+ * Safety: out_error must point to a SidereonTerrainStoreError.
+ */
+enum SidereonStatus sidereon_last_terrain_store_error(struct SidereonTerrainStoreError *out_error);
+
+/**
+ * Copy the last typed terrain datum error for this thread. If no terrain datum
+ * error is recorded, kind is SidereonTerrainDatumErrorKind::None.
+ *
+ * Safety: out_error must point to a SidereonTerrainDatumError.
+ */
+enum SidereonStatus sidereon_last_terrain_datum_error(struct SidereonTerrainDatumError *out_error);
+
+/**
+ * Convert a DTED tile tree rooted at root into memory-mappable terrain store
+ * bytes. The output uses the variable-length output contract. Store postings
+ * are orthometric heights in metres.
+ *
+ * Safety: root must be a non-empty UTF-8 C string; out must point to len bytes
+ * or be NULL when len is 0; out_written and out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_dted_tree_to_mmap_store(const char *root,
+                                                     uint8_t *out,
+                                                     size_t len,
+                                                     size_t *out_written,
+                                                     size_t *out_required);
+
+/**
+ * Convert a DTED tile tree and write memory-mappable terrain store bytes to
+ * out_path. Store postings are orthometric heights in metres.
+ *
+ * Safety: root and out_path must be non-empty UTF-8 C strings.
+ */
+enum SidereonStatus sidereon_write_dted_tree_to_mmap_store(const char *root, const char *out_path);
+
+/**
+ * Return an FNV-1a checksum for terrain store bytes.
+ *
+ * Safety: bytes must point to len readable bytes; out_checksum64 must point to
+ * a uint64_t.
+ */
+enum SidereonStatus sidereon_terrain_store_checksum64(const uint8_t *bytes,
+                                                      size_t len,
+                                                      uint64_t *out_checksum64);
+
+/**
+ * Parse memory-mappable terrain store bytes into an owned reader handle. The C
+ * binding copies the input byte span into handle-owned storage. Terrain lookup
+ * APIs use longitude, latitude degrees and return orthometric height.
+ *
+ * Safety: bytes must point to len readable bytes; out_terrain must point to a
+ * SidereonMmapTerrain*.
+ */
+enum SidereonStatus sidereon_mmap_terrain_from_bytes(const uint8_t *bytes,
+                                                     size_t len,
+                                                     struct SidereonMmapTerrain **out_terrain);
+
+/**
+ * Parse memory-mappable terrain store bytes into an owned reader handle. This
+ * is the same C ownership contract as sidereon_mmap_terrain_from_bytes.
+ *
+ * Safety: bytes must point to len readable bytes; out_terrain must point to a
+ * SidereonMmapTerrain*.
+ */
+enum SidereonStatus sidereon_mmap_terrain_from_vec(const uint8_t *bytes,
+                                                   size_t len,
+                                                   struct SidereonMmapTerrain **out_terrain);
+
+/**
+ * Read and parse a memory-mappable terrain store file. Terrain lookup APIs use
+ * longitude, latitude degrees and return orthometric height.
+ *
+ * Safety: path must be a non-empty UTF-8 C string; out_terrain must point to a
+ * SidereonMmapTerrain*.
+ */
+enum SidereonStatus sidereon_mmap_terrain_from_path(const char *path,
+                                                    struct SidereonMmapTerrain **out_terrain);
+
+/**
+ * Query one bilinear terrain height. Inputs are longitude, latitude degrees.
+ * The returned value is orthometric height H in metres.
+ *
+ * Safety: terrain must be a live handle; out_height_m must point to a
+ * SidereonOrthometricHeightM.
+ */
+enum SidereonStatus sidereon_mmap_terrain_height_m(struct SidereonMmapTerrain *terrain,
+                                                   double longitude_deg,
+                                                   double latitude_deg,
+                                                   struct SidereonOrthometricHeightM *out_height_m);
+
+/**
+ * Query one terrain height with interpolation options. Inputs are longitude,
+ * latitude degrees. The returned value is orthometric height H in metres.
+ *
+ * Safety: terrain must be a live handle; options must point to
+ * SidereonDtedLookupOptions; out_height_m must point to a
+ * SidereonOrthometricHeightM.
+ */
+enum SidereonStatus sidereon_mmap_terrain_height_m_with_options(struct SidereonMmapTerrain *terrain,
+                                                                double longitude_deg,
+                                                                double latitude_deg,
+                                                                const struct SidereonDtedLookupOptions *options,
+                                                                struct SidereonOrthometricHeightM *out_height_m);
+
+/**
+ * Query one typed orthometric terrain height. Inputs are longitude, latitude
+ * degrees. The returned value is orthometric height H in metres.
+ *
+ * Safety: terrain must be a live handle; out_height_m must point to a
+ * SidereonOrthometricHeightM.
+ */
+enum SidereonStatus sidereon_mmap_terrain_orthometric_height_m(const struct SidereonMmapTerrain *terrain,
+                                                               double longitude_deg,
+                                                               double latitude_deg,
+                                                               struct SidereonOrthometricHeightM *out_height_m);
+
+/**
+ * Query one typed orthometric terrain height with interpolation options. Inputs
+ * are longitude, latitude degrees. The returned value is orthometric height H
+ * in metres.
+ *
+ * Safety: terrain must be a live handle; options must point to
+ * SidereonDtedLookupOptions; out_height_m must point to a
+ * SidereonOrthometricHeightM.
+ */
+enum SidereonStatus sidereon_mmap_terrain_orthometric_height_m_with_options(const struct SidereonMmapTerrain *terrain,
+                                                                            double longitude_deg,
+                                                                            double latitude_deg,
+                                                                            const struct SidereonDtedLookupOptions *options,
+                                                                            struct SidereonOrthometricHeightM *out_height_m);
+
+/**
+ * Query many terrain points as orthometric heights H in metres. Points are
+ * longitude, latitude degrees. Per-point failures are written into out[i].status.
+ *
+ * Safety: terrain must be a live handle; points must point to count
+ * SidereonLonLatDeg values; options must point to SidereonDtedLookupOptions;
+ * out must point to count SidereonTerrainHeightResult values or be NULL when
+ * count is zero.
+ */
+enum SidereonStatus sidereon_mmap_terrain_height_batch(struct SidereonMmapTerrain *terrain,
+                                                       const struct SidereonLonLatDeg *points,
+                                                       size_t count,
+                                                       const struct SidereonDtedLookupOptions *options,
+                                                       struct SidereonTerrainHeightResult *out);
+
+/**
+ * Query many terrain points as typed orthometric heights H in metres. Points
+ * are longitude, latitude degrees. Per-point failures are written into
+ * out[i].status.
+ *
+ * Safety: terrain must be a live handle; points must point to count
+ * SidereonLonLatDeg values; options must point to SidereonDtedLookupOptions;
+ * out must point to count SidereonTerrainHeightResult values or be NULL when
+ * count is zero.
+ */
+enum SidereonStatus sidereon_mmap_terrain_orthometric_height_batch(const struct SidereonMmapTerrain *terrain,
+                                                                   const struct SidereonLonLatDeg *points,
+                                                                   size_t count,
+                                                                   const struct SidereonDtedLookupOptions *options,
+                                                                   struct SidereonTerrainHeightResult *out);
+
+/**
+ * Query one ellipsoidal terrain height h in metres using the embedded EGM96
+ * 1-degree geoid grid for h = H + N. Inputs are longitude, latitude degrees.
+ *
+ * Safety: terrain must be a live handle; out_height_m must point to a
+ * SidereonEllipsoidalHeightM.
+ */
+enum SidereonStatus sidereon_mmap_terrain_ellipsoidal_height_m(const struct SidereonMmapTerrain *terrain,
+                                                               double longitude_deg,
+                                                               double latitude_deg,
+                                                               struct SidereonEllipsoidalHeightM *out_height_m);
+
+/**
+ * Query one ellipsoidal terrain height h in metres using the embedded EGM96
+ * 1-degree geoid grid and explicit terrain interpolation options. Inputs are
+ * longitude, latitude degrees.
+ *
+ * Safety: terrain must be a live handle; options must point to
+ * SidereonDtedLookupOptions; out_height_m must point to a
+ * SidereonEllipsoidalHeightM.
+ */
+enum SidereonStatus sidereon_mmap_terrain_ellipsoidal_height_m_with_options(const struct SidereonMmapTerrain *terrain,
+                                                                            double longitude_deg,
+                                                                            double latitude_deg,
+                                                                            const struct SidereonDtedLookupOptions *options,
+                                                                            struct SidereonEllipsoidalHeightM *out_height_m);
+
+/**
+ * Query one ellipsoidal terrain height h in metres using an explicit geoid
+ * tier. The EGM96 15-arcminute tier requires a loaded WW15MGH.DAC handle and
+ * never falls back to the embedded 1-degree grid. Inputs are longitude,
+ * latitude degrees.
+ *
+ * Safety: terrain must be a live handle; options must point to
+ * SidereonDtedLookupOptions; geoid may be NULL only for Egm96OneDegree;
+ * out_height_m must point to a SidereonEllipsoidalHeightM.
+ */
+enum SidereonStatus sidereon_mmap_terrain_ellipsoidal_height_m_with_model(const struct SidereonMmapTerrain *terrain,
+                                                                          double longitude_deg,
+                                                                          double latitude_deg,
+                                                                          const struct SidereonDtedLookupOptions *options,
+                                                                          uint32_t geoid_model,
+                                                                          const struct SidereonEgm96FifteenMinuteGeoid *geoid,
+                                                                          struct SidereonEllipsoidalHeightM *out_height_m);
+
+/**
+ * Copy terrain store tile index rows. Uses the variable-length output contract.
+ * Each row carries the tile bounds, payload location, checksum, and vertical datum.
+ *
+ * Safety: terrain must be a live handle; out must point to len writable rows or
+ * be NULL when len is 0; out_written and out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_mmap_terrain_tile_index(const struct SidereonMmapTerrain *terrain,
+                                                     struct SidereonTerrainStoreTileIndex *out,
+                                                     size_t len,
+                                                     size_t *out_written,
+                                                     size_t *out_required);
+
+/**
+ * Return the store-level vertical datum. Terrain store postings are orthometric
+ * heights in metres.
+ *
+ * Safety: terrain must be a live handle; out_datum must point to a
+ * SidereonVerticalDatum.
+ */
+enum SidereonStatus sidereon_mmap_terrain_vertical_datum(const struct SidereonMmapTerrain *terrain,
+                                                         enum SidereonVerticalDatum *out_datum);
+
+/**
+ * Return an FNV-1a checksum of the full terrain store byte span.
+ *
+ * Safety: terrain must be a live handle; out_checksum64 must point to a
+ * uint64_t.
+ */
+enum SidereonStatus sidereon_mmap_terrain_checksum64(const struct SidereonMmapTerrain *terrain,
+                                                     uint64_t *out_checksum64);
+
+/**
+ * Serialize the parsed terrain store back to bytes. Uses the variable-length
+ * output contract. The output bytes preserve orthometric terrain postings.
+ *
+ * Safety: terrain must be a live handle; out must point to len writable bytes
+ * or be NULL when len is 0; out_written and out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_mmap_terrain_to_bytes(const struct SidereonMmapTerrain *terrain,
+                                                   uint8_t *out,
+                                                   size_t len,
+                                                   size_t *out_written,
+                                                   size_t *out_required);
+
+/**
+ * Release a memory-mappable terrain reader handle. Passing NULL is a no-op.
+ *
+ * Safety: terrain must be NULL or a live handle from sidereon_mmap_terrain_*.
+ */
+void sidereon_mmap_terrain_free(struct SidereonMmapTerrain *terrain);
+
+/**
+ * Load WW15MGH.DAC bytes as an EGM96 15-arcminute geoid grid. This function
+ * does not fall back to the embedded 1-degree grid.
+ *
+ * Safety: bytes must point to len readable bytes; out_geoid must point to a
+ * SidereonEgm96FifteenMinuteGeoid*.
+ */
+enum SidereonStatus sidereon_egm96_15m_geoid_from_ww15mgh_dac_bytes(const uint8_t *bytes,
+                                                                    size_t len,
+                                                                    struct SidereonEgm96FifteenMinuteGeoid **out_geoid);
+
+/**
+ * Read and load WW15MGH.DAC as an EGM96 15-arcminute geoid grid. A missing
+ * file returns SidereonTerrainDatumErrorKind::MissingEgm96Dac through
+ * sidereon_last_terrain_datum_error and does not fall back to the embedded
+ * 1-degree grid.
+ *
+ * Safety: path must be a non-empty UTF-8 C string; out_geoid must point to a
+ * SidereonEgm96FifteenMinuteGeoid*.
+ */
+enum SidereonStatus sidereon_egm96_15m_geoid_from_ww15mgh_dac_path(const char *path,
+                                                                   struct SidereonEgm96FifteenMinuteGeoid **out_geoid);
+
+/**
+ * Release an EGM96 15-arcminute geoid grid handle. Passing NULL is a no-op.
+ *
+ * Safety: geoid must be NULL or a live handle from sidereon_egm96_15m_geoid_*.
+ */
+void sidereon_egm96_15m_geoid_free(struct SidereonEgm96FifteenMinuteGeoid *geoid);
 
 /**
  * Build a UTC Instant from civil-calendar fields and report its split Julian
