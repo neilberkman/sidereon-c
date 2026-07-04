@@ -404,7 +404,7 @@ pub unsafe extern "C" fn sidereon_propagate_covariance(
                 epochs_s,
                 epoch_count
             ));
-            let propagation_config = c_try!(state_propagation_config_from_c(
+            let propagator = c_try!(state_propagator_from_c(
                 "sidereon_propagate_covariance",
                 config
             ));
@@ -420,7 +420,7 @@ pub unsafe extern "C" fn sidereon_propagate_covariance(
                 "sidereon_propagate_covariance",
                 options.process_noise
             ));
-            let result = match propagation_config.to_propagator().propagate_covariance(
+            let result = match propagator.propagate_covariance(
                 sidereon_core::astro::propagator::LabeledCovariance6 {
                     covariance: covariance0,
                     frame: input_frame,

@@ -270,7 +270,10 @@ pub unsafe extern "C" fn sidereon_tle_to_lines(
             },
         };
         let tle = c_try!(require_ref(tle, "sidereon_tle_to_lines", "tle"));
-        let (line1, line2) = sidereon_tle::encode(&tle.elements);
+        let (line1, line2) = c_try!(sidereon_tle::encode(&tle.elements).map_err(|err| {
+            set_last_error(format!("sidereon_tle_to_lines: {err}"));
+            SidereonStatus::InvalidArgument
+        }));
         *out_lines = SidereonTleLines {
             line1: SidereonTleLine {
                 bytes: fixed_c_chars(&line1),

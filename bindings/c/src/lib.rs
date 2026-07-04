@@ -38,7 +38,7 @@ use sidereon::passes::{
 };
 use sidereon::propagator::api::{IntegratorOptions, PropagationContext};
 use sidereon::propagator::{
-    propagate_states, ForceModelKind, IntegratorKind, PropagationConfig, PropagationForceModel,
+    ForceModelComponents, ForceModelKind, IntegratorKind, PropagationConfig, PropagationForceModel,
 };
 use sidereon::sgp4::{
     parse_tle_file_with_opsmode, Error as Sgp4Error, NamedSatellite, OpsMode, Prediction, Satellite,
@@ -64,7 +64,10 @@ use sidereon_core::astro::elements::{coe2rv, rv2coe, ClassicalElements, Elements
 use sidereon_core::astro::error::PropagationError;
 use sidereon_core::astro::forces::drag::{DragForce, DragParameters, SpaceWeather};
 use sidereon_core::astro::forces::SpaceWeatherSource;
-use sidereon_core::astro::forces::{ForceModel, J2Gravity, TwoBodyGravity};
+use sidereon_core::astro::forces::{
+    ForceModel, J2Gravity, SchwarzschildRelativity, SolarRadiationPressure, ThirdBodyBodies,
+    ThirdBodyGravity, TwoBodyGravity, ZonalCoefficients, ZonalDegrees, ZonalGravity,
+};
 use sidereon_core::astro::frames::transforms::FrameTransformError;
 use sidereon_core::astro::math::least_squares::Status;
 use sidereon_core::astro::math::vec3::dot3;
@@ -78,6 +81,7 @@ use sidereon_core::astro::opm::{self as core_opm, Opm};
 use sidereon_core::astro::propagator::decay::{
     estimate_decay, DecayConfig, DecayError, DecayEstimate,
 };
+use sidereon_core::astro::propagator::StatePropagator;
 use sidereon_core::astro::time::civil::j2000_seconds_from_split;
 use sidereon_core::astro::time::gnss::{
     seconds_of_week_from_calendar, week_and_seconds_of_week, week_epoch_julian_day_number,
@@ -104,13 +108,19 @@ use sidereon_core::bias::{
 };
 use sidereon_core::clock_stability::{
     allan_deviation as core_allan_deviation,
+    allan_deviation_power_law_slope as core_allan_deviation_power_law_slope,
+    allan_variance_power_law_tau_exponent as core_allan_variance_power_law_tau_exponent,
     compute_allan_deviations as core_compute_allan_deviations,
-    hadamard_deviation as core_hadamard_deviation, modified_adev as core_modified_adev,
+    fit_power_law_noise as core_fit_power_law_noise, hadamard_deviation as core_hadamard_deviation,
+    modified_adev as core_modified_adev,
+    modified_allan_deviation_power_law_slope as core_modified_allan_deviation_power_law_slope,
     overlapping_adev as core_overlapping_adev,
     receiver_clock_phase_deviations as core_receiver_clock_phase_deviations,
     time_deviation as core_time_deviation, AllanDeviationCurves as CoreAllanDeviationCurves,
     AllanError, AllanEstimator as CoreAllanEstimator, AllanEstimatorSet, AllanInput, AllanOptions,
-    AllanResult as CoreAllanResult, AllanSeries, GapPolicy, TauGrid,
+    AllanResult as CoreAllanResult, AllanSeries, GapPolicy, PowerLawNoiseError,
+    PowerLawNoiseFit as CorePowerLawNoiseFit, PowerLawNoiseOptions, PowerLawNoiseRegion,
+    PowerLawNoiseType, PowerLawOctave, PowerLawOctaveDominance, PowerLawOctaveFlag, TauGrid,
 };
 use sidereon_core::constants::SECONDS_PER_DAY;
 use sidereon_core::constellation::{
@@ -196,9 +206,14 @@ use sidereon_core::precise_positioning::{
     VMF_SITE_MAX_SAMPLES as PPP_VMF_SITE_MAX_SAMPLES,
 };
 use sidereon_core::quality::{
-    fde_spp, raim_fde_design, spp_robust_fde_driver, validate_receiver_solution, FdeError,
-    FdeOptions, FdeSppError, FdeSppOptions, QualityError, RaimOptions, RaimWeights,
-    RangeFdeOptions, RangeFdeResult, RangeFdeRow, SolutionValidationOptions,
+    fde_spp, raim_fde_design, reliability_araim as core_reliability_araim,
+    reliability_design as core_reliability_design, spp_robust_fde_driver,
+    validate_receiver_solution, wtest_noncentrality as core_wtest_noncentrality, FdeError,
+    FdeOptions, FdeSppError, FdeSppOptions, ObservationReliability as CoreObservationReliability,
+    QualityError, RaimOptions, RaimWeights, RangeFdeOptions, RangeFdeResult, RangeFdeRow,
+    RangeReliabilityRow as CoreRangeReliabilityRow, ReliabilityOptions as CoreReliabilityOptions,
+    ReliabilityReport as CoreReliabilityReport, ReliabilitySummary as CoreReliabilitySummary,
+    SolutionValidationOptions,
 };
 use sidereon_core::rinex::crinex::decode as crinex_decode;
 use sidereon_core::rinex::observations::{
@@ -248,6 +263,12 @@ use sidereon_core::sbas::{
     SbasIgpMask, SbasIntegrity, SbasIonoDelays, SbasLongTermCorrection, SbasLongTermHalf,
     SbasLongTermRecord, SbasMessage, SbasMixedFastCorrections, SbasPrnMask, SbasSolveMode,
     SbasWireForm,
+};
+use sidereon_core::sbas_pl::{
+    sbas_protection_levels as core_sbas_protection_levels, AirborneModel as CoreAirborneModel,
+    DegradationParams as CoreDegradationParams, SbasErrorModel as CoreSbasErrorModel,
+    SbasKMultipliers as CoreSbasKMultipliers, SbasPlError as CoreSbasPlError,
+    SbasProtection as CoreSbasProtection, SbasSisError as CoreSbasSisError,
 };
 use sidereon_core::ssr::{
     MissingCorrectionAction, OrbitReferencePoint, RegionalPolicy, SsrClockCorrection,
@@ -439,10 +460,12 @@ mod doppler;
 mod drag;
 mod dted;
 mod ephemeris;
+mod error_metrics;
 mod estimation;
 mod fde;
 mod force;
 mod frame;
+mod geodetic_time_series;
 mod geoid;
 mod geometry;
 mod glonass;
@@ -459,18 +482,22 @@ mod oem;
 mod omm;
 mod opm;
 mod orbit;
+mod orbit_fit;
 mod ppp;
 mod precise;
 mod raim;
 mod range;
 mod reduced;
+mod reliability;
 mod rf;
 mod rinex;
 mod rtcm;
 mod rtk;
 mod satellite;
 mod sbas;
+mod sbas_pl;
 mod sgp4;
+mod sidereal;
 mod signal;
 mod solve;
 mod source_localization;
@@ -508,10 +535,12 @@ pub use doppler::*;
 pub use drag::*;
 pub use dted::*;
 pub use ephemeris::*;
+pub use error_metrics::*;
 pub use estimation::*;
 pub use fde::*;
 pub use force::*;
 pub use frame::*;
+pub use geodetic_time_series::*;
 pub use geoid::*;
 pub use geometry::*;
 pub use glonass::*;
@@ -528,18 +557,22 @@ pub use oem::*;
 pub use omm::*;
 pub use opm::*;
 pub use orbit::*;
+pub use orbit_fit::*;
 pub use ppp::*;
 pub use precise::*;
 pub use raim::*;
 pub use range::*;
 pub use reduced::*;
+pub use reliability::*;
 pub use rf::*;
 pub use rinex::*;
 pub use rtcm::*;
 pub use rtk::*;
 pub use satellite::*;
 pub use sbas::*;
+pub use sbas_pl::*;
 pub use sgp4::*;
+pub use sidereal::*;
 pub use signal::*;
 pub use solve::*;
 pub use source_localization::*;
@@ -1765,6 +1798,52 @@ fn propagation_force_model_from_c(
     }
 }
 
+fn propagation_force_model_kind_from_c(
+    fn_name: &str,
+    config: &SidereonStatePropagationConfig,
+) -> Result<ForceModelKind, SidereonStatus> {
+    match config.force_model {
+        value if value == SidereonPropagationForceModel::TwoBody as u32 => {
+            Ok(ForceModelKind::TwoBody {
+                mu_km3_s2: if config.mu_km3_s2_enabled {
+                    config.mu_km3_s2
+                } else {
+                    MU_EARTH
+                },
+            })
+        }
+        value if value == SidereonPropagationForceModel::TwoBodyJ2 as u32 => {
+            Ok(ForceModelKind::TwoBodyJ2 {
+                mu_km3_s2: if config.mu_km3_s2_enabled {
+                    config.mu_km3_s2
+                } else {
+                    MU_EARTH
+                },
+                re_km: sidereon_core::astro::constants::RE_EARTH,
+                j2: sidereon_core::astro::constants::J2_EARTH,
+            })
+        }
+        value if value == SidereonPropagationForceModel::Composite as u32 => {
+            composite_force_model_from_c(fn_name, config)
+        }
+        value if value == SidereonPropagationForceModel::EarthPhaseA as u32 => {
+            let srp = if config.force_components.has_solar_radiation_pressure {
+                Some(solar_radiation_pressure_from_c(
+                    fn_name,
+                    config.force_components.solar_radiation_pressure,
+                )?)
+            } else {
+                None
+            };
+            Ok(ForceModelKind::earth_phase_a(srp))
+        }
+        _ => {
+            set_last_error(format!("{fn_name}: invalid force_model selector"));
+            Err(SidereonStatus::InvalidArgument)
+        }
+    }
+}
+
 fn propagation_integrator_from_c(
     fn_name: &str,
     integrator: u32,
@@ -1818,15 +1897,15 @@ fn drag_parameters_from_c(
     })
 }
 
-fn state_propagation_config_from_c(
+fn state_propagator_from_c(
     fn_name: &str,
     config: &SidereonStatePropagationConfig,
-) -> Result<PropagationConfig, SidereonStatus> {
+) -> Result<StatePropagator, SidereonStatus> {
     if config.initial_step_s <= 0.0 {
         set_last_error(format!("{fn_name}: initial_step_s must be positive"));
         return Err(SidereonStatus::InvalidArgument);
     }
-    let force_model = propagation_force_model_from_c(fn_name, config.force_model)?;
+    let force_model = propagation_force_model_kind_from_c(fn_name, config)?;
     let integrator = propagation_integrator_from_c(fn_name, config.integrator)?;
     let options = IntegratorOptions {
         abs_tol: config.abs_tol,
@@ -1842,13 +1921,94 @@ fn state_propagation_config_from_c(
     } else {
         None
     };
-    Ok(PropagationConfig {
+    Ok(StatePropagator {
         initial: CartesianState::new(config.epoch_s, config.position_km, config.velocity_km_s),
         force_model,
-        mu_km3_s2: config.mu_km3_s2_enabled.then_some(config.mu_km3_s2),
         integrator,
         options,
         drag,
+        space_weather: None,
+    })
+}
+
+fn composite_force_model_from_c(
+    fn_name: &str,
+    config: &SidereonStatePropagationConfig,
+) -> Result<ForceModelKind, SidereonStatus> {
+    let components = config.force_components;
+    let effective_mu = if config.mu_km3_s2_enabled {
+        config.mu_km3_s2
+    } else {
+        MU_EARTH
+    };
+    let two_body_mu = if components.two_body_mu_km3_s2_enabled {
+        components.two_body_mu_km3_s2
+    } else {
+        effective_mu
+    };
+
+    if components.has_two_body
+        && components.has_zonal
+        && components.zonal_max_degree == 2
+        && !components.has_third_body
+        && !components.has_solar_radiation_pressure
+        && !components.has_relativity
+    {
+        return Ok(ForceModelKind::TwoBodyJ2 {
+            mu_km3_s2: two_body_mu,
+            re_km: sidereon_core::astro::constants::RE_EARTH,
+            j2: sidereon_core::astro::constants::J2_EARTH,
+        });
+    }
+
+    let mut force_components = ForceModelComponents::default();
+    if components.has_two_body {
+        force_components = force_components.with_two_body_mu(two_body_mu);
+    }
+    if components.has_zonal {
+        let max_degree = u8::try_from(components.zonal_max_degree).map_err(|_| {
+            set_last_error(format!("{fn_name}: zonal_max_degree must be in 2..=6"));
+            SidereonStatus::InvalidArgument
+        })?;
+        let degrees = ZonalDegrees::through(max_degree).map_err(|err| {
+            set_last_error(format!("{fn_name}: {err}"));
+            SidereonStatus::InvalidArgument
+        })?;
+        force_components = force_components.with_zonal(ZonalGravity::new(
+            effective_mu,
+            sidereon_core::astro::constants::RE_EARTH,
+            degrees,
+            ZonalCoefficients::default(),
+        ));
+    }
+    if components.has_third_body {
+        force_components = force_components.with_third_body(ThirdBodyGravity {
+            bodies: ThirdBodyBodies {
+                sun: components.third_body_sun,
+                moon: components.third_body_moon,
+            },
+            ..ThirdBodyGravity::default()
+        });
+    }
+    if components.has_solar_radiation_pressure {
+        force_components = force_components.with_solar_radiation_pressure(
+            solar_radiation_pressure_from_c(fn_name, components.solar_radiation_pressure)?,
+        );
+    }
+    if components.has_relativity {
+        force_components = force_components.with_relativity(SchwarzschildRelativity::default());
+    }
+
+    Ok(ForceModelKind::composite(force_components))
+}
+
+fn solar_radiation_pressure_from_c(
+    fn_name: &str,
+    value: SidereonSolarRadiationPressure,
+) -> Result<SolarRadiationPressure, SidereonStatus> {
+    SolarRadiationPressure::new(value.cr, value.area_to_mass_m2_kg).map_err(|err| {
+        set_last_error(format!("{fn_name}: {err}"));
+        SidereonStatus::InvalidArgument
     })
 }
 

@@ -591,7 +591,7 @@ fn map_precise_samples_error(fn_name: &str, err: PreciseSamplesError) -> Sidereo
     SidereonStatus::InvalidArgument
 }
 
-unsafe fn precise_sample_from_c(
+pub(crate) unsafe fn precise_sample_from_c(
     fn_name: &str,
     sample: &SidereonPreciseEphemerisSample,
 ) -> Result<PreciseEphemerisSample, SidereonStatus> {

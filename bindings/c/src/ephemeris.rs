@@ -16,6 +16,10 @@ pub enum SidereonPropagationForceModel {
     TwoBody = 0,
     /// Two-body gravity plus Earth J2 oblateness.
     TwoBodyJ2 = 1,
+    /// Additive force components from SidereonForceModelComponents.
+    Composite = 2,
+    /// Canonical Earth Phase A force set with optional SRP parameters.
+    EarthPhaseA = 3,
 }
 
 /// Numerical propagation integrator selector. Stored in
@@ -27,6 +31,44 @@ pub enum SidereonPropagationIntegrator {
     Dp54 = 0,
     /// Fixed-step fourth-order Runge-Kutta integrator.
     Rk4 = 1,
+}
+
+/// Cannonball solar-radiation-pressure spacecraft parameters.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonSolarRadiationPressure {
+    /// Reflectivity coefficient C_R.
+    pub cr: f64,
+    /// Spacecraft area-to-mass ratio A/m, square meters per kilogram.
+    pub area_to_mass_m2_kg: f64,
+}
+
+/// Additive force components for composite numerical propagation.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonForceModelComponents {
+    /// Whether to include central two-body gravity.
+    pub has_two_body: bool,
+    /// Whether two_body_mu_km3_s2 overrides the config-level mu for two-body gravity.
+    pub two_body_mu_km3_s2_enabled: bool,
+    /// Two-body gravitational parameter in km^3/s^2 when enabled.
+    pub two_body_mu_km3_s2: f64,
+    /// Whether to include Earth zonal gravity.
+    pub has_zonal: bool,
+    /// Highest active zonal degree, in the inclusive range 2 through 6.
+    pub zonal_max_degree: u32,
+    /// Whether to include third-body gravity.
+    pub has_third_body: bool,
+    /// Include the Sun in third-body gravity.
+    pub third_body_sun: bool,
+    /// Include the Moon in third-body gravity.
+    pub third_body_moon: bool,
+    /// Whether to include cannonball solar radiation pressure.
+    pub has_solar_radiation_pressure: bool,
+    /// Solar-radiation-pressure parameters when enabled.
+    pub solar_radiation_pressure: SidereonSolarRadiationPressure,
+    /// Whether to include the geocentric Schwarzschild correction.
+    pub has_relativity: bool,
 }
 
 /// Numerical state propagation controls. Initialize with
@@ -64,6 +106,9 @@ pub struct SidereonStatePropagationConfig {
     pub has_drag: bool,
     /// Drag parameters when has_drag is true.
     pub drag: SidereonDragParameters,
+    /// Additive force components used when force_model is Composite or the SRP
+    /// component is requested for EarthPhaseA.
+    pub force_components: SidereonForceModelComponents,
 }
 
 /// Initialize numerical state propagation config with engine defaults.
@@ -114,11 +159,8 @@ pub unsafe extern "C" fn sidereon_propagate_state(
             times_s,
             time_count,
         ));
-        let propagation_config = c_try!(state_propagation_config_from_c(
-            "sidereon_propagate_state",
-            config,
-        ));
-        let states = match propagate_states(&propagation_config, times) {
+        let propagator = c_try!(state_propagator_from_c("sidereon_propagate_state", config,));
+        let states = match propagator.ephemeris(times) {
             Ok(states) => states,
             Err(err) => {
                 set_last_error(format!("sidereon_propagate_state: {err}"));
@@ -281,5 +323,25 @@ fn default_state_propagation_config() -> SidereonStatePropagationConfig {
         mu_km3_s2: MU_EARTH,
         has_drag: false,
         drag: drag_parameters_to_c(drag),
+        force_components: default_force_model_components(),
+    }
+}
+
+fn default_force_model_components() -> SidereonForceModelComponents {
+    SidereonForceModelComponents {
+        has_two_body: true,
+        two_body_mu_km3_s2_enabled: false,
+        two_body_mu_km3_s2: MU_EARTH,
+        has_zonal: false,
+        zonal_max_degree: 6,
+        has_third_body: false,
+        third_body_sun: true,
+        third_body_moon: true,
+        has_solar_radiation_pressure: false,
+        solar_radiation_pressure: SidereonSolarRadiationPressure {
+            cr: 1.0,
+            area_to_mass_m2_kg: 0.01,
+        },
+        has_relativity: false,
     }
 }
