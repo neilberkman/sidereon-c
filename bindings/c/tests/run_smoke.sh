@@ -388,6 +388,24 @@ cc -std=c11 -Wall -Wextra -Werror \
 echo "== running cap013_smoke program =="
 "${cap013_out}" "${sp3_path}"
 
+# 0.15 capabilities: composite perturbation selection, sidereal filtering,
+# geodetic time series, position-error metrics, clock-noise identification, and
+# orbit-fit residual ledgers. Self-contained.
+echo "== compiling cap015_smoke program =="
+cap015_out="${target_dir}/cap015_smoke"
+cc -std=c11 -Wall -Wextra -Werror \
+    -I"${binding_root}/include" \
+    -I"${here}" \
+    "${here}/cap015_smoke.c" \
+    -L"${lib_dir}" \
+    -lsidereon \
+    -Wl,-rpath,"${lib_dir}" \
+    -lm \
+    -o "${cap015_out}"
+
+echo "== running cap015_smoke program =="
+"${cap015_out}"
+
 # 0.12 core capabilities: Allan-family clock stability, terrain batch lookup,
 # IONEX sample construction/extraction, SBAS decoded payload accessors, ARAIM,
 # and coordinate angular separation / position angle. Uses the IONEX binding

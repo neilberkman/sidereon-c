@@ -57,9 +57,9 @@ usize_is_size_t = true
 after_includes = """
 
 #define SIDEREON_VERSION_MAJOR 0
-#define SIDEREON_VERSION_MINOR 13
+#define SIDEREON_VERSION_MINOR 14
 #define SIDEREON_VERSION_PATCH 0
-#define SIDEREON_VERSION_STRING "0.13.0\""""
+#define SIDEREON_VERSION_STRING "0.14.0\""""
 
 [enum]
 # Idiomatic C enum constants: SidereonStatus::Ok -> SIDEREON_STATUS_OK.
@@ -142,6 +142,8 @@ include = [
     "SidereonSatellitePass",
     "SidereonVisibleSatellite",
     "SidereonItrfPosition",
+    "SidereonSolarRadiationPressure",
+    "SidereonForceModelComponents",
     "SidereonStatePropagationConfig",
     "SidereonCartesianState",
     "SidereonPppSolveStatus",
@@ -471,4 +473,52 @@ include = [
     "SidereonSsrCorrectionStore",
     "SidereonEphemerisSampleStatus",
     "SidereonEphemerisSampleRow",
+    "SidereonSiderealTemplateMethod",
+    "SidereonSiderealFilterOptions",
+    "SidereonSiderealPeriodicityStrength",
+    "SidereonSiderealFilterOutput",
+    "SidereonErrorMetricsErrorKind",
+    "SidereonErrorEllipse",
+    "SidereonPercentileRadius",
+    "SidereonPositionErrorMetrics",
+    "SidereonKinematicSolutionMetricsInput",
+    "SidereonGeodeticTimeSeriesFrame",
+    "SidereonGeodeticTimeSeriesQuality",
+    "SidereonGeodeticTrajectoryLoss",
+    "SidereonGeodeticTrajectoryTermKind",
+    "SidereonGeodeticStepDetectionHeuristic",
+    "SidereonGeodeticStationId",
+    "SidereonGeodeticPositionSample",
+    "SidereonGeodeticPositionSeries",
+    "SidereonMidasOptions",
+    "SidereonMidasComponentStats",
+    "SidereonMidasVelocity",
+    "SidereonGeodeticTrajectoryModel",
+    "SidereonGeodeticTrajectoryFitOptions",
+    "SidereonGeodeticTrajectorySummary",
+    "SidereonGeodeticTrajectoryTerm",
+    "SidereonGeodeticTrajectoryComponent",
+    "SidereonGeodeticStepDetectionOptions",
+    "SidereonGeodeticStepCandidate",
+    "SidereonGeodeticNetworkFrame",
+    "SidereonGeodeticNetworkStation",
+    "SidereonGeodeticStationMotion",
+    "SidereonGeodeticTrajectory",
+    "SidereonGeodeticMotionField",
+    "SidereonPowerLawNoiseType",
+    "SidereonPowerLawOctaveFlag",
+    "SidereonPowerLawOctaveDominanceKind",
+    "SidereonPowerLawNoiseOptions",
+    "SidereonPowerLawOctave",
+    "SidereonPowerLawNoiseRegion",
+    "SidereonPowerLawNoiseFit",
+    "SidereonOrbitFitCovarianceKind",
+    "SidereonOrbitFitCovariance",
+    "SidereonOrbitFitSolution",
+    "SidereonOrbitArcSpan",
+    "SidereonOrbitResidualStats",
+    "SidereonOrbitSatelliteResidualEntry",
+    "SidereonOrbitConstellationResidualEntry",
+    "SidereonOrbitFitOptions",
+    "SidereonOrbitFitReport",
 ]

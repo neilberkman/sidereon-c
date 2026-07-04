@@ -130,6 +130,119 @@ pub struct SidereonAllanDeviationCurves {
     pub(crate) inner: CoreAllanDeviationCurves,
 }
 
+/// IEEE 1139 fractional-frequency PSD power-law noise type.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonPowerLawNoiseType {
+    /// Random-walk frequency modulation.
+    RandomWalkFM = 0,
+    /// Flicker frequency modulation.
+    FlickerFM = 1,
+    /// White frequency modulation.
+    WhiteFM = 2,
+    /// Flicker phase modulation.
+    FlickerPM = 3,
+    /// White phase modulation.
+    WhitePM = 4,
+}
+
+/// Reason a power-law octave was not classifiable.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonPowerLawOctaveFlag {
+    /// Too few tau points were present in the octave.
+    UnderSampled = 0,
+    /// A zero deviation made the slope undefined.
+    DegenerateDeviation = 1,
+    /// MDEV did not have enough tau points to separate phase-modulation types.
+    MissingModifiedAllan = 2,
+}
+
+/// Dominant-noise decision class for one tau octave.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonPowerLawOctaveDominanceKind {
+    /// A single power-law type was identified.
+    Dominant = 0,
+    /// The octave contains conflicting or off-table slopes.
+    Ambiguous = 1,
+    /// Required data were absent.
+    Flagged = 2,
+}
+
+/// Options for IEEE 1139 power-law noise identification.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonPowerLawNoiseOptions {
+    /// Minimum tau points required before an octave can be classified.
+    pub min_points_per_octave: usize,
+    /// Maximum absolute slope error allowed for exact-rational noise types.
+    pub slope_tolerance: f64,
+    /// Maximum robust local-slope scatter before an octave is ambiguous.
+    pub scatter_tolerance: f64,
+    /// Basic sample interval used by the deviation calculation, seconds.
+    pub basic_tau_s: f64,
+    /// Upper measurement bandwidth, hertz.
+    pub measurement_bandwidth_hz: f64,
+}
+
+/// Per-octave power-law classification from ADEV and MDEV slopes.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonPowerLawOctave {
+    /// First tau in the octave, seconds.
+    pub tau_start_s: f64,
+    /// Last tau used in the octave, seconds.
+    pub tau_end_s: f64,
+    /// Number of ADEV tau points used for the slope.
+    pub point_count: usize,
+    /// Whether adev_slope carries a value.
+    pub has_adev_slope: bool,
+    /// Fitted ADEV log-log slope.
+    pub adev_slope: f64,
+    /// Whether mdev_slope carries a value.
+    pub has_mdev_slope: bool,
+    /// Fitted MDEV log-log slope.
+    pub mdev_slope: f64,
+    /// Whether slope_scatter carries a value.
+    pub has_slope_scatter: bool,
+    /// Robust scatter of adjacent ADEV slopes.
+    pub slope_scatter: f64,
+    /// Dominance class, as SidereonPowerLawOctaveDominanceKind.
+    pub dominance_kind: u32,
+    /// Dominant noise type when dominance_kind is Dominant.
+    pub noise_type: u32,
+    /// Flag reason when dominance_kind is Flagged.
+    pub flag: u32,
+}
+
+/// Consecutive tau span supporting one fitted power-law coefficient.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonPowerLawNoiseRegion {
+    /// Identified noise type.
+    pub noise_type: u32,
+    /// First tau in the region, seconds.
+    pub tau_start_s: f64,
+    /// Last tau in the region, seconds.
+    pub tau_end_s: f64,
+    /// Number of classified octaves merged into this region.
+    pub octave_count: usize,
+    /// Number of deviation points used in the coefficient fit.
+    pub point_count: usize,
+    /// Mean local slope from the classification statistic.
+    pub mean_slope: f64,
+    /// Fitted PSD coefficient.
+    pub coefficient: f64,
+}
+
+/// Power-law noise fit. Opaque to C. Create with
+/// sidereon_clock_fit_power_law_noise and release with
+/// sidereon_clock_power_law_noise_fit_free.
+pub struct SidereonPowerLawNoiseFit {
+    pub(crate) inner: CorePowerLawNoiseFit,
+}
+
 /// Initialize Allan-family options with the core defaults: standard estimators,
 /// octave tau grid, and gap rejection.
 ///
@@ -507,6 +620,264 @@ pub unsafe extern "C" fn sidereon_clock_time_deviation(
     )
 }
 
+/// Initialize power-law noise options from a sample interval and bandwidth.
+///
+/// Safety: out_options must point to SidereonPowerLawNoiseOptions.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_clock_power_law_noise_options_init(
+    basic_tau_s: f64,
+    measurement_bandwidth_hz: f64,
+    out_options: *mut SidereonPowerLawNoiseOptions,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_clock_power_law_noise_options_init",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_options,
+                "sidereon_clock_power_law_noise_options_init",
+                "out_options"
+            ));
+            *out = power_law_options_to_c(PowerLawNoiseOptions::new(
+                basic_tau_s,
+                measurement_bandwidth_hz,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Return exact ADEV and MDEV log-log slopes for a power-law noise type.
+///
+/// Safety: out_adev_slope, out_mdev_slope, and out_variance_tau_exponent must
+/// point to writable scalars.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_clock_power_law_noise_slopes(
+    noise_type: u32,
+    out_adev_slope: *mut f64,
+    out_mdev_slope: *mut f64,
+    out_variance_tau_exponent: *mut i32,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_clock_power_law_noise_slopes",
+        SidereonStatus::Panic,
+        || {
+            let out_adev = c_try!(require_out(
+                out_adev_slope,
+                "sidereon_clock_power_law_noise_slopes",
+                "out_adev_slope"
+            ));
+            let out_mdev = c_try!(require_out(
+                out_mdev_slope,
+                "sidereon_clock_power_law_noise_slopes",
+                "out_mdev_slope"
+            ));
+            let out_exp = c_try!(require_out(
+                out_variance_tau_exponent,
+                "sidereon_clock_power_law_noise_slopes",
+                "out_variance_tau_exponent"
+            ));
+            *out_adev = 0.0;
+            *out_mdev = 0.0;
+            *out_exp = 0;
+            let noise_type = c_try!(power_law_noise_type_from_c(
+                "sidereon_clock_power_law_noise_slopes",
+                noise_type,
+            ));
+            *out_adev = core_allan_deviation_power_law_slope(noise_type);
+            *out_mdev = core_modified_allan_deviation_power_law_slope(noise_type);
+            *out_exp = core_allan_variance_power_law_tau_exponent(noise_type);
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Identify power-law clock noise from supplied ADEV and MDEV curves. On
+/// success writes a handle to *out_fit.
+///
+/// Safety: adev_points and mdev_points point to their counts; options may be
+/// NULL for sampled-at-Nyquist defaults from the first ADEV tau; out_fit must
+/// point to handle storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_clock_fit_power_law_noise(
+    adev_points: *const SidereonAllanPoint,
+    adev_count: usize,
+    mdev_points: *const SidereonAllanPoint,
+    mdev_count: usize,
+    options: *const SidereonPowerLawNoiseOptions,
+    out_fit: *mut *mut SidereonPowerLawNoiseFit,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_clock_fit_power_law_noise",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_fit,
+                "sidereon_clock_fit_power_law_noise",
+                "out_fit"
+            ));
+            *out = ptr::null_mut();
+            let adev = c_try!(allan_result_from_points(
+                "sidereon_clock_fit_power_law_noise",
+                "adev_points",
+                adev_points,
+                adev_count,
+            ));
+            let mdev = c_try!(allan_result_from_points(
+                "sidereon_clock_fit_power_law_noise",
+                "mdev_points",
+                mdev_points,
+                mdev_count,
+            ));
+            let options = c_try!(power_law_options_from_c(
+                "sidereon_clock_fit_power_law_noise",
+                options,
+                &adev,
+            ));
+            match core_fit_power_law_noise(&adev, &mdev, options) {
+                Ok(inner) => {
+                    write_boxed_handle(out, SidereonPowerLawNoiseFit { inner });
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_power_law_noise_error("sidereon_clock_fit_power_law_noise", err),
+            }
+        },
+    )
+}
+
+/// Copy PSD coefficients [h_-2, h_-1, h_0, h_1, h_2].
+///
+/// Safety: fit must be live; out_coefficients must point to 5 doubles.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_clock_power_law_noise_fit_coefficients(
+    fit: *const SidereonPowerLawNoiseFit,
+    out_coefficients: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_clock_power_law_noise_fit_coefficients",
+        SidereonStatus::Panic,
+        || {
+            let fit = c_try!(require_ref(
+                fit,
+                "sidereon_clock_power_law_noise_fit_coefficients",
+                "fit"
+            ));
+            c_try!(copy_exact_f64s(
+                "sidereon_clock_power_law_noise_fit_coefficients",
+                "out_coefficients",
+                out_coefficients,
+                5,
+                &fit.inner.coefficients,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy per-octave power-law decisions. Uses the variable-length output
+/// contract.
+///
+/// Safety: fit must be live; out may be NULL only when len is zero.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_clock_power_law_noise_fit_octaves(
+    fit: *const SidereonPowerLawNoiseFit,
+    out: *mut SidereonPowerLawOctave,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_clock_power_law_noise_fit_octaves",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_clock_power_law_noise_fit_octaves",
+                out_written,
+                out_required
+            ));
+            let fit = c_try!(require_ref(
+                fit,
+                "sidereon_clock_power_law_noise_fit_octaves",
+                "fit"
+            ));
+            let octaves: Vec<_> = fit
+                .inner
+                .dominant_per_octave
+                .iter()
+                .map(power_law_octave_to_c)
+                .collect();
+            c_try!(copy_prefix_to_c(
+                "sidereon_clock_power_law_noise_fit_octaves",
+                "out",
+                &octaves,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy fitted power-law regions. Uses the variable-length output contract.
+///
+/// Safety: fit must be live; out may be NULL only when len is zero.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_clock_power_law_noise_fit_regions(
+    fit: *const SidereonPowerLawNoiseFit,
+    out: *mut SidereonPowerLawNoiseRegion,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_clock_power_law_noise_fit_regions",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_clock_power_law_noise_fit_regions",
+                out_written,
+                out_required
+            ));
+            let fit = c_try!(require_ref(
+                fit,
+                "sidereon_clock_power_law_noise_fit_regions",
+                "fit"
+            ));
+            let regions: Vec<_> = fit
+                .inner
+                .regions
+                .iter()
+                .map(power_law_region_to_c)
+                .collect();
+            c_try!(copy_prefix_to_c(
+                "sidereon_clock_power_law_noise_fit_regions",
+                "out",
+                &regions,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Release a power-law noise fit handle. Null is a no-op.
+///
+/// Safety: fit must be NULL or a live handle from
+/// sidereon_clock_fit_power_law_noise.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_clock_power_law_noise_fit_free(
+    fit: *mut SidereonPowerLawNoiseFit,
+) {
+    ffi_boundary("sidereon_clock_power_law_noise_fit_free", (), || {
+        free_boxed(fit);
+    });
+}
+
 /// Broadcast satellite-clock polynomial about toc_sow, mirroring
 /// sidereon_core::ephemeris::ClockPolynomial.
 #[repr(C)]
@@ -773,4 +1144,145 @@ fn allan_points(result: &CoreAllanResult) -> Vec<SidereonAllanPoint> {
             n,
         })
         .collect()
+}
+
+unsafe fn allan_result_from_points(
+    fn_name: &str,
+    arg_name: &str,
+    points: *const SidereonAllanPoint,
+    count: usize,
+) -> Result<CoreAllanResult, SidereonStatus> {
+    let raw = require_slice(points, count, fn_name, arg_name)?;
+    let mut result = CoreAllanResult {
+        tau_s: Vec::with_capacity(raw.len()),
+        deviation: Vec::with_capacity(raw.len()),
+        n: Vec::with_capacity(raw.len()),
+    };
+    for point in raw {
+        result.tau_s.push(point.tau_s);
+        result.deviation.push(point.deviation);
+        result.n.push(point.n);
+    }
+    Ok(result)
+}
+
+unsafe fn power_law_options_from_c(
+    fn_name: &str,
+    options: *const SidereonPowerLawNoiseOptions,
+    adev: &CoreAllanResult,
+) -> Result<PowerLawNoiseOptions, SidereonStatus> {
+    if options.is_null() {
+        let basic_tau_s = adev.tau_s.first().copied().unwrap_or(1.0);
+        return Ok(PowerLawNoiseOptions::sampled_at_nyquist(basic_tau_s));
+    }
+    let options = require_ref(options, fn_name, "options")?;
+    Ok(PowerLawNoiseOptions {
+        min_points_per_octave: options.min_points_per_octave,
+        slope_tolerance: options.slope_tolerance,
+        scatter_tolerance: options.scatter_tolerance,
+        basic_tau_s: options.basic_tau_s,
+        measurement_bandwidth_hz: options.measurement_bandwidth_hz,
+    })
+}
+
+fn power_law_options_to_c(options: PowerLawNoiseOptions) -> SidereonPowerLawNoiseOptions {
+    SidereonPowerLawNoiseOptions {
+        min_points_per_octave: options.min_points_per_octave,
+        slope_tolerance: options.slope_tolerance,
+        scatter_tolerance: options.scatter_tolerance,
+        basic_tau_s: options.basic_tau_s,
+        measurement_bandwidth_hz: options.measurement_bandwidth_hz,
+    }
+}
+
+fn power_law_noise_type_from_c(
+    fn_name: &str,
+    value: u32,
+) -> Result<PowerLawNoiseType, SidereonStatus> {
+    match value {
+        x if x == SidereonPowerLawNoiseType::RandomWalkFM as u32 => {
+            Ok(PowerLawNoiseType::RandomWalkFM)
+        }
+        x if x == SidereonPowerLawNoiseType::FlickerFM as u32 => Ok(PowerLawNoiseType::FlickerFM),
+        x if x == SidereonPowerLawNoiseType::WhiteFM as u32 => Ok(PowerLawNoiseType::WhiteFM),
+        x if x == SidereonPowerLawNoiseType::FlickerPM as u32 => Ok(PowerLawNoiseType::FlickerPM),
+        x if x == SidereonPowerLawNoiseType::WhitePM as u32 => Ok(PowerLawNoiseType::WhitePM),
+        _ => {
+            set_last_error(format!("{fn_name}: invalid power-law noise type"));
+            Err(SidereonStatus::InvalidArgument)
+        }
+    }
+}
+
+fn power_law_noise_type_to_c(value: PowerLawNoiseType) -> u32 {
+    match value {
+        PowerLawNoiseType::RandomWalkFM => SidereonPowerLawNoiseType::RandomWalkFM as u32,
+        PowerLawNoiseType::FlickerFM => SidereonPowerLawNoiseType::FlickerFM as u32,
+        PowerLawNoiseType::WhiteFM => SidereonPowerLawNoiseType::WhiteFM as u32,
+        PowerLawNoiseType::FlickerPM => SidereonPowerLawNoiseType::FlickerPM as u32,
+        PowerLawNoiseType::WhitePM => SidereonPowerLawNoiseType::WhitePM as u32,
+    }
+}
+
+fn power_law_flag_to_c(value: PowerLawOctaveFlag) -> u32 {
+    match value {
+        PowerLawOctaveFlag::UnderSampled => SidereonPowerLawOctaveFlag::UnderSampled as u32,
+        PowerLawOctaveFlag::DegenerateDeviation => {
+            SidereonPowerLawOctaveFlag::DegenerateDeviation as u32
+        }
+        PowerLawOctaveFlag::MissingModifiedAllan => {
+            SidereonPowerLawOctaveFlag::MissingModifiedAllan as u32
+        }
+    }
+}
+
+fn power_law_octave_to_c(octave: &PowerLawOctave) -> SidereonPowerLawOctave {
+    let (dominance_kind, noise_type, flag) = match octave.dominance {
+        PowerLawOctaveDominance::Dominant(noise_type) => (
+            SidereonPowerLawOctaveDominanceKind::Dominant as u32,
+            power_law_noise_type_to_c(noise_type),
+            SidereonPowerLawOctaveFlag::UnderSampled as u32,
+        ),
+        PowerLawOctaveDominance::Ambiguous => (
+            SidereonPowerLawOctaveDominanceKind::Ambiguous as u32,
+            SidereonPowerLawNoiseType::RandomWalkFM as u32,
+            SidereonPowerLawOctaveFlag::UnderSampled as u32,
+        ),
+        PowerLawOctaveDominance::Flagged(flag) => (
+            SidereonPowerLawOctaveDominanceKind::Flagged as u32,
+            SidereonPowerLawNoiseType::RandomWalkFM as u32,
+            power_law_flag_to_c(flag),
+        ),
+    };
+    SidereonPowerLawOctave {
+        tau_start_s: octave.tau_start_s,
+        tau_end_s: octave.tau_end_s,
+        point_count: octave.point_count,
+        has_adev_slope: octave.adev_slope.is_some(),
+        adev_slope: octave.adev_slope.unwrap_or(0.0),
+        has_mdev_slope: octave.mdev_slope.is_some(),
+        mdev_slope: octave.mdev_slope.unwrap_or(0.0),
+        has_slope_scatter: octave.slope_scatter.is_some(),
+        slope_scatter: octave.slope_scatter.unwrap_or(0.0),
+        dominance_kind,
+        noise_type,
+        flag,
+    }
+}
+
+fn power_law_region_to_c(region: &PowerLawNoiseRegion) -> SidereonPowerLawNoiseRegion {
+    SidereonPowerLawNoiseRegion {
+        noise_type: power_law_noise_type_to_c(region.noise_type),
+        tau_start_s: region.tau_start_s,
+        tau_end_s: region.tau_end_s,
+        octave_count: region.octave_count,
+        point_count: region.point_count,
+        mean_slope: region.mean_slope,
+        coefficient: region.coefficient,
+    }
+}
+
+fn map_power_law_noise_error(fn_name: &str, err: PowerLawNoiseError) -> SidereonStatus {
+    set_last_error(format!("{fn_name}: {err}"));
+    SidereonStatus::InvalidArgument
 }

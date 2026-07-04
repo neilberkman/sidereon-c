@@ -45,9 +45,9 @@
 #include <stdlib.h>
 
 #define SIDEREON_VERSION_MAJOR 0
-#define SIDEREON_VERSION_MINOR 13
+#define SIDEREON_VERSION_MINOR 14
 #define SIDEREON_VERSION_PATCH 0
-#define SIDEREON_VERSION_STRING "0.13.0"
+#define SIDEREON_VERSION_STRING "0.14.0"
 
 #define BIAS_OBS_C_BYTES (MAX_BIAS_OBS_BYTES + 1)
 
@@ -328,6 +328,32 @@ typedef enum SidereonEclipseStatus {
 } SidereonEclipseStatus;
 
 /**
+ * Typed error detail for position-error metric functions.
+ */
+typedef enum SidereonErrorMetricsErrorKind {
+    /**
+     * No domain error occurred.
+     */
+    SIDEREON_ERROR_METRICS_ERROR_KIND_NONE = 0,
+    /**
+     * At least one numeric input was NaN or infinite.
+     */
+    SIDEREON_ERROR_METRICS_ERROR_KIND_NON_FINITE = 1,
+    /**
+     * The covariance was not positive semidefinite within tolerance.
+     */
+    SIDEREON_ERROR_METRICS_ERROR_KIND_NOT_POSITIVE_SEMIDEFINITE = 2,
+    /**
+     * A probability value was outside the open interval (0, 1).
+     */
+    SIDEREON_ERROR_METRICS_ERROR_KIND_INVALID_PROBABILITY = 3,
+    /**
+     * ECEF-to-ENU rotation failed.
+     */
+    SIDEREON_ERROR_METRICS_ERROR_KIND_ROTATION = 4,
+} SidereonErrorMetricsErrorKind;
+
+/**
  * Direction of a Moon elevation threshold crossing.
  */
 typedef enum SidereonMoonRiseSetKind {
@@ -354,6 +380,31 @@ typedef enum SidereonMoonTransitKind {
      */
     SIDEREON_MOON_TRANSIT_KIND_LOWER = 1,
 } SidereonMoonTransitKind;
+
+/**
+ * Observability and covariance-validation tier for an estimation geometry.
+ */
+typedef enum SidereonObservabilityTier {
+    /**
+     * The design rank is below the parameter count; at least one parameter is
+     * not observable.
+     */
+    SIDEREON_OBSERVABILITY_TIER_RANK_DEFICIENT = 0,
+    /**
+     * The design is full rank but has no residual degrees of freedom. Snapshot
+     * solves report unvalidated covariance bounds at this tier.
+     */
+    SIDEREON_OBSERVABILITY_TIER_ZERO_REDUNDANCY = 1,
+    /**
+     * The design is full rank with residual degrees of freedom, but exceeds a
+     * condition-number or GDOP cutoff. Bounds are reported unclamped.
+     */
+    SIDEREON_OBSERVABILITY_TIER_WEAK = 2,
+    /**
+     * The design is full rank and within the configured cutoffs.
+     */
+    SIDEREON_OBSERVABILITY_TIER_NOMINAL = 3,
+} SidereonObservabilityTier;
 
 /**
  * Terrain store vertical datum. Terrain store postings are orthometric heights.
@@ -393,31 +444,6 @@ typedef enum SidereonRtkSolveStatus {
      */
     SIDEREON_RTK_SOLVE_STATUS_MAX_ITERATIONS = 1,
 } SidereonRtkSolveStatus;
-
-/**
- * Observability and covariance-validation tier for an estimation geometry.
- */
-typedef enum SidereonObservabilityTier {
-    /**
-     * The design rank is below the parameter count; at least one parameter is
-     * not observable.
-     */
-    SIDEREON_OBSERVABILITY_TIER_RANK_DEFICIENT = 0,
-    /**
-     * The design is full rank but has no residual degrees of freedom. Snapshot
-     * solves report unvalidated covariance bounds at this tier.
-     */
-    SIDEREON_OBSERVABILITY_TIER_ZERO_REDUNDANCY = 1,
-    /**
-     * The design is full rank with residual degrees of freedom, but exceeds a
-     * condition-number or GDOP cutoff. Bounds are reported unclamped.
-     */
-    SIDEREON_OBSERVABILITY_TIER_WEAK = 2,
-    /**
-     * The design is full rank and within the configured cutoffs.
-     */
-    SIDEREON_OBSERVABILITY_TIER_NOMINAL = 3,
-} SidereonObservabilityTier;
 
 /**
  * Integer ambiguity-fix verdict for an RTK fixed solve.
@@ -893,6 +919,14 @@ typedef enum SidereonPropagationForceModel {
      * Two-body gravity plus Earth J2 oblateness.
      */
     SIDEREON_PROPAGATION_FORCE_MODEL_TWO_BODY_J2 = 1,
+    /**
+     * Additive force components from SidereonForceModelComponents.
+     */
+    SIDEREON_PROPAGATION_FORCE_MODEL_COMPOSITE = 2,
+    /**
+     * Canonical Earth Phase A force set with optional SRP parameters.
+     */
+    SIDEREON_PROPAGATION_FORCE_MODEL_EARTH_PHASE_A = 3,
 } SidereonPropagationForceModel;
 
 /**
@@ -1667,6 +1701,198 @@ typedef enum SidereonSsrMissingCorrectionAction {
 } SidereonSsrMissingCorrectionAction;
 
 /**
+ * Template estimator for sidereal residual filtering.
+ */
+typedef enum SidereonSiderealTemplateMethod {
+    /**
+     * Arithmetic mean of prior values in each phase bin.
+     */
+    SIDEREON_SIDEREAL_TEMPLATE_METHOD_MEAN = 0,
+    /**
+     * MAD-gated mean of prior values in each phase bin.
+     */
+    SIDEREON_SIDEREAL_TEMPLATE_METHOD_ROBUST_MAD = 1,
+    /**
+     * Exponentially weighted mean of prior values in each phase bin.
+     */
+    SIDEREON_SIDEREAL_TEMPLATE_METHOD_EWMA = 2,
+} SidereonSiderealTemplateMethod;
+
+/**
+ * Coordinate frame for geodetic time-series samples.
+ */
+typedef enum SidereonGeodeticTimeSeriesFrame {
+    /**
+     * Local east, north, up meters.
+     */
+    SIDEREON_GEODETIC_TIME_SERIES_FRAME_ENU = 0,
+    /**
+     * ITRF/ECEF meters, differenced from a geodetic reference.
+     */
+    SIDEREON_GEODETIC_TIME_SERIES_FRAME_ECEF = 1,
+} SidereonGeodeticTimeSeriesFrame;
+
+/**
+ * Strength flag for a time-series velocity estimate.
+ */
+typedef enum SidereonGeodeticTimeSeriesQuality {
+    /**
+     * The span and selected pairs support the requested estimator.
+     */
+    SIDEREON_GEODETIC_TIME_SERIES_QUALITY_NOMINAL = 0,
+    /**
+     * The estimate is usable but has less than three dominant periods of span.
+     */
+    SIDEREON_GEODETIC_TIME_SERIES_QUALITY_SHORT_SPAN = 1,
+} SidereonGeodeticTimeSeriesQuality;
+
+/**
+ * Trajectory robust loss selector. Values match SidereonTrlsLoss.
+ */
+typedef enum SidereonGeodeticTrajectoryLoss {
+    /**
+     * Ordinary least squares.
+     */
+    SIDEREON_GEODETIC_TRAJECTORY_LOSS_LINEAR = 0,
+    /**
+     * Soft-L1 robust loss.
+     */
+    SIDEREON_GEODETIC_TRAJECTORY_LOSS_SOFT_L1 = 1,
+    /**
+     * Huber robust loss.
+     */
+    SIDEREON_GEODETIC_TRAJECTORY_LOSS_HUBER = 2,
+    /**
+     * Cauchy robust loss.
+     */
+    SIDEREON_GEODETIC_TRAJECTORY_LOSS_CAUCHY = 3,
+    /**
+     * Arctangent robust loss.
+     */
+    SIDEREON_GEODETIC_TRAJECTORY_LOSS_ARCTAN = 4,
+} SidereonGeodeticTrajectoryLoss;
+
+/**
+ * Trajectory term kind.
+ */
+typedef enum SidereonGeodeticTrajectoryTermKind {
+    /**
+     * Position at the reference epoch.
+     */
+    SIDEREON_GEODETIC_TRAJECTORY_TERM_KIND_POSITION = 0,
+    /**
+     * Linear velocity.
+     */
+    SIDEREON_GEODETIC_TRAJECTORY_TERM_KIND_VELOCITY = 1,
+    /**
+     * Annual sine coefficient.
+     */
+    SIDEREON_GEODETIC_TRAJECTORY_TERM_KIND_ANNUAL_SIN = 2,
+    /**
+     * Annual cosine coefficient.
+     */
+    SIDEREON_GEODETIC_TRAJECTORY_TERM_KIND_ANNUAL_COS = 3,
+    /**
+     * Semiannual sine coefficient.
+     */
+    SIDEREON_GEODETIC_TRAJECTORY_TERM_KIND_SEMIANNUAL_SIN = 4,
+    /**
+     * Semiannual cosine coefficient.
+     */
+    SIDEREON_GEODETIC_TRAJECTORY_TERM_KIND_SEMIANNUAL_COS = 5,
+    /**
+     * Heaviside offset coefficient.
+     */
+    SIDEREON_GEODETIC_TRAJECTORY_TERM_KIND_OFFSET = 6,
+} SidereonGeodeticTrajectoryTermKind;
+
+/**
+ * Heuristic used for step detection.
+ */
+typedef enum SidereonGeodeticStepDetectionHeuristic {
+    /**
+     * Difference of detrended pre-event and post-event medians.
+     */
+    SIDEREON_GEODETIC_STEP_DETECTION_HEURISTIC_DETRENDED_SLIDING_MEDIAN = 0,
+} SidereonGeodeticStepDetectionHeuristic;
+
+/**
+ * IEEE 1139 fractional-frequency PSD power-law noise type.
+ */
+typedef enum SidereonPowerLawNoiseType {
+    /**
+     * Random-walk frequency modulation.
+     */
+    SIDEREON_POWER_LAW_NOISE_TYPE_RANDOM_WALK_FM = 0,
+    /**
+     * Flicker frequency modulation.
+     */
+    SIDEREON_POWER_LAW_NOISE_TYPE_FLICKER_FM = 1,
+    /**
+     * White frequency modulation.
+     */
+    SIDEREON_POWER_LAW_NOISE_TYPE_WHITE_FM = 2,
+    /**
+     * Flicker phase modulation.
+     */
+    SIDEREON_POWER_LAW_NOISE_TYPE_FLICKER_PM = 3,
+    /**
+     * White phase modulation.
+     */
+    SIDEREON_POWER_LAW_NOISE_TYPE_WHITE_PM = 4,
+} SidereonPowerLawNoiseType;
+
+/**
+ * Reason a power-law octave was not classifiable.
+ */
+typedef enum SidereonPowerLawOctaveFlag {
+    /**
+     * Too few tau points were present in the octave.
+     */
+    SIDEREON_POWER_LAW_OCTAVE_FLAG_UNDER_SAMPLED = 0,
+    /**
+     * A zero deviation made the slope undefined.
+     */
+    SIDEREON_POWER_LAW_OCTAVE_FLAG_DEGENERATE_DEVIATION = 1,
+    /**
+     * MDEV did not have enough tau points to separate phase-modulation types.
+     */
+    SIDEREON_POWER_LAW_OCTAVE_FLAG_MISSING_MODIFIED_ALLAN = 2,
+} SidereonPowerLawOctaveFlag;
+
+/**
+ * Dominant-noise decision class for one tau octave.
+ */
+typedef enum SidereonPowerLawOctaveDominanceKind {
+    /**
+     * A single power-law type was identified.
+     */
+    SIDEREON_POWER_LAW_OCTAVE_DOMINANCE_KIND_DOMINANT = 0,
+    /**
+     * The octave contains conflicting or off-table slopes.
+     */
+    SIDEREON_POWER_LAW_OCTAVE_DOMINANCE_KIND_AMBIGUOUS = 1,
+    /**
+     * Required data were absent.
+     */
+    SIDEREON_POWER_LAW_OCTAVE_DOMINANCE_KIND_FLAGGED = 2,
+} SidereonPowerLawOctaveDominanceKind;
+
+/**
+ * Covariance state for a fitted orbit.
+ */
+typedef enum SidereonOrbitFitCovarianceKind {
+    /**
+     * A finite covariance matrix is present.
+     */
+    SIDEREON_ORBIT_FIT_COVARIANCE_KIND_ESTIMATED = 0,
+    /**
+     * The arc has no positive residual degrees of freedom.
+     */
+    SIDEREON_ORBIT_FIT_COVARIANCE_KIND_UNBOUNDED = 1,
+} SidereonOrbitFitCovarianceKind;
+
+/**
  * Combined Allan-family estimator curves. Opaque to C. Create with
  * sidereon_clock_compute_allan_deviations and release with
  * sidereon_clock_allan_deviation_curves_free.
@@ -1791,6 +2017,18 @@ typedef struct SidereonEphemeris SidereonEphemeris;
 typedef struct SidereonFdeSolution SidereonFdeSolution;
 
 /**
+ * Network motion field handle. Create with sidereon_geodetic_network_field and
+ * release with sidereon_geodetic_motion_field_free.
+ */
+typedef struct SidereonGeodeticMotionField SidereonGeodeticMotionField;
+
+/**
+ * Fitted trajectory handle. Create with sidereon_geodetic_fit_trajectory and
+ * release with sidereon_geodetic_trajectory_free.
+ */
+typedef struct SidereonGeodeticTrajectory SidereonGeodeticTrajectory;
+
+/**
  * A loaded geoid undulation grid. Opaque to C. Create with
  * sidereon_geoid_grid_from_text or sidereon_geoid_grid_new; release with
  * sidereon_geoid_grid_free.
@@ -1880,10 +2118,24 @@ typedef struct SidereonOmmCatalog SidereonOmmCatalog;
 typedef struct SidereonOpm SidereonOpm;
 
 /**
+ * Precise-orbit fit report. Opaque to C. Create with
+ * sidereon_fit_sp3_precise_orbit or sidereon_fit_precise_ephemeris_sample_orbit
+ * and release with sidereon_orbit_fit_report_free.
+ */
+typedef struct SidereonOrbitFitReport SidereonOrbitFitReport;
+
+/**
  * Dense satellite pass list. Opaque to C. Create with
  * sidereon_tle_find_passes and release with sidereon_pass_list_free.
  */
 typedef struct SidereonPassList SidereonPassList;
+
+/**
+ * Power-law noise fit. Opaque to C. Create with
+ * sidereon_clock_fit_power_law_noise and release with
+ * sidereon_clock_power_law_noise_fit_free.
+ */
+typedef struct SidereonPowerLawNoiseFit SidereonPowerLawNoiseFit;
 
 /**
  * Precomputed PPP correction tables. Opaque to C. Create with
@@ -2076,6 +2328,12 @@ typedef struct SidereonSbasBlock SidereonSbasBlock;
 typedef struct SidereonSbasCorrectionStore SidereonSbasCorrectionStore;
 
 typedef struct SidereonSgp4TleFit SidereonSgp4TleFit;
+
+/**
+ * Sidereal filter output. Opaque to C. Create with sidereon_sidereal_filter
+ * and release with sidereon_sidereal_filter_output_free.
+ */
+typedef struct SidereonSiderealFilterOutput SidereonSiderealFilterOutput;
 
 /**
  * Source-localization solution handle. Opaque to C. Create with
@@ -3445,6 +3703,120 @@ typedef struct SidereonAllanOptions {
     size_t averaging_factor_count;
 } SidereonAllanOptions;
 
+/**
+ * Options for IEEE 1139 power-law noise identification.
+ */
+typedef struct SidereonPowerLawNoiseOptions {
+    /**
+     * Minimum tau points required before an octave can be classified.
+     */
+    size_t min_points_per_octave;
+    /**
+     * Maximum absolute slope error allowed for exact-rational noise types.
+     */
+    double slope_tolerance;
+    /**
+     * Maximum robust local-slope scatter before an octave is ambiguous.
+     */
+    double scatter_tolerance;
+    /**
+     * Basic sample interval used by the deviation calculation, seconds.
+     */
+    double basic_tau_s;
+    /**
+     * Upper measurement bandwidth, hertz.
+     */
+    double measurement_bandwidth_hz;
+} SidereonPowerLawNoiseOptions;
+
+/**
+ * Per-octave power-law classification from ADEV and MDEV slopes.
+ */
+typedef struct SidereonPowerLawOctave {
+    /**
+     * First tau in the octave, seconds.
+     */
+    double tau_start_s;
+    /**
+     * Last tau used in the octave, seconds.
+     */
+    double tau_end_s;
+    /**
+     * Number of ADEV tau points used for the slope.
+     */
+    size_t point_count;
+    /**
+     * Whether adev_slope carries a value.
+     */
+    bool has_adev_slope;
+    /**
+     * Fitted ADEV log-log slope.
+     */
+    double adev_slope;
+    /**
+     * Whether mdev_slope carries a value.
+     */
+    bool has_mdev_slope;
+    /**
+     * Fitted MDEV log-log slope.
+     */
+    double mdev_slope;
+    /**
+     * Whether slope_scatter carries a value.
+     */
+    bool has_slope_scatter;
+    /**
+     * Robust scatter of adjacent ADEV slopes.
+     */
+    double slope_scatter;
+    /**
+     * Dominance class, as SidereonPowerLawOctaveDominanceKind.
+     */
+    uint32_t dominance_kind;
+    /**
+     * Dominant noise type when dominance_kind is Dominant.
+     */
+    uint32_t noise_type;
+    /**
+     * Flag reason when dominance_kind is Flagged.
+     */
+    uint32_t flag;
+} SidereonPowerLawOctave;
+
+/**
+ * Consecutive tau span supporting one fitted power-law coefficient.
+ */
+typedef struct SidereonPowerLawNoiseRegion {
+    /**
+     * Identified noise type.
+     */
+    uint32_t noise_type;
+    /**
+     * First tau in the region, seconds.
+     */
+    double tau_start_s;
+    /**
+     * Last tau in the region, seconds.
+     */
+    double tau_end_s;
+    /**
+     * Number of classified octaves merged into this region.
+     */
+    size_t octave_count;
+    /**
+     * Number of deviation points used in the coefficient fit.
+     */
+    size_t point_count;
+    /**
+     * Mean local slope from the classification statistic.
+     */
+    double mean_slope;
+    /**
+     * Fitted PSD coefficient.
+     */
+    double coefficient;
+} SidereonPowerLawNoiseRegion;
+
 typedef struct SidereonCodeDcbOptions {
     const char *obs1;
     const char *obs2;
@@ -4544,6 +4916,114 @@ typedef struct SidereonErrorEllipse2 {
 } SidereonErrorEllipse2;
 
 /**
+ * Horizontal one-sigma error ellipse.
+ */
+typedef struct SidereonErrorEllipse {
+    /**
+     * Semi-major axis length, meters.
+     */
+    double semi_major_m;
+    /**
+     * Semi-minor axis length, meters.
+     */
+    double semi_minor_m;
+    /**
+     * Semi-major-axis orientation, radians from east toward north.
+     */
+    double orientation_rad;
+} SidereonErrorEllipse;
+
+/**
+ * Circle or sphere radius containing a target probability mass.
+ */
+typedef struct SidereonPercentileRadius {
+    /**
+     * Probability mass inside radius_m.
+     */
+    double probability;
+    /**
+     * Exact circle or sphere radius, meters.
+     */
+    double radius_m;
+    /**
+     * Approximate radius when the named approximation is applicable.
+     */
+    double approx_m;
+    /**
+     * Whether approx_m is valid for the covariance ratio.
+     */
+    bool approx_valid;
+} SidereonPercentileRadius;
+
+/**
+ * Standard position-error metrics from one covariance.
+ */
+typedef struct SidereonPositionErrorMetrics {
+    /**
+     * Horizontal one-sigma covariance ellipse.
+     */
+    struct SidereonErrorEllipse ellipse;
+    /**
+     * East standard deviation, meters.
+     */
+    double sigma_e_m;
+    /**
+     * North standard deviation, meters.
+     */
+    double sigma_n_m;
+    /**
+     * Up standard deviation, meters.
+     */
+    double sigma_u_m;
+    /**
+     * Horizontal 50 percent circular error probable.
+     */
+    struct SidereonPercentileRadius cep_m;
+    /**
+     * Horizontal 95 percent radius.
+     */
+    struct SidereonPercentileRadius r95_m;
+    /**
+     * Horizontal 99 percent radius.
+     */
+    struct SidereonPercentileRadius r99_m;
+    /**
+     * Distance root mean square, meters.
+     */
+    double drms_m;
+    /**
+     * Two times distance root mean square, meters.
+     */
+    double two_drms_m;
+    /**
+     * Vertical 50 percent one-dimensional radius, meters.
+     */
+    double vep_m;
+    /**
+     * Three-dimensional 50 percent spherical error probable.
+     */
+    struct SidereonPercentileRadius sep_m;
+    /**
+     * Mean radial spherical error, meters.
+     */
+    double mrse_m;
+} SidereonPositionErrorMetrics;
+
+/**
+ * Minimal kinematic solution input for position-error metrics.
+ */
+typedef struct SidereonKinematicSolutionMetricsInput {
+    /**
+     * Receiver ECEF position, meters.
+     */
+    double position_m[3];
+    /**
+     * Row-major ECEF position covariance, square meters.
+     */
+    double position_covariance_m2[9];
+} SidereonKinematicSolutionMetricsInput;
+
+/**
  * Result of a drag-decay estimate.
  */
 typedef struct SidereonDecayEstimate {
@@ -4839,6 +5319,188 @@ typedef struct SidereonTcaPropagatedCovariancePcOptions {
 } SidereonTcaPropagatedCovariancePcOptions;
 
 /**
+ * One canonical precise-ephemeris sample: a satellite's ECEF position (and
+ * optional clock) at one epoch, in SI units. This is the serialization-
+ * independent element behind an SP3 record; sidereon_sp3_precise_ephemeris_samples
+ * extracts them and sidereon_precise_ephemeris_samples_from_samples rebuilds an
+ * interpolatable source from them.
+ */
+typedef struct SidereonPreciseEphemerisSample {
+    /**
+     * Satellite this sample describes, as a null-terminated token (e.g. G01).
+     */
+    struct SidereonSatelliteToken sat;
+    /**
+     * Time scale the epoch is expressed in (a SidereonTimeScale code as
+     * uint32_t). Every sample in one source must share this scale.
+     */
+    uint32_t time_scale;
+    /**
+     * Sample epoch, seconds since J2000 in the sample's time scale.
+     */
+    double epoch_j2000_s;
+    /**
+     * Satellite ECEF position in the ITRF/IGS frame, meters.
+     */
+    double position_ecef_m[3];
+    /**
+     * Whether clock_s carries a satellite clock estimate.
+     */
+    bool has_clock_s;
+    /**
+     * Satellite clock offset, seconds, when has_clock_s is true.
+     */
+    double clock_s;
+    /**
+     * Whether this epoch carries the SP3 E clock-event flag: true splits the
+     * clock interpolation arc here (a clock reset takes effect at this epoch).
+     */
+    bool clock_event;
+} SidereonPreciseEphemerisSample;
+
+/**
+ * Cannonball solar-radiation-pressure spacecraft parameters.
+ */
+typedef struct SidereonSolarRadiationPressure {
+    /**
+     * Reflectivity coefficient C_R.
+     */
+    double cr;
+    /**
+     * Spacecraft area-to-mass ratio A/m, square meters per kilogram.
+     */
+    double area_to_mass_m2_kg;
+} SidereonSolarRadiationPressure;
+
+/**
+ * Additive force components for composite numerical propagation.
+ */
+typedef struct SidereonForceModelComponents {
+    /**
+     * Whether to include central two-body gravity.
+     */
+    bool has_two_body;
+    /**
+     * Whether two_body_mu_km3_s2 overrides the config-level mu for two-body gravity.
+     */
+    bool two_body_mu_km3_s2_enabled;
+    /**
+     * Two-body gravitational parameter in km^3/s^2 when enabled.
+     */
+    double two_body_mu_km3_s2;
+    /**
+     * Whether to include Earth zonal gravity.
+     */
+    bool has_zonal;
+    /**
+     * Highest active zonal degree, in the inclusive range 2 through 6.
+     */
+    uint32_t zonal_max_degree;
+    /**
+     * Whether to include third-body gravity.
+     */
+    bool has_third_body;
+    /**
+     * Include the Sun in third-body gravity.
+     */
+    bool third_body_sun;
+    /**
+     * Include the Moon in third-body gravity.
+     */
+    bool third_body_moon;
+    /**
+     * Whether to include cannonball solar radiation pressure.
+     */
+    bool has_solar_radiation_pressure;
+    /**
+     * Solar-radiation-pressure parameters when enabled.
+     */
+    struct SidereonSolarRadiationPressure solar_radiation_pressure;
+    /**
+     * Whether to include the geocentric Schwarzschild correction.
+     */
+    bool has_relativity;
+} SidereonForceModelComponents;
+
+/**
+ * Options controlling a precise-orbit fit.
+ */
+typedef struct SidereonOrbitFitOptions {
+    /**
+     * Force model selector, as SidereonPropagationForceModel.
+     */
+    uint32_t force_model;
+    /**
+     * Additive force components for Composite, and optional SRP for EarthPhaseA.
+     */
+    struct SidereonForceModelComponents force_components;
+    /**
+     * Whether mu_km3_s2 overrides the engine default in legacy and composite paths.
+     */
+    bool mu_km3_s2_enabled;
+    /**
+     * Gravitational parameter in km^3/s^2 when enabled.
+     */
+    double mu_km3_s2;
+    /**
+     * Integrator selector, as SidereonPropagationIntegrator.
+     */
+    uint32_t integrator;
+    /**
+     * Absolute propagation tolerance.
+     */
+    double abs_tol;
+    /**
+     * Relative propagation tolerance.
+     */
+    double rel_tol;
+    /**
+     * Initial integration step, seconds.
+     */
+    double initial_step_s;
+    /**
+     * Minimum integration step, seconds.
+     */
+    double min_step_s;
+    /**
+     * Maximum integration step, seconds.
+     */
+    double max_step_s;
+    /**
+     * Maximum integration steps.
+     */
+    uint32_t max_steps;
+    /**
+     * Nonlinear solve gradient tolerance.
+     */
+    double solver_gtol;
+    /**
+     * Nonlinear solve cost tolerance.
+     */
+    double solver_ftol;
+    /**
+     * Nonlinear solve step tolerance.
+     */
+    double solver_xtol;
+    /**
+     * Maximum nonlinear residual evaluations.
+     */
+    size_t solver_max_nfev;
+    /**
+     * Minimum residual count before a ledger entry is not marked low-n.
+     */
+    size_t min_ledger_samples;
+    /**
+     * Whether drag is layered on the selected force model.
+     */
+    bool has_drag;
+    /**
+     * Drag parameters when has_drag is true.
+     */
+    struct SidereonDragParameters drag;
+} SidereonOrbitFitOptions;
+
+/**
  * One receiver's dual-frequency code/carrier observation for RTK wide-lane and
  * ionosphere-free arc setup.
  */
@@ -5080,6 +5742,454 @@ typedef struct SidereonRtkWideLaneArcConfig {
      */
     struct SidereonRtkDualCycleSlipConfig cycle_slip;
 } SidereonRtkWideLaneArcConfig;
+
+/**
+ * One position sample in a station time series.
+ */
+typedef struct SidereonGeodeticPositionSample {
+    /**
+     * Epoch expressed as a decimal year.
+     */
+    double epoch_year;
+    /**
+     * Position vector in meters, interpreted by the series frame.
+     */
+    double position_m[3];
+    /**
+     * Whether covariance_m2 carries a row-major 3x3 covariance.
+     */
+    bool has_covariance_m2;
+    /**
+     * Row-major coordinate covariance in square meters.
+     */
+    double covariance_m2[9];
+} SidereonGeodeticPositionSample;
+
+/**
+ * Borrowed position-series descriptor.
+ */
+typedef struct SidereonGeodeticPositionSeries {
+    /**
+     * Frame selector, as SidereonGeodeticTimeSeriesFrame.
+     */
+    uint32_t frame;
+    /**
+     * ECEF reference when frame is Ecef.
+     */
+    struct SidereonGeodetic reference;
+    /**
+     * Position samples.
+     */
+    const struct SidereonGeodeticPositionSample *samples;
+    /**
+     * Number of position samples.
+     */
+    size_t sample_count;
+} SidereonGeodeticPositionSeries;
+
+/**
+ * MIDAS velocity-estimator options.
+ */
+typedef struct SidereonMidasOptions {
+    /**
+     * Dominant period used for pair selection, years.
+     */
+    double dominant_period_years;
+    /**
+     * Allowed absolute period difference, years.
+     */
+    double period_tolerance_years;
+    /**
+     * Minimum retained pair count for each component.
+     */
+    size_t min_pairs;
+} SidereonMidasOptions;
+
+/**
+ * Step-detection controls.
+ */
+typedef struct SidereonGeodeticStepDetectionOptions {
+    /**
+     * Half-window around a candidate epoch, years.
+     */
+    double window_years;
+    /**
+     * Minimum normalized offset score to report.
+     */
+    double score_threshold;
+    /**
+     * Minimum three-dimensional offset norm, meters.
+     */
+    double min_offset_m;
+    /**
+     * Minimum sample count on each side.
+     */
+    size_t min_samples_each_side;
+    /**
+     * Minimum separation between retained candidates, years.
+     */
+    double min_separation_years;
+    /**
+     * MIDAS controls used for detrending.
+     */
+    struct SidereonMidasOptions midas;
+} SidereonGeodeticStepDetectionOptions;
+
+/**
+ * Candidate displacement step.
+ */
+typedef struct SidereonGeodeticStepCandidate {
+    /**
+     * Candidate epoch, decimal years.
+     */
+    double epoch_year;
+    /**
+     * Estimated ENU offset, meters, after minus before.
+     */
+    double offset_enu_m[3];
+    /**
+     * Robust normalized offset score.
+     */
+    double score;
+    /**
+     * Number of samples before the candidate.
+     */
+    size_t before_count;
+    /**
+     * Number of samples after the candidate.
+     */
+    size_t after_count;
+    /**
+     * Heuristic selector.
+     */
+    uint32_t heuristic;
+} SidereonGeodeticStepCandidate;
+
+/**
+ * Linear trajectory model shape.
+ */
+typedef struct SidereonGeodeticTrajectoryModel {
+    /**
+     * Whether reference_epoch_year overrides the mean sample epoch.
+     */
+    bool has_reference_epoch_year;
+    /**
+     * Reference epoch for the position parameter.
+     */
+    double reference_epoch_year;
+    /**
+     * Include annual sine and cosine terms.
+     */
+    bool include_annual;
+    /**
+     * Include semiannual sine and cosine terms.
+     */
+    bool include_semiannual;
+    /**
+     * Known offset epochs, decimal years.
+     */
+    const double *offset_epochs_year;
+    /**
+     * Number of known offset epochs.
+     */
+    size_t offset_count;
+} SidereonGeodeticTrajectoryModel;
+
+/**
+ * Trajectory least-squares controls.
+ */
+typedef struct SidereonGeodeticTrajectoryFitOptions {
+    /**
+     * Robust loss selector, as SidereonGeodeticTrajectoryLoss.
+     */
+    uint32_t loss;
+    /**
+     * Robust loss scale, meters.
+     */
+    double f_scale_m;
+    /**
+     * Whether max_nfev overrides the solver default.
+     */
+    bool has_max_nfev;
+    /**
+     * Maximum residual evaluations when enabled.
+     */
+    size_t max_nfev;
+} SidereonGeodeticTrajectoryFitOptions;
+
+/**
+ * Fixed-size station id token.
+ */
+typedef struct SidereonGeodeticStationId {
+    /**
+     * Null-terminated UTF-8 station id bytes.
+     */
+    char bytes[65];
+} SidereonGeodeticStationId;
+
+/**
+ * MIDAS diagnostics for one ENU component.
+ */
+typedef struct SidereonMidasComponentStats {
+    /**
+     * Pair slopes selected before trimming.
+     */
+    size_t pair_count;
+    /**
+     * Pair slopes retained after trimming.
+     */
+    size_t retained_pair_count;
+    /**
+     * Robust standard deviation of retained slopes, meters per year.
+     */
+    double slope_sigma_m_per_yr;
+    /**
+     * Effective independent slope count.
+     */
+    double effective_pair_count;
+} SidereonMidasComponentStats;
+
+/**
+ * Robust ENU velocity estimate from MIDAS.
+ */
+typedef struct SidereonMidasVelocity {
+    /**
+     * Velocity components [east, north, up], meters per year.
+     */
+    double rate_enu_m_per_yr[3];
+    /**
+     * One-sigma uncertainties [east, north, up], meters per year.
+     */
+    double sigma_enu_m_per_yr[3];
+    /**
+     * Row-major diagonal ENU velocity covariance.
+     */
+    double covariance_enu_m2_per_yr2[9];
+    /**
+     * Per-component MIDAS slope statistics.
+     */
+    struct SidereonMidasComponentStats component_stats[3];
+    /**
+     * Number of accepted position samples.
+     */
+    size_t sample_count;
+    /**
+     * Series span, years.
+     */
+    double span_years;
+    /**
+     * SidereonGeodeticTimeSeriesQuality value.
+     */
+    uint32_t quality;
+} SidereonMidasVelocity;
+
+/**
+ * One station motion in a network field.
+ */
+typedef struct SidereonGeodeticStationMotion {
+    /**
+     * Station id.
+     */
+    struct SidereonGeodeticStationId id;
+    /**
+     * Velocity after optional common-mode removal.
+     */
+    double rate_enu_m_per_yr[3];
+    /**
+     * Velocity before optional common-mode removal.
+     */
+    double raw_rate_enu_m_per_yr[3];
+    /**
+     * One-sigma uncertainty in the network frame.
+     */
+    double sigma_enu_m_per_yr[3];
+    /**
+     * Station-local MIDAS velocity before rotation.
+     */
+    struct SidereonMidasVelocity local_velocity;
+} SidereonGeodeticStationMotion;
+
+/**
+ * One station input for network_field.
+ */
+typedef struct SidereonGeodeticNetworkStation {
+    /**
+     * Null-terminated station id.
+     */
+    const char *id;
+    /**
+     * Station reference position used for local ENU rotation.
+     */
+    struct SidereonGeodetic reference;
+    /**
+     * Station position time series.
+     */
+    struct SidereonGeodeticPositionSeries series;
+} SidereonGeodeticNetworkStation;
+
+/**
+ * Network field frame and common-mode control.
+ */
+typedef struct SidereonGeodeticNetworkFrame {
+    /**
+     * Geodetic origin defining the output ENU frame.
+     */
+    struct SidereonGeodetic origin;
+    /**
+     * Remove unweighted mean velocity across stations.
+     */
+    bool remove_common_mode;
+} SidereonGeodeticNetworkFrame;
+
+/**
+ * Fitted trajectory coefficients for one ENU component.
+ */
+typedef struct SidereonGeodeticTrajectoryComponent {
+    /**
+     * Position at the reference epoch, meters.
+     */
+    double position_m;
+    /**
+     * Linear velocity, meters per year.
+     */
+    double velocity_m_per_yr;
+    /**
+     * Whether annual_sin_m is present.
+     */
+    bool has_annual_sin_m;
+    /**
+     * Annual sine coefficient, meters.
+     */
+    double annual_sin_m;
+    /**
+     * Whether annual_cos_m is present.
+     */
+    bool has_annual_cos_m;
+    /**
+     * Annual cosine coefficient, meters.
+     */
+    double annual_cos_m;
+    /**
+     * Whether semiannual_sin_m is present.
+     */
+    bool has_semiannual_sin_m;
+    /**
+     * Semiannual sine coefficient, meters.
+     */
+    double semiannual_sin_m;
+    /**
+     * Whether semiannual_cos_m is present.
+     */
+    bool has_semiannual_cos_m;
+    /**
+     * Semiannual cosine coefficient, meters.
+     */
+    double semiannual_cos_m;
+    /**
+     * Number of offset coefficients available through the offset accessor.
+     */
+    size_t offset_count;
+} SidereonGeodeticTrajectoryComponent;
+
+/**
+ * Geometry observability and covariance-validation diagnostics.
+ */
+typedef struct SidereonGeometryQuality {
+    /**
+     * Observability and validation tier.
+     */
+    enum SidereonObservabilityTier tier;
+    /**
+     * Observation redundancy, defined as number of observations minus number
+     * of estimated parameters.
+     */
+    int32_t redundancy;
+    /**
+     * Rank of the design matrix used by the solve.
+     */
+    size_t rank;
+    /**
+     * Singular-value condition number of the design matrix.
+     */
+    double condition_number;
+    /**
+     * Geometric dilution of precision for the solved state.
+     */
+    double gdop;
+    /**
+     * Whether residual-based RAIM can test the solve.
+     */
+    bool raim_checkable;
+    /**
+     * Whether residuals or a valid propagated prior validate the covariance
+     * bound.
+     */
+    bool covariance_validated;
+} SidereonGeometryQuality;
+
+/**
+ * Summary of one trajectory fit.
+ */
+typedef struct SidereonGeodeticTrajectorySummary {
+    /**
+     * Reference epoch used by the fit.
+     */
+    double reference_epoch_year;
+    /**
+     * Number of terms per ENU component.
+     */
+    size_t term_count;
+    /**
+     * Square covariance dimension.
+     */
+    size_t covariance_dim;
+    /**
+     * Root-mean-square residuals [east, north, up], meters.
+     */
+    double residual_rms_enu_m[3];
+    /**
+     * Design observability diagnostics.
+     */
+    struct SidereonGeometryQuality geometry_quality;
+    /**
+     * Trust-region termination status.
+     */
+    int32_t status;
+    /**
+     * Residual evaluations used by the solver.
+     */
+    size_t nfev;
+    /**
+     * Jacobian evaluations used by the solver.
+     */
+    size_t njev;
+    /**
+     * Final least-squares cost.
+     */
+    double cost;
+    /**
+     * Infinity norm of the final gradient.
+     */
+    double optimality;
+} SidereonGeodeticTrajectorySummary;
+
+/**
+ * One trajectory term descriptor.
+ */
+typedef struct SidereonGeodeticTrajectoryTerm {
+    /**
+     * Term kind, as SidereonGeodeticTrajectoryTermKind.
+     */
+    uint32_t kind;
+    /**
+     * Offset index when kind is Offset.
+     */
+    size_t offset_index;
+    /**
+     * Offset epoch when kind is Offset.
+     */
+    double epoch_year;
+} SidereonGeodeticTrajectoryTerm;
 
 /**
  * GNSS week and time-of-week value.
@@ -5896,42 +7006,6 @@ typedef struct SidereonMoonIllumination {
 } SidereonMoonIllumination;
 
 /**
- * Geometry observability and covariance-validation diagnostics.
- */
-typedef struct SidereonGeometryQuality {
-    /**
-     * Observability and validation tier.
-     */
-    enum SidereonObservabilityTier tier;
-    /**
-     * Observation redundancy, defined as number of observations minus number
-     * of estimated parameters.
-     */
-    int32_t redundancy;
-    /**
-     * Rank of the design matrix used by the solve.
-     */
-    size_t rank;
-    /**
-     * Singular-value condition number of the design matrix.
-     */
-    double condition_number;
-    /**
-     * Geometric dilution of precision for the solved state.
-     */
-    double gdop;
-    /**
-     * Whether residual-based RAIM can test the solve.
-     */
-    bool raim_checkable;
-    /**
-     * Whether residuals or a valid propagated prior validate the covariance
-     * bound.
-     */
-    bool covariance_validated;
-} SidereonGeometryQuality;
-
-/**
  * Summary scalars for an RTK float solution.
  */
 typedef struct SidereonRtkFloatMetadata {
@@ -6484,6 +7558,134 @@ typedef struct SidereonSkippedOmm {
      */
     bool object_name_present;
 } SidereonSkippedOmm;
+
+/**
+ * Arc span covered by a residual ledger.
+ */
+typedef struct SidereonOrbitArcSpan {
+    /**
+     * Time scale shared by residual epochs, as SidereonTimeScale.
+     */
+    uint32_t time_scale;
+    /**
+     * First residual epoch, seconds since J2000 in time_scale.
+     */
+    double start_j2000_s;
+    /**
+     * Last residual epoch, seconds since J2000 in time_scale.
+     */
+    double end_j2000_s;
+    /**
+     * Arc duration, seconds.
+     */
+    double duration_s;
+} SidereonOrbitArcSpan;
+
+/**
+ * RTN residual RMS summary.
+ */
+typedef struct SidereonOrbitResidualStats {
+    /**
+     * Radial RMS residual, meters.
+     */
+    double radial_rms_m;
+    /**
+     * Along-track RMS residual, meters.
+     */
+    double along_rms_m;
+    /**
+     * Cross-track RMS residual, meters.
+     */
+    double cross_rms_m;
+    /**
+     * Three-dimensional RMS residual, meters.
+     */
+    double rms_3d_m;
+    /**
+     * Number of residual epochs.
+     */
+    size_t n;
+    /**
+     * Whether n is below the configured ledger minimum.
+     */
+    bool low_sample_count;
+} SidereonOrbitResidualStats;
+
+/**
+ * Per-constellation residual ledger entry.
+ */
+typedef struct SidereonOrbitConstellationResidualEntry {
+    /**
+     * GNSS system for this ledger entry.
+     */
+    uint32_t system;
+    /**
+     * Residual statistics.
+     */
+    struct SidereonOrbitResidualStats stats;
+} SidereonOrbitConstellationResidualEntry;
+
+/**
+ * Fitted initial-state covariance for [x, y, z, vx, vy, vz].
+ */
+typedef struct SidereonOrbitFitCovariance {
+    /**
+     * Covariance tag, as SidereonOrbitFitCovarianceKind.
+     */
+    uint32_t kind;
+    /**
+     * Row-major 6x6 covariance when kind is Estimated.
+     */
+    double matrix[36];
+} SidereonOrbitFitCovariance;
+
+/**
+ * Initial-state fit result for one satellite.
+ */
+typedef struct SidereonOrbitFitSolution {
+    /**
+     * Satellite fitted by this solution.
+     */
+    struct SidereonSatelliteToken satellite;
+    /**
+     * Estimated inertial initial state.
+     */
+    struct SidereonCartesianState initial_state;
+    /**
+     * Fitted state covariance tag and matrix.
+     */
+    struct SidereonOrbitFitCovariance covariance;
+    /**
+     * Singular-value geometry diagnostics.
+     */
+    struct SidereonGeometryQuality geometry_quality;
+    /**
+     * Three-dimensional RMS residual of the seeded state, meters.
+     */
+    double seed_rms_3d_m;
+    /**
+     * Three-dimensional RMS residual of the fitted state, meters.
+     */
+    double fit_rms_3d_m;
+    /**
+     * Accepted nonlinear least-squares iterations.
+     */
+    size_t iterations;
+} SidereonOrbitFitSolution;
+
+/**
+ * Per-satellite residual ledger entry.
+ */
+typedef struct SidereonOrbitSatelliteResidualEntry {
+    /**
+     * Satellite for this ledger entry.
+     */
+    struct SidereonSatelliteToken satellite;
+    /**
+     * Residual statistics.
+     */
+    struct SidereonOrbitResidualStats stats;
+} SidereonOrbitSatelliteResidualEntry;
 
 /**
  * Dense pass-finder options. Initialize with
@@ -7392,46 +8594,6 @@ typedef struct SidereonPppTroposphereOptions {
 } SidereonPppTroposphereOptions;
 
 /**
- * One canonical precise-ephemeris sample: a satellite's ECEF position (and
- * optional clock) at one epoch, in SI units. This is the serialization-
- * independent element behind an SP3 record; sidereon_sp3_precise_ephemeris_samples
- * extracts them and sidereon_precise_ephemeris_samples_from_samples rebuilds an
- * interpolatable source from them.
- */
-typedef struct SidereonPreciseEphemerisSample {
-    /**
-     * Satellite this sample describes, as a null-terminated token (e.g. G01).
-     */
-    struct SidereonSatelliteToken sat;
-    /**
-     * Time scale the epoch is expressed in (a SidereonTimeScale code as
-     * uint32_t). Every sample in one source must share this scale.
-     */
-    uint32_t time_scale;
-    /**
-     * Sample epoch, seconds since J2000 in the sample's time scale.
-     */
-    double epoch_j2000_s;
-    /**
-     * Satellite ECEF position in the ITRF/IGS frame, meters.
-     */
-    double position_ecef_m[3];
-    /**
-     * Whether clock_s carries a satellite clock estimate.
-     */
-    bool has_clock_s;
-    /**
-     * Satellite clock offset, seconds, when has_clock_s is true.
-     */
-    double clock_s;
-    /**
-     * Whether this epoch carries the SP3 E clock-event flag: true splits the
-     * clock interpolation arc here (a clock reset takes effect at this epoch).
-     */
-    bool clock_event;
-} SidereonPreciseEphemerisSample;
-
-/**
  * One batch range-prediction request: the satellite token, the static receiver
  * ECEF position (meters), and the receive epoch (seconds since J2000).
  */
@@ -7602,6 +8764,11 @@ typedef struct SidereonStatePropagationConfig {
      * Drag parameters when has_drag is true.
      */
     struct SidereonDragParameters drag;
+    /**
+     * Additive force components used when force_model is Composite or the SRP
+     * component is requested for EarthPhaseA.
+     */
+    struct SidereonForceModelComponents force_components;
 } SidereonStatePropagationConfig;
 
 typedef struct SidereonCovariancePropagationOptions {
@@ -10082,6 +11249,46 @@ typedef struct SidereonSgp4FitStatistics {
     bool bstar_observable;
     size_t seed_refine_passes;
 } SidereonSgp4FitStatistics;
+
+/**
+ * Options for sidereal residual filtering.
+ */
+typedef struct SidereonSiderealFilterOptions {
+    /**
+     * Sampling interval of the residual series, seconds.
+     */
+    double sample_interval_s;
+    /**
+     * Maximum number of prior repeats retained per phase bin.
+     */
+    size_t prior_periods;
+    /**
+     * Minimum prior samples required before applying a correction.
+     */
+    size_t min_coverage;
+    /**
+     * Template method, as SidereonSiderealTemplateMethod.
+     */
+    uint32_t template_method;
+    /**
+     * EWMA gain used when template_method is Ewma.
+     */
+    double ewma_alpha;
+} SidereonSiderealFilterOptions;
+
+/**
+ * One period-strength score from sidereon_sidereal_periodicity_strength.
+ */
+typedef struct SidereonSiderealPeriodicityStrength {
+    /**
+     * Candidate period, seconds.
+     */
+    double period_s;
+    /**
+     * Robust variance-reduction score in [0, 1].
+     */
+    double strength;
+} SidereonSiderealPeriodicityStrength;
 
 /**
  * One satellite/elevation entry for sigma and weight maps, mirroring
@@ -13127,6 +14334,21 @@ enum SidereonStatus sidereon_clock_compute_allan_deviations(const struct Sidereo
                                                             struct SidereonAllanDeviationCurves **out_curves);
 
 /**
+ * Identify power-law clock noise from supplied ADEV and MDEV curves. On
+ * success writes a handle to *out_fit.
+ *
+ * Safety: adev_points and mdev_points point to their counts; options may be
+ * NULL for sampled-at-Nyquist defaults from the first ADEV tau; out_fit must
+ * point to handle storage.
+ */
+enum SidereonStatus sidereon_clock_fit_power_law_noise(const struct SidereonAllanPoint *adev_points,
+                                                       size_t adev_count,
+                                                       const struct SidereonAllanPoint *mdev_points,
+                                                       size_t mdev_count,
+                                                       const struct SidereonPowerLawNoiseOptions *options,
+                                                       struct SidereonPowerLawNoiseFit **out_fit);
+
+/**
  * Overlapping Hadamard deviation for explicit averaging factors. Each output
  * point has tau in seconds.
  *
@@ -13179,6 +14401,65 @@ enum SidereonStatus sidereon_clock_overlapping_adev(const struct SidereonAllanSa
                                                     size_t len,
                                                     size_t *out_written,
                                                     size_t *out_required);
+
+/**
+ * Copy PSD coefficients [h_-2, h_-1, h_0, h_1, h_2].
+ *
+ * Safety: fit must be live; out_coefficients must point to 5 doubles.
+ */
+enum SidereonStatus sidereon_clock_power_law_noise_fit_coefficients(const struct SidereonPowerLawNoiseFit *fit,
+                                                                    double *out_coefficients);
+
+/**
+ * Release a power-law noise fit handle. Null is a no-op.
+ *
+ * Safety: fit must be NULL or a live handle from
+ * sidereon_clock_fit_power_law_noise.
+ */
+void sidereon_clock_power_law_noise_fit_free(struct SidereonPowerLawNoiseFit *fit);
+
+/**
+ * Copy per-octave power-law decisions. Uses the variable-length output
+ * contract.
+ *
+ * Safety: fit must be live; out may be NULL only when len is zero.
+ */
+enum SidereonStatus sidereon_clock_power_law_noise_fit_octaves(const struct SidereonPowerLawNoiseFit *fit,
+                                                               struct SidereonPowerLawOctave *out,
+                                                               size_t len,
+                                                               size_t *out_written,
+                                                               size_t *out_required);
+
+/**
+ * Copy fitted power-law regions. Uses the variable-length output contract.
+ *
+ * Safety: fit must be live; out may be NULL only when len is zero.
+ */
+enum SidereonStatus sidereon_clock_power_law_noise_fit_regions(const struct SidereonPowerLawNoiseFit *fit,
+                                                               struct SidereonPowerLawNoiseRegion *out,
+                                                               size_t len,
+                                                               size_t *out_written,
+                                                               size_t *out_required);
+
+/**
+ * Initialize power-law noise options from a sample interval and bandwidth.
+ *
+ * Safety: out_options must point to SidereonPowerLawNoiseOptions.
+ */
+enum SidereonStatus sidereon_clock_power_law_noise_options_init(double basic_tau_s,
+                                                                double measurement_bandwidth_hz,
+                                                                struct SidereonPowerLawNoiseOptions *out_options);
+
+/**
+ * Return exact ADEV and MDEV log-log slopes for a power-law noise type.
+ *
+ * Safety: out_adev_slope, out_mdev_slope, and out_variance_tau_exponent must
+ * point to writable scalars.
+ */
+enum SidereonStatus sidereon_clock_power_law_noise_slopes(uint32_t noise_type,
+                                                          double *out_adev_slope,
+                                                          double *out_mdev_slope,
+                                                          int32_t *out_variance_tau_exponent);
 
 /**
  * Time deviation for explicit averaging factors. Tau and deviation are seconds.
@@ -14601,6 +15882,36 @@ enum SidereonStatus sidereon_error_ellipse_2x2(const double *covariance,
                                                struct SidereonErrorEllipse2 *out_ellipse);
 
 /**
+ * Rotate an ECEF covariance to ENU at receiver and compute standard metrics.
+ *
+ * Safety: covariance_ecef_m2 points to 9 row-major doubles; out_metrics and
+ * out_error must point to writable structs.
+ */
+enum SidereonStatus sidereon_error_metrics_from_ecef_covariance_m2(const double *covariance_ecef_m2,
+                                                                   struct SidereonGeodetic receiver,
+                                                                   struct SidereonPositionErrorMetrics *out_metrics,
+                                                                   enum SidereonErrorMetricsErrorKind *out_error);
+
+/**
+ * Compute standard metrics from an ENU covariance in square meters.
+ *
+ * Safety: covariance_enu_m2 points to 9 row-major doubles; out_metrics and
+ * out_error must point to writable structs.
+ */
+enum SidereonStatus sidereon_error_metrics_from_enu_covariance_m2(const double *covariance_enu_m2,
+                                                                  struct SidereonPositionErrorMetrics *out_metrics,
+                                                                  enum SidereonErrorMetricsErrorKind *out_error);
+
+/**
+ * Compute standard metrics from a kinematic PPP epoch solution shape.
+ *
+ * Safety: solution, out_metrics, and out_error must point to valid structs.
+ */
+enum SidereonStatus sidereon_error_metrics_from_kinematic_solution(const struct SidereonKinematicSolutionMetricsInput *solution,
+                                                                   struct SidereonPositionErrorMetrics *out_metrics,
+                                                                   enum SidereonErrorMetricsErrorKind *out_error);
+
+/**
  * Estimate time to reentry using drag-perturbed numerical propagation.
  *
  * Safety: initial and config must point to valid structs; out_estimate must
@@ -14834,6 +16145,32 @@ enum SidereonStatus sidereon_find_tca_conjunctions_with_propagated_covariance_fr
                                                                                         size_t len,
                                                                                         size_t *out_written,
                                                                                         size_t *out_required);
+
+/**
+ * Fit one satellite from canonical precise-ephemeris samples. On success
+ * writes a report handle to *out_report.
+ *
+ * Safety: samples points to count sample structs; sat_id must be a
+ * null-terminated satellite token; options may be NULL; out_report must point
+ * to handle storage.
+ */
+enum SidereonStatus sidereon_fit_precise_ephemeris_sample_orbit(const struct SidereonPreciseEphemerisSample *samples,
+                                                                size_t count,
+                                                                const char *sat_id,
+                                                                const struct SidereonOrbitFitOptions *options,
+                                                                struct SidereonOrbitFitReport **out_report);
+
+/**
+ * Fit one satellite from a parsed SP3 product. On success writes a report
+ * handle to *out_report.
+ *
+ * Safety: sp3 must be live; sat_id must be a null-terminated satellite token;
+ * options may be NULL for defaults; out_report must point to handle storage.
+ */
+enum SidereonStatus sidereon_fit_sp3_precise_orbit(const struct SidereonSp3 *sp3,
+                                                   const char *sat_id,
+                                                   const struct SidereonOrbitFitOptions *options,
+                                                   struct SidereonOrbitFitReport **out_report);
 
 /**
  * Fix Melbourne-Wubbena wide-lane ambiguities over a dual-frequency RTK arc. On
@@ -15122,6 +16459,85 @@ enum SidereonStatus sidereon_galileo_nequick_g_native(double ai0,
                                                       double *out_delay_m);
 
 /**
+ * Detect candidate displacement steps. Uses the variable-length output
+ * contract.
+ *
+ * Safety: series must point to a valid series; out may be NULL only when len
+ * is zero.
+ */
+enum SidereonStatus sidereon_geodetic_detect_steps(const struct SidereonGeodeticPositionSeries *series,
+                                                   const struct SidereonGeodeticStepDetectionOptions *options,
+                                                   struct SidereonGeodeticStepCandidate *out,
+                                                   size_t len,
+                                                   size_t *out_written,
+                                                   size_t *out_required);
+
+/**
+ * Fit a linear geodetic trajectory model. On success writes a trajectory
+ * handle to *out_trajectory.
+ *
+ * Safety: series and model must point to valid structs; options may be NULL
+ * for defaults; out_trajectory must point to handle storage.
+ */
+enum SidereonStatus sidereon_geodetic_fit_trajectory(const struct SidereonGeodeticPositionSeries *series,
+                                                     const struct SidereonGeodeticTrajectoryModel *model,
+                                                     const struct SidereonGeodeticTrajectoryFitOptions *options,
+                                                     struct SidereonGeodeticTrajectory **out_trajectory);
+
+/**
+ * Initialize MIDAS options with core defaults.
+ *
+ * Safety: out_options must point to SidereonMidasOptions.
+ */
+enum SidereonStatus sidereon_geodetic_midas_options_init(struct SidereonMidasOptions *out_options);
+
+/**
+ * Copy the common-mode velocity removed from a motion field.
+ *
+ * Safety: field must be live; out_common_mode must point to 3 doubles.
+ */
+enum SidereonStatus sidereon_geodetic_motion_field_common_mode(const struct SidereonGeodeticMotionField *field,
+                                                               double *out_common_mode);
+
+/**
+ * Release a motion field handle. Null is a no-op.
+ *
+ * Safety: field must be NULL or a live handle from
+ * sidereon_geodetic_network_field.
+ */
+void sidereon_geodetic_motion_field_free(struct SidereonGeodeticMotionField *field);
+
+/**
+ * Copy station motions from a motion field. Uses the variable-length output
+ * contract.
+ *
+ * Safety: field must be live; out may be NULL only when len is zero.
+ */
+enum SidereonStatus sidereon_geodetic_motion_field_stations(const struct SidereonGeodeticMotionField *field,
+                                                            struct SidereonGeodeticStationMotion *out,
+                                                            size_t len,
+                                                            size_t *out_written,
+                                                            size_t *out_required);
+
+/**
+ * Estimate a network motion field. On success writes a handle to *out_field.
+ *
+ * Safety: stations points to station_count entries; out_field must point to
+ * handle storage.
+ */
+enum SidereonStatus sidereon_geodetic_network_field(const struct SidereonGeodeticNetworkStation *stations,
+                                                    size_t station_count,
+                                                    struct SidereonGeodeticNetworkFrame frame,
+                                                    struct SidereonGeodeticMotionField **out_field);
+
+/**
+ * Initialize step-detection options with core defaults.
+ *
+ * Safety: out_options must point to SidereonGeodeticStepDetectionOptions.
+ */
+enum SidereonStatus sidereon_geodetic_step_detection_options_init(struct SidereonGeodeticStepDetectionOptions *out_options);
+
+/**
  * Convert a WGS84 geodetic position (latitude/longitude in radians, ellipsoidal
  * height in meters) to an ITRF/ECEF position in meters. Pure value in, value
  * out: no handle is allocated. Wraps the engine's single validated forward
@@ -15132,6 +16548,83 @@ enum SidereonStatus sidereon_galileo_nequick_g_native(double ai0,
  */
 enum SidereonStatus sidereon_geodetic_to_ecef(const struct SidereonGeodetic *geodetic,
                                               struct SidereonItrfPosition *out_ecef);
+
+/**
+ * Copy the three ENU trajectory component summaries.
+ *
+ * Safety: out_components must point to at least 3 component structs.
+ */
+enum SidereonStatus sidereon_geodetic_trajectory_components(const struct SidereonGeodeticTrajectory *trajectory,
+                                                            struct SidereonGeodeticTrajectoryComponent *out_components);
+
+/**
+ * Initialize trajectory fit options with core defaults.
+ *
+ * Safety: out_options must point to SidereonGeodeticTrajectoryFitOptions.
+ */
+enum SidereonStatus sidereon_geodetic_trajectory_fit_options_init(struct SidereonGeodeticTrajectoryFitOptions *out_options);
+
+/**
+ * Release a trajectory handle. Null is a no-op.
+ *
+ * Safety: trajectory must be NULL or a live handle from
+ * sidereon_geodetic_fit_trajectory.
+ */
+void sidereon_geodetic_trajectory_free(struct SidereonGeodeticTrajectory *trajectory);
+
+/**
+ * Copy one ENU component's offset coefficients. Uses the variable-length
+ * output contract.
+ *
+ * Safety: trajectory must be live; out may be NULL only when len is zero.
+ */
+enum SidereonStatus sidereon_geodetic_trajectory_offsets(const struct SidereonGeodeticTrajectory *trajectory,
+                                                         size_t axis,
+                                                         double *out,
+                                                         size_t len,
+                                                         size_t *out_written,
+                                                         size_t *out_required);
+
+/**
+ * Copy the flattened row-major trajectory parameter covariance.
+ *
+ * Safety: trajectory must be live; out may be NULL only when len is zero.
+ */
+enum SidereonStatus sidereon_geodetic_trajectory_parameter_covariance(const struct SidereonGeodeticTrajectory *trajectory,
+                                                                      double *out,
+                                                                      size_t len,
+                                                                      size_t *out_written,
+                                                                      size_t *out_required);
+
+/**
+ * Copy a trajectory summary.
+ *
+ * Safety: trajectory must be a live handle; out_summary must point to a
+ * SidereonGeodeticTrajectorySummary.
+ */
+enum SidereonStatus sidereon_geodetic_trajectory_summary(const struct SidereonGeodeticTrajectory *trajectory,
+                                                         struct SidereonGeodeticTrajectorySummary *out_summary);
+
+/**
+ * Copy trajectory terms. Uses the variable-length output contract.
+ *
+ * Safety: trajectory must be live; out may be NULL only when len is zero.
+ */
+enum SidereonStatus sidereon_geodetic_trajectory_terms(const struct SidereonGeodeticTrajectory *trajectory,
+                                                       struct SidereonGeodeticTrajectoryTerm *out,
+                                                       size_t len,
+                                                       size_t *out_written,
+                                                       size_t *out_required);
+
+/**
+ * Estimate station velocity with MIDAS.
+ *
+ * Safety: series must point to a series descriptor; options may be NULL for
+ * defaults; out_velocity must point to a SidereonMidasVelocity.
+ */
+enum SidereonStatus sidereon_geodetic_velocity_midas(const struct SidereonGeodeticPositionSeries *series,
+                                                     const struct SidereonMidasOptions *options,
+                                                     struct SidereonMidasVelocity *out_velocity);
 
 enum SidereonStatus sidereon_geoid_grid_ellipsoidal_height_rad(const struct SidereonGeoidGrid *grid,
                                                                double orthometric_height_m,
@@ -17028,6 +18521,64 @@ enum SidereonStatus sidereon_opm_to_xml(const struct SidereonOpm *opm,
                                         size_t len,
                                         size_t *out_written,
                                         size_t *out_required);
+
+/**
+ * Initialize orbit-fit options with core defaults.
+ *
+ * Safety: out_options must point to SidereonOrbitFitOptions.
+ */
+enum SidereonStatus sidereon_orbit_fit_options_init(struct SidereonOrbitFitOptions *out_options);
+
+/**
+ * Copy the residual ledger arc span.
+ *
+ * Safety: report must be live; out_span must point to SidereonOrbitArcSpan.
+ */
+enum SidereonStatus sidereon_orbit_fit_report_arc_span(const struct SidereonOrbitFitReport *report,
+                                                       struct SidereonOrbitArcSpan *out_span);
+
+/**
+ * Copy per-constellation residual ledger entries. Uses the variable-length
+ * output contract.
+ *
+ * Safety: report must be live; out may be NULL only when len is zero.
+ */
+enum SidereonStatus sidereon_orbit_fit_report_constellation_ledger(const struct SidereonOrbitFitReport *report,
+                                                                   struct SidereonOrbitConstellationResidualEntry *out,
+                                                                   size_t len,
+                                                                   size_t *out_written,
+                                                                   size_t *out_required);
+
+/**
+ * Copy fitted initial-state solutions. Uses the variable-length output
+ * contract.
+ *
+ * Safety: report must be live; out may be NULL only when len is zero.
+ */
+enum SidereonStatus sidereon_orbit_fit_report_fits(const struct SidereonOrbitFitReport *report,
+                                                   struct SidereonOrbitFitSolution *out,
+                                                   size_t len,
+                                                   size_t *out_written,
+                                                   size_t *out_required);
+
+/**
+ * Release an orbit-fit report handle. Null is a no-op.
+ *
+ * Safety: report must be NULL or a live handle from an orbit-fit function.
+ */
+void sidereon_orbit_fit_report_free(struct SidereonOrbitFitReport *report);
+
+/**
+ * Copy per-satellite residual ledger entries. Uses the variable-length output
+ * contract.
+ *
+ * Safety: report must be live; out may be NULL only when len is zero.
+ */
+enum SidereonStatus sidereon_orbit_fit_report_satellite_ledger(const struct SidereonOrbitFitReport *report,
+                                                               struct SidereonOrbitSatelliteResidualEntry *out,
+                                                               size_t len,
+                                                               size_t *out_written,
+                                                               size_t *out_required);
 
 /**
  * Orthometric height H = h - N (metres above mean sea level) from an
@@ -20579,6 +22130,113 @@ enum SidereonStatus sidereon_sgp4_tle_fit_omm(const struct SidereonSgp4TleFit *f
 
 enum SidereonStatus sidereon_sgp4_tle_fit_statistics(const struct SidereonSgp4TleFit *fit,
                                                      struct SidereonSgp4FitStatistics *out_stats);
+
+/**
+ * Filter a residual series by phase-stacked sidereal repeat templates. On
+ * success writes a handle to *out_output; release it with
+ * sidereon_sidereal_filter_output_free.
+ *
+ * Safety: series points to count doubles, options may be NULL for defaults,
+ * and out_output must point to SidereonSiderealFilterOutput* storage.
+ */
+enum SidereonStatus sidereon_sidereal_filter(const double *series,
+                                             size_t count,
+                                             double period_s,
+                                             const struct SidereonSiderealFilterOptions *options,
+                                             struct SidereonSiderealFilterOutput **out_output);
+
+/**
+ * Initialize sidereal filter options with the core defaults.
+ *
+ * Safety: out_options must point to a SidereonSiderealFilterOptions.
+ */
+enum SidereonStatus sidereon_sidereal_filter_options_init(struct SidereonSiderealFilterOptions *out_options);
+
+/**
+ * Copy per-bin coverage counts. Uses the variable-length output contract.
+ *
+ * Safety: output must be a live handle; out may be NULL only when len is zero.
+ */
+enum SidereonStatus sidereon_sidereal_filter_output_coverage(const struct SidereonSiderealFilterOutput *output,
+                                                             size_t *out,
+                                                             size_t len,
+                                                             size_t *out_written,
+                                                             size_t *out_required);
+
+/**
+ * Copy sidereal-filtered residuals. Uses the variable-length output contract.
+ *
+ * Safety: output must be a live handle; out may be NULL only when len is zero.
+ */
+enum SidereonStatus sidereon_sidereal_filter_output_filtered(const struct SidereonSiderealFilterOutput *output,
+                                                             double *out,
+                                                             size_t len,
+                                                             size_t *out_written,
+                                                             size_t *out_required);
+
+/**
+ * Release a sidereal filter output handle. Null is a no-op.
+ *
+ * Safety: output must be NULL or a live handle from sidereon_sidereal_filter.
+ */
+void sidereon_sidereal_filter_output_free(struct SidereonSiderealFilterOutput *output);
+
+/**
+ * Copy sidereal template values by phase bin. Uses the variable-length output
+ * contract.
+ *
+ * Safety: output must be a live handle; out may be NULL only when len is zero.
+ */
+enum SidereonStatus sidereon_sidereal_filter_output_template(const struct SidereonSiderealFilterOutput *output,
+                                                             double *out,
+                                                             size_t len,
+                                                             size_t *out_written,
+                                                             size_t *out_required);
+
+/**
+ * Copy per-bin under-covered flags. Uses the variable-length output contract.
+ *
+ * Safety: output must be a live handle; out may be NULL only when len is zero.
+ */
+enum SidereonStatus sidereon_sidereal_filter_output_under_covered(const struct SidereonSiderealFilterOutput *output,
+                                                                  bool *out,
+                                                                  size_t len,
+                                                                  size_t *out_written,
+                                                                  size_t *out_required);
+
+/**
+ * Compute a broadcast-orbit repeat lag for one satellite, in seconds.
+ *
+ * Safety: broadcast must be a live handle; sat_id must be a null-terminated
+ * satellite token; out_period_s must point to a double.
+ */
+enum SidereonStatus sidereon_sidereal_orbit_repeat_lag(const struct SidereonBroadcastEphemeris *broadcast,
+                                                       const char *sat_id,
+                                                       double near_epoch_j2000_s,
+                                                       double *out_period_s);
+
+/**
+ * Score repeating components at candidate periods for 1 Hz samples. Uses the
+ * variable-length output contract.
+ *
+ * Safety: series and candidate_periods_s point to their counts; out may be
+ * NULL only when len is zero.
+ */
+enum SidereonStatus sidereon_sidereal_periodicity_strength(const double *series,
+                                                           size_t count,
+                                                           const double *candidate_periods_s,
+                                                           size_t candidate_count,
+                                                           struct SidereonSiderealPeriodicityStrength *out,
+                                                           size_t len,
+                                                           size_t *out_written,
+                                                           size_t *out_required);
+
+/**
+ * Return the default constellation repeat period, in seconds.
+ *
+ * Safety: out_period_s must point to a double.
+ */
+enum SidereonStatus sidereon_sidereal_repeat_period(uint32_t system, double *out_period_s);
 
 /**
  * Per-satellite measurement sigma (meters) for elevation/C-N0 entries. Writes
