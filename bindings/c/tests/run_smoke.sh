@@ -370,6 +370,24 @@ cc -std=c11 -Wall -Wextra -Werror \
 echo "== running precise_samples_smoke program =="
 "${precise_samples_out}" "${sp3_path}"
 
+# 0.13 capabilities: batched observable states and cached precise interpolants,
+# estimation/detection primitives, and source localization. Uses the GRG SP3 for
+# observable-state parity; source-localization inputs are synthetic in the test.
+echo "== compiling cap013_smoke program =="
+cap013_out="${target_dir}/cap013_smoke"
+cc -std=c11 -Wall -Wextra -Werror \
+    -I"${binding_root}/include" \
+    -I"${here}" \
+    "${here}/cap013_smoke.c" \
+    -L"${lib_dir}" \
+    -lsidereon \
+    -Wl,-rpath,"${lib_dir}" \
+    -lm \
+    -o "${cap013_out}"
+
+echo "== running cap013_smoke program =="
+"${cap013_out}" "${sp3_path}"
+
 # 0.12 core capabilities: Allan-family clock stability, terrain batch lookup,
 # IONEX sample construction/extraction, SBAS decoded payload accessors, ARAIM,
 # and coordinate angular separation / position angle. Uses the IONEX binding

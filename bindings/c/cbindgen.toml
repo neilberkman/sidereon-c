@@ -57,9 +57,9 @@ usize_is_size_t = true
 after_includes = """
 
 #define SIDEREON_VERSION_MAJOR 0
-#define SIDEREON_VERSION_MINOR 11
-#define SIDEREON_VERSION_PATCH 1
-#define SIDEREON_VERSION_STRING "0.11.1\""""
+#define SIDEREON_VERSION_MINOR 12
+#define SIDEREON_VERSION_PATCH 0
+#define SIDEREON_VERSION_STRING "0.12.0\""""
 
 [enum]
 # Idiomatic C enum constants: SidereonStatus::Ok -> SIDEREON_STATUS_OK.
@@ -409,8 +409,27 @@ include = [
     "SidereonMoonTransit",
     "SidereonPreciseEphemerisSample",
     "SidereonPreciseEphemerisSamples",
+    "SidereonPreciseEphemerisInterpolant",
+    "SidereonObservableStateElementStatus",
     "SidereonRangePredictionRequest",
     "SidereonRangePrediction",
+    "SidereonAlphaBetaState",
+    "SidereonAlphaBetaGains",
+    "SidereonAlphaBetaStep",
+    "SidereonScalarKalmanGains",
+    "SidereonNisGate",
+    "SidereonSourceSolveMode",
+    "SidereonSourceLoss",
+    "SidereonSourceSensor",
+    "SidereonSourceLocateOptions",
+    "SidereonSourceInitialGuess",
+    "SidereonSourceCovariance",
+    "SidereonSourceResidual",
+    "SidereonSourceSensorInfluence",
+    "SidereonSourceGeometryQuality",
+    "SidereonSourceSolutionSummary",
+    "SidereonSourceCrlb",
+    "SidereonSourceSolution",
     "SidereonTecSample",
     "SidereonTecGridSamples",
     "SidereonTecGridSamplesInfo",

@@ -45,9 +45,9 @@
 #include <stdlib.h>
 
 #define SIDEREON_VERSION_MAJOR 0
-#define SIDEREON_VERSION_MINOR 11
-#define SIDEREON_VERSION_PATCH 1
-#define SIDEREON_VERSION_STRING "0.11.1"
+#define SIDEREON_VERSION_MINOR 12
+#define SIDEREON_VERSION_PATCH 0
+#define SIDEREON_VERSION_STRING "0.12.0"
 
 #define TLE_FIELD_C_BYTES 32
 
@@ -134,6 +134,8 @@
  * 0/1 bit per byte, most significant first).
  */
 #define SIDEREON_LNAV_SUBFRAME_LENGTH 300
+
+
 
 #define SGP4_FIT_OBJECT_NAME_C_BYTES 65
 
@@ -683,6 +685,24 @@ typedef enum SidereonEphemerisSampleStatus {
     SIDEREON_EPHEMERIS_SAMPLE_STATUS_VALID = 0,
     SIDEREON_EPHEMERIS_SAMPLE_STATUS_GAP = 1,
 } SidereonEphemerisSampleStatus;
+
+/**
+ * Per-element state category for a batched observable-state query.
+ */
+typedef enum SidereonObservableStateElementStatus {
+    /**
+     * Position and clock fields hold a usable state.
+     */
+    SIDEREON_OBSERVABLE_STATE_ELEMENT_STATUS_VALID = 0,
+    /**
+     * The source had no usable state for this satellite and epoch.
+     */
+    SIDEREON_OBSERVABLE_STATE_ELEMENT_STATUS_GAP = 1,
+    /**
+     * The scalar evaluator returned a non-gap error.
+     */
+    SIDEREON_OBSERVABLE_STATE_ELEMENT_STATUS_ERROR = 2,
+} SidereonObservableStateElementStatus;
 
 /**
  * Direction of a Moon elevation threshold crossing.
@@ -1571,6 +1591,46 @@ typedef enum SidereonAllanEstimator {
     SIDEREON_ALLAN_ESTIMATOR_TDEV = 4,
 } SidereonAllanEstimator;
 
+/**
+ * Source-localization solve mode.
+ */
+typedef enum SidereonSourceSolveMode {
+    /**
+     * Absolute time of arrival. The solved state is position plus origin time.
+     */
+    SIDEREON_SOURCE_SOLVE_MODE_TOA = 0,
+    /**
+     * Time difference of arrival against reference_sensor in the options.
+     */
+    SIDEREON_SOURCE_SOLVE_MODE_TDOA = 1,
+} SidereonSourceSolveMode;
+
+/**
+ * Source-localization trust-region loss selector.
+ */
+typedef enum SidereonSourceLoss {
+    /**
+     * Ordinary least squares.
+     */
+    SIDEREON_SOURCE_LOSS_LINEAR = 0,
+    /**
+     * Soft-L1 robust loss.
+     */
+    SIDEREON_SOURCE_LOSS_SOFT_L1 = 1,
+    /**
+     * Huber robust loss.
+     */
+    SIDEREON_SOURCE_LOSS_HUBER = 2,
+    /**
+     * Cauchy robust loss.
+     */
+    SIDEREON_SOURCE_LOSS_CAUCHY = 3,
+    /**
+     * Arctangent robust loss.
+     */
+    SIDEREON_SOURCE_LOSS_ARCTAN = 4,
+} SidereonSourceLoss;
+
 typedef enum SidereonSbasSolveMode {
     SIDEREON_SBAS_SOLVE_MODE_MIXED_AUGMENTATION = 0,
     SIDEREON_SBAS_SOLVE_MODE_SBAS_ONLY = 1,
@@ -1820,6 +1880,15 @@ typedef struct SidereonPppFixedSolution SidereonPppFixedSolution;
 typedef struct SidereonPppFloatSolution SidereonPppFloatSolution;
 
 /**
+ * A build-once precise-ephemeris interpolant with cached per-satellite nodes.
+ * Opaque to C. Create with sidereon_precise_ephemeris_interpolant_from_sp3,
+ * sidereon_precise_ephemeris_interpolant_from_samples, or
+ * sidereon_precise_ephemeris_interpolant_from_precise_ephemeris_samples and
+ * release with sidereon_precise_ephemeris_interpolant_free.
+ */
+typedef struct SidereonPreciseEphemerisInterpolant SidereonPreciseEphemerisInterpolant;
+
+/**
  * A sample-backed precise-ephemeris source, built from canonical
  * position/clock samples rather than parsed SP3 text. Opaque to C. Create with
  * sidereon_precise_ephemeris_samples_from_samples and release with
@@ -1982,6 +2051,13 @@ typedef struct SidereonSbasBlock SidereonSbasBlock;
 typedef struct SidereonSbasCorrectionStore SidereonSbasCorrectionStore;
 
 typedef struct SidereonSgp4TleFit SidereonSgp4TleFit;
+
+/**
+ * Source-localization solution handle. Opaque to C. Create with
+ * sidereon_locate_source, read with sidereon_source_solution_* accessors, and
+ * release with sidereon_source_solution_free.
+ */
+typedef struct SidereonSourceSolution SidereonSourceSolution;
 
 /**
  * A receiver solution paired with the ephemeris-source provenance that produced
@@ -11025,6 +11101,400 @@ typedef struct SidereonRangePrediction {
      */
     double sat_pos_ecef_m[3];
 } SidereonRangePrediction;
+
+/**
+ * Alpha-beta gain set for one scalar channel.
+ */
+typedef struct SidereonAlphaBetaGains {
+    /**
+     * Level gain alpha.
+     */
+    double alpha;
+    /**
+     * Rate gain beta. The update applies beta * innovation / dt.
+     */
+    double beta;
+} SidereonAlphaBetaGains;
+
+/**
+ * State of one scalar level and rate alpha-beta channel.
+ */
+typedef struct SidereonAlphaBetaState {
+    /**
+     * Level estimate, in caller-chosen units.
+     */
+    double level;
+    /**
+     * Rate estimate, in caller-chosen units per second.
+     */
+    double rate;
+} SidereonAlphaBetaState;
+
+/**
+ * One alpha-beta predict and update result.
+ */
+typedef struct SidereonAlphaBetaStep {
+    /**
+     * Predicted state before applying the measurement.
+     */
+    struct SidereonAlphaBetaState predicted;
+    /**
+     * Updated state after applying the measurement.
+     */
+    struct SidereonAlphaBetaState updated;
+    /**
+     * Measurement innovation, measurement minus predicted level.
+     */
+    double innovation;
+} SidereonAlphaBetaStep;
+
+/**
+ * Steady-state scalar constant-velocity Kalman gain set.
+ */
+typedef struct SidereonScalarKalmanGains {
+    /**
+     * Position gain Kx.
+     */
+    double position_gain;
+    /**
+     * Rate gain Kv, in 1 / dt units.
+     */
+    double rate_gain;
+} SidereonScalarKalmanGains;
+
+/**
+ * Result of a normalized innovation squared gate.
+ */
+typedef struct SidereonNisGate {
+    /**
+     * Normalized innovation squared statistic.
+     */
+    double nis;
+    /**
+     * Chi-square gate threshold.
+     */
+    double threshold;
+    /**
+     * True when nis is less than or equal to threshold.
+     */
+    bool in_gate;
+    /**
+     * Measurement degrees of freedom.
+     */
+    size_t dof;
+} SidereonNisGate;
+
+/**
+ * Options for sidereon_locate_source. Initialize with
+ * sidereon_source_locate_options_init for the core defaults.
+ */
+typedef struct SidereonSourceLocateOptions {
+    /**
+     * SidereonSourceSolveMode as a uint32_t.
+     */
+    uint32_t mode;
+    /**
+     * Reference sensor index when mode is SIDEREON_SOURCE_SOLVE_MODE_TDOA.
+     */
+    size_t reference_sensor;
+    /**
+     * Timing standard deviation in seconds for covariance and CRLB scaling.
+     */
+    double timing_sigma_s;
+    /**
+     * SidereonSourceLoss as a uint32_t.
+     */
+    uint32_t loss;
+    /**
+     * Residual scale in seconds for non-linear loss functions.
+     */
+    double f_scale_s;
+    /**
+     * Whether ftol is present.
+     */
+    bool has_ftol;
+    /**
+     * Optional function tolerance.
+     */
+    double ftol;
+    /**
+     * Whether xtol is present.
+     */
+    bool has_xtol;
+    /**
+     * Optional step tolerance.
+     */
+    double xtol;
+    /**
+     * Whether gtol is present.
+     */
+    bool has_gtol;
+    /**
+     * Optional gradient tolerance.
+     */
+    double gtol;
+    /**
+     * Whether max_nfev is present.
+     */
+    bool has_max_nfev;
+    /**
+     * Optional maximum residual evaluations.
+     */
+    size_t max_nfev;
+} SidereonSourceLocateOptions;
+
+/**
+ * A source-localization sensor position. position_m stores 2D or 3D Cartesian
+ * coordinates in meters; dimension selects how many components are read.
+ */
+typedef struct SidereonSourceSensor {
+    /**
+     * Coordinate dimension, 2 or 3.
+     */
+    size_t dimension;
+    /**
+     * Cartesian position in meters. Components beyond dimension are ignored.
+     */
+    double position_m[3];
+    /**
+     * Whether propagation_speed_m_s overrides the call-level speed.
+     */
+    bool has_propagation_speed_m_s;
+    /**
+     * Per-sensor propagation speed in meters per second when present.
+     */
+    double propagation_speed_m_s;
+} SidereonSourceSensor;
+
+/**
+ * Closed-form initializer used to start source localization.
+ */
+typedef struct SidereonSourceInitialGuess {
+    /**
+     * Coordinate dimension, 2 or 3.
+     */
+    size_t dimension;
+    /**
+     * Initial position in meters; components beyond dimension are zero.
+     */
+    double position_m[3];
+    /**
+     * Whether origin_time_s is present.
+     */
+    bool has_origin_time_s;
+    /**
+     * Initial origin time in seconds when present.
+     */
+    double origin_time_s;
+    /**
+     * Root-mean-square residual of the seed in seconds.
+     */
+    double residual_rms_s;
+} SidereonSourceInitialGuess;
+
+/**
+ * State covariance or CRLB for a source solve. Matrices are row-major.
+ */
+typedef struct SidereonSourceCovariance {
+    /**
+     * Position coordinate dimension, 2 or 3.
+     */
+    size_t dimension;
+    /**
+     * State dimension. ToA is dimension + 1, TDOA is dimension.
+     */
+    size_t state_dimension;
+    /**
+     * Full state covariance, row-major, maximum 4 by 4.
+     */
+    double state[16];
+    /**
+     * Position covariance block in square meters, row-major, maximum 3 by 3.
+     */
+    double position_m2[9];
+    /**
+     * Whether origin_time_s2 is present.
+     */
+    bool has_origin_time_s2;
+    /**
+     * Origin-time variance in square seconds when present.
+     */
+    double origin_time_s2;
+    /**
+     * Timing sigma in seconds used to scale the covariance.
+     */
+    double timing_sigma_s;
+} SidereonSourceCovariance;
+
+/**
+ * CRLB and DOP for a proposed source geometry.
+ */
+typedef struct SidereonSourceCrlb {
+    /**
+     * Timing DOP values. Position DOP values multiply seconds into meters.
+     */
+    struct SidereonDop dop;
+    /**
+     * State covariance scaled by the requested timing sigma.
+     */
+    struct SidereonSourceCovariance covariance;
+} SidereonSourceCrlb;
+
+/**
+ * Geometry and redundancy diagnostics for a source solve.
+ */
+typedef struct SidereonSourceGeometryQuality {
+    /**
+     * Number of residual rows used by the solve.
+     */
+    size_t residual_count;
+    /**
+     * Number of estimated state parameters.
+     */
+    size_t parameter_count;
+    /**
+     * Residual count minus parameter count, saturated at zero.
+     */
+    size_t redundancy;
+    /**
+     * Whether covariance was available from the normal matrix.
+     */
+    bool covariance_available;
+    /**
+     * Whether the final normal matrix was rank deficient.
+     */
+    bool rank_deficient;
+} SidereonSourceGeometryQuality;
+
+/**
+ * Source-localization solution summary.
+ */
+typedef struct SidereonSourceSolutionSummary {
+    /**
+     * Coordinate dimension, 2 or 3.
+     */
+    size_t dimension;
+    /**
+     * Estimated source position in meters; components beyond dimension are zero.
+     */
+    double position_m[3];
+    /**
+     * Whether origin_time_s is present.
+     */
+    bool has_origin_time_s;
+    /**
+     * Estimated origin time in seconds.
+     */
+    double origin_time_s;
+    /**
+     * Whether covariance is available.
+     */
+    bool has_covariance;
+    /**
+     * Number of residual rows.
+     */
+    size_t residual_count;
+    /**
+     * Number of per-sensor influence rows.
+     */
+    size_t influence_count;
+    /**
+     * Geometry and redundancy diagnostics.
+     */
+    struct SidereonSourceGeometryQuality geometry_quality;
+    /**
+     * Closed-form seed used by the iterative solve.
+     */
+    struct SidereonSourceInitialGuess initial_guess;
+    /**
+     * Trust-region termination status.
+     */
+    int32_t status;
+    /**
+     * Residual evaluations used by the solver.
+     */
+    size_t nfev;
+    /**
+     * Jacobian evaluations used by the solver.
+     */
+    size_t njev;
+    /**
+     * Final least-squares cost.
+     */
+    double cost;
+    /**
+     * Infinity norm of the final gradient.
+     */
+    double optimality;
+} SidereonSourceSolutionSummary;
+
+/**
+ * One residual row associated with a sensor.
+ */
+typedef struct SidereonSourceResidual {
+    /**
+     * Sensor index in the input array.
+     */
+    size_t sensor_index;
+    /**
+     * Whether reference_sensor_index is present.
+     */
+    bool has_reference_sensor_index;
+    /**
+     * Reference sensor for TDOA residuals.
+     */
+    size_t reference_sensor_index;
+    /**
+     * Residual in seconds.
+     */
+    double residual_s;
+} SidereonSourceResidual;
+
+/**
+ * Per-sensor leave-one-out diagnostic.
+ */
+typedef struct SidereonSourceSensorInfluence {
+    /**
+     * Sensor index in the input array.
+     */
+    size_t sensor_index;
+    /**
+     * ToA residual at the full solution in seconds.
+     */
+    double residual_s;
+    /**
+     * Whether leave_one_out_residual_s is present.
+     */
+    bool has_leave_one_out_residual_s;
+    /**
+     * Held-out ToA residual in seconds.
+     */
+    double leave_one_out_residual_s;
+    /**
+     * Whether position_delta_m is present.
+     */
+    bool has_position_delta_m;
+    /**
+     * Position change between full and leave-one-out solutions, meters.
+     */
+    double position_delta_m;
+    /**
+     * Whether origin_time_delta_s is present.
+     */
+    bool has_origin_time_delta_s;
+    /**
+     * Origin-time change between full and leave-one-out solutions, seconds.
+     */
+    double origin_time_delta_s;
+    /**
+     * First-derivative loss weight for the full residual.
+     */
+    double loss_weight;
+    /**
+     * Normalized diagnostic score. Larger means poorer fit.
+     */
+    double score;
+} SidereonSourceSensorInfluence;
 
 /**
  * Topocentric look angle of a body (Sun or Moon) from a ground site.
@@ -21446,6 +21916,468 @@ enum SidereonStatus sidereon_precise_ephemeris_samples_predict_ranges(const stru
                                                                       size_t count,
                                                                       const struct SidereonObservablesOptions *options,
                                                                       struct SidereonRangePrediction *out);
+
+/**
+ * Copy the observable-state missing-position sentinel into out. The sentinel is
+ * three NaN components and is also written for every failed batch element.
+ *
+ * Safety: out_position_ecef_m must point to at least len doubles; len must be
+ * at least 3.
+ */
+enum SidereonStatus sidereon_observable_state_missing_position_ecef_m(double *out_position_ecef_m,
+                                                                      size_t len);
+
+/**
+ * Build a cached precise-ephemeris interpolant from a loaded SP3 handle. On
+ * success writes a newly owned handle to *out_handle; release it with
+ * sidereon_precise_ephemeris_interpolant_free.
+ *
+ * Safety: sp3 must be a live handle; out_handle must point to storage for a
+ * SidereonPreciseEphemerisInterpolant*.
+ */
+enum SidereonStatus sidereon_precise_ephemeris_interpolant_from_sp3(const struct SidereonSp3 *sp3,
+                                                                    struct SidereonPreciseEphemerisInterpolant **out_handle);
+
+/**
+ * Build a cached precise-ephemeris interpolant from canonical samples. On
+ * success writes a newly owned handle to *out_handle; release it with
+ * sidereon_precise_ephemeris_interpolant_free.
+ *
+ * Safety: samples must point to count entries or be NULL when count is 0;
+ * out_handle must point to storage for a SidereonPreciseEphemerisInterpolant*.
+ */
+enum SidereonStatus sidereon_precise_ephemeris_interpolant_from_samples(const struct SidereonPreciseEphemerisSample *samples,
+                                                                        size_t count,
+                                                                        struct SidereonPreciseEphemerisInterpolant **out_handle);
+
+/**
+ * Build a cached precise-ephemeris interpolant from an existing sample-backed
+ * source handle. On success writes a newly owned handle to *out_handle; release
+ * it with sidereon_precise_ephemeris_interpolant_free.
+ *
+ * Safety: samples must be a live handle; out_handle must point to storage for a
+ * SidereonPreciseEphemerisInterpolant*.
+ */
+enum SidereonStatus sidereon_precise_ephemeris_interpolant_from_precise_ephemeris_samples(const struct SidereonPreciseEphemerisSamples *samples,
+                                                                                          struct SidereonPreciseEphemerisInterpolant **out_handle);
+
+/**
+ * Release a cached precise-ephemeris interpolant. Null is a no-op.
+ *
+ * Safety: interpolant must be NULL or a live handle from an interpolant
+ * creation function.
+ */
+void sidereon_precise_ephemeris_interpolant_free(struct SidereonPreciseEphemerisInterpolant *interpolant);
+
+/**
+ * Evaluate many SP3 observable states with per-satellite epochs.
+ *
+ * out_positions_ecef_m receives count triples in row-major XYZ order, meters.
+ * out_clocks_s and out_has_clocks_s receive count satellite-clock entries in
+ * seconds. out_element_statuses receives Valid/Gap/Error. out_result_statuses
+ * receives SIDEREON_STATUS_OK for valid elements, SIDEREON_STATUS_SOLVE for
+ * gaps/source errors, and SIDEREON_STATUS_INVALID_ARGUMENT for invalid scalar
+ * inputs. Failed elements receive the missing-position sentinel.
+ *
+ * Safety: sp3 is a live handle; satellites and epochs_j2000_s point to count
+ * entries; output arrays point to count entries except out_positions_ecef_m,
+ * which points to count * 3 doubles.
+ */
+enum SidereonStatus sidereon_sp3_observable_states_at_j2000_s(const struct SidereonSp3 *sp3,
+                                                              const char *const *satellites,
+                                                              const double *epochs_j2000_s,
+                                                              size_t count,
+                                                              double *out_positions_ecef_m,
+                                                              double *out_clocks_s,
+                                                              bool *out_has_clocks_s,
+                                                              enum SidereonObservableStateElementStatus *out_element_statuses,
+                                                              enum SidereonStatus *out_result_statuses);
+
+/**
+ * Evaluate many SP3 observable states at one shared epoch.
+ *
+ * Safety: same output-array contract as
+ * sidereon_sp3_observable_states_at_j2000_s.
+ */
+enum SidereonStatus sidereon_sp3_observable_states_at_shared_j2000_s(const struct SidereonSp3 *sp3,
+                                                                     const char *const *satellites,
+                                                                     size_t satellite_count,
+                                                                     double epoch_j2000_s,
+                                                                     double *out_positions_ecef_m,
+                                                                     double *out_clocks_s,
+                                                                     bool *out_has_clocks_s,
+                                                                     enum SidereonObservableStateElementStatus *out_element_statuses,
+                                                                     enum SidereonStatus *out_result_statuses);
+
+/**
+ * Evaluate many broadcast-ephemeris observable states with per-satellite
+ * epochs. The output arrays follow
+ * sidereon_sp3_observable_states_at_j2000_s.
+ *
+ * Safety: broadcast is a live handle; all array pointers follow the SP3 batch
+ * state contract.
+ */
+enum SidereonStatus sidereon_broadcast_observable_states_at_j2000_s(const struct SidereonBroadcastEphemeris *broadcast,
+                                                                    const char *const *satellites,
+                                                                    const double *epochs_j2000_s,
+                                                                    size_t count,
+                                                                    double *out_positions_ecef_m,
+                                                                    double *out_clocks_s,
+                                                                    bool *out_has_clocks_s,
+                                                                    enum SidereonObservableStateElementStatus *out_element_statuses,
+                                                                    enum SidereonStatus *out_result_statuses);
+
+/**
+ * Evaluate many broadcast-ephemeris observable states at one shared epoch.
+ *
+ * Safety: same output-array contract as
+ * sidereon_sp3_observable_states_at_j2000_s.
+ */
+enum SidereonStatus sidereon_broadcast_observable_states_at_shared_j2000_s(const struct SidereonBroadcastEphemeris *broadcast,
+                                                                           const char *const *satellites,
+                                                                           size_t satellite_count,
+                                                                           double epoch_j2000_s,
+                                                                           double *out_positions_ecef_m,
+                                                                           double *out_clocks_s,
+                                                                           bool *out_has_clocks_s,
+                                                                           enum SidereonObservableStateElementStatus *out_element_statuses,
+                                                                           enum SidereonStatus *out_result_statuses);
+
+/**
+ * Evaluate many sample-backed precise-ephemeris observable states with
+ * per-satellite epochs. The output arrays follow
+ * sidereon_sp3_observable_states_at_j2000_s.
+ *
+ * Safety: samples is a live handle; all array pointers follow the SP3 batch
+ * state contract.
+ */
+enum SidereonStatus sidereon_precise_ephemeris_samples_observable_states_at_j2000_s(const struct SidereonPreciseEphemerisSamples *samples,
+                                                                                    const char *const *satellites,
+                                                                                    const double *epochs_j2000_s,
+                                                                                    size_t count,
+                                                                                    double *out_positions_ecef_m,
+                                                                                    double *out_clocks_s,
+                                                                                    bool *out_has_clocks_s,
+                                                                                    enum SidereonObservableStateElementStatus *out_element_statuses,
+                                                                                    enum SidereonStatus *out_result_statuses);
+
+/**
+ * Evaluate many sample-backed precise-ephemeris observable states at one shared
+ * epoch.
+ *
+ * Safety: same output-array contract as
+ * sidereon_sp3_observable_states_at_j2000_s.
+ */
+enum SidereonStatus sidereon_precise_ephemeris_samples_observable_states_at_shared_j2000_s(const struct SidereonPreciseEphemerisSamples *samples,
+                                                                                           const char *const *satellites,
+                                                                                           size_t satellite_count,
+                                                                                           double epoch_j2000_s,
+                                                                                           double *out_positions_ecef_m,
+                                                                                           double *out_clocks_s,
+                                                                                           bool *out_has_clocks_s,
+                                                                                           enum SidereonObservableStateElementStatus *out_element_statuses,
+                                                                                           enum SidereonStatus *out_result_statuses);
+
+/**
+ * Evaluate many cached precise-interpolant observable states with
+ * per-satellite epochs. The output arrays follow
+ * sidereon_sp3_observable_states_at_j2000_s.
+ *
+ * Safety: interpolant is a live handle; all array pointers follow the SP3 batch
+ * state contract.
+ */
+enum SidereonStatus sidereon_precise_ephemeris_interpolant_observable_states_at_j2000_s(const struct SidereonPreciseEphemerisInterpolant *interpolant,
+                                                                                        const char *const *satellites,
+                                                                                        const double *epochs_j2000_s,
+                                                                                        size_t count,
+                                                                                        double *out_positions_ecef_m,
+                                                                                        double *out_clocks_s,
+                                                                                        bool *out_has_clocks_s,
+                                                                                        enum SidereonObservableStateElementStatus *out_element_statuses,
+                                                                                        enum SidereonStatus *out_result_statuses);
+
+/**
+ * Evaluate many cached precise-interpolant observable states at one shared
+ * epoch.
+ *
+ * Safety: same output-array contract as
+ * sidereon_sp3_observable_states_at_j2000_s.
+ */
+enum SidereonStatus sidereon_precise_ephemeris_interpolant_observable_states_at_shared_j2000_s(const struct SidereonPreciseEphemerisInterpolant *interpolant,
+                                                                                               const char *const *satellites,
+                                                                                               size_t satellite_count,
+                                                                                               double epoch_j2000_s,
+                                                                                               double *out_positions_ecef_m,
+                                                                                               double *out_clocks_s,
+                                                                                               bool *out_has_clocks_s,
+                                                                                               enum SidereonObservableStateElementStatus *out_element_statuses,
+                                                                                               enum SidereonStatus *out_result_statuses);
+
+/**
+ * Return the MAD Gaussian consistency factor, 1 / Phi^-1(3/4).
+ *
+ * Safety: out must point to a double.
+ */
+enum SidereonStatus sidereon_mad_gaussian_consistency(double *out);
+
+/**
+ * Compute steady-state alpha-beta gains from a positive dimensionless tracking
+ * index.
+ *
+ * Safety: out_gains must point to a SidereonAlphaBetaGains.
+ */
+enum SidereonStatus sidereon_alpha_beta_steady_state_gains(double tracking_index,
+                                                           struct SidereonAlphaBetaGains *out_gains);
+
+/**
+ * Run one scalar alpha-beta predict and measurement update.
+ *
+ * Safety: state, gains, and out_step must point to live structs.
+ */
+enum SidereonStatus sidereon_alpha_beta_filter_step(const struct SidereonAlphaBetaState *state,
+                                                    double measurement,
+                                                    double dt,
+                                                    const struct SidereonAlphaBetaGains *gains,
+                                                    struct SidereonAlphaBetaStep *out_step);
+
+/**
+ * Compute steady-state gains for a scalar constant-velocity Kalman filter.
+ *
+ * Safety: out_gains must point to a SidereonScalarKalmanGains.
+ */
+enum SidereonStatus sidereon_kalman_cv_steady_state_gains(double tracking_index,
+                                                          double dt,
+                                                          double measurement_variance,
+                                                          struct SidereonScalarKalmanGains *out_gains);
+
+/**
+ * Scalar normalized innovation, innovation divided by sqrt(variance).
+ *
+ * Safety: out must point to a double.
+ */
+enum SidereonStatus sidereon_normalized_innovation(double innovation,
+                                                   double innovation_variance,
+                                                   double *out);
+
+/**
+ * Scalar normalized innovation squared statistic.
+ *
+ * Safety: out must point to a double.
+ */
+enum SidereonStatus sidereon_nis(double innovation, double innovation_variance, double *out);
+
+/**
+ * Expected NIS value for a measurement dimension.
+ *
+ * Safety: out must point to a double.
+ */
+enum SidereonStatus sidereon_nis_expected_value(size_t dof, double *out);
+
+/**
+ * Chi-square NIS gate threshold for a confidence in (0, 1) and positive DOF.
+ *
+ * Safety: out_threshold must point to a double.
+ */
+enum SidereonStatus sidereon_nis_gate_threshold(size_t dof,
+                                                double confidence,
+                                                double *out_threshold);
+
+/**
+ * Test one scalar innovation against a chi-square NIS gate.
+ *
+ * Safety: out_gate must point to a SidereonNisGate.
+ */
+enum SidereonStatus sidereon_nis_gate_test(double innovation,
+                                           double innovation_variance,
+                                           size_t dof,
+                                           double confidence,
+                                           struct SidereonNisGate *out_gate);
+
+/**
+ * Median absolute deviation spread estimate with Gaussian consistency scaling.
+ *
+ * Safety: values must point to count doubles or be NULL when count is 0; out
+ * must point to a double.
+ */
+enum SidereonStatus sidereon_mad_spread(const double *values,
+                                        size_t count,
+                                        double scale_floor,
+                                        double *out);
+
+/**
+ * EWMA update with alpha in [0, 1].
+ *
+ * Safety: out must point to a double.
+ */
+enum SidereonStatus sidereon_ewma_update(double previous, double sample, double alpha, double *out);
+
+/**
+ * EWMA update with alpha = 1 / 2^shift.
+ *
+ * Safety: out must point to a double.
+ */
+enum SidereonStatus sidereon_ewma_update_power_of_two(double previous,
+                                                      double sample,
+                                                      uint32_t shift,
+                                                      double *out);
+
+/**
+ * CA-CFAR threshold multiplier from searched-cell count and target false-alarm
+ * probability.
+ *
+ * Safety: out_multiplier must point to a double.
+ */
+enum SidereonStatus sidereon_cfar_ca_multiplier_from_pfa(size_t searched_cells,
+                                                         double false_alarm_probability,
+                                                         double *out_multiplier);
+
+/**
+ * CA-CFAR false-alarm probability from a threshold multiplier.
+ *
+ * Safety: out_pfa must point to a double.
+ */
+enum SidereonStatus sidereon_cfar_ca_pfa_from_multiplier(size_t searched_cells,
+                                                         double multiplier,
+                                                         double *out_pfa);
+
+/**
+ * CA-CFAR absolute threshold from mean noise level and target false-alarm
+ * probability.
+ *
+ * Safety: out_threshold must point to a double.
+ */
+enum SidereonStatus sidereon_cfar_ca_threshold(size_t searched_cells,
+                                               double false_alarm_probability,
+                                               double noise_level,
+                                               double *out_threshold);
+
+/**
+ * CA-CFAR false-alarm probability from an absolute threshold and mean noise
+ * level.
+ *
+ * Safety: out_pfa must point to a double.
+ */
+enum SidereonStatus sidereon_cfar_ca_false_alarm_probability(size_t searched_cells,
+                                                             double threshold,
+                                                             double noise_level,
+                                                             double *out_pfa);
+
+/**
+ * Initialize source-localization options to the core defaults: ToA mode, timing
+ * sigma 1 second, linear loss, f_scale 1 second, and no explicit tolerances.
+ *
+ * Safety: out_options must point to a SidereonSourceLocateOptions.
+ */
+enum SidereonStatus sidereon_source_locate_options_init(struct SidereonSourceLocateOptions *out_options);
+
+/**
+ * Locate a source from sensor arrival times. Sensor positions are caller-owned
+ * 2D or 3D Cartesian coordinates in meters. Arrival times are seconds, and
+ * propagation_speed_m_s is meters per second. options may be NULL for defaults.
+ * On success writes a newly owned handle to *out_solution.
+ *
+ * Safety: sensors and arrival_times_s point to sensor_count entries or NULL
+ * when sensor_count is 0; options is NULL or points to options; out_solution
+ * points to storage for a SidereonSourceSolution*.
+ */
+enum SidereonStatus sidereon_locate_source(const struct SidereonSourceSensor *sensors,
+                                           size_t sensor_count,
+                                           const double *arrival_times_s,
+                                           double propagation_speed_m_s,
+                                           const struct SidereonSourceLocateOptions *options,
+                                           struct SidereonSourceSolution **out_solution);
+
+/**
+ * Compute the closed-form source-localization initial guess.
+ *
+ * Safety: sensors and arrival_times_s point to sensor_count entries; out_guess
+ * must point to a SidereonSourceInitialGuess.
+ */
+enum SidereonStatus sidereon_chan_ho_initial_guess(const struct SidereonSourceSensor *sensors,
+                                                   size_t sensor_count,
+                                                   const double *arrival_times_s,
+                                                   double propagation_speed_m_s,
+                                                   uint32_t mode,
+                                                   size_t reference_sensor,
+                                                   struct SidereonSourceInitialGuess *out_guess);
+
+/**
+ * Compute timing DOP for a proposed source location. DOP position values
+ * multiply timing sigma in seconds to produce meters.
+ *
+ * Safety: sensors points to sensor_count entries; source_position_m points to
+ * source_dimension doubles; out_dop points to a SidereonDop.
+ */
+enum SidereonStatus sidereon_source_dop(const struct SidereonSourceSensor *sensors,
+                                        size_t sensor_count,
+                                        const double *source_position_m,
+                                        size_t source_dimension,
+                                        double propagation_speed_m_s,
+                                        struct SidereonDop *out_dop);
+
+/**
+ * Compute a timing CRLB and DOP for a proposed source location.
+ *
+ * Safety: sensors points to sensor_count entries; source_position_m points to
+ * source_dimension doubles; out_crlb points to a SidereonSourceCrlb.
+ */
+enum SidereonStatus sidereon_source_crlb(const struct SidereonSourceSensor *sensors,
+                                         size_t sensor_count,
+                                         const double *source_position_m,
+                                         size_t source_dimension,
+                                         double propagation_speed_m_s,
+                                         double timing_sigma_s,
+                                         struct SidereonSourceCrlb *out_crlb);
+
+/**
+ * Copy a source solution summary into *out_summary.
+ *
+ * Safety: solution must be a live handle; out_summary points to a summary.
+ */
+enum SidereonStatus sidereon_source_solution_summary(const struct SidereonSourceSolution *solution,
+                                                     struct SidereonSourceSolutionSummary *out_summary);
+
+/**
+ * Copy the source solution covariance when available.
+ *
+ * Safety: solution must be a live handle; out_covariance and out_available
+ * must point to writable values.
+ */
+enum SidereonStatus sidereon_source_solution_covariance(const struct SidereonSourceSolution *solution,
+                                                        struct SidereonSourceCovariance *out_covariance,
+                                                        bool *out_available);
+
+/**
+ * Copy solution residual rows using the variable-length output contract.
+ *
+ * Safety: solution must be a live handle; out points to len residual rows or is
+ * NULL when len is 0; out_written and out_required point to size_t values.
+ */
+enum SidereonStatus sidereon_source_solution_residuals(const struct SidereonSourceSolution *solution,
+                                                       struct SidereonSourceResidual *out,
+                                                       size_t len,
+                                                       size_t *out_written,
+                                                       size_t *out_required);
+
+/**
+ * Copy per-sensor influence diagnostics using the variable-length output
+ * contract.
+ *
+ * Safety: solution must be a live handle; out points to len influence rows or
+ * is NULL when len is 0; out_written and out_required point to size_t values.
+ */
+enum SidereonStatus sidereon_source_solution_influences(const struct SidereonSourceSolution *solution,
+                                                        struct SidereonSourceSensorInfluence *out,
+                                                        size_t len,
+                                                        size_t *out_written,
+                                                        size_t *out_required);
+
+/**
+ * Release a source-localization solution handle. Null is a no-op.
+ *
+ * Safety: solution must be NULL or a live handle from sidereon_locate_source.
+ */
+void sidereon_source_solution_free(struct SidereonSourceSolution *solution);
 
 /**
  * GPS - UTC (the GNSS leap-second offset a GPS receiver applies, IS-GPS-200) at
