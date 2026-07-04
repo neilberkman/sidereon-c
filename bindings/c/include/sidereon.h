@@ -45,9 +45,9 @@
 #include <stdlib.h>
 
 #define SIDEREON_VERSION_MAJOR 0
-#define SIDEREON_VERSION_MINOR 14
+#define SIDEREON_VERSION_MINOR 15
 #define SIDEREON_VERSION_PATCH 0
-#define SIDEREON_VERSION_STRING "0.14.0"
+#define SIDEREON_VERSION_STRING "0.15.0"
 
 #define BIAS_OBS_C_BYTES (MAX_BIAS_OBS_BYTES + 1)
 
@@ -581,6 +581,28 @@ typedef enum SidereonSbasMessageKind {
     SIDEREON_SBAS_MESSAGE_KIND_IONO_DELAYS = 11,
     SIDEREON_SBAS_MESSAGE_KIND_UNSUPPORTED = 12,
 } SidereonSbasMessageKind;
+
+/**
+ * Typed error detail for SBAS protection-level functions.
+ */
+typedef enum SidereonSbasPlError {
+    /**
+     * No SBAS protection-level error occurred.
+     */
+    SIDEREON_SBAS_PL_ERROR_NONE = 0,
+    /**
+     * The geometry does not have enough independent rows.
+     */
+    SIDEREON_SBAS_PL_ERROR_INSUFFICIENT_GEOMETRY = 1,
+    /**
+     * A matrix operation or covariance projection failed.
+     */
+    SIDEREON_SBAS_PL_ERROR_NUMERICAL_FAILURE = 2,
+    /**
+     * The supplied error model is missing, non-finite, or outside its domain.
+     */
+    SIDEREON_SBAS_PL_ERROR_INVALID_ERROR_MODEL = 3,
+} SidereonSbasPlError;
 
 /**
  * Typed outcome of a staleness selection. SIDEREON_SELECTION_STATUS_OK is the
@@ -2194,6 +2216,11 @@ typedef struct SidereonReducedOrbitDriftReport SidereonReducedOrbitDriftReport;
  * sidereon_reduced_orbit_piecewise_free.
  */
 typedef struct SidereonReducedOrbitPiecewise SidereonReducedOrbitPiecewise;
+
+/**
+ * Classical reliability report handle. Release with sidereon_reliability_report_free.
+ */
+typedef struct SidereonReliabilityReport SidereonReliabilityReport;
 
 /**
  * A parsed RINEX clock product. Opaque to C. Create with
@@ -9233,6 +9260,146 @@ typedef struct SidereonReducedOrbitPiecewiseSegment {
 } SidereonReducedOrbitPiecewiseSegment;
 
 /**
+ * Options for classical internal and external reliability design.
+ */
+typedef struct SidereonReliabilityOptions {
+    /**
+     * Two-sided false-alarm probability for one w-test.
+     */
+    double alpha;
+    /**
+     * Missed-detection probability for the target bias.
+     */
+    double beta;
+    /**
+     * Whether lambda0_override carries a precomputed noncentrality value.
+     */
+    bool has_lambda0_override;
+    /**
+     * Precomputed noncentrality value, used only when has_lambda0_override is true.
+     */
+    double lambda0_override;
+    /**
+     * Redundancy below which an observation is reported as uncheckable.
+     */
+    double min_redundancy;
+} SidereonReliabilityOptions;
+
+/**
+ * One range row for pre-data reliability design.
+ */
+typedef struct SidereonRangeReliabilityRow {
+    /**
+     * Null-terminated observation identifier, at most 64 bytes.
+     */
+    const char *id;
+    /**
+     * Linearized design row for this range observation.
+     */
+    const double *design_row;
+    /**
+     * Number of entries in design_row.
+     */
+    size_t design_dim;
+    /**
+     * Externally supplied one-sigma range model, meters.
+     */
+    double sigma_m;
+} SidereonRangeReliabilityRow;
+
+/**
+ * Reliability diagnostics for one observation.
+ */
+typedef struct SidereonObservationReliability {
+    /**
+     * Observation identifier, null-terminated.
+     */
+    struct SidereonRtkId id;
+    /**
+     * Redundancy number, the checked fraction of this observation.
+     */
+    double redundancy;
+    /**
+     * Whether mdb_m carries a minimal detectable bias.
+     */
+    bool has_mdb_m;
+    /**
+     * Minimal detectable bias, meters, when present.
+     */
+    double mdb_m;
+    /**
+     * Whether external_enu_m carries an external effect vector.
+     */
+    bool has_external_enu_m;
+    /**
+     * External effect vector, meters, when present.
+     */
+    double external_enu_m[3];
+    /**
+     * Whether bias_to_noise carries a state-space bias-to-noise ratio.
+     */
+    bool has_bias_to_noise;
+    /**
+     * Bias-to-noise ratio, when present.
+     */
+    double bias_to_noise;
+    /**
+     * True when the observation redundancy is below the configured floor.
+     */
+    bool uncheckable;
+} SidereonObservationReliability;
+
+/**
+ * Aggregate reliability diagnostics for a design.
+ */
+typedef struct SidereonReliabilitySummary {
+    /**
+     * Number of observations in the design.
+     */
+    size_t n_obs;
+    /**
+     * Number of estimated parameters in the design.
+     */
+    size_t n_params;
+    /**
+     * Algebraic degrees of freedom.
+     */
+    size_t dof;
+    /**
+     * Sum of per-observation redundancy numbers.
+     */
+    double sum_redundancy;
+    /**
+     * Noncentrality parameter used for MDB calculations.
+     */
+    double lambda0;
+    /**
+     * Whether max_mdb_id and max_mdb_m carry a checkable observation.
+     */
+    bool has_max_mdb_m;
+    /**
+     * Observation identifier for the largest finite MDB.
+     */
+    struct SidereonRtkId max_mdb_id;
+    /**
+     * Largest finite MDB, meters, when present.
+     */
+    double max_mdb_m;
+    /**
+     * Observation identifier for the smallest redundancy number.
+     */
+    struct SidereonRtkId min_redundancy_id;
+    /**
+     * Smallest redundancy number.
+     */
+    double min_redundancy;
+    /**
+     * Count of observations reported as uncheckable.
+     */
+    size_t n_uncheckable;
+} SidereonReliabilitySummary;
+
+/**
  * Jarque-Bera normality test result.
  */
 typedef struct SidereonJarqueBera {
@@ -10727,6 +10894,16 @@ typedef struct SidereonFleetPass {
 } SidereonFleetPass;
 
 /**
+ * Airborne receiver and multipath contribution model.
+ */
+typedef struct SidereonAirborneModel {
+    /**
+     * Receiver noise and code-carrier divergence sigma, meters.
+     */
+    double sigma_noise_divergence_m;
+} SidereonAirborneModel;
+
+/**
  * Decoded SBAS fast-correction message payload.
  */
 typedef struct SidereonSbasRawFastCorrections {
@@ -11047,6 +11224,176 @@ typedef struct SidereonSbasPrnMask {
      */
     bool mask[210];
 } SidereonSbasPrnMask;
+
+/**
+ * Supplied SBAS degradation terms.
+ */
+typedef struct SidereonDegradationParams {
+    /**
+     * Variance multiplier applied to the UDRE variance table.
+     */
+    double delta_udre;
+    /**
+     * Fast-correction degradation term, meters.
+     */
+    double eps_fc_m;
+    /**
+     * Range-rate-correction degradation term, meters.
+     */
+    double eps_rrc_m;
+    /**
+     * Long-term-correction degradation term, meters.
+     */
+    double eps_ltc_m;
+    /**
+     * En-route degradation term, meters.
+     */
+    double eps_er_m;
+    /**
+     * Ionospheric degradation term added to UIRE, meters.
+     */
+    double eps_iono_m;
+    /**
+     * True when UDRE degradation terms are combined by root-sum-square.
+     */
+    bool rss_udre;
+} SidereonDegradationParams;
+
+/**
+ * Fixed SBAS protection-level multipliers.
+ */
+typedef struct SidereonSbasKMultipliers {
+    /**
+     * Horizontal multiplier applied to the horizontal semi-major axis.
+     */
+    double k_h;
+    /**
+     * Vertical multiplier applied to the vertical one-sigma standard deviation.
+     */
+    double k_v;
+} SidereonSbasKMultipliers;
+
+/**
+ * One satellite row in an SBAS protection geometry snapshot.
+ */
+typedef struct SidereonSbasProtectionRow {
+    /**
+     * Null-terminated satellite token.
+     */
+    const char *sat_id;
+    /**
+     * Receiver-to-satellite ECEF unit line of sight.
+     */
+    struct SidereonLineOfSight line_of_sight;
+    /**
+     * GNSS system as SidereonGnssSystem.
+     */
+    uint32_t system;
+    /**
+     * Elevation angle at the receiver, radians.
+     */
+    double elevation_rad;
+} SidereonSbasProtectionRow;
+
+/**
+ * SBAS protection geometry input. Arrays are caller-owned.
+ */
+typedef struct SidereonSbasProtectionGeometry {
+    /**
+     * Satellite rows.
+     */
+    const struct SidereonSbasProtectionRow *rows;
+    /**
+     * Number of satellite rows.
+     */
+    size_t row_count;
+    /**
+     * Receiver WGS84 geodetic position.
+     */
+    struct SidereonGeodetic receiver;
+    /**
+     * Receiver-clock systems as SidereonGnssSystem values.
+     */
+    const uint32_t *clock_systems;
+    /**
+     * Number of receiver-clock systems.
+     */
+    size_t clock_system_count;
+} SidereonSbasProtectionGeometry;
+
+/**
+ * One satellite's SBAS one-sigma range-error budget.
+ */
+typedef struct SidereonSbasSisError {
+    /**
+     * Null-terminated satellite token matching a protection geometry row.
+     */
+    const char *sat_id;
+    /**
+     * Fast and long-term correction residual sigma, meters.
+     */
+    double sigma_flt_m;
+    /**
+     * User ionospheric range-error sigma, meters.
+     */
+    double sigma_uire_m;
+    /**
+     * Airborne receiver noise, divergence, and multipath sigma, meters.
+     */
+    double sigma_air_m;
+    /**
+     * Tropospheric residual sigma, meters.
+     */
+    double sigma_tropo_m;
+} SidereonSbasSisError;
+
+/**
+ * Index-aligned SBAS error model for protection-level geometry rows.
+ */
+typedef struct SidereonSbasErrorModel {
+    /**
+     * Per-satellite range-error rows.
+     */
+    const struct SidereonSbasSisError *rows;
+    /**
+     * Number of range-error rows.
+     */
+    size_t row_count;
+} SidereonSbasErrorModel;
+
+/**
+ * SBAS protection-level output for one geometry snapshot.
+ */
+typedef struct SidereonSbasProtection {
+    /**
+     * Horizontal protection level, meters.
+     */
+    double hpl_m;
+    /**
+     * Vertical protection level, meters.
+     */
+    double vpl_m;
+    /**
+     * Horizontal one-sigma semi-major axis, meters.
+     */
+    double d_major_m;
+    /**
+     * Vertical one-sigma standard deviation, meters.
+     */
+    double sigma_u_m;
+    /**
+     * East one-sigma standard deviation, meters.
+     */
+    double d_east_m;
+    /**
+     * North one-sigma standard deviation, meters.
+     */
+    double d_north_m;
+    /**
+     * East-north covariance term, square meters.
+     */
+    double d_en_m2;
+} SidereonSbasProtection;
 
 typedef struct SidereonSbasFastCorrection {
     double prc_m;
@@ -13283,6 +13630,20 @@ typedef struct SidereonVisibleSatellite {
      */
     double position_km[3];
 } SidereonVisibleSatellite;
+
+/**
+ * Baarda w-test constants for one false-alarm and missed-detection pair.
+ */
+typedef struct SidereonWTestNoncentrality {
+    /**
+     * Minimal normalized bias.
+     */
+    double delta0;
+    /**
+     * Noncentrality parameter, equal to delta0 squared.
+     */
+    double lambda0;
+} SidereonWTestNoncentrality;
 
 #ifdef __cplusplus
 extern "C" {
@@ -19768,6 +20129,73 @@ enum SidereonStatus sidereon_relative_state(const struct SidereonCartesianState 
                                             struct SidereonCartesianState *out);
 
 /**
+ * Compute reliability for ARAIM geometry and an integrity support message.
+ *
+ * On success, *out_report receives a newly owned handle. Release it with
+ * sidereon_reliability_report_free.
+ *
+ * Safety: geometry, ism, options, and out_report must point to their documented
+ * storage.
+ */
+enum SidereonStatus sidereon_reliability_araim(const struct SidereonAraimGeometry *geometry,
+                                               const struct SidereonAraimIsm *ism,
+                                               const struct SidereonReliabilityOptions *options,
+                                               struct SidereonReliabilityReport **out_report);
+
+/**
+ * Compute reliability from supplied range design rows.
+ *
+ * On success, *out_report receives a newly owned handle. Release it with
+ * sidereon_reliability_report_free.
+ *
+ * Safety: rows points to row_count SidereonRangeReliabilityRow entries,
+ * options points to SidereonReliabilityOptions, and out_report points to a
+ * SidereonReliabilityReport pointer.
+ */
+enum SidereonStatus sidereon_reliability_design(const struct SidereonRangeReliabilityRow *rows,
+                                                size_t row_count,
+                                                const struct SidereonReliabilityOptions *options,
+                                                struct SidereonReliabilityReport **out_report);
+
+/**
+ * Initialize reliability options with the engine defaults.
+ *
+ * Safety: out_options must point to writable SidereonReliabilityOptions storage.
+ */
+enum SidereonStatus sidereon_reliability_options_init(struct SidereonReliabilityOptions *out_options);
+
+/**
+ * Release a reliability report handle. Passing NULL is a no-op.
+ *
+ * Safety: report must be NULL or a live handle from a reliability function.
+ */
+void sidereon_reliability_report_free(struct SidereonReliabilityReport *report);
+
+/**
+ * Copy per-observation reliability rows from a report handle.
+ *
+ * Uses the variable-length output contract. Pass out NULL with len 0 to query
+ * the required row count.
+ *
+ * Safety: report must be a live handle; out points to len entries or NULL when
+ * len is 0; out_written and out_required must point to size_t storage.
+ */
+enum SidereonStatus sidereon_reliability_report_observations(const struct SidereonReliabilityReport *report,
+                                                             struct SidereonObservationReliability *out,
+                                                             size_t len,
+                                                             size_t *out_written,
+                                                             size_t *out_required);
+
+/**
+ * Read the aggregate reliability summary from a report handle.
+ *
+ * Safety: report must be a live handle; out_summary must point to writable
+ * SidereonReliabilitySummary storage.
+ */
+enum SidereonStatus sidereon_reliability_report_summary(const struct SidereonReliabilityReport *report,
+                                                        struct SidereonReliabilitySummary *out_summary);
+
+/**
  * Jarque-Bera normality test on a residual set, written to *out. Uses the
  * biased skewness and excess kurtosis (scipy.stats.jarque_bera). Needs at least
  * two values. Delegates to the core `jarque_bera`.
@@ -21777,6 +22205,22 @@ enum SidereonStatus sidereon_satellite_visual_magnitude(double range_km,
                                                         double reference_range_km,
                                                         double *out_magnitude);
 
+/**
+ * Initialize the AAD-A airborne model.
+ *
+ * Safety: out_model must point to writable SidereonAirborneModel storage.
+ */
+enum SidereonStatus sidereon_sbas_airborne_model_aad_a(struct SidereonAirborneModel *out_model);
+
+/**
+ * Compute airborne receiver, divergence, and multipath sigma.
+ *
+ * Safety: model and out_sigma_m must point to their documented storage.
+ */
+enum SidereonStatus sidereon_sbas_airborne_sigma_air_m(const struct SidereonAirborneModel *model,
+                                                       double elevation_rad,
+                                                       double *out_sigma_m);
+
 enum SidereonStatus sidereon_sbas_block_decode(const uint8_t *bytes,
                                                size_t len,
                                                uint32_t form,
@@ -21933,6 +22377,63 @@ enum SidereonStatus sidereon_sbas_corrected_state(const struct SidereonBroadcast
                                                   bool *out_present,
                                                   double *out_position_ecef_m,
                                                   double *out_clock_s);
+
+/**
+ * Initialize degradation terms to the no-extra-degradation values.
+ *
+ * Safety: out_params must point to writable SidereonDegradationParams storage.
+ */
+enum SidereonStatus sidereon_sbas_degradation_params_none(struct SidereonDegradationParams *out_params);
+
+/**
+ * Initialize the en-route through non-precision-approach SBAS K multipliers.
+ *
+ * Safety: out_k must point to writable SidereonSbasKMultipliers storage.
+ */
+enum SidereonStatus sidereon_sbas_k_multipliers_en_route_npa(struct SidereonSbasKMultipliers *out_k);
+
+/**
+ * Initialize the precision-approach SBAS K multipliers.
+ *
+ * Safety: out_k must point to writable SidereonSbasKMultipliers storage.
+ */
+enum SidereonStatus sidereon_sbas_k_multipliers_precision_approach(struct SidereonSbasKMultipliers *out_k);
+
+/**
+ * Compute SBAS HPL and VPL from protection geometry and range-error rows.
+ *
+ * Safety: geometry, model, out_protection, and out_error must point to their
+ * documented storage.
+ */
+enum SidereonStatus sidereon_sbas_protection_levels(const struct SidereonSbasProtectionGeometry *geometry,
+                                                    const struct SidereonSbasErrorModel *model,
+                                                    struct SidereonSbasKMultipliers k,
+                                                    struct SidereonSbasProtection *out_protection,
+                                                    enum SidereonSbasPlError *out_error);
+
+/**
+ * Compute fast and long-term residual sigma from UDREI and degradation terms.
+ *
+ * Safety: degradation and out_sigma_m must point to their documented storage.
+ */
+enum SidereonStatus sidereon_sbas_sigma_flt_m_for_udrei(uint8_t udrei,
+                                                        const struct SidereonDegradationParams *degradation,
+                                                        double *out_sigma_m);
+
+/**
+ * Compute SBAS tropospheric residual sigma at an elevation angle.
+ *
+ * Safety: out_sigma_m must point to writable double storage.
+ */
+enum SidereonStatus sidereon_sbas_sigma_tropo_m(double elevation_rad, double *out_sigma_m);
+
+/**
+ * Compute the total one-sigma range error for one SBAS SIS error row.
+ *
+ * Safety: row and out_sigma_m must point to their documented storage.
+ */
+enum SidereonStatus sidereon_sbas_sis_error_sigma_m(const struct SidereonSbasSisError *row,
+                                                    double *out_sigma_m);
 
 enum SidereonStatus sidereon_sbas_solve_broadcast(const struct SidereonBroadcastEphemeris *broadcast,
                                                   const struct SidereonSbasCorrectionStore *store,
@@ -24777,6 +25278,15 @@ enum SidereonStatus sidereon_weight_vector(const struct SidereonWeightEntry *ent
  * Safety: root and out_path must be non-empty UTF-8 C strings.
  */
 enum SidereonStatus sidereon_write_dted_tree_to_mmap_store(const char *root, const char *out_path);
+
+/**
+ * Compute Baarda w-test delta0 and lambda0 for one alpha and beta pair.
+ *
+ * Safety: out must point to writable SidereonWTestNoncentrality storage.
+ */
+enum SidereonStatus sidereon_wtest_noncentrality(double alpha,
+                                                 double beta,
+                                                 struct SidereonWTestNoncentrality *out);
 
 #ifdef __cplusplus
 }  // extern "C"

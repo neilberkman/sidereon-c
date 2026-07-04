@@ -37,6 +37,12 @@ static bool close_rel(double actual, double expected, double rel) {
     return fabs(actual - expected) <= rel * scale;
 }
 
+static uint64_t f64_bits(double value) {
+    uint64_t bits = 0;
+    memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
 static void set_sat_token(SidereonSatelliteToken *token, const char *text) {
     memset(token->bytes, 0, sizeof(token->bytes));
     memcpy(token->bytes, text, strlen(text));
@@ -385,12 +391,153 @@ static int test_sparse_orbit_fit(void) {
     return 0;
 }
 
+static int test_baarda_constants(void) {
+    SidereonWTestNoncentrality constants;
+    if (require_ok(sidereon_wtest_noncentrality(0.001, 0.20, &constants),
+                   "w-test noncentrality") != 0) {
+        return 1;
+    }
+    if (!close_rel(constants.delta0, 4.132147965064809, 1.0e-14)) {
+        fprintf(stderr, "FAIL: delta0 %.17g expected %.17g\n", constants.delta0,
+                4.132147965064809);
+        return 1;
+    }
+    if (constants.lambda0 != constants.delta0 * constants.delta0) {
+        return fail("lambda0 identity");
+    }
+    return 0;
+}
+
+static int test_reliability_design(void) {
+    const double h1[2] = {1.0, 0.0};
+    const double h2[2] = {0.0, 1.0};
+    const double h3[2] = {0.0, 1.0};
+    const SidereonRangeReliabilityRow rows[3] = {
+        {.id = "rx_clock", .design_row = h1, .design_dim = 2, .sigma_m = 1.0},
+        {.id = "range_a", .design_row = h2, .design_dim = 2, .sigma_m = 1.0},
+        {.id = "range_b", .design_row = h3, .design_dim = 2, .sigma_m = 1.0},
+    };
+    SidereonReliabilityOptions options;
+    if (require_ok(sidereon_reliability_options_init(&options), "reliability options") != 0) {
+        return 1;
+    }
+    SidereonReliabilityReport *report = NULL;
+    if (require_ok(sidereon_reliability_design(rows, 3, &options, &report),
+                   "reliability design") != 0) {
+        return 1;
+    }
+    SidereonReliabilitySummary summary;
+    if (require_ok(sidereon_reliability_report_summary(report, &summary),
+                   "reliability summary") != 0) {
+        sidereon_reliability_report_free(report);
+        return 1;
+    }
+    SidereonObservationReliability obs[3];
+    size_t written = 0;
+    size_t required = 0;
+    if (require_ok(sidereon_reliability_report_observations(report, obs, 3, &written,
+                                                            &required),
+                   "reliability observations") != 0) {
+        sidereon_reliability_report_free(report);
+        return 1;
+    }
+    sidereon_reliability_report_free(report);
+    if (written != 3 || required != 3 || summary.dof != 1 || summary.n_uncheckable != 1) {
+        return fail("reliability counts");
+    }
+    double sum = obs[0].redundancy + obs[1].redundancy + obs[2].redundancy;
+    if (!close_abs(sum, summary.sum_redundancy, 2.0e-14) ||
+        !close_abs(summary.sum_redundancy, (double)summary.dof, 2.0e-14)) {
+        return fail("reliability redundancy sum");
+    }
+    if (!obs[0].uncheckable || obs[0].has_mdb_m || obs[0].has_external_enu_m ||
+        obs[0].has_bias_to_noise) {
+        return fail("reliability uncheckable row");
+    }
+    if (obs[1].uncheckable || !obs[1].has_mdb_m || !obs[1].has_bias_to_noise) {
+        return fail("reliability checkable row");
+    }
+    return 0;
+}
+
+static int test_sbas_protection_levels(void) {
+    SidereonSbasKMultipliers precision;
+    SidereonSbasKMultipliers enroute;
+    if (require_ok(sidereon_sbas_k_multipliers_precision_approach(&precision),
+                   "SBAS precision K") != 0 ||
+        require_ok(sidereon_sbas_k_multipliers_en_route_npa(&enroute), "SBAS enroute K") != 0) {
+        return 1;
+    }
+    if (f64_bits(precision.k_h) != f64_bits(6.0) ||
+        f64_bits(precision.k_v) != f64_bits(5.33) ||
+        f64_bits(enroute.k_h) != f64_bits(6.18) ||
+        f64_bits(enroute.k_v) != f64_bits(5.33)) {
+        return fail("SBAS K constants");
+    }
+
+    const double deg_to_rad = 0.017453292519943295;
+    const SidereonGeodetic receiver = {.lat_rad = 0.0, .lon_rad = 0.0, .height_m = 0.0};
+    const double az_el[5][2] = {
+        {15.0, 15.0},
+        {80.0, 70.0},
+        {155.0, 25.0},
+        {230.0, 55.0},
+        {310.0, 35.0},
+    };
+    const char *ids[5] = {"G01", "G02", "G03", "G04", "G05"};
+    SidereonSbasProtectionRow rows[5];
+    for (size_t i = 0; i < 5; i++) {
+        if (require_ok(sidereon_line_of_sight_from_az_el_deg(az_el[i][0], az_el[i][1],
+                                                             receiver, &rows[i].line_of_sight),
+                       "SBAS line of sight") != 0) {
+            return 1;
+        }
+        rows[i].sat_id = ids[i];
+        rows[i].system = SIDEREON_GNSS_SYSTEM_GPS;
+        rows[i].elevation_rad = az_el[i][1] * deg_to_rad;
+    }
+    const uint32_t clocks[1] = {SIDEREON_GNSS_SYSTEM_GPS};
+    const SidereonSbasProtectionGeometry geometry = {
+        .rows = rows,
+        .row_count = 5,
+        .receiver = receiver,
+        .clock_systems = clocks,
+        .clock_system_count = 1,
+    };
+    const double sigmas[5] = {2.0, 1.0, 1.5, 1.2, 1.8};
+    SidereonSbasSisError sis[5];
+    for (size_t i = 0; i < 5; i++) {
+        sis[i].sat_id = ids[i];
+        sis[i].sigma_flt_m = sigmas[i];
+        sis[i].sigma_uire_m = 0.0;
+        sis[i].sigma_air_m = 0.0;
+        sis[i].sigma_tropo_m = 0.0;
+    }
+    const SidereonSbasErrorModel model = {.rows = sis, .row_count = 5};
+    SidereonSbasProtection pl;
+    SidereonSbasPlError err = SIDEREON_SBAS_PL_ERROR_NONE;
+    if (require_ok(sidereon_sbas_protection_levels(&geometry, &model, precision, &pl, &err),
+                   "SBAS protection levels") != 0) {
+        return 1;
+    }
+    if (err != SIDEREON_SBAS_PL_ERROR_NONE) {
+        return fail("SBAS PL error detail");
+    }
+    if (!close_rel(pl.hpl_m, 9.064491010405014, 1.0e-12) ||
+        !close_rel(pl.vpl_m, 13.664070819648263, 1.0e-12)) {
+        fprintf(stderr, "FAIL: SBAS PL hpl=%.17g vpl=%.17g\n", pl.hpl_m, pl.vpl_m);
+        return 1;
+    }
+    return 0;
+}
+
 int main(void) {
     if (test_error_metrics() != 0 || test_sidereal() != 0 || test_midas() != 0 ||
         test_clock_power_law() != 0 || test_composite_propagation() != 0 ||
-        test_sparse_orbit_fit() != 0) {
+        test_sparse_orbit_fit() != 0 || test_baarda_constants() != 0 ||
+        test_reliability_design() != 0 || test_sbas_protection_levels() != 0) {
         return 1;
     }
-    printf("cap015: error metrics, sidereal, MIDAS, clock noise, composite propagation, orbit fit\n");
+    printf("cap015: error metrics, sidereal, MIDAS, clock noise, composite propagation, orbit fit, reliability, SBAS PL\n");
     return 0;
 }

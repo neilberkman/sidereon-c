@@ -409,7 +409,7 @@ fn araim_allocation_from_c(value: &SidereonAraimIntegrityAllocation) -> Integrit
     }
 }
 
-unsafe fn araim_geometry_from_c(
+pub(crate) unsafe fn araim_geometry_from_c(
     fn_name: &str,
     value: &SidereonAraimGeometry,
 ) -> Result<AraimGeometry, SidereonStatus> {
@@ -452,7 +452,10 @@ unsafe fn araim_geometry_from_c(
     })
 }
 
-unsafe fn araim_ism_from_c(fn_name: &str, value: &SidereonAraimIsm) -> Result<Ism, SidereonStatus> {
+pub(crate) unsafe fn araim_ism_from_c(
+    fn_name: &str,
+    value: &SidereonAraimIsm,
+) -> Result<Ism, SidereonStatus> {
     let raw_constellations = require_slice(
         value.constellations,
         value.constellation_count,

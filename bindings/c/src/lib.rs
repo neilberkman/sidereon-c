@@ -206,9 +206,14 @@ use sidereon_core::precise_positioning::{
     VMF_SITE_MAX_SAMPLES as PPP_VMF_SITE_MAX_SAMPLES,
 };
 use sidereon_core::quality::{
-    fde_spp, raim_fde_design, spp_robust_fde_driver, validate_receiver_solution, FdeError,
-    FdeOptions, FdeSppError, FdeSppOptions, QualityError, RaimOptions, RaimWeights,
-    RangeFdeOptions, RangeFdeResult, RangeFdeRow, SolutionValidationOptions,
+    fde_spp, raim_fde_design, reliability_araim as core_reliability_araim,
+    reliability_design as core_reliability_design, spp_robust_fde_driver,
+    validate_receiver_solution, wtest_noncentrality as core_wtest_noncentrality, FdeError,
+    FdeOptions, FdeSppError, FdeSppOptions, ObservationReliability as CoreObservationReliability,
+    QualityError, RaimOptions, RaimWeights, RangeFdeOptions, RangeFdeResult, RangeFdeRow,
+    RangeReliabilityRow as CoreRangeReliabilityRow, ReliabilityOptions as CoreReliabilityOptions,
+    ReliabilityReport as CoreReliabilityReport, ReliabilitySummary as CoreReliabilitySummary,
+    SolutionValidationOptions,
 };
 use sidereon_core::rinex::crinex::decode as crinex_decode;
 use sidereon_core::rinex::observations::{
@@ -258,6 +263,12 @@ use sidereon_core::sbas::{
     SbasIgpMask, SbasIntegrity, SbasIonoDelays, SbasLongTermCorrection, SbasLongTermHalf,
     SbasLongTermRecord, SbasMessage, SbasMixedFastCorrections, SbasPrnMask, SbasSolveMode,
     SbasWireForm,
+};
+use sidereon_core::sbas_pl::{
+    sbas_protection_levels as core_sbas_protection_levels, AirborneModel as CoreAirborneModel,
+    DegradationParams as CoreDegradationParams, SbasErrorModel as CoreSbasErrorModel,
+    SbasKMultipliers as CoreSbasKMultipliers, SbasPlError as CoreSbasPlError,
+    SbasProtection as CoreSbasProtection, SbasSisError as CoreSbasSisError,
 };
 use sidereon_core::ssr::{
     MissingCorrectionAction, OrbitReferencePoint, RegionalPolicy, SsrClockCorrection,
@@ -477,12 +488,14 @@ mod precise;
 mod raim;
 mod range;
 mod reduced;
+mod reliability;
 mod rf;
 mod rinex;
 mod rtcm;
 mod rtk;
 mod satellite;
 mod sbas;
+mod sbas_pl;
 mod sgp4;
 mod sidereal;
 mod signal;
@@ -550,12 +563,14 @@ pub use precise::*;
 pub use raim::*;
 pub use range::*;
 pub use reduced::*;
+pub use reliability::*;
 pub use rf::*;
 pub use rinex::*;
 pub use rtcm::*;
 pub use rtk::*;
 pub use satellite::*;
 pub use sbas::*;
+pub use sbas_pl::*;
 pub use sgp4::*;
 pub use sidereal::*;
 pub use signal::*;
