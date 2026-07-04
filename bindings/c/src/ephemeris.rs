@@ -20,6 +20,8 @@ pub enum SidereonPropagationForceModel {
     Composite = 2,
     /// Canonical Earth Phase A force set with optional SRP parameters.
     EarthPhaseA = 3,
+    /// Canonical Earth Phase B force set with spherical-harmonic gravity.
+    EarthPhaseB = 4,
 }
 
 /// Numerical propagation integrator selector. Stored in
@@ -57,6 +59,12 @@ pub struct SidereonForceModelComponents {
     pub has_zonal: bool,
     /// Highest active zonal degree, in the inclusive range 2 through 6.
     pub zonal_max_degree: u32,
+    /// Whether to include Earth spherical-harmonic gravity.
+    pub has_spherical_harmonic: bool,
+    /// Spherical-harmonic maximum degree.
+    pub spherical_harmonic_max_degree: u32,
+    /// Spherical-harmonic maximum order.
+    pub spherical_harmonic_max_order: u32,
     /// Whether to include third-body gravity.
     pub has_third_body: bool,
     /// Include the Sun in third-body gravity.
@@ -160,7 +168,8 @@ pub unsafe extern "C" fn sidereon_propagate_state(
             time_count,
         ));
         let propagator = c_try!(state_propagator_from_c("sidereon_propagate_state", config,));
-        let states = match propagator.ephemeris(times) {
+        let context = propagation_context_from_c(config);
+        let states = match propagator.ephemeris_with_context(times, &context) {
             Ok(states) => states,
             Err(err) => {
                 set_last_error(format!("sidereon_propagate_state: {err}"));
@@ -334,6 +343,9 @@ fn default_force_model_components() -> SidereonForceModelComponents {
         two_body_mu_km3_s2: MU_EARTH,
         has_zonal: false,
         zonal_max_degree: 6,
+        has_spherical_harmonic: false,
+        spherical_harmonic_max_degree: 8,
+        spherical_harmonic_max_order: 8,
         has_third_body: false,
         third_body_sun: true,
         third_body_moon: true,

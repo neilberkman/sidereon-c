@@ -41,7 +41,8 @@ use sidereon::propagator::{
     ForceModelComponents, ForceModelKind, IntegratorKind, PropagationConfig, PropagationForceModel,
 };
 use sidereon::sgp4::{
-    parse_tle_file_with_opsmode, Error as Sgp4Error, NamedSatellite, OpsMode, Prediction, Satellite,
+    parse_tle_file_with_opsmode, DecayLatch, DecayLatchedError, Error as Sgp4Error,
+    MinutesSinceEpoch, NamedSatellite, OpsMode, Prediction, Satellite,
 };
 use sidereon::state::CartesianState;
 use sidereon::tle::{self as sidereon_tle, ChecksumWarning, TleElements};
@@ -65,10 +66,12 @@ use sidereon_core::astro::error::PropagationError;
 use sidereon_core::astro::forces::drag::{DragForce, DragParameters, SpaceWeather};
 use sidereon_core::astro::forces::SpaceWeatherSource;
 use sidereon_core::astro::forces::{
-    ForceModel, J2Gravity, SchwarzschildRelativity, SolarRadiationPressure, ThirdBodyBodies,
-    ThirdBodyGravity, TwoBodyGravity, ZonalCoefficients, ZonalDegrees, ZonalGravity,
+    ForceModel, J2Gravity, SchwarzschildRelativity, SolarRadiationPressure,
+    SphericalHarmonicGravityConfig, ThirdBodyBodies, ThirdBodyGravity, TwoBodyGravity,
+    ZonalCoefficients, ZonalDegrees, ZonalGravity,
 };
 use sidereon_core::astro::frames::transforms::FrameTransformError;
+use sidereon_core::astro::frames::TdbEarthOrientationProvider;
 use sidereon_core::astro::math::least_squares::Status;
 use sidereon_core::astro::math::vec3::dot3;
 use sidereon_core::astro::observation::{
@@ -144,7 +147,8 @@ use sidereon_core::frame::{
     geocentric_neu_basis, geodetic_to_itrf, itrf_to_geodetic, ItrfPositionM, Wgs84Geodetic,
 };
 use sidereon_core::geoid::{
-    ellipsoidal_height_m, geoid_undulation, orthometric_height_m, GeoidError, GeoidGrid,
+    ellipsoidal_height_m, geoid_undulation, orthometric_height_m, Egm2008GridSpacing,
+    Egm2008RasterWindow, GeoidError, GeoidGrid,
 };
 use sidereon_core::geometry::{
     dop as core_dop, line_of_sight_from_az_el_deg, passes as geometry_passes,
@@ -208,9 +212,10 @@ use sidereon_core::precise_positioning::{
 use sidereon_core::quality::{
     fde_spp, raim_fde_design, reliability_araim as core_reliability_araim,
     reliability_design as core_reliability_design, spp_robust_fde_driver,
-    validate_receiver_solution, wtest_noncentrality as core_wtest_noncentrality, FdeError,
-    FdeOptions, FdeSppError, FdeSppOptions, ObservationReliability as CoreObservationReliability,
-    QualityError, RaimOptions, RaimWeights, RangeFdeOptions, RangeFdeResult, RangeFdeRow,
+    validate_receiver_solution,
+    wtest_noncentrality_components as core_wtest_noncentrality_components, FdeError, FdeOptions,
+    FdeSppError, FdeSppOptions, ObservationReliability as CoreObservationReliability, QualityError,
+    RaimOptions, RaimWeights, RangeFdeOptions, RangeFdeResult, RangeFdeRow,
     RangeReliabilityRow as CoreRangeReliabilityRow, ReliabilityOptions as CoreReliabilityOptions,
     ReliabilityReport as CoreReliabilityReport, ReliabilitySummary as CoreReliabilitySummary,
     SolutionValidationOptions,
@@ -465,6 +470,8 @@ mod estimation;
 mod fde;
 mod force;
 mod frame;
+mod frame_catalog;
+mod geodesic;
 mod geodetic_time_series;
 mod geoid;
 mod geometry;
@@ -509,6 +516,7 @@ mod spp;
 mod ssr;
 mod staleness;
 mod tca;
+mod tdm;
 mod terrain;
 mod time;
 mod tle;
@@ -540,6 +548,8 @@ pub use estimation::*;
 pub use fde::*;
 pub use force::*;
 pub use frame::*;
+pub use frame_catalog::*;
+pub use geodesic::*;
 pub use geodetic_time_series::*;
 pub use geoid::*;
 pub use geometry::*;
@@ -584,6 +594,7 @@ pub use spp::*;
 pub use ssr::*;
 pub use staleness::*;
 pub use tca::*;
+pub use tdm::*;
 pub use terrain::*;
 pub use time::*;
 pub use tle::*;
@@ -1837,6 +1848,34 @@ fn propagation_force_model_kind_from_c(
             };
             Ok(ForceModelKind::earth_phase_a(srp))
         }
+        value if value == SidereonPropagationForceModel::EarthPhaseB as u32 => {
+            let srp = if config.force_components.has_solar_radiation_pressure {
+                Some(solar_radiation_pressure_from_c(
+                    fn_name,
+                    config.force_components.solar_radiation_pressure,
+                )?)
+            } else {
+                None
+            };
+            let max_degree = u16::try_from(config.force_components.spherical_harmonic_max_degree)
+                .map_err(|_| {
+                set_last_error(format!(
+                    "{fn_name}: spherical_harmonic_max_degree is out of range"
+                ));
+                SidereonStatus::InvalidArgument
+            })?;
+            let max_order = u16::try_from(config.force_components.spherical_harmonic_max_order)
+                .map_err(|_| {
+                    set_last_error(format!(
+                        "{fn_name}: spherical_harmonic_max_order is out of range"
+                    ));
+                    SidereonStatus::InvalidArgument
+                })?;
+            ForceModelKind::earth_phase_b(max_degree, max_order, srp).map_err(|err| {
+                set_last_error(format!("{fn_name}: {err}"));
+                SidereonStatus::InvalidArgument
+            })
+        }
         _ => {
             set_last_error(format!("{fn_name}: invalid force_model selector"));
             Err(SidereonStatus::InvalidArgument)
@@ -1931,6 +1970,21 @@ fn state_propagator_from_c(
     })
 }
 
+fn propagation_context_from_c(config: &SidereonStatePropagationConfig) -> PropagationContext {
+    if propagation_force_model_needs_body_fixed_frame(config) {
+        PropagationContext::new()
+            .with_body_fixed_frame_provider(Arc::new(TdbEarthOrientationProvider::new()))
+    } else {
+        PropagationContext::default()
+    }
+}
+
+fn propagation_force_model_needs_body_fixed_frame(config: &SidereonStatePropagationConfig) -> bool {
+    config.force_model == SidereonPropagationForceModel::EarthPhaseB as u32
+        || (config.force_model == SidereonPropagationForceModel::Composite as u32
+            && config.force_components.has_spherical_harmonic)
+}
+
 fn composite_force_model_from_c(
     fn_name: &str,
     config: &SidereonStatePropagationConfig,
@@ -1950,6 +2004,7 @@ fn composite_force_model_from_c(
     if components.has_two_body
         && components.has_zonal
         && components.zonal_max_degree == 2
+        && !components.has_spherical_harmonic
         && !components.has_third_body
         && !components.has_solar_radiation_pressure
         && !components.has_relativity
@@ -1980,6 +2035,32 @@ fn composite_force_model_from_c(
             degrees,
             ZonalCoefficients::default(),
         ));
+    }
+    if components.has_spherical_harmonic {
+        if components.has_zonal {
+            set_last_error(format!(
+                "{fn_name}: zonal and spherical_harmonic gravity cannot both be enabled"
+            ));
+            return Err(SidereonStatus::InvalidArgument);
+        }
+        let max_degree = u16::try_from(components.spherical_harmonic_max_degree).map_err(|_| {
+            set_last_error(format!(
+                "{fn_name}: spherical_harmonic_max_degree is out of range"
+            ));
+            SidereonStatus::InvalidArgument
+        })?;
+        let max_order = u16::try_from(components.spherical_harmonic_max_order).map_err(|_| {
+            set_last_error(format!(
+                "{fn_name}: spherical_harmonic_max_order is out of range"
+            ));
+            SidereonStatus::InvalidArgument
+        })?;
+        let spherical_harmonic = SphericalHarmonicGravityConfig::earth(max_degree, max_order)
+            .map_err(|err| {
+                set_last_error(format!("{fn_name}: {err}"));
+                SidereonStatus::InvalidArgument
+            })?;
+        force_components = force_components.with_spherical_harmonic(spherical_harmonic);
     }
     if components.has_third_body {
         force_components = force_components.with_third_body(ThirdBodyGravity {

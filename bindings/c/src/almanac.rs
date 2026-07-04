@@ -14,6 +14,16 @@ pub enum SidereonEclipseStatus {
     Umbra = 2,
 }
 
+/// Earth figure used for eclipse shadow geometry.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonEarthShadowModel {
+    /// Mean-radius spherical Earth.
+    Spherical = 0,
+    /// WGS84 oblate Earth approximation.
+    Wgs84Oblate = 1,
+}
+
 /// Sun aspect angle in degrees between satellite and Sun directions. Delegates
 /// to sidereon_core::astro::angles::sun_angle. Position vectors are in km.
 ///
@@ -181,6 +191,53 @@ pub unsafe extern "C" fn sidereon_eclipse_shadow_fraction(
     )
 }
 
+/// Fractional solar illumination at the satellite with an explicit Earth model.
+///
+/// Safety: sat_pos_km and sun_pos_km must point to 3 doubles; out must point
+/// to a double.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_eclipse_shadow_fraction_with_model(
+    sat_pos_km: *const f64,
+    sun_pos_km: *const f64,
+    model: u32,
+    out: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_eclipse_shadow_fraction_with_model",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out,
+                "sidereon_eclipse_shadow_fraction_with_model",
+                "out"
+            ));
+            *out = 0.0;
+            let sat = c_try!(read_vec3(
+                "sidereon_eclipse_shadow_fraction_with_model",
+                "sat_pos_km",
+                sat_pos_km
+            ));
+            let sun = c_try!(read_vec3(
+                "sidereon_eclipse_shadow_fraction_with_model",
+                "sun_pos_km",
+                sun_pos_km
+            ));
+            let model = c_try!(earth_shadow_model_from_c(
+                "sidereon_eclipse_shadow_fraction_with_model",
+                model
+            ));
+            match sidereon_core::astro::events::eclipse::shadow_fraction_with_model(sat, sun, model)
+            {
+                Ok(v) => {
+                    *out = v;
+                    SidereonStatus::Ok
+                }
+                Err(err) => extra_invalid_arg("sidereon_eclipse_shadow_fraction_with_model", err),
+            }
+        },
+    )
+}
+
 /// Discrete eclipse status (sunlit / penumbra / umbra). Delegates to
 /// sidereon_core::astro::events::eclipse::status.
 ///
@@ -223,6 +280,84 @@ pub unsafe extern "C" fn sidereon_eclipse_status(
             Err(err) => extra_invalid_arg("sidereon_eclipse_status", err),
         }
     })
+}
+
+/// Discrete eclipse status with an explicit Earth shadow model.
+///
+/// Safety: sat_pos_km and sun_pos_km must point to 3 doubles; out must point
+/// to a SidereonEclipseStatus.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_eclipse_status_with_model(
+    sat_pos_km: *const f64,
+    sun_pos_km: *const f64,
+    model: u32,
+    out: *mut SidereonEclipseStatus,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_eclipse_status_with_model",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out,
+                "sidereon_eclipse_status_with_model",
+                "out"
+            ));
+            *out = SidereonEclipseStatus::Sunlit;
+            let sat = c_try!(read_vec3(
+                "sidereon_eclipse_status_with_model",
+                "sat_pos_km",
+                sat_pos_km
+            ));
+            let sun = c_try!(read_vec3(
+                "sidereon_eclipse_status_with_model",
+                "sun_pos_km",
+                sun_pos_km
+            ));
+            let model = c_try!(earth_shadow_model_from_c(
+                "sidereon_eclipse_status_with_model",
+                model
+            ));
+            match sidereon_core::astro::events::eclipse::status_with_model(sat, sun, model) {
+                Ok(s) => {
+                    *out = eclipse_status_to_c(s);
+                    SidereonStatus::Ok
+                }
+                Err(err) => extra_invalid_arg("sidereon_eclipse_status_with_model", err),
+            }
+        },
+    )
+}
+
+fn earth_shadow_model_from_c(
+    fn_name: &str,
+    value: u32,
+) -> Result<sidereon_core::astro::events::eclipse::EarthShadowModel, SidereonStatus> {
+    match value {
+        value if value == SidereonEarthShadowModel::Spherical as u32 => {
+            Ok(sidereon_core::astro::events::eclipse::EarthShadowModel::Spherical)
+        }
+        value if value == SidereonEarthShadowModel::Wgs84Oblate as u32 => {
+            Ok(sidereon_core::astro::events::eclipse::EarthShadowModel::Wgs84Oblate)
+        }
+        _ => {
+            set_last_error(format!("{fn_name}: invalid Earth shadow model"));
+            Err(SidereonStatus::InvalidArgument)
+        }
+    }
+}
+
+fn eclipse_status_to_c(
+    status: sidereon_core::astro::events::eclipse::EclipseStatus,
+) -> SidereonEclipseStatus {
+    match status {
+        sidereon_core::astro::events::eclipse::EclipseStatus::Sunlit => {
+            SidereonEclipseStatus::Sunlit
+        }
+        sidereon_core::astro::events::eclipse::EclipseStatus::Penumbra => {
+            SidereonEclipseStatus::Penumbra
+        }
+        sidereon_core::astro::events::eclipse::EclipseStatus::Umbra => SidereonEclipseStatus::Umbra,
+    }
 }
 
 // --- Sun/Moon ephemeris (sidereon_core::astro::bodies) -----------------------

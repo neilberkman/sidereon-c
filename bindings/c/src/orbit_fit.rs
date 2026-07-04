@@ -234,6 +234,159 @@ pub unsafe extern "C" fn sidereon_fit_sp3_precise_orbit(
     )
 }
 
+/// Fit one satellite from a parsed ECEF SP3 product. On success writes a report
+/// handle to *out_report.
+///
+/// The Earth-orientation provider is constructed internally with zero polar
+/// motion.
+///
+/// Safety: sp3 must be live; sat_id must be a null-terminated satellite token;
+/// options may be NULL for defaults; out_report must point to handle storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_fit_sp3_ecef_precise_orbit(
+    sp3: *const SidereonSp3,
+    sat_id: *const c_char,
+    options: *const SidereonOrbitFitOptions,
+    out_report: *mut *mut SidereonOrbitFitReport,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_fit_sp3_ecef_precise_orbit",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_report,
+                "sidereon_fit_sp3_ecef_precise_orbit",
+                "out_report"
+            ));
+            *out = ptr::null_mut();
+            let sp3 = c_try!(require_ref(
+                sp3,
+                "sidereon_fit_sp3_ecef_precise_orbit",
+                "sp3"
+            ));
+            let sat = c_try!(parse_satellite_token(
+                "sidereon_fit_sp3_ecef_precise_orbit",
+                sat_id,
+            ));
+            let options = c_try!(orbit_fit_options_from_c(
+                "sidereon_fit_sp3_ecef_precise_orbit",
+                options,
+            ));
+            let orientation = TdbEarthOrientationProvider::new();
+            match sidereon_core::ephemeris::fit_sp3_ecef_precise_orbit(
+                &sp3.inner,
+                sat,
+                &orientation,
+                &options,
+            ) {
+                Ok(inner) => {
+                    write_boxed_handle(out, SidereonOrbitFitReport { inner });
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_orbit_fit_error("sidereon_fit_sp3_ecef_precise_orbit", err),
+            }
+        },
+    )
+}
+
+/// Fit selected satellites from a parsed ECEF SP3 product.
+///
+/// Safety: sp3 must be live; satellites must point to satellite_count fixed
+/// tokens; options may be NULL; out_report must point to handle storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_fit_sp3_ecef_precise_orbits(
+    sp3: *const SidereonSp3,
+    satellites: *const SidereonSatelliteToken,
+    satellite_count: usize,
+    options: *const SidereonOrbitFitOptions,
+    out_report: *mut *mut SidereonOrbitFitReport,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_fit_sp3_ecef_precise_orbits",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_report,
+                "sidereon_fit_sp3_ecef_precise_orbits",
+                "out_report"
+            ));
+            *out = ptr::null_mut();
+            let sp3 = c_try!(require_ref(
+                sp3,
+                "sidereon_fit_sp3_ecef_precise_orbits",
+                "sp3"
+            ));
+            let satellites = c_try!(satellite_tokens_from_c(
+                "sidereon_fit_sp3_ecef_precise_orbits",
+                satellites,
+                satellite_count
+            ));
+            let options = c_try!(orbit_fit_options_from_c(
+                "sidereon_fit_sp3_ecef_precise_orbits",
+                options,
+            ));
+            let orientation = TdbEarthOrientationProvider::new();
+            match sidereon_core::ephemeris::fit_sp3_ecef_precise_orbits(
+                &sp3.inner,
+                &satellites,
+                &orientation,
+                &options,
+            ) {
+                Ok(inner) => {
+                    write_boxed_handle(out, SidereonOrbitFitReport { inner });
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_orbit_fit_error("sidereon_fit_sp3_ecef_precise_orbits", err),
+            }
+        },
+    )
+}
+
+/// Fit every satellite from a parsed ECEF SP3 product.
+///
+/// Safety: sp3 must be live; options may be NULL; out_report must point to
+/// handle storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_fit_all_sp3_ecef_precise_orbits(
+    sp3: *const SidereonSp3,
+    options: *const SidereonOrbitFitOptions,
+    out_report: *mut *mut SidereonOrbitFitReport,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_fit_all_sp3_ecef_precise_orbits",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_report,
+                "sidereon_fit_all_sp3_ecef_precise_orbits",
+                "out_report"
+            ));
+            *out = ptr::null_mut();
+            let sp3 = c_try!(require_ref(
+                sp3,
+                "sidereon_fit_all_sp3_ecef_precise_orbits",
+                "sp3"
+            ));
+            let options = c_try!(orbit_fit_options_from_c(
+                "sidereon_fit_all_sp3_ecef_precise_orbits",
+                options,
+            ));
+            let orientation = TdbEarthOrientationProvider::new();
+            match sidereon_core::ephemeris::fit_all_sp3_ecef_precise_orbits(
+                &sp3.inner,
+                &orientation,
+                &options,
+            ) {
+                Ok(inner) => {
+                    write_boxed_handle(out, SidereonOrbitFitReport { inner });
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_orbit_fit_error("sidereon_fit_all_sp3_ecef_precise_orbits", err),
+            }
+        },
+    )
+}
+
 /// Fit one satellite from canonical precise-ephemeris samples. On success
 /// writes a report handle to *out_report.
 ///
@@ -590,6 +743,9 @@ fn orbit_fit_default_force_components() -> SidereonForceModelComponents {
         two_body_mu_km3_s2: MU_EARTH,
         has_zonal: false,
         zonal_max_degree: 6,
+        has_spherical_harmonic: false,
+        spherical_harmonic_max_degree: 8,
+        spherical_harmonic_max_order: 8,
         has_third_body: false,
         third_body_sun: true,
         third_body_moon: true,
@@ -600,6 +756,23 @@ fn orbit_fit_default_force_components() -> SidereonForceModelComponents {
         },
         has_relativity: false,
     }
+}
+
+unsafe fn satellite_tokens_from_c(
+    fn_name: &str,
+    satellites: *const SidereonSatelliteToken,
+    satellite_count: usize,
+) -> Result<Vec<GnssSatelliteId>, SidereonStatus> {
+    let raw = require_slice(satellites, satellite_count, fn_name, "satellites")?;
+    let mut parsed = Vec::with_capacity(raw.len());
+    for (idx, token) in raw.iter().enumerate() {
+        let text = fixed_c_array_to_string(fn_name, &format!("satellites[{idx}]"), &token.bytes)?;
+        parsed.push(GnssSatelliteId::from_str(&text).map_err(|_| {
+            set_last_error(format!("{fn_name}: invalid satellite token: {text}"));
+            SidereonStatus::InvalidToken
+        })?);
+    }
+    Ok(parsed)
 }
 
 fn orbit_fit_solution_to_c(

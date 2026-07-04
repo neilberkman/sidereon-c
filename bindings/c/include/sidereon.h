@@ -949,6 +949,10 @@ typedef enum SidereonPropagationForceModel {
      * Canonical Earth Phase A force set with optional SRP parameters.
      */
     SIDEREON_PROPAGATION_FORCE_MODEL_EARTH_PHASE_A = 3,
+    /**
+     * Canonical Earth Phase B force set with spherical-harmonic gravity.
+     */
+    SIDEREON_PROPAGATION_FORCE_MODEL_EARTH_PHASE_B = 4,
 } SidereonPropagationForceModel;
 
 /**
@@ -1108,6 +1112,38 @@ typedef enum SidereonPseudorangeVarianceModel {
      */
     SIDEREON_PSEUDORANGE_VARIANCE_MODEL_ELEVATION_CN0 = 1,
 } SidereonPseudorangeVarianceModel;
+
+/**
+ * Troposphere mapping error category.
+ */
+typedef enum SidereonTropoMappingErrorKind {
+    /**
+     * No mapping error.
+     */
+    SIDEREON_TROPO_MAPPING_ERROR_KIND_NONE = 0,
+    /**
+     * Elevation is below the Niell mapping validity bound.
+     */
+    SIDEREON_TROPO_MAPPING_ERROR_KIND_LOW_ELEVATION = 1,
+    /**
+     * Another invalid input was rejected by core.
+     */
+    SIDEREON_TROPO_MAPPING_ERROR_KIND_INVALID_INPUT = 2,
+} SidereonTropoMappingErrorKind;
+
+/**
+ * Earth figure used for eclipse shadow geometry.
+ */
+typedef enum SidereonEarthShadowModel {
+    /**
+     * Mean-radius spherical Earth.
+     */
+    SIDEREON_EARTH_SHADOW_MODEL_SPHERICAL = 0,
+    /**
+     * WGS84 oblate Earth approximation.
+     */
+    SIDEREON_EARTH_SHADOW_MODEL_WGS84_OBLATE = 1,
+} SidereonEarthShadowModel;
 
 /**
  * Collision-probability computation method.
@@ -1332,6 +1368,42 @@ typedef enum SidereonRtcmAntennaStringField {
      */
     SIDEREON_RTCM_ANTENNA_STRING_FIELD_RECEIVER_SERIAL_NUMBER = 4,
 } SidereonRtcmAntennaStringField;
+
+/**
+ * EGM2008 raster grid spacing selector.
+ */
+typedef enum SidereonEgm2008GridSpacing {
+    /**
+     * One-arcminute global raster.
+     */
+    SIDEREON_EGM2008_GRID_SPACING_ONE_MINUTE = 0,
+    /**
+     * Two-and-a-half-arcminute global raster.
+     */
+    SIDEREON_EGM2008_GRID_SPACING_TWO_POINT_FIVE_MINUTE = 1,
+} SidereonEgm2008GridSpacing;
+
+/**
+ * Terrestrial reference-frame realization selector.
+ */
+typedef enum SidereonTerrestrialFrame {
+    /**
+     * ITRF2020.
+     */
+    SIDEREON_TERRESTRIAL_FRAME_ITRF2020 = 0,
+    /**
+     * ITRF2014.
+     */
+    SIDEREON_TERRESTRIAL_FRAME_ITRF2014 = 1,
+    /**
+     * ITRF2008.
+     */
+    SIDEREON_TERRESTRIAL_FRAME_ITRF2008 = 2,
+    /**
+     * ETRF2020.
+     */
+    SIDEREON_TERRESTRIAL_FRAME_ETRF2020 = 3,
+} SidereonTerrestrialFrame;
 
 /**
  * Reference-satellite selection mode for an RTK arc, mirroring
@@ -1915,6 +1987,126 @@ typedef enum SidereonOrbitFitCovarianceKind {
 } SidereonOrbitFitCovarianceKind;
 
 /**
+ * TDM observable family.
+ */
+typedef enum SidereonTdmObservable {
+    /**
+     * RANGE.
+     */
+    SIDEREON_TDM_OBSERVABLE_RANGE = 0,
+    /**
+     * DOPPLER_INSTANTANEOUS.
+     */
+    SIDEREON_TDM_OBSERVABLE_DOPPLER_INSTANTANEOUS = 1,
+    /**
+     * DOPPLER_INTEGRATED.
+     */
+    SIDEREON_TDM_OBSERVABLE_DOPPLER_INTEGRATED = 2,
+    /**
+     * RECEIVE_FREQ or RECEIVE_FREQ_n.
+     */
+    SIDEREON_TDM_OBSERVABLE_RECEIVE_FREQ = 3,
+    /**
+     * TRANSMIT_FREQ or TRANSMIT_FREQ_n.
+     */
+    SIDEREON_TDM_OBSERVABLE_TRANSMIT_FREQ = 4,
+    /**
+     * TRANSMIT_FREQ_RATE or TRANSMIT_FREQ_RATE_n.
+     */
+    SIDEREON_TDM_OBSERVABLE_TRANSMIT_FREQ_RATE = 5,
+    /**
+     * ANGLE_1.
+     */
+    SIDEREON_TDM_OBSERVABLE_ANGLE1 = 6,
+    /**
+     * ANGLE_2.
+     */
+    SIDEREON_TDM_OBSERVABLE_ANGLE2 = 7,
+    /**
+     * A CCSDS table-defined observable without a dedicated enum variant.
+     */
+    SIDEREON_TDM_OBSERVABLE_OTHER = 255,
+} SidereonTdmObservable;
+
+/**
+ * TDM record unit.
+ */
+typedef enum SidereonTdmUnit {
+    /**
+     * Kilometers.
+     */
+    SIDEREON_TDM_UNIT_KILOMETERS = 0,
+    /**
+     * Seconds.
+     */
+    SIDEREON_TDM_UNIT_SECONDS = 1,
+    /**
+     * CCSDS range units.
+     */
+    SIDEREON_TDM_UNIT_RANGE_UNITS = 2,
+    /**
+     * Kilometers per second.
+     */
+    SIDEREON_TDM_UNIT_KILOMETERS_PER_SECOND = 3,
+    /**
+     * Hertz.
+     */
+    SIDEREON_TDM_UNIT_HERTZ = 4,
+    /**
+     * Hertz per second.
+     */
+    SIDEREON_TDM_UNIT_HERTZ_PER_SECOND = 5,
+    /**
+     * Degrees.
+     */
+    SIDEREON_TDM_UNIT_DEGREES = 6,
+    /**
+     * Decibel watts.
+     */
+    SIDEREON_TDM_UNIT_DECIBEL_WATTS = 7,
+    /**
+     * Decibel hertz.
+     */
+    SIDEREON_TDM_UNIT_DECIBEL_HERTZ = 8,
+    /**
+     * Square meters.
+     */
+    SIDEREON_TDM_UNIT_SQUARE_METERS = 9,
+    /**
+     * Meters.
+     */
+    SIDEREON_TDM_UNIT_METERS = 10,
+    /**
+     * Seconds per second.
+     */
+    SIDEREON_TDM_UNIT_SECONDS_PER_SECOND = 11,
+    /**
+     * Percent.
+     */
+    SIDEREON_TDM_UNIT_PERCENT = 12,
+    /**
+     * Kelvin.
+     */
+    SIDEREON_TDM_UNIT_KELVIN = 13,
+    /**
+     * Hectopascals.
+     */
+    SIDEREON_TDM_UNIT_HECTOPASCALS = 14,
+    /**
+     * Total electron content units.
+     */
+    SIDEREON_TDM_UNIT_TOTAL_ELECTRON_CONTENT_UNITS = 15,
+    /**
+     * Dimensionless quantity.
+     */
+    SIDEREON_TDM_UNIT_DIMENSIONLESS = 16,
+    /**
+     * Unmodeled unit label.
+     */
+    SIDEREON_TDM_UNIT_UNKNOWN = 255,
+} SidereonTdmUnit;
+
+/**
  * Combined Allan-family estimator curves. Opaque to C. Create with
  * sidereon_clock_compute_allan_deviations and release with
  * sidereon_clock_allan_deviation_curves_free.
@@ -2354,6 +2546,13 @@ typedef struct SidereonSbasBlock SidereonSbasBlock;
 
 typedef struct SidereonSbasCorrectionStore SidereonSbasCorrectionStore;
 
+/**
+ * Stateful SGP4 decay latch. Opaque to C. Create with
+ * sidereon_sgp4_decay_latch_new and release with
+ * sidereon_sgp4_decay_latch_free.
+ */
+typedef struct SidereonSgp4DecayLatch SidereonSgp4DecayLatch;
+
 typedef struct SidereonSgp4TleFit SidereonSgp4TleFit;
 
 /**
@@ -2413,6 +2612,13 @@ typedef struct SidereonSppBatch SidereonSppBatch;
 typedef struct SidereonSppSolution SidereonSppSolution;
 
 typedef struct SidereonSsrCorrectionStore SidereonSsrCorrectionStore;
+
+/**
+ * A parsed CCSDS Tracking Data Message. Opaque to C. Create with
+ * sidereon_tdm_parse_kvn, serialize with sidereon_tdm_to_kvn, and release
+ * with sidereon_tdm_free.
+ */
+typedef struct SidereonTdm SidereonTdm;
 
 /**
  * A parsed TLE and initialized SGP4 satellite. Opaque to C. Create with
@@ -5346,46 +5552,6 @@ typedef struct SidereonTcaPropagatedCovariancePcOptions {
 } SidereonTcaPropagatedCovariancePcOptions;
 
 /**
- * One canonical precise-ephemeris sample: a satellite's ECEF position (and
- * optional clock) at one epoch, in SI units. This is the serialization-
- * independent element behind an SP3 record; sidereon_sp3_precise_ephemeris_samples
- * extracts them and sidereon_precise_ephemeris_samples_from_samples rebuilds an
- * interpolatable source from them.
- */
-typedef struct SidereonPreciseEphemerisSample {
-    /**
-     * Satellite this sample describes, as a null-terminated token (e.g. G01).
-     */
-    struct SidereonSatelliteToken sat;
-    /**
-     * Time scale the epoch is expressed in (a SidereonTimeScale code as
-     * uint32_t). Every sample in one source must share this scale.
-     */
-    uint32_t time_scale;
-    /**
-     * Sample epoch, seconds since J2000 in the sample's time scale.
-     */
-    double epoch_j2000_s;
-    /**
-     * Satellite ECEF position in the ITRF/IGS frame, meters.
-     */
-    double position_ecef_m[3];
-    /**
-     * Whether clock_s carries a satellite clock estimate.
-     */
-    bool has_clock_s;
-    /**
-     * Satellite clock offset, seconds, when has_clock_s is true.
-     */
-    double clock_s;
-    /**
-     * Whether this epoch carries the SP3 E clock-event flag: true splits the
-     * clock interpolation arc here (a clock reset takes effect at this epoch).
-     */
-    bool clock_event;
-} SidereonPreciseEphemerisSample;
-
-/**
  * Cannonball solar-radiation-pressure spacecraft parameters.
  */
 typedef struct SidereonSolarRadiationPressure {
@@ -5423,6 +5589,18 @@ typedef struct SidereonForceModelComponents {
      * Highest active zonal degree, in the inclusive range 2 through 6.
      */
     uint32_t zonal_max_degree;
+    /**
+     * Whether to include Earth spherical-harmonic gravity.
+     */
+    bool has_spherical_harmonic;
+    /**
+     * Spherical-harmonic maximum degree.
+     */
+    uint32_t spherical_harmonic_max_degree;
+    /**
+     * Spherical-harmonic maximum order.
+     */
+    uint32_t spherical_harmonic_max_order;
     /**
      * Whether to include third-body gravity.
      */
@@ -5526,6 +5704,46 @@ typedef struct SidereonOrbitFitOptions {
      */
     struct SidereonDragParameters drag;
 } SidereonOrbitFitOptions;
+
+/**
+ * One canonical precise-ephemeris sample: a satellite's ECEF position (and
+ * optional clock) at one epoch, in SI units. This is the serialization-
+ * independent element behind an SP3 record; sidereon_sp3_precise_ephemeris_samples
+ * extracts them and sidereon_precise_ephemeris_samples_from_samples rebuilds an
+ * interpolatable source from them.
+ */
+typedef struct SidereonPreciseEphemerisSample {
+    /**
+     * Satellite this sample describes, as a null-terminated token (e.g. G01).
+     */
+    struct SidereonSatelliteToken sat;
+    /**
+     * Time scale the epoch is expressed in (a SidereonTimeScale code as
+     * uint32_t). Every sample in one source must share this scale.
+     */
+    uint32_t time_scale;
+    /**
+     * Sample epoch, seconds since J2000 in the sample's time scale.
+     */
+    double epoch_j2000_s;
+    /**
+     * Satellite ECEF position in the ITRF/IGS frame, meters.
+     */
+    double position_ecef_m[3];
+    /**
+     * Whether clock_s carries a satellite clock estimate.
+     */
+    bool has_clock_s;
+    /**
+     * Satellite clock offset, seconds, when has_clock_s is true.
+     */
+    double clock_s;
+    /**
+     * Whether this epoch carries the SP3 E clock-event flag: true splits the
+     * clock interpolation arc here (a clock reset takes effect at this epoch).
+     */
+    bool clock_event;
+} SidereonPreciseEphemerisSample;
 
 /**
  * One receiver's dual-frequency code/carrier observation for RTK wide-lane and
@@ -5769,6 +5987,146 @@ typedef struct SidereonRtkWideLaneArcConfig {
      */
     struct SidereonRtkDualCycleSlipConfig cycle_slip;
 } SidereonRtkWideLaneArcConfig;
+
+/**
+ * Helmert parameters in published table units.
+ */
+typedef struct SidereonHelmertParameters {
+    /**
+     * Translation components [Tx, Ty, Tz], millimeters.
+     */
+    double translation_mm[3];
+    /**
+     * Scale difference, parts per billion.
+     */
+    double scale_ppb;
+    /**
+     * Rotation components [Rx, Ry, Rz], milliarcseconds.
+     */
+    double rotation_mas[3];
+} SidereonHelmertParameters;
+
+/**
+ * Helmert parameter rates in published table units.
+ */
+typedef struct SidereonHelmertRates {
+    /**
+     * Translation rates [Tx, Ty, Tz], millimeters per year.
+     */
+    double translation_mm_per_year[3];
+    /**
+     * Scale rate, parts per billion per year.
+     */
+    double scale_ppb_per_year;
+    /**
+     * Rotation rates [Rx, Ry, Rz], milliarcseconds per year.
+     */
+    double rotation_mas_per_year[3];
+} SidereonHelmertRates;
+
+/**
+ * Published terrestrial-frame Helmert transform.
+ */
+typedef struct SidereonHelmertTransform {
+    /**
+     * Source frame as SidereonTerrestrialFrame.
+     */
+    uint32_t from;
+    /**
+     * Target frame as SidereonTerrestrialFrame.
+     */
+    uint32_t to;
+    /**
+     * Parameter reference epoch, decimal year.
+     */
+    double reference_epoch_year;
+    /**
+     * Helmert parameters at the reference epoch.
+     */
+    struct SidereonHelmertParameters parameters;
+    /**
+     * Linear rates of the Helmert parameters.
+     */
+    struct SidereonHelmertRates rates;
+    /**
+     * Null-terminated provenance string.
+     */
+    char provenance[129];
+} SidereonHelmertTransform;
+
+/**
+ * Cartesian terrestrial position in meters.
+ */
+typedef struct SidereonTerrestrialPosition {
+    /**
+     * Position components [x, y, z], meters.
+     */
+    double position_m[3];
+} SidereonTerrestrialPosition;
+
+/**
+ * Cartesian terrestrial station velocity in meters per year.
+ */
+typedef struct SidereonTerrestrialVelocity {
+    /**
+     * Velocity components [vx, vy, vz], meters per year.
+     */
+    double velocity_m_per_year[3];
+} SidereonTerrestrialVelocity;
+
+/**
+ * Cartesian terrestrial state with optional station velocity.
+ */
+typedef struct SidereonTerrestrialState {
+    /**
+     * Terrestrial position.
+     */
+    struct SidereonTerrestrialPosition position;
+    /**
+     * Whether velocity is present.
+     */
+    bool has_velocity;
+    /**
+     * Terrestrial station velocity when present.
+     */
+    struct SidereonTerrestrialVelocity velocity;
+} SidereonTerrestrialState;
+
+/**
+ * Geodesic direct solution on WGS84.
+ */
+typedef struct SidereonGeodesicDirectResult {
+    /**
+     * Destination latitude in degrees.
+     */
+    double latitude_deg;
+    /**
+     * Destination longitude in degrees.
+     */
+    double longitude_deg;
+    /**
+     * Forward azimuth at the destination, degrees clockwise from north.
+     */
+    double final_azimuth_deg;
+} SidereonGeodesicDirectResult;
+
+/**
+ * Geodesic inverse solution on WGS84.
+ */
+typedef struct SidereonGeodesicInverseResult {
+    /**
+     * Ellipsoidal distance in meters.
+     */
+    double distance_m;
+    /**
+     * Forward azimuth at the first point, degrees clockwise from north.
+     */
+    double initial_azimuth_deg;
+    /**
+     * Forward azimuth at the second point, degrees clockwise from north.
+     */
+    double final_azimuth_deg;
+} SidereonGeodesicInverseResult;
 
 /**
  * One position sample in a station time series.
@@ -6217,6 +6575,32 @@ typedef struct SidereonGeodeticTrajectoryTerm {
      */
     double epoch_year;
 } SidereonGeodeticTrajectoryTerm;
+
+/**
+ * EGM2008 raster window descriptor.
+ */
+typedef struct SidereonEgm2008RasterWindow {
+    /**
+     * Raster spacing as SidereonEgm2008GridSpacing.
+     */
+    uint32_t spacing;
+    /**
+     * Minimum latitude of the crop, degrees.
+     */
+    double lat_min_deg;
+    /**
+     * Minimum longitude of the crop, degrees.
+     */
+    double lon_min_deg;
+    /**
+     * Number of latitude samples.
+     */
+    size_t n_lat;
+    /**
+     * Number of longitude samples.
+     */
+    size_t n_lon;
+} SidereonEgm2008RasterWindow;
 
 /**
  * GNSS week and time-of-week value.
@@ -13398,6 +13782,148 @@ typedef struct SidereonSurfacePoint {
 } SidereonSurfacePoint;
 
 /**
+ * One TDM participant metadata entry.
+ */
+typedef struct SidereonTdmParticipant {
+    /**
+     * Segment index in parse order.
+     */
+    size_t segment_index;
+    /**
+     * PARTICIPANT_n suffix.
+     */
+    uint8_t index;
+    /**
+     * Null-terminated participant name.
+     */
+    char name[65];
+} SidereonTdmParticipant;
+
+/**
+ * One TDM PATH metadata entry.
+ */
+typedef struct SidereonTdmPath {
+    /**
+     * Segment index in parse order.
+     */
+    size_t segment_index;
+    /**
+     * Original PATH keyword.
+     */
+    char key[49];
+    /**
+     * Whether index carries the PATH_n suffix.
+     */
+    bool has_index;
+    /**
+     * PATH_n suffix when present.
+     */
+    uint8_t index;
+    /**
+     * Number of participant indices copied into participants.
+     */
+    size_t participant_count;
+    /**
+     * Participant indices in path order.
+     */
+    uint8_t participants[8];
+} SidereonTdmPath;
+
+/**
+ * One time-tagged TDM data record.
+ */
+typedef struct SidereonTdmDataRecord {
+    /**
+     * Segment index in parse order.
+     */
+    size_t segment_index;
+    /**
+     * Observable family as SidereonTdmObservable.
+     */
+    uint32_t observable;
+    /**
+     * Whether observable_participant carries an indexed observable suffix.
+     */
+    bool has_observable_participant;
+    /**
+     * Observable participant suffix when present.
+     */
+    uint8_t observable_participant;
+    /**
+     * Unit as SidereonTdmUnit.
+     */
+    uint32_t unit;
+    /**
+     * Original data keyword.
+     */
+    char keyword[49];
+    /**
+     * Raw epoch string.
+     */
+    char epoch[65];
+    /**
+     * Exact decimal token from the message.
+     */
+    char value_text[65];
+    /**
+     * Parsed numeric value.
+     */
+    double value;
+} SidereonTdmDataRecord;
+
+/**
+ * Optional fixed-size null-terminated TDM string field.
+ */
+typedef struct SidereonTdmStringField {
+    /**
+     * Whether value is present.
+     */
+    bool has_value;
+    /**
+     * Null-terminated string value when present.
+     */
+    char value[129];
+} SidereonTdmStringField;
+
+/**
+ * Summary of one TDM metadata/data segment.
+ */
+typedef struct SidereonTdmSegmentSummary {
+    /**
+     * Segment index in parse order.
+     */
+    size_t segment_index;
+    /**
+     * Optional MODE metadata value.
+     */
+    struct SidereonTdmStringField mode;
+    /**
+     * Optional TIMETAG_REF metadata value.
+     */
+    struct SidereonTdmStringField timetag_ref;
+    /**
+     * Optional TIME_SYSTEM metadata value.
+     */
+    struct SidereonTdmStringField time_system;
+    /**
+     * Range unit as SidereonTdmUnit.
+     */
+    uint32_t range_unit;
+    /**
+     * Number of parsed participant entries.
+     */
+    size_t participant_count;
+    /**
+     * Number of parsed path entries.
+     */
+    size_t path_count;
+    /**
+     * Number of data records in the segment.
+     */
+    size_t record_count;
+} SidereonTdmSegmentSummary;
+
+/**
  * One TEME Cartesian state from SGP4.
  */
 typedef struct SidereonTemeState {
@@ -13555,6 +14081,24 @@ typedef struct SidereonMappingFactors {
      */
     double wet;
 } SidereonMappingFactors;
+
+/**
+ * Typed troposphere mapping error detail.
+ */
+typedef struct SidereonTropoMappingError {
+    /**
+     * Error kind as SidereonTropoMappingErrorKind.
+     */
+    uint32_t kind;
+    /**
+     * Input elevation, radians.
+     */
+    double elevation_rad;
+    /**
+     * Minimum supported mapping elevation, radians.
+     */
+    double min_elevation_rad;
+} SidereonTropoMappingError;
 
 /**
  * Zenith troposphere delay split, mirroring
@@ -16046,6 +16590,17 @@ enum SidereonStatus sidereon_eclipse_shadow_fraction(const double *sat_pos_km,
                                                      double *out);
 
 /**
+ * Fractional solar illumination at the satellite with an explicit Earth model.
+ *
+ * Safety: sat_pos_km and sun_pos_km must point to 3 doubles; out must point
+ * to a double.
+ */
+enum SidereonStatus sidereon_eclipse_shadow_fraction_with_model(const double *sat_pos_km,
+                                                                const double *sun_pos_km,
+                                                                uint32_t model,
+                                                                double *out);
+
+/**
  * Discrete eclipse status (sunlit / penumbra / umbra). Delegates to
  * sidereon_core::astro::events::eclipse::status.
  *
@@ -16055,6 +16610,17 @@ enum SidereonStatus sidereon_eclipse_shadow_fraction(const double *sat_pos_km,
 enum SidereonStatus sidereon_eclipse_status(const double *sat_pos_km,
                                             const double *sun_pos_km,
                                             enum SidereonEclipseStatus *out);
+
+/**
+ * Discrete eclipse status with an explicit Earth shadow model.
+ *
+ * Safety: sat_pos_km and sun_pos_km must point to 3 doubles; out must point
+ * to a SidereonEclipseStatus.
+ */
+enum SidereonStatus sidereon_eclipse_status_with_model(const double *sat_pos_km,
+                                                       const double *sun_pos_km,
+                                                       uint32_t model,
+                                                       enum SidereonEclipseStatus *out);
 
 /**
  * Release an EGM96 15-arcminute geoid grid handle. Passing NULL is a no-op.
@@ -16508,6 +17074,16 @@ enum SidereonStatus sidereon_find_tca_conjunctions_with_propagated_covariance_fr
                                                                                         size_t *out_required);
 
 /**
+ * Fit every satellite from a parsed ECEF SP3 product.
+ *
+ * Safety: sp3 must be live; options may be NULL; out_report must point to
+ * handle storage.
+ */
+enum SidereonStatus sidereon_fit_all_sp3_ecef_precise_orbits(const struct SidereonSp3 *sp3,
+                                                             const struct SidereonOrbitFitOptions *options,
+                                                             struct SidereonOrbitFitReport **out_report);
+
+/**
  * Fit one satellite from canonical precise-ephemeris samples. On success
  * writes a report handle to *out_report.
  *
@@ -16520,6 +17096,33 @@ enum SidereonStatus sidereon_fit_precise_ephemeris_sample_orbit(const struct Sid
                                                                 const char *sat_id,
                                                                 const struct SidereonOrbitFitOptions *options,
                                                                 struct SidereonOrbitFitReport **out_report);
+
+/**
+ * Fit one satellite from a parsed ECEF SP3 product. On success writes a report
+ * handle to *out_report.
+ *
+ * The Earth-orientation provider is constructed internally with zero polar
+ * motion.
+ *
+ * Safety: sp3 must be live; sat_id must be a null-terminated satellite token;
+ * options may be NULL for defaults; out_report must point to handle storage.
+ */
+enum SidereonStatus sidereon_fit_sp3_ecef_precise_orbit(const struct SidereonSp3 *sp3,
+                                                        const char *sat_id,
+                                                        const struct SidereonOrbitFitOptions *options,
+                                                        struct SidereonOrbitFitReport **out_report);
+
+/**
+ * Fit selected satellites from a parsed ECEF SP3 product.
+ *
+ * Safety: sp3 must be live; satellites must point to satellite_count fixed
+ * tokens; options may be NULL; out_report must point to handle storage.
+ */
+enum SidereonStatus sidereon_fit_sp3_ecef_precise_orbits(const struct SidereonSp3 *sp3,
+                                                         const struct SidereonSatelliteToken *satellites,
+                                                         size_t satellite_count,
+                                                         const struct SidereonOrbitFitOptions *options,
+                                                         struct SidereonOrbitFitReport **out_report);
 
 /**
  * Fit one satellite from a parsed SP3 product. On success writes a report
@@ -16569,6 +17172,72 @@ enum SidereonStatus sidereon_force_j2_acceleration(const double *position_km,
 enum SidereonStatus sidereon_force_twobody_acceleration(const double *position_km,
                                                         const double *velocity_km_s,
                                                         double *out_accel);
+
+/**
+ * Write the number of built-in terrestrial frame catalog entries to
+ * *out_count.
+ *
+ * Safety: out_count must point to writable size_t storage.
+ */
+enum SidereonStatus sidereon_frame_catalog_count(size_t *out_count);
+
+/**
+ * Copy built-in terrestrial frame catalog entries.
+ *
+ * Safety: out must point to len writable entries or be NULL when len is 0;
+ * out_written and out_required must point to size_t storage.
+ */
+enum SidereonStatus sidereon_frame_catalog_entries(struct SidereonHelmertTransform *out,
+                                                   size_t len,
+                                                   size_t *out_written,
+                                                   size_t *out_required);
+
+/**
+ * Copy one published catalog entry for a forward frame pair.
+ *
+ * Safety: out_transform must point to writable SidereonHelmertTransform
+ * storage.
+ */
+enum SidereonStatus sidereon_frame_catalog_entry(uint32_t from,
+                                                 uint32_t to,
+                                                 struct SidereonHelmertTransform *out_transform);
+
+/**
+ * Propagate a terrestrial station position between decimal-year epochs.
+ *
+ * Safety: position, velocity, and out_position must point to their documented
+ * storage.
+ */
+enum SidereonStatus sidereon_frame_catalog_propagate_position(const struct SidereonTerrestrialPosition *position,
+                                                              const struct SidereonTerrestrialVelocity *velocity,
+                                                              double from_epoch_year,
+                                                              double to_epoch_year,
+                                                              struct SidereonTerrestrialPosition *out_position);
+
+/**
+ * Transform a terrestrial position and optional velocity between frames.
+ *
+ * Safety: state and out_state must point to their documented storage.
+ */
+enum SidereonStatus sidereon_frame_catalog_transform(const struct SidereonTerrestrialState *state,
+                                                     uint32_t from,
+                                                     uint32_t to,
+                                                     double epoch_year,
+                                                     struct SidereonTerrestrialState *out_state);
+
+/**
+ * Propagate a station to a transform epoch, then transform it between frames.
+ *
+ * Safety: position, velocity, and out_state must point to their documented
+ * storage.
+ */
+enum SidereonStatus sidereon_frame_catalog_transform_from_epoch(const struct SidereonTerrestrialPosition *position,
+                                                                const struct SidereonTerrestrialVelocity *velocity,
+                                                                double position_epoch_year,
+                                                                uint32_t from,
+                                                                uint32_t to,
+                                                                double transform_epoch_year,
+                                                                struct SidereonTerrestrialState *out_state);
 
 /**
  * Greenwich Apparent Sidereal Time (radians) for the given time scales.
@@ -16820,6 +17489,30 @@ enum SidereonStatus sidereon_galileo_nequick_g_native(double ai0,
                                                       double *out_delay_m);
 
 /**
+ * Solve the WGS84 Karney direct geodesic from a point, azimuth, and distance.
+ *
+ * Safety: out_result must point to writable SidereonGeodesicDirectResult
+ * storage.
+ */
+enum SidereonStatus sidereon_geodesic_direct(double lat1_deg,
+                                             double lon1_deg,
+                                             double initial_azimuth_deg,
+                                             double distance_m,
+                                             struct SidereonGeodesicDirectResult *out_result);
+
+/**
+ * Solve the WGS84 Karney inverse geodesic from point 1 to point 2.
+ *
+ * Safety: out_result must point to writable SidereonGeodesicInverseResult
+ * storage.
+ */
+enum SidereonStatus sidereon_geodesic_inverse(double lat1_deg,
+                                              double lon1_deg,
+                                              double lat2_deg,
+                                              double lon2_deg,
+                                              struct SidereonGeodesicInverseResult *out_result);
+
+/**
  * Detect candidate displacement steps. Uses the variable-length output
  * contract.
  *
@@ -16999,6 +17692,28 @@ enum SidereonStatus sidereon_geoid_grid_ellipsoidal_height_rad(const struct Side
  * Safety: grid must be a handle from a sidereon_geoid_grid_* constructor or NULL.
  */
 void sidereon_geoid_grid_free(struct SidereonGeoidGrid *grid);
+
+/**
+ * Load a global EGM2008 raster into the generic geoid grid handle.
+ *
+ * Safety: data must point to len readable bytes; out_grid must point to a
+ * SidereonGeoidGrid*.
+ */
+enum SidereonStatus sidereon_geoid_grid_from_egm2008_raster(const uint8_t *data,
+                                                            size_t len,
+                                                            uint32_t spacing,
+                                                            struct SidereonGeoidGrid **out_grid);
+
+/**
+ * Load an EGM2008 raster crop into the generic geoid grid handle.
+ *
+ * Safety: data and window must point to readable storage; out_grid must point
+ * to a SidereonGeoidGrid*.
+ */
+enum SidereonStatus sidereon_geoid_grid_from_egm2008_raster_window(const uint8_t *data,
+                                                                   size_t len,
+                                                                   const struct SidereonEgm2008RasterWindow *window,
+                                                                   struct SidereonGeoidGrid **out_grid);
 
 enum SidereonStatus sidereon_geoid_grid_from_egm96_dac(const uint8_t *data,
                                                        size_t len,
@@ -22614,6 +23329,38 @@ enum SidereonSelectionStatus sidereon_select_sp3_over_range(const struct Sidereo
                                                             struct SidereonSp3 **out_selection,
                                                             struct SidereonStalenessMetadata *out_metadata);
 
+/**
+ * Clear the recorded decay state from a latch.
+ *
+ * Safety: latch must be a live SidereonSgp4DecayLatch handle.
+ */
+enum SidereonStatus sidereon_sgp4_decay_latch_clear(struct SidereonSgp4DecayLatch *latch);
+
+/**
+ * Copy the first failing epoch recorded by a decay latch.
+ *
+ * Safety: latch must be live; out_has_epoch and out_minutes_since_epoch must
+ * point to writable storage.
+ */
+enum SidereonStatus sidereon_sgp4_decay_latch_first_failing_epoch(const struct SidereonSgp4DecayLatch *latch,
+                                                                  bool *out_has_epoch,
+                                                                  double *out_minutes_since_epoch);
+
+/**
+ * Release an SGP4 decay latch handle. Passing NULL is a no-op.
+ *
+ * Safety: latch must be NULL or a live handle from
+ * sidereon_sgp4_decay_latch_new.
+ */
+void sidereon_sgp4_decay_latch_free(struct SidereonSgp4DecayLatch *latch);
+
+/**
+ * Create an empty SGP4 decay latch.
+ *
+ * Safety: out_latch must point to storage for a SidereonSgp4DecayLatch*.
+ */
+enum SidereonStatus sidereon_sgp4_decay_latch_new(struct SidereonSgp4DecayLatch **out_latch);
+
 enum SidereonStatus sidereon_sgp4_fit_config_init(struct SidereonSgp4FitConfig *out_config);
 
 enum SidereonStatus sidereon_sgp4_fit_tle(const struct SidereonSgp4FitSample *samples,
@@ -24492,6 +25239,99 @@ enum SidereonStatus sidereon_tca_collision_probability(const struct SidereonTcaC
 enum SidereonStatus sidereon_tca_finder_options_init(struct SidereonTcaFinderOptions *out_options);
 
 /**
+ * Release a TDM handle. Passing NULL is a no-op.
+ *
+ * Safety: tdm must be NULL or a live handle from sidereon_tdm_parse_kvn.
+ */
+void sidereon_tdm_free(struct SidereonTdm *tdm);
+
+/**
+ * Parse a CCSDS TDM in KVN form. On success writes a newly owned handle to
+ * *out_tdm. Release it with sidereon_tdm_free.
+ *
+ * Safety: data must point to len readable bytes; out_tdm must point to
+ * storage for a SidereonTdm*.
+ */
+enum SidereonStatus sidereon_tdm_parse_kvn(const uint8_t *data,
+                                           size_t len,
+                                           struct SidereonTdm **out_tdm);
+
+/**
+ * Copy parsed TDM participant entries across all segments.
+ *
+ * Safety: tdm must be live; output pointers follow the variable-length output
+ * contract.
+ */
+enum SidereonStatus sidereon_tdm_participants(const struct SidereonTdm *tdm,
+                                              struct SidereonTdmParticipant *out,
+                                              size_t len,
+                                              size_t *out_written,
+                                              size_t *out_required);
+
+/**
+ * Copy parsed TDM path entries across all segments.
+ *
+ * Safety: tdm must be live; output pointers follow the variable-length output
+ * contract.
+ */
+enum SidereonStatus sidereon_tdm_paths(const struct SidereonTdm *tdm,
+                                       struct SidereonTdmPath *out,
+                                       size_t len,
+                                       size_t *out_written,
+                                       size_t *out_required);
+
+/**
+ * Write the total number of TDM data records to *out_count.
+ *
+ * Safety: tdm must be live; out_count must point to size_t storage.
+ */
+enum SidereonStatus sidereon_tdm_record_count(const struct SidereonTdm *tdm, size_t *out_count);
+
+/**
+ * Copy flattened TDM data records across all segments.
+ *
+ * Safety: tdm must be live; output pointers follow the variable-length output
+ * contract.
+ */
+enum SidereonStatus sidereon_tdm_records(const struct SidereonTdm *tdm,
+                                         struct SidereonTdmDataRecord *out,
+                                         size_t len,
+                                         size_t *out_written,
+                                         size_t *out_required);
+
+/**
+ * Write the number of TDM segments to *out_count.
+ *
+ * Safety: tdm must be live; out_count must point to size_t storage.
+ */
+enum SidereonStatus sidereon_tdm_segment_count(const struct SidereonTdm *tdm, size_t *out_count);
+
+/**
+ * Copy TDM segment summaries.
+ *
+ * Safety: tdm must be live; out must point to len writable entries or be NULL
+ * when len is 0; out_written and out_required must point to size_t storage.
+ */
+enum SidereonStatus sidereon_tdm_segments(const struct SidereonTdm *tdm,
+                                          struct SidereonTdmSegmentSummary *out,
+                                          size_t len,
+                                          size_t *out_written,
+                                          size_t *out_required);
+
+/**
+ * Serialize a TDM to KVN text. The output is not null-terminated.
+ *
+ * Safety: tdm must be a live handle; out must point to len writable bytes or
+ * be NULL when len is 0; out_written and out_required must point to size_t
+ * storage.
+ */
+enum SidereonStatus sidereon_tdm_to_kvn(const struct SidereonTdm *tdm,
+                                        uint8_t *out,
+                                        size_t len,
+                                        size_t *out_written,
+                                        size_t *out_required);
+
+/**
  * Latitude (degrees) of the day-night terminator at a query longitude, given
  * the sub-solar point. Delegates to
  * sidereon_core::astro::observation::terminator_latitude_deg.
@@ -24819,6 +25659,21 @@ enum SidereonStatus sidereon_tle_propagate(const struct SidereonTle *tle,
                                            struct SidereonTlePropagation **out_propagation);
 
 /**
+ * Propagate one TLE at minutes since element epoch using a decay latch.
+ *
+ * The latch records the first decay-like SGP4 failure and rejects later
+ * requests at the same or later epoch without returning a raw post-decay state.
+ * Use sidereon_tle_propagate for the existing stateless UTC arc path.
+ *
+ * Safety: tle and latch must be live handles; out_state must point to a
+ * SidereonTemeState.
+ */
+enum SidereonStatus sidereon_tle_propagate_with_decay_latch(const struct SidereonTle *tle,
+                                                            double minutes_since_epoch,
+                                                            struct SidereonSgp4DecayLatch *latch,
+                                                            struct SidereonTemeState *out_state);
+
+/**
  * Write the number of epochs in a TLE propagation arc to *out_count.
  *
  * Safety: propagation must be a live handle; out_count must point to a size_t.
@@ -25016,6 +25871,20 @@ enum SidereonStatus sidereon_tropo_mapping_factors(double elevation_rad,
                                                    double jd_whole,
                                                    double jd_fraction,
                                                    struct SidereonMappingFactors *out);
+
+/**
+ * Hydrostatic and wet mapping factors with typed low-elevation error detail.
+ *
+ * Safety: out must point to a SidereonMappingFactors; out_error must point to
+ * a SidereonTropoMappingError.
+ */
+enum SidereonStatus sidereon_tropo_mapping_factors_checked(double elevation_rad,
+                                                           struct SidereonGeodetic receiver,
+                                                           uint32_t scale,
+                                                           double jd_whole,
+                                                           double jd_fraction,
+                                                           struct SidereonMappingFactors *out,
+                                                           struct SidereonTropoMappingError *out_error);
 
 /**
  * Total slant troposphere delay in meters (Saastamoinen zenith, Niell mapping).

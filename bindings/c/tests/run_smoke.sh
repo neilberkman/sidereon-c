@@ -13,6 +13,8 @@ binding_root="$(cd "${here}/.." && pwd)"
 repo_root="$(cd "${binding_root}/../.." && pwd)"
 
 cd "${binding_root}"
+mkdir -p "${binding_root}/.tmp"
+export TMPDIR="${SIDEREON_C_TMPDIR:-${binding_root}/.tmp}"
 
 fixtures="${here}/fixtures"
 sp3_path="${fixtures}/sp3/GRG0MGXFIN_20201760000_01D_15M_ORB.SP3"
@@ -43,6 +45,9 @@ opm_xml_path="${fixtures}/opm/osprey.xml"
 cdm_kvn_path="${fixtures}/cdm/ccsds_example2.kvn"
 cdm_xml_path="${fixtures}/cdm/ccsds_example2.xml"
 rinex_clk_path="${fixtures}/clk/synthetic_rinex_clock.clk"
+geodtest_one_path="${fixtures}/geodesic/geodtest_one.dat"
+egm2008_crop_path="${fixtures}/geoid/egm2008_25_norcal_crop.bin"
+tdm_annex_path="${fixtures}/tdm/annex_e_18.kvn"
 # Universal-parity additions: a single-object OMM (KVN/XML/JSON serializers) from
 # the canonical engine checkout.
 omm_kvn_path="${fixtures}/omm/24876.kvn"
@@ -405,6 +410,26 @@ cc -std=c11 -Wall -Wextra -Werror \
 
 echo "== running cap015_smoke program =="
 "${cap015_out}"
+
+# Wave-2 local-core additions: geodesics, terrestrial frame catalog, EGM2008,
+# spherical-harmonic propagation selection, CCSDS TDM, ECEF SP3 orbit fit, SGP4
+# decay latch, typed low-elevation troposphere error, oblate eclipse, and
+# reliability noncentrality component marshaling.
+echo "== compiling wave2_smoke program =="
+wave2_out="${target_dir}/wave2_smoke"
+cc -std=c11 -Wall -Wextra -Werror \
+    -I"${binding_root}/include" \
+    -I"${here}" \
+    "${here}/wave2_smoke.c" \
+    -L"${lib_dir}" \
+    -lsidereon \
+    -Wl,-rpath,"${lib_dir}" \
+    -lm \
+    -o "${wave2_out}"
+
+echo "== running wave2_smoke program =="
+"${wave2_out}" "${geodtest_one_path}" "${egm2008_crop_path}" "${tdm_annex_path}" \
+    "${prior_sp3_path}"
 
 # 0.12 core capabilities: Allan-family clock stability, terrain batch lookup,
 # IONEX sample construction/extraction, SBAS decoded payload accessors, ARAIM,
