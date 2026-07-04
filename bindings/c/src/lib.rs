@@ -124,8 +124,8 @@ use sidereon_core::constellation::{
 };
 use sidereon_core::ephemeris::{
     align_clock_reference, clock_reference_offset, merge, EpochAgreement, MergeCombine, MergeFlag,
-    MergeOptions, MergeReport, PreciseEphemerisSample, PreciseEphemerisSamples,
-    PreciseSamplesError, Sp3, Sp3State,
+    MergeOptions, MergeReport, PreciseEphemerisInterpolant, PreciseEphemerisSample,
+    PreciseEphemerisSamples, PreciseInterpolantError, PreciseSamplesError, Sp3, Sp3State,
 };
 use sidereon_core::ephemeris::{
     sample as ephemeris_sample, BroadcastEphemeris, EphemerisSampleRow, EphemerisSampleStatus,
@@ -145,8 +145,10 @@ use sidereon_core::geometry::{
 use sidereon_core::ils::{bounded_ils_search, lambda_ils_search, IlsError, IlsResult};
 use sidereon_core::observables::{
     predict as observables_predict, predict_ranges as observables_predict_ranges,
-    ObservableEphemerisSource, ObservablesError, PredictOptions, PredictedObservables,
-    RangePrediction, RangePredictionRequest,
+    ObservableEphemerisSource, ObservableStateBatch,
+    ObservableStateElementStatus as CoreObservableStateElementStatus, ObservablesError,
+    PredictOptions, PredictedObservables, RangePrediction, RangePredictionRequest,
+    OBSERVABLE_STATE_MISSING_POSITION_ECEF_M,
 };
 use sidereon_core::orbit::{
     drift as reduced_orbit_drift_core,
@@ -500,6 +502,22 @@ unsafe fn require_slice<'a, T>(
     }
     validate_element_count::<T>(fn_name, arg_name, count)?;
     Ok(slice::from_raw_parts(ptr, count))
+}
+
+unsafe fn require_out_array<T>(
+    ptr: *mut T,
+    count: usize,
+    fn_name: &str,
+    arg_name: &str,
+) -> Result<(), SidereonStatus> {
+    if count == 0 {
+        return Ok(());
+    }
+    if ptr.is_null() {
+        set_last_error(format!("{fn_name}: null {arg_name}"));
+        return Err(SidereonStatus::NullPointer);
+    }
+    validate_element_count::<T>(fn_name, arg_name, count)
 }
 
 fn insert_unique_string_key<T>(
@@ -2948,6 +2966,15 @@ pub struct SidereonSp3 {
 /// through the same substrate as a loaded SP3 product.
 pub struct SidereonPreciseEphemerisSamples {
     inner: PreciseEphemerisSamples,
+}
+
+/// A build-once precise-ephemeris interpolant with cached per-satellite nodes.
+/// Opaque to C. Create with sidereon_precise_ephemeris_interpolant_from_sp3,
+/// sidereon_precise_ephemeris_interpolant_from_samples, or
+/// sidereon_precise_ephemeris_interpolant_from_precise_ephemeris_samples and
+/// release with sidereon_precise_ephemeris_interpolant_free.
+pub struct SidereonPreciseEphemerisInterpolant {
+    inner: PreciseEphemerisInterpolant,
 }
 
 /// An SP3 merge audit report. Opaque to C. Create with sidereon_sp3_merge and
@@ -49612,6 +49639,2183 @@ pub unsafe extern "C" fn sidereon_precise_ephemeris_samples_predict_ranges(
             )
         },
     )
+}
+
+// --- 0.13 batched observable states and cached interpolants -----------------
+
+/// Per-element state category for a batched observable-state query.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonObservableStateElementStatus {
+    /// Position and clock fields hold a usable state.
+    Valid = 0,
+    /// The source had no usable state for this satellite and epoch.
+    Gap = 1,
+    /// The scalar evaluator returned a non-gap error.
+    Error = 2,
+}
+
+fn map_precise_interpolant_error(fn_name: &str, err: PreciseInterpolantError) -> SidereonStatus {
+    set_last_error(format!("{fn_name}: {err}"));
+    SidereonStatus::InvalidArgument
+}
+
+fn observable_state_element_status_to_c(
+    status: CoreObservableStateElementStatus,
+) -> SidereonObservableStateElementStatus {
+    match status {
+        CoreObservableStateElementStatus::Valid => SidereonObservableStateElementStatus::Valid,
+        CoreObservableStateElementStatus::Gap => SidereonObservableStateElementStatus::Gap,
+        CoreObservableStateElementStatus::Error => SidereonObservableStateElementStatus::Error,
+    }
+}
+
+fn observable_state_result_status(result: &Result<(), ObservablesError>) -> SidereonStatus {
+    match result {
+        Ok(()) => SidereonStatus::Ok,
+        Err(ObservablesError::InvalidInput { .. })
+        | Err(ObservablesError::Ephemeris(CoreError::InvalidInput(_))) => {
+            SidereonStatus::InvalidArgument
+        }
+        Err(ObservablesError::NoEphemeris | ObservablesError::Ephemeris(_)) => {
+            SidereonStatus::Solve
+        }
+    }
+}
+
+fn checked_position_output_count(fn_name: &str, count: usize) -> Result<usize, SidereonStatus> {
+    count.checked_mul(3).ok_or_else(|| {
+        set_last_error(format!("{fn_name}: output position count is too large"));
+        SidereonStatus::InvalidArgument
+    })
+}
+
+unsafe fn initialize_observable_state_outputs(
+    fn_name: &str,
+    count: usize,
+    out_positions_ecef_m: *mut f64,
+    out_clocks_s: *mut f64,
+    out_has_clocks_s: *mut bool,
+    out_element_statuses: *mut SidereonObservableStateElementStatus,
+    out_result_statuses: *mut SidereonStatus,
+) -> Result<(), SidereonStatus> {
+    let position_values = checked_position_output_count(fn_name, count)?;
+    require_out_array(
+        out_positions_ecef_m,
+        position_values,
+        fn_name,
+        "out_positions_ecef_m",
+    )?;
+    require_out_array(out_clocks_s, count, fn_name, "out_clocks_s")?;
+    require_out_array(out_has_clocks_s, count, fn_name, "out_has_clocks_s")?;
+    require_out_array(out_element_statuses, count, fn_name, "out_element_statuses")?;
+    require_out_array(out_result_statuses, count, fn_name, "out_result_statuses")?;
+
+    for idx in 0..count {
+        let base = idx * 3;
+        for (axis, value) in OBSERVABLE_STATE_MISSING_POSITION_ECEF_M.iter().enumerate() {
+            out_positions_ecef_m.add(base + axis).write(*value);
+        }
+        out_clocks_s.add(idx).write(0.0);
+        out_has_clocks_s.add(idx).write(false);
+        out_element_statuses
+            .add(idx)
+            .write(SidereonObservableStateElementStatus::Error);
+        out_result_statuses
+            .add(idx)
+            .write(SidereonStatus::InvalidArgument);
+    }
+    Ok(())
+}
+
+unsafe fn satellites_from_c_tokens(
+    fn_name: &str,
+    satellites: *const *const c_char,
+    count: usize,
+) -> Result<Vec<GnssSatelliteId>, SidereonStatus> {
+    let raw = require_slice(satellites, count, fn_name, "satellites")?;
+    let mut parsed = Vec::with_capacity(raw.len());
+    for ptr in raw {
+        parsed.push(parse_satellite_token(fn_name, *ptr)?);
+    }
+    Ok(parsed)
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn write_observable_state_batch(
+    fn_name: &str,
+    batch: &ObservableStateBatch,
+    count: usize,
+    out_positions_ecef_m: *mut f64,
+    out_clocks_s: *mut f64,
+    out_has_clocks_s: *mut bool,
+    out_element_statuses: *mut SidereonObservableStateElementStatus,
+    out_result_statuses: *mut SidereonStatus,
+) -> SidereonStatus {
+    if batch.len() != count {
+        set_last_error(format!(
+            "{fn_name}: core returned {} observable states for {count} inputs",
+            batch.len()
+        ));
+        return SidereonStatus::Solve;
+    }
+    for idx in 0..count {
+        let position = batch.positions_ecef_m[idx];
+        let base = idx * 3;
+        for (axis, value) in position.iter().enumerate() {
+            out_positions_ecef_m.add(base + axis).write(*value);
+        }
+        let clock_s = batch.clocks_s[idx];
+        out_has_clocks_s.add(idx).write(clock_s.is_some());
+        out_clocks_s.add(idx).write(clock_s.unwrap_or(0.0));
+        let element_status = batch
+            .element_status(idx)
+            .unwrap_or(CoreObservableStateElementStatus::Error);
+        out_element_statuses
+            .add(idx)
+            .write(observable_state_element_status_to_c(element_status));
+        out_result_statuses
+            .add(idx)
+            .write(observable_state_result_status(&batch.element_results[idx]));
+    }
+    SidereonStatus::Ok
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn observable_states_at_j2000_s_common(
+    fn_name: &str,
+    source: &dyn ObservableEphemerisSource,
+    satellites: *const *const c_char,
+    epochs_j2000_s: *const f64,
+    count: usize,
+    out_positions_ecef_m: *mut f64,
+    out_clocks_s: *mut f64,
+    out_has_clocks_s: *mut bool,
+    out_element_statuses: *mut SidereonObservableStateElementStatus,
+    out_result_statuses: *mut SidereonStatus,
+) -> SidereonStatus {
+    c_try!(initialize_observable_state_outputs(
+        fn_name,
+        count,
+        out_positions_ecef_m,
+        out_clocks_s,
+        out_has_clocks_s,
+        out_element_statuses,
+        out_result_statuses,
+    ));
+    let sats = c_try!(satellites_from_c_tokens(fn_name, satellites, count));
+    let epochs = c_try!(require_slice(
+        epochs_j2000_s,
+        count,
+        fn_name,
+        "epochs_j2000_s"
+    ));
+    let batch = match source.observable_states_at_j2000_s(&sats, epochs) {
+        Ok(batch) => batch,
+        Err(err) => return map_observables_error(fn_name, err),
+    };
+    write_observable_state_batch(
+        fn_name,
+        &batch,
+        count,
+        out_positions_ecef_m,
+        out_clocks_s,
+        out_has_clocks_s,
+        out_element_statuses,
+        out_result_statuses,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn observable_states_at_shared_j2000_s_common(
+    fn_name: &str,
+    source: &dyn ObservableEphemerisSource,
+    satellites: *const *const c_char,
+    satellite_count: usize,
+    epoch_j2000_s: f64,
+    out_positions_ecef_m: *mut f64,
+    out_clocks_s: *mut f64,
+    out_has_clocks_s: *mut bool,
+    out_element_statuses: *mut SidereonObservableStateElementStatus,
+    out_result_statuses: *mut SidereonStatus,
+) -> SidereonStatus {
+    c_try!(initialize_observable_state_outputs(
+        fn_name,
+        satellite_count,
+        out_positions_ecef_m,
+        out_clocks_s,
+        out_has_clocks_s,
+        out_element_statuses,
+        out_result_statuses,
+    ));
+    let sats = c_try!(satellites_from_c_tokens(
+        fn_name,
+        satellites,
+        satellite_count
+    ));
+    let batch = source.observable_states_at_shared_j2000_s(&sats, epoch_j2000_s);
+    write_observable_state_batch(
+        fn_name,
+        &batch,
+        satellite_count,
+        out_positions_ecef_m,
+        out_clocks_s,
+        out_has_clocks_s,
+        out_element_statuses,
+        out_result_statuses,
+    )
+}
+
+/// Copy the observable-state missing-position sentinel into out. The sentinel is
+/// three NaN components and is also written for every failed batch element.
+///
+/// Safety: out_position_ecef_m must point to at least len doubles; len must be
+/// at least 3.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_observable_state_missing_position_ecef_m(
+    out_position_ecef_m: *mut f64,
+    len: usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_observable_state_missing_position_ecef_m",
+        SidereonStatus::Panic,
+        || {
+            c_try!(copy_exact_f64s(
+                "sidereon_observable_state_missing_position_ecef_m",
+                "out_position_ecef_m",
+                out_position_ecef_m,
+                len,
+                &OBSERVABLE_STATE_MISSING_POSITION_ECEF_M,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Build a cached precise-ephemeris interpolant from a loaded SP3 handle. On
+/// success writes a newly owned handle to *out_handle; release it with
+/// sidereon_precise_ephemeris_interpolant_free.
+///
+/// Safety: sp3 must be a live handle; out_handle must point to storage for a
+/// SidereonPreciseEphemerisInterpolant*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_precise_ephemeris_interpolant_from_sp3(
+    sp3: *const SidereonSp3,
+    out_handle: *mut *mut SidereonPreciseEphemerisInterpolant,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_precise_ephemeris_interpolant_from_sp3",
+        SidereonStatus::Panic,
+        || {
+            let out_handle = c_try!(require_out(
+                out_handle,
+                "sidereon_precise_ephemeris_interpolant_from_sp3",
+                "out_handle"
+            ));
+            *out_handle = ptr::null_mut();
+            let sp3 = c_try!(require_ref(
+                sp3,
+                "sidereon_precise_ephemeris_interpolant_from_sp3",
+                "sp3"
+            ));
+            write_boxed_handle(
+                out_handle,
+                SidereonPreciseEphemerisInterpolant {
+                    inner: PreciseEphemerisInterpolant::from_sp3(&sp3.inner),
+                },
+            );
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Build a cached precise-ephemeris interpolant from canonical samples. On
+/// success writes a newly owned handle to *out_handle; release it with
+/// sidereon_precise_ephemeris_interpolant_free.
+///
+/// Safety: samples must point to count entries or be NULL when count is 0;
+/// out_handle must point to storage for a SidereonPreciseEphemerisInterpolant*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_precise_ephemeris_interpolant_from_samples(
+    samples: *const SidereonPreciseEphemerisSample,
+    count: usize,
+    out_handle: *mut *mut SidereonPreciseEphemerisInterpolant,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_precise_ephemeris_interpolant_from_samples",
+        SidereonStatus::Panic,
+        || {
+            let out_handle = c_try!(require_out(
+                out_handle,
+                "sidereon_precise_ephemeris_interpolant_from_samples",
+                "out_handle"
+            ));
+            *out_handle = ptr::null_mut();
+            let raw = c_try!(require_slice(
+                samples,
+                count,
+                "sidereon_precise_ephemeris_interpolant_from_samples",
+                "samples"
+            ));
+            let mut parsed = Vec::with_capacity(raw.len());
+            for sample in raw {
+                parsed.push(c_try!(precise_sample_from_c(
+                    "sidereon_precise_ephemeris_interpolant_from_samples",
+                    sample
+                )));
+            }
+            let inner = match PreciseEphemerisInterpolant::from_samples(parsed) {
+                Ok(inner) => inner,
+                Err(err) => {
+                    return map_precise_interpolant_error(
+                        "sidereon_precise_ephemeris_interpolant_from_samples",
+                        err,
+                    )
+                }
+            };
+            write_boxed_handle(out_handle, SidereonPreciseEphemerisInterpolant { inner });
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Build a cached precise-ephemeris interpolant from an existing sample-backed
+/// source handle. On success writes a newly owned handle to *out_handle; release
+/// it with sidereon_precise_ephemeris_interpolant_free.
+///
+/// Safety: samples must be a live handle; out_handle must point to storage for a
+/// SidereonPreciseEphemerisInterpolant*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_precise_ephemeris_interpolant_from_precise_ephemeris_samples(
+    samples: *const SidereonPreciseEphemerisSamples,
+    out_handle: *mut *mut SidereonPreciseEphemerisInterpolant,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_precise_ephemeris_interpolant_from_precise_ephemeris_samples",
+        SidereonStatus::Panic,
+        || {
+            let out_handle = c_try!(require_out(
+                out_handle,
+                "sidereon_precise_ephemeris_interpolant_from_precise_ephemeris_samples",
+                "out_handle"
+            ));
+            *out_handle = ptr::null_mut();
+            let samples = c_try!(require_ref(
+                samples,
+                "sidereon_precise_ephemeris_interpolant_from_precise_ephemeris_samples",
+                "samples"
+            ));
+            write_boxed_handle(
+                out_handle,
+                SidereonPreciseEphemerisInterpolant {
+                    inner: PreciseEphemerisInterpolant::from_precise_ephemeris_samples(
+                        &samples.inner,
+                    ),
+                },
+            );
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Release a cached precise-ephemeris interpolant. Null is a no-op.
+///
+/// Safety: interpolant must be NULL or a live handle from an interpolant
+/// creation function.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_precise_ephemeris_interpolant_free(
+    interpolant: *mut SidereonPreciseEphemerisInterpolant,
+) {
+    ffi_boundary("sidereon_precise_ephemeris_interpolant_free", (), || {
+        free_boxed(interpolant);
+    });
+}
+
+/// Evaluate many SP3 observable states with per-satellite epochs.
+///
+/// out_positions_ecef_m receives count triples in row-major XYZ order, meters.
+/// out_clocks_s and out_has_clocks_s receive count satellite-clock entries in
+/// seconds. out_element_statuses receives Valid/Gap/Error. out_result_statuses
+/// receives SIDEREON_STATUS_OK for valid elements, SIDEREON_STATUS_SOLVE for
+/// gaps/source errors, and SIDEREON_STATUS_INVALID_ARGUMENT for invalid scalar
+/// inputs. Failed elements receive the missing-position sentinel.
+///
+/// Safety: sp3 is a live handle; satellites and epochs_j2000_s point to count
+/// entries; output arrays point to count entries except out_positions_ecef_m,
+/// which points to count * 3 doubles.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sp3_observable_states_at_j2000_s(
+    sp3: *const SidereonSp3,
+    satellites: *const *const c_char,
+    epochs_j2000_s: *const f64,
+    count: usize,
+    out_positions_ecef_m: *mut f64,
+    out_clocks_s: *mut f64,
+    out_has_clocks_s: *mut bool,
+    out_element_statuses: *mut SidereonObservableStateElementStatus,
+    out_result_statuses: *mut SidereonStatus,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_sp3_observable_states_at_j2000_s",
+        SidereonStatus::Panic,
+        || {
+            let sp3 = c_try!(require_ref(
+                sp3,
+                "sidereon_sp3_observable_states_at_j2000_s",
+                "sp3"
+            ));
+            observable_states_at_j2000_s_common(
+                "sidereon_sp3_observable_states_at_j2000_s",
+                &sp3.inner,
+                satellites,
+                epochs_j2000_s,
+                count,
+                out_positions_ecef_m,
+                out_clocks_s,
+                out_has_clocks_s,
+                out_element_statuses,
+                out_result_statuses,
+            )
+        },
+    )
+}
+
+/// Evaluate many SP3 observable states at one shared epoch.
+///
+/// Safety: same output-array contract as
+/// sidereon_sp3_observable_states_at_j2000_s.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sp3_observable_states_at_shared_j2000_s(
+    sp3: *const SidereonSp3,
+    satellites: *const *const c_char,
+    satellite_count: usize,
+    epoch_j2000_s: f64,
+    out_positions_ecef_m: *mut f64,
+    out_clocks_s: *mut f64,
+    out_has_clocks_s: *mut bool,
+    out_element_statuses: *mut SidereonObservableStateElementStatus,
+    out_result_statuses: *mut SidereonStatus,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_sp3_observable_states_at_shared_j2000_s",
+        SidereonStatus::Panic,
+        || {
+            let sp3 = c_try!(require_ref(
+                sp3,
+                "sidereon_sp3_observable_states_at_shared_j2000_s",
+                "sp3"
+            ));
+            observable_states_at_shared_j2000_s_common(
+                "sidereon_sp3_observable_states_at_shared_j2000_s",
+                &sp3.inner,
+                satellites,
+                satellite_count,
+                epoch_j2000_s,
+                out_positions_ecef_m,
+                out_clocks_s,
+                out_has_clocks_s,
+                out_element_statuses,
+                out_result_statuses,
+            )
+        },
+    )
+}
+
+/// Evaluate many broadcast-ephemeris observable states with per-satellite
+/// epochs. The output arrays follow
+/// sidereon_sp3_observable_states_at_j2000_s.
+///
+/// Safety: broadcast is a live handle; all array pointers follow the SP3 batch
+/// state contract.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_broadcast_observable_states_at_j2000_s(
+    broadcast: *const SidereonBroadcastEphemeris,
+    satellites: *const *const c_char,
+    epochs_j2000_s: *const f64,
+    count: usize,
+    out_positions_ecef_m: *mut f64,
+    out_clocks_s: *mut f64,
+    out_has_clocks_s: *mut bool,
+    out_element_statuses: *mut SidereonObservableStateElementStatus,
+    out_result_statuses: *mut SidereonStatus,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_broadcast_observable_states_at_j2000_s",
+        SidereonStatus::Panic,
+        || {
+            let broadcast = c_try!(require_ref(
+                broadcast,
+                "sidereon_broadcast_observable_states_at_j2000_s",
+                "broadcast"
+            ));
+            observable_states_at_j2000_s_common(
+                "sidereon_broadcast_observable_states_at_j2000_s",
+                &broadcast.inner,
+                satellites,
+                epochs_j2000_s,
+                count,
+                out_positions_ecef_m,
+                out_clocks_s,
+                out_has_clocks_s,
+                out_element_statuses,
+                out_result_statuses,
+            )
+        },
+    )
+}
+
+/// Evaluate many broadcast-ephemeris observable states at one shared epoch.
+///
+/// Safety: same output-array contract as
+/// sidereon_sp3_observable_states_at_j2000_s.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_broadcast_observable_states_at_shared_j2000_s(
+    broadcast: *const SidereonBroadcastEphemeris,
+    satellites: *const *const c_char,
+    satellite_count: usize,
+    epoch_j2000_s: f64,
+    out_positions_ecef_m: *mut f64,
+    out_clocks_s: *mut f64,
+    out_has_clocks_s: *mut bool,
+    out_element_statuses: *mut SidereonObservableStateElementStatus,
+    out_result_statuses: *mut SidereonStatus,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_broadcast_observable_states_at_shared_j2000_s",
+        SidereonStatus::Panic,
+        || {
+            let broadcast = c_try!(require_ref(
+                broadcast,
+                "sidereon_broadcast_observable_states_at_shared_j2000_s",
+                "broadcast"
+            ));
+            observable_states_at_shared_j2000_s_common(
+                "sidereon_broadcast_observable_states_at_shared_j2000_s",
+                &broadcast.inner,
+                satellites,
+                satellite_count,
+                epoch_j2000_s,
+                out_positions_ecef_m,
+                out_clocks_s,
+                out_has_clocks_s,
+                out_element_statuses,
+                out_result_statuses,
+            )
+        },
+    )
+}
+
+/// Evaluate many sample-backed precise-ephemeris observable states with
+/// per-satellite epochs. The output arrays follow
+/// sidereon_sp3_observable_states_at_j2000_s.
+///
+/// Safety: samples is a live handle; all array pointers follow the SP3 batch
+/// state contract.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_precise_ephemeris_samples_observable_states_at_j2000_s(
+    samples: *const SidereonPreciseEphemerisSamples,
+    satellites: *const *const c_char,
+    epochs_j2000_s: *const f64,
+    count: usize,
+    out_positions_ecef_m: *mut f64,
+    out_clocks_s: *mut f64,
+    out_has_clocks_s: *mut bool,
+    out_element_statuses: *mut SidereonObservableStateElementStatus,
+    out_result_statuses: *mut SidereonStatus,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_precise_ephemeris_samples_observable_states_at_j2000_s",
+        SidereonStatus::Panic,
+        || {
+            let samples = c_try!(require_ref(
+                samples,
+                "sidereon_precise_ephemeris_samples_observable_states_at_j2000_s",
+                "samples"
+            ));
+            observable_states_at_j2000_s_common(
+                "sidereon_precise_ephemeris_samples_observable_states_at_j2000_s",
+                &samples.inner,
+                satellites,
+                epochs_j2000_s,
+                count,
+                out_positions_ecef_m,
+                out_clocks_s,
+                out_has_clocks_s,
+                out_element_statuses,
+                out_result_statuses,
+            )
+        },
+    )
+}
+
+/// Evaluate many sample-backed precise-ephemeris observable states at one shared
+/// epoch.
+///
+/// Safety: same output-array contract as
+/// sidereon_sp3_observable_states_at_j2000_s.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_precise_ephemeris_samples_observable_states_at_shared_j2000_s(
+    samples: *const SidereonPreciseEphemerisSamples,
+    satellites: *const *const c_char,
+    satellite_count: usize,
+    epoch_j2000_s: f64,
+    out_positions_ecef_m: *mut f64,
+    out_clocks_s: *mut f64,
+    out_has_clocks_s: *mut bool,
+    out_element_statuses: *mut SidereonObservableStateElementStatus,
+    out_result_statuses: *mut SidereonStatus,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_precise_ephemeris_samples_observable_states_at_shared_j2000_s",
+        SidereonStatus::Panic,
+        || {
+            let samples = c_try!(require_ref(
+                samples,
+                "sidereon_precise_ephemeris_samples_observable_states_at_shared_j2000_s",
+                "samples"
+            ));
+            observable_states_at_shared_j2000_s_common(
+                "sidereon_precise_ephemeris_samples_observable_states_at_shared_j2000_s",
+                &samples.inner,
+                satellites,
+                satellite_count,
+                epoch_j2000_s,
+                out_positions_ecef_m,
+                out_clocks_s,
+                out_has_clocks_s,
+                out_element_statuses,
+                out_result_statuses,
+            )
+        },
+    )
+}
+
+/// Evaluate many cached precise-interpolant observable states with
+/// per-satellite epochs. The output arrays follow
+/// sidereon_sp3_observable_states_at_j2000_s.
+///
+/// Safety: interpolant is a live handle; all array pointers follow the SP3 batch
+/// state contract.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_precise_ephemeris_interpolant_observable_states_at_j2000_s(
+    interpolant: *const SidereonPreciseEphemerisInterpolant,
+    satellites: *const *const c_char,
+    epochs_j2000_s: *const f64,
+    count: usize,
+    out_positions_ecef_m: *mut f64,
+    out_clocks_s: *mut f64,
+    out_has_clocks_s: *mut bool,
+    out_element_statuses: *mut SidereonObservableStateElementStatus,
+    out_result_statuses: *mut SidereonStatus,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_precise_ephemeris_interpolant_observable_states_at_j2000_s",
+        SidereonStatus::Panic,
+        || {
+            let interpolant = c_try!(require_ref(
+                interpolant,
+                "sidereon_precise_ephemeris_interpolant_observable_states_at_j2000_s",
+                "interpolant"
+            ));
+            observable_states_at_j2000_s_common(
+                "sidereon_precise_ephemeris_interpolant_observable_states_at_j2000_s",
+                &interpolant.inner,
+                satellites,
+                epochs_j2000_s,
+                count,
+                out_positions_ecef_m,
+                out_clocks_s,
+                out_has_clocks_s,
+                out_element_statuses,
+                out_result_statuses,
+            )
+        },
+    )
+}
+
+/// Evaluate many cached precise-interpolant observable states at one shared
+/// epoch.
+///
+/// Safety: same output-array contract as
+/// sidereon_sp3_observable_states_at_j2000_s.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_precise_ephemeris_interpolant_observable_states_at_shared_j2000_s(
+    interpolant: *const SidereonPreciseEphemerisInterpolant,
+    satellites: *const *const c_char,
+    satellite_count: usize,
+    epoch_j2000_s: f64,
+    out_positions_ecef_m: *mut f64,
+    out_clocks_s: *mut f64,
+    out_has_clocks_s: *mut bool,
+    out_element_statuses: *mut SidereonObservableStateElementStatus,
+    out_result_statuses: *mut SidereonStatus,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_precise_ephemeris_interpolant_observable_states_at_shared_j2000_s",
+        SidereonStatus::Panic,
+        || {
+            let interpolant = c_try!(require_ref(
+                interpolant,
+                "sidereon_precise_ephemeris_interpolant_observable_states_at_shared_j2000_s",
+                "interpolant"
+            ));
+            observable_states_at_shared_j2000_s_common(
+                "sidereon_precise_ephemeris_interpolant_observable_states_at_shared_j2000_s",
+                &interpolant.inner,
+                satellites,
+                satellite_count,
+                epoch_j2000_s,
+                out_positions_ecef_m,
+                out_clocks_s,
+                out_has_clocks_s,
+                out_element_statuses,
+                out_result_statuses,
+            )
+        },
+    )
+}
+
+// --- 0.13 estimation and detection primitives ------------------------------
+
+use sidereon_core::estimation as core_estimation;
+
+/// MAD Gaussian consistency factor used by sidereon_mad_spread.
+pub const SIDEREON_MAD_GAUSSIAN_CONSISTENCY: f64 = core_estimation::MAD_GAUSSIAN_CONSISTENCY;
+
+/// State of one scalar level and rate alpha-beta channel.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonAlphaBetaState {
+    /// Level estimate, in caller-chosen units.
+    pub level: f64,
+    /// Rate estimate, in caller-chosen units per second.
+    pub rate: f64,
+}
+
+/// Alpha-beta gain set for one scalar channel.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonAlphaBetaGains {
+    /// Level gain alpha.
+    pub alpha: f64,
+    /// Rate gain beta. The update applies beta * innovation / dt.
+    pub beta: f64,
+}
+
+/// One alpha-beta predict and update result.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonAlphaBetaStep {
+    /// Predicted state before applying the measurement.
+    pub predicted: SidereonAlphaBetaState,
+    /// Updated state after applying the measurement.
+    pub updated: SidereonAlphaBetaState,
+    /// Measurement innovation, measurement minus predicted level.
+    pub innovation: f64,
+}
+
+/// Steady-state scalar constant-velocity Kalman gain set.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonScalarKalmanGains {
+    /// Position gain Kx.
+    pub position_gain: f64,
+    /// Rate gain Kv, in 1 / dt units.
+    pub rate_gain: f64,
+}
+
+/// Result of a normalized innovation squared gate.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonNisGate {
+    /// Normalized innovation squared statistic.
+    pub nis: f64,
+    /// Chi-square gate threshold.
+    pub threshold: f64,
+    /// True when nis is less than or equal to threshold.
+    pub in_gate: bool,
+    /// Measurement degrees of freedom.
+    pub dof: usize,
+}
+
+fn map_primitive_error(fn_name: &str, err: core_estimation::PrimitiveError) -> SidereonStatus {
+    set_last_error(format!("{fn_name}: {err}"));
+    SidereonStatus::InvalidArgument
+}
+
+fn alpha_beta_state_from_c(state: SidereonAlphaBetaState) -> core_estimation::AlphaBetaState {
+    core_estimation::AlphaBetaState {
+        level: state.level,
+        rate: state.rate,
+    }
+}
+
+fn alpha_beta_state_to_c(state: core_estimation::AlphaBetaState) -> SidereonAlphaBetaState {
+    SidereonAlphaBetaState {
+        level: state.level,
+        rate: state.rate,
+    }
+}
+
+fn alpha_beta_gains_from_c(gains: SidereonAlphaBetaGains) -> core_estimation::AlphaBetaGains {
+    core_estimation::AlphaBetaGains {
+        alpha: gains.alpha,
+        beta: gains.beta,
+    }
+}
+
+fn alpha_beta_gains_to_c(gains: core_estimation::AlphaBetaGains) -> SidereonAlphaBetaGains {
+    SidereonAlphaBetaGains {
+        alpha: gains.alpha,
+        beta: gains.beta,
+    }
+}
+
+fn scalar_kalman_gains_to_c(
+    gains: core_estimation::ScalarKalmanGains,
+) -> SidereonScalarKalmanGains {
+    SidereonScalarKalmanGains {
+        position_gain: gains.position_gain,
+        rate_gain: gains.rate_gain,
+    }
+}
+
+fn nis_gate_to_c(gate: sidereon_core::estimation::primitives::NisGate) -> SidereonNisGate {
+    SidereonNisGate {
+        nis: gate.nis,
+        threshold: gate.threshold,
+        in_gate: gate.in_gate,
+        dof: gate.dof,
+    }
+}
+
+/// Return the MAD Gaussian consistency factor, 1 / Phi^-1(3/4).
+///
+/// Safety: out must point to a double.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_mad_gaussian_consistency(out: *mut f64) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_mad_gaussian_consistency",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(out, "sidereon_mad_gaussian_consistency", "out"));
+            *out = core_estimation::MAD_GAUSSIAN_CONSISTENCY;
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Compute steady-state alpha-beta gains from a positive dimensionless tracking
+/// index.
+///
+/// Safety: out_gains must point to a SidereonAlphaBetaGains.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_alpha_beta_steady_state_gains(
+    tracking_index: f64,
+    out_gains: *mut SidereonAlphaBetaGains,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_alpha_beta_steady_state_gains",
+        SidereonStatus::Panic,
+        || {
+            let out_gains = c_try!(require_out(
+                out_gains,
+                "sidereon_alpha_beta_steady_state_gains",
+                "out_gains"
+            ));
+            *out_gains = SidereonAlphaBetaGains {
+                alpha: 0.0,
+                beta: 0.0,
+            };
+            match core_estimation::alpha_beta_steady_state_gains(tracking_index) {
+                Ok(gains) => {
+                    *out_gains = alpha_beta_gains_to_c(gains);
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_primitive_error("sidereon_alpha_beta_steady_state_gains", err),
+            }
+        },
+    )
+}
+
+/// Run one scalar alpha-beta predict and measurement update.
+///
+/// Safety: state, gains, and out_step must point to live structs.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_alpha_beta_filter_step(
+    state: *const SidereonAlphaBetaState,
+    measurement: f64,
+    dt: f64,
+    gains: *const SidereonAlphaBetaGains,
+    out_step: *mut SidereonAlphaBetaStep,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_alpha_beta_filter_step",
+        SidereonStatus::Panic,
+        || {
+            let state = c_try!(require_ref(
+                state,
+                "sidereon_alpha_beta_filter_step",
+                "state"
+            ));
+            let gains = c_try!(require_ref(
+                gains,
+                "sidereon_alpha_beta_filter_step",
+                "gains"
+            ));
+            let out_step = c_try!(require_out(
+                out_step,
+                "sidereon_alpha_beta_filter_step",
+                "out_step"
+            ));
+            *out_step = SidereonAlphaBetaStep {
+                predicted: SidereonAlphaBetaState {
+                    level: 0.0,
+                    rate: 0.0,
+                },
+                updated: SidereonAlphaBetaState {
+                    level: 0.0,
+                    rate: 0.0,
+                },
+                innovation: 0.0,
+            };
+            match core_estimation::alpha_beta_filter_step(
+                alpha_beta_state_from_c(*state),
+                measurement,
+                dt,
+                alpha_beta_gains_from_c(*gains),
+            ) {
+                Ok(step) => {
+                    *out_step = SidereonAlphaBetaStep {
+                        predicted: alpha_beta_state_to_c(step.predicted),
+                        updated: alpha_beta_state_to_c(step.updated),
+                        innovation: step.innovation,
+                    };
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_primitive_error("sidereon_alpha_beta_filter_step", err),
+            }
+        },
+    )
+}
+
+/// Compute steady-state gains for a scalar constant-velocity Kalman filter.
+///
+/// Safety: out_gains must point to a SidereonScalarKalmanGains.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_kalman_cv_steady_state_gains(
+    tracking_index: f64,
+    dt: f64,
+    measurement_variance: f64,
+    out_gains: *mut SidereonScalarKalmanGains,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_kalman_cv_steady_state_gains",
+        SidereonStatus::Panic,
+        || {
+            let out_gains = c_try!(require_out(
+                out_gains,
+                "sidereon_kalman_cv_steady_state_gains",
+                "out_gains"
+            ));
+            *out_gains = SidereonScalarKalmanGains {
+                position_gain: 0.0,
+                rate_gain: 0.0,
+            };
+            match core_estimation::kalman_cv_steady_state_gains(
+                tracking_index,
+                dt,
+                measurement_variance,
+            ) {
+                Ok(gains) => {
+                    *out_gains = scalar_kalman_gains_to_c(gains);
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_primitive_error("sidereon_kalman_cv_steady_state_gains", err),
+            }
+        },
+    )
+}
+
+/// Scalar normalized innovation, innovation divided by sqrt(variance).
+///
+/// Safety: out must point to a double.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_normalized_innovation(
+    innovation: f64,
+    innovation_variance: f64,
+    out: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_normalized_innovation",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(out, "sidereon_normalized_innovation", "out"));
+            *out = 0.0;
+            match core_estimation::normalized_innovation(innovation, innovation_variance) {
+                Ok(value) => {
+                    *out = value;
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_primitive_error("sidereon_normalized_innovation", err),
+            }
+        },
+    )
+}
+
+/// Scalar normalized innovation squared statistic.
+///
+/// Safety: out must point to a double.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_nis(
+    innovation: f64,
+    innovation_variance: f64,
+    out: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_nis", SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out, "sidereon_nis", "out"));
+        *out = 0.0;
+        match core_estimation::nis_statistic(innovation, innovation_variance) {
+            Ok(value) => {
+                *out = value;
+                SidereonStatus::Ok
+            }
+            Err(err) => map_primitive_error("sidereon_nis", err),
+        }
+    })
+}
+
+/// Expected NIS value for a measurement dimension.
+///
+/// Safety: out must point to a double.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_nis_expected_value(dof: usize, out: *mut f64) -> SidereonStatus {
+    ffi_boundary("sidereon_nis_expected_value", SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out, "sidereon_nis_expected_value", "out"));
+        *out = 0.0;
+        match core_estimation::nis_expected_value(dof) {
+            Ok(value) => {
+                *out = value;
+                SidereonStatus::Ok
+            }
+            Err(err) => map_primitive_error("sidereon_nis_expected_value", err),
+        }
+    })
+}
+
+/// Chi-square NIS gate threshold for a confidence in (0, 1) and positive DOF.
+///
+/// Safety: out_threshold must point to a double.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_nis_gate_threshold(
+    dof: usize,
+    confidence: f64,
+    out_threshold: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_nis_gate_threshold", SidereonStatus::Panic, || {
+        let out_threshold = c_try!(require_out(
+            out_threshold,
+            "sidereon_nis_gate_threshold",
+            "out_threshold"
+        ));
+        *out_threshold = 0.0;
+        match core_estimation::nis_gate_threshold(dof, confidence) {
+            Ok(value) => {
+                *out_threshold = value;
+                SidereonStatus::Ok
+            }
+            Err(err) => map_primitive_error("sidereon_nis_gate_threshold", err),
+        }
+    })
+}
+
+/// Test one scalar innovation against a chi-square NIS gate.
+///
+/// Safety: out_gate must point to a SidereonNisGate.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_nis_gate_test(
+    innovation: f64,
+    innovation_variance: f64,
+    dof: usize,
+    confidence: f64,
+    out_gate: *mut SidereonNisGate,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_nis_gate_test", SidereonStatus::Panic, || {
+        let out_gate = c_try!(require_out(out_gate, "sidereon_nis_gate_test", "out_gate"));
+        *out_gate = SidereonNisGate {
+            nis: 0.0,
+            threshold: 0.0,
+            in_gate: false,
+            dof: 0,
+        };
+        match core_estimation::nis_gate_test(innovation, innovation_variance, dof, confidence) {
+            Ok(gate) => {
+                *out_gate = nis_gate_to_c(gate);
+                SidereonStatus::Ok
+            }
+            Err(err) => map_primitive_error("sidereon_nis_gate_test", err),
+        }
+    })
+}
+
+/// Median absolute deviation spread estimate with Gaussian consistency scaling.
+///
+/// Safety: values must point to count doubles or be NULL when count is 0; out
+/// must point to a double.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_mad_spread(
+    values: *const f64,
+    count: usize,
+    scale_floor: f64,
+    out: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_mad_spread", SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out, "sidereon_mad_spread", "out"));
+        *out = 0.0;
+        let values = c_try!(require_slice(
+            values,
+            count,
+            "sidereon_mad_spread",
+            "values"
+        ));
+        match core_estimation::mad_spread(values, scale_floor) {
+            Ok(value) => {
+                *out = value;
+                SidereonStatus::Ok
+            }
+            Err(err) => map_primitive_error("sidereon_mad_spread", err),
+        }
+    })
+}
+
+/// EWMA update with alpha in [0, 1].
+///
+/// Safety: out must point to a double.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ewma_update(
+    previous: f64,
+    sample: f64,
+    alpha: f64,
+    out: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_ewma_update", SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out, "sidereon_ewma_update", "out"));
+        *out = 0.0;
+        match core_estimation::ewma_update(previous, sample, alpha) {
+            Ok(value) => {
+                *out = value;
+                SidereonStatus::Ok
+            }
+            Err(err) => map_primitive_error("sidereon_ewma_update", err),
+        }
+    })
+}
+
+/// EWMA update with alpha = 1 / 2^shift.
+///
+/// Safety: out must point to a double.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ewma_update_power_of_two(
+    previous: f64,
+    sample: f64,
+    shift: u32,
+    out: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_ewma_update_power_of_two",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(out, "sidereon_ewma_update_power_of_two", "out"));
+            *out = 0.0;
+            match core_estimation::ewma_update_power_of_two(previous, sample, shift) {
+                Ok(value) => {
+                    *out = value;
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_primitive_error("sidereon_ewma_update_power_of_two", err),
+            }
+        },
+    )
+}
+
+/// CA-CFAR threshold multiplier from searched-cell count and target false-alarm
+/// probability.
+///
+/// Safety: out_multiplier must point to a double.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_cfar_ca_multiplier_from_pfa(
+    searched_cells: usize,
+    false_alarm_probability: f64,
+    out_multiplier: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_cfar_ca_multiplier_from_pfa",
+        SidereonStatus::Panic,
+        || {
+            let out_multiplier = c_try!(require_out(
+                out_multiplier,
+                "sidereon_cfar_ca_multiplier_from_pfa",
+                "out_multiplier"
+            ));
+            *out_multiplier = 0.0;
+            match core_estimation::cfar_ca_multiplier_from_pfa(
+                searched_cells,
+                false_alarm_probability,
+            ) {
+                Ok(value) => {
+                    *out_multiplier = value;
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_primitive_error("sidereon_cfar_ca_multiplier_from_pfa", err),
+            }
+        },
+    )
+}
+
+/// CA-CFAR false-alarm probability from a threshold multiplier.
+///
+/// Safety: out_pfa must point to a double.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_cfar_ca_pfa_from_multiplier(
+    searched_cells: usize,
+    multiplier: f64,
+    out_pfa: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_cfar_ca_pfa_from_multiplier",
+        SidereonStatus::Panic,
+        || {
+            let out_pfa = c_try!(require_out(
+                out_pfa,
+                "sidereon_cfar_ca_pfa_from_multiplier",
+                "out_pfa"
+            ));
+            *out_pfa = 0.0;
+            match core_estimation::cfar_ca_pfa_from_multiplier(searched_cells, multiplier) {
+                Ok(value) => {
+                    *out_pfa = value;
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_primitive_error("sidereon_cfar_ca_pfa_from_multiplier", err),
+            }
+        },
+    )
+}
+
+/// CA-CFAR absolute threshold from mean noise level and target false-alarm
+/// probability.
+///
+/// Safety: out_threshold must point to a double.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_cfar_ca_threshold(
+    searched_cells: usize,
+    false_alarm_probability: f64,
+    noise_level: f64,
+    out_threshold: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_cfar_ca_threshold", SidereonStatus::Panic, || {
+        let out_threshold = c_try!(require_out(
+            out_threshold,
+            "sidereon_cfar_ca_threshold",
+            "out_threshold"
+        ));
+        *out_threshold = 0.0;
+        match core_estimation::cfar_ca_threshold(
+            searched_cells,
+            false_alarm_probability,
+            noise_level,
+        ) {
+            Ok(value) => {
+                *out_threshold = value;
+                SidereonStatus::Ok
+            }
+            Err(err) => map_primitive_error("sidereon_cfar_ca_threshold", err),
+        }
+    })
+}
+
+/// CA-CFAR false-alarm probability from an absolute threshold and mean noise
+/// level.
+///
+/// Safety: out_pfa must point to a double.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_cfar_ca_false_alarm_probability(
+    searched_cells: usize,
+    threshold: f64,
+    noise_level: f64,
+    out_pfa: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_cfar_ca_false_alarm_probability",
+        SidereonStatus::Panic,
+        || {
+            let out_pfa = c_try!(require_out(
+                out_pfa,
+                "sidereon_cfar_ca_false_alarm_probability",
+                "out_pfa"
+            ));
+            *out_pfa = 0.0;
+            match core_estimation::cfar_ca_false_alarm_probability(
+                searched_cells,
+                threshold,
+                noise_level,
+            ) {
+                Ok(value) => {
+                    *out_pfa = value;
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_primitive_error("sidereon_cfar_ca_false_alarm_probability", err),
+            }
+        },
+    )
+}
+
+// --- 0.13 source localization ----------------------------------------------
+
+use sidereon_core::source_localization::{
+    chan_ho_initial_guess as core_chan_ho_initial_guess, locate_source as core_locate_source,
+    source_crlb as core_source_crlb, source_dop as core_source_dop, Loss as SourceLossInner,
+    Sensor as CoreSourceSensor, SourceCovariance as CoreSourceCovariance,
+    SourceCrlb as CoreSourceCrlb, SourceGeometryQuality as CoreSourceGeometryQuality,
+    SourceInitialGuess as CoreSourceInitialGuess,
+    SourceLocalizationError as CoreSourceLocalizationError,
+    SourceLocateOptions as CoreSourceLocateOptions, SourceResidual as CoreSourceResidual,
+    SourceSensorInfluence as CoreSourceSensorInfluence, SourceSolution as CoreSourceSolution,
+    SourceSolveMode as CoreSourceSolveMode,
+};
+
+/// Source-localization solve mode.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonSourceSolveMode {
+    /// Absolute time of arrival. The solved state is position plus origin time.
+    Toa = 0,
+    /// Time difference of arrival against reference_sensor in the options.
+    Tdoa = 1,
+}
+
+/// Source-localization trust-region loss selector.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonSourceLoss {
+    /// Ordinary least squares.
+    Linear = 0,
+    /// Soft-L1 robust loss.
+    SoftL1 = 1,
+    /// Huber robust loss.
+    Huber = 2,
+    /// Cauchy robust loss.
+    Cauchy = 3,
+    /// Arctangent robust loss.
+    Arctan = 4,
+}
+
+/// A source-localization sensor position. position_m stores 2D or 3D Cartesian
+/// coordinates in meters; dimension selects how many components are read.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonSourceSensor {
+    /// Coordinate dimension, 2 or 3.
+    pub dimension: usize,
+    /// Cartesian position in meters. Components beyond dimension are ignored.
+    pub position_m: [f64; 3],
+    /// Whether propagation_speed_m_s overrides the call-level speed.
+    pub has_propagation_speed_m_s: bool,
+    /// Per-sensor propagation speed in meters per second when present.
+    pub propagation_speed_m_s: f64,
+}
+
+/// Options for sidereon_locate_source. Initialize with
+/// sidereon_source_locate_options_init for the core defaults.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonSourceLocateOptions {
+    /// SidereonSourceSolveMode as a uint32_t.
+    pub mode: u32,
+    /// Reference sensor index when mode is SIDEREON_SOURCE_SOLVE_MODE_TDOA.
+    pub reference_sensor: usize,
+    /// Timing standard deviation in seconds for covariance and CRLB scaling.
+    pub timing_sigma_s: f64,
+    /// SidereonSourceLoss as a uint32_t.
+    pub loss: u32,
+    /// Residual scale in seconds for non-linear loss functions.
+    pub f_scale_s: f64,
+    /// Whether ftol is present.
+    pub has_ftol: bool,
+    /// Optional function tolerance.
+    pub ftol: f64,
+    /// Whether xtol is present.
+    pub has_xtol: bool,
+    /// Optional step tolerance.
+    pub xtol: f64,
+    /// Whether gtol is present.
+    pub has_gtol: bool,
+    /// Optional gradient tolerance.
+    pub gtol: f64,
+    /// Whether max_nfev is present.
+    pub has_max_nfev: bool,
+    /// Optional maximum residual evaluations.
+    pub max_nfev: usize,
+}
+
+/// Closed-form initializer used to start source localization.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonSourceInitialGuess {
+    /// Coordinate dimension, 2 or 3.
+    pub dimension: usize,
+    /// Initial position in meters; components beyond dimension are zero.
+    pub position_m: [f64; 3],
+    /// Whether origin_time_s is present.
+    pub has_origin_time_s: bool,
+    /// Initial origin time in seconds when present.
+    pub origin_time_s: f64,
+    /// Root-mean-square residual of the seed in seconds.
+    pub residual_rms_s: f64,
+}
+
+/// State covariance or CRLB for a source solve. Matrices are row-major.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonSourceCovariance {
+    /// Position coordinate dimension, 2 or 3.
+    pub dimension: usize,
+    /// State dimension. ToA is dimension + 1, TDOA is dimension.
+    pub state_dimension: usize,
+    /// Full state covariance, row-major, maximum 4 by 4.
+    pub state: [f64; 16],
+    /// Position covariance block in square meters, row-major, maximum 3 by 3.
+    pub position_m2: [f64; 9],
+    /// Whether origin_time_s2 is present.
+    pub has_origin_time_s2: bool,
+    /// Origin-time variance in square seconds when present.
+    pub origin_time_s2: f64,
+    /// Timing sigma in seconds used to scale the covariance.
+    pub timing_sigma_s: f64,
+}
+
+/// One residual row associated with a sensor.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonSourceResidual {
+    /// Sensor index in the input array.
+    pub sensor_index: usize,
+    /// Whether reference_sensor_index is present.
+    pub has_reference_sensor_index: bool,
+    /// Reference sensor for TDOA residuals.
+    pub reference_sensor_index: usize,
+    /// Residual in seconds.
+    pub residual_s: f64,
+}
+
+/// Per-sensor leave-one-out diagnostic.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonSourceSensorInfluence {
+    /// Sensor index in the input array.
+    pub sensor_index: usize,
+    /// ToA residual at the full solution in seconds.
+    pub residual_s: f64,
+    /// Whether leave_one_out_residual_s is present.
+    pub has_leave_one_out_residual_s: bool,
+    /// Held-out ToA residual in seconds.
+    pub leave_one_out_residual_s: f64,
+    /// Whether position_delta_m is present.
+    pub has_position_delta_m: bool,
+    /// Position change between full and leave-one-out solutions, meters.
+    pub position_delta_m: f64,
+    /// Whether origin_time_delta_s is present.
+    pub has_origin_time_delta_s: bool,
+    /// Origin-time change between full and leave-one-out solutions, seconds.
+    pub origin_time_delta_s: f64,
+    /// First-derivative loss weight for the full residual.
+    pub loss_weight: f64,
+    /// Normalized diagnostic score. Larger means poorer fit.
+    pub score: f64,
+}
+
+/// Geometry and redundancy diagnostics for a source solve.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonSourceGeometryQuality {
+    /// Number of residual rows used by the solve.
+    pub residual_count: usize,
+    /// Number of estimated state parameters.
+    pub parameter_count: usize,
+    /// Residual count minus parameter count, saturated at zero.
+    pub redundancy: usize,
+    /// Whether covariance was available from the normal matrix.
+    pub covariance_available: bool,
+    /// Whether the final normal matrix was rank deficient.
+    pub rank_deficient: bool,
+}
+
+/// Source-localization solution summary.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonSourceSolutionSummary {
+    /// Coordinate dimension, 2 or 3.
+    pub dimension: usize,
+    /// Estimated source position in meters; components beyond dimension are zero.
+    pub position_m: [f64; 3],
+    /// Whether origin_time_s is present.
+    pub has_origin_time_s: bool,
+    /// Estimated origin time in seconds.
+    pub origin_time_s: f64,
+    /// Whether covariance is available.
+    pub has_covariance: bool,
+    /// Number of residual rows.
+    pub residual_count: usize,
+    /// Number of per-sensor influence rows.
+    pub influence_count: usize,
+    /// Geometry and redundancy diagnostics.
+    pub geometry_quality: SidereonSourceGeometryQuality,
+    /// Closed-form seed used by the iterative solve.
+    pub initial_guess: SidereonSourceInitialGuess,
+    /// Trust-region termination status.
+    pub status: i32,
+    /// Residual evaluations used by the solver.
+    pub nfev: usize,
+    /// Jacobian evaluations used by the solver.
+    pub njev: usize,
+    /// Final least-squares cost.
+    pub cost: f64,
+    /// Infinity norm of the final gradient.
+    pub optimality: f64,
+}
+
+/// CRLB and DOP for a proposed source geometry.
+#[repr(C)]
+pub struct SidereonSourceCrlb {
+    /// Timing DOP values. Position DOP values multiply seconds into meters.
+    pub dop: SidereonDop,
+    /// State covariance scaled by the requested timing sigma.
+    pub covariance: SidereonSourceCovariance,
+}
+
+/// Source-localization solution handle. Opaque to C. Create with
+/// sidereon_locate_source, read with sidereon_source_solution_* accessors, and
+/// release with sidereon_source_solution_free.
+pub struct SidereonSourceSolution {
+    inner: CoreSourceSolution,
+}
+
+fn zero_vec3_from_slice(values: &[f64]) -> [f64; 3] {
+    let mut out = [0.0; 3];
+    for (idx, value) in values.iter().take(3).enumerate() {
+        out[idx] = *value;
+    }
+    out
+}
+
+fn source_covariance_empty() -> SidereonSourceCovariance {
+    SidereonSourceCovariance {
+        dimension: 0,
+        state_dimension: 0,
+        state: [0.0; 16],
+        position_m2: [0.0; 9],
+        has_origin_time_s2: false,
+        origin_time_s2: 0.0,
+        timing_sigma_s: 0.0,
+    }
+}
+
+fn source_covariance_to_c(covariance: &CoreSourceCovariance) -> SidereonSourceCovariance {
+    let dimension = covariance.position_m2.len().min(3);
+    let state_dimension = covariance.state.len().min(4);
+    let mut state = [0.0; 16];
+    for row in 0..state_dimension {
+        for col in 0..covariance.state[row].len().min(4) {
+            state[row * 4 + col] = covariance.state[row][col];
+        }
+    }
+    let mut position_m2 = [0.0; 9];
+    for row in 0..dimension {
+        for col in 0..covariance.position_m2[row].len().min(3) {
+            position_m2[row * 3 + col] = covariance.position_m2[row][col];
+        }
+    }
+    SidereonSourceCovariance {
+        dimension,
+        state_dimension,
+        state,
+        position_m2,
+        has_origin_time_s2: covariance.origin_time_s2.is_some(),
+        origin_time_s2: covariance.origin_time_s2.unwrap_or(0.0),
+        timing_sigma_s: covariance.timing_sigma_s,
+    }
+}
+
+fn source_initial_guess_to_c(initial: &CoreSourceInitialGuess) -> SidereonSourceInitialGuess {
+    SidereonSourceInitialGuess {
+        dimension: initial.position_m.len().min(3),
+        position_m: zero_vec3_from_slice(&initial.position_m),
+        has_origin_time_s: initial.origin_time_s.is_some(),
+        origin_time_s: initial.origin_time_s.unwrap_or(0.0),
+        residual_rms_s: initial.residual_rms_s,
+    }
+}
+
+fn source_geometry_quality_to_c(
+    quality: &CoreSourceGeometryQuality,
+) -> SidereonSourceGeometryQuality {
+    SidereonSourceGeometryQuality {
+        residual_count: quality.residual_count,
+        parameter_count: quality.parameter_count,
+        redundancy: quality.redundancy,
+        covariance_available: quality.covariance_available,
+        rank_deficient: quality.rank_deficient,
+    }
+}
+
+fn source_residual_to_c(residual: &CoreSourceResidual) -> SidereonSourceResidual {
+    SidereonSourceResidual {
+        sensor_index: residual.sensor_index,
+        has_reference_sensor_index: residual.reference_sensor_index.is_some(),
+        reference_sensor_index: residual.reference_sensor_index.unwrap_or(0),
+        residual_s: residual.residual_s,
+    }
+}
+
+fn source_influence_to_c(influence: &CoreSourceSensorInfluence) -> SidereonSourceSensorInfluence {
+    SidereonSourceSensorInfluence {
+        sensor_index: influence.sensor_index,
+        residual_s: influence.residual_s,
+        has_leave_one_out_residual_s: influence.leave_one_out_residual_s.is_some(),
+        leave_one_out_residual_s: influence.leave_one_out_residual_s.unwrap_or(0.0),
+        has_position_delta_m: influence.position_delta_m.is_some(),
+        position_delta_m: influence.position_delta_m.unwrap_or(0.0),
+        has_origin_time_delta_s: influence.origin_time_delta_s.is_some(),
+        origin_time_delta_s: influence.origin_time_delta_s.unwrap_or(0.0),
+        loss_weight: influence.loss_weight,
+        score: influence.score,
+    }
+}
+
+fn source_summary_to_c(solution: &CoreSourceSolution) -> SidereonSourceSolutionSummary {
+    SidereonSourceSolutionSummary {
+        dimension: solution.position_m.len().min(3),
+        position_m: zero_vec3_from_slice(&solution.position_m),
+        has_origin_time_s: solution.origin_time_s.is_some(),
+        origin_time_s: solution.origin_time_s.unwrap_or(0.0),
+        has_covariance: solution.covariance.is_some(),
+        residual_count: solution.residuals.len(),
+        influence_count: solution.per_sensor_influence.len(),
+        geometry_quality: source_geometry_quality_to_c(&solution.geometry_quality),
+        initial_guess: source_initial_guess_to_c(&solution.initial_guess),
+        status: solution.status,
+        nfev: solution.nfev,
+        njev: solution.njev,
+        cost: solution.cost,
+        optimality: solution.optimality,
+    }
+}
+
+fn source_loss_from_c(
+    fn_name: &str,
+    arg_name: &str,
+    loss: u32,
+) -> Result<SourceLossInner, SidereonStatus> {
+    match loss {
+        value if value == SidereonSourceLoss::Linear as u32 => Ok(SourceLossInner::Linear),
+        value if value == SidereonSourceLoss::SoftL1 as u32 => Ok(SourceLossInner::SoftL1),
+        value if value == SidereonSourceLoss::Huber as u32 => Ok(SourceLossInner::Huber),
+        value if value == SidereonSourceLoss::Cauchy as u32 => Ok(SourceLossInner::Cauchy),
+        value if value == SidereonSourceLoss::Arctan as u32 => Ok(SourceLossInner::Arctan),
+        _ => {
+            set_last_error(format!("{fn_name}: invalid {arg_name} source loss"));
+            Err(SidereonStatus::InvalidArgument)
+        }
+    }
+}
+
+fn source_solve_mode_from_c(
+    fn_name: &str,
+    mode: u32,
+    reference_sensor: usize,
+) -> Result<CoreSourceSolveMode, SidereonStatus> {
+    match mode {
+        value if value == SidereonSourceSolveMode::Toa as u32 => Ok(CoreSourceSolveMode::Toa),
+        value if value == SidereonSourceSolveMode::Tdoa as u32 => {
+            Ok(CoreSourceSolveMode::Tdoa { reference_sensor })
+        }
+        _ => {
+            set_last_error(format!("{fn_name}: invalid source solve mode"));
+            Err(SidereonStatus::InvalidArgument)
+        }
+    }
+}
+
+fn source_options_from_c(
+    fn_name: &str,
+    options: *const SidereonSourceLocateOptions,
+) -> Result<CoreSourceLocateOptions, SidereonStatus> {
+    if options.is_null() {
+        return Ok(CoreSourceLocateOptions::default());
+    }
+    let options = unsafe { require_ref(options, fn_name, "options") }?;
+    Ok(CoreSourceLocateOptions {
+        mode: source_solve_mode_from_c(fn_name, options.mode, options.reference_sensor)?,
+        timing_sigma_s: options.timing_sigma_s,
+        loss: source_loss_from_c(fn_name, "options.loss", options.loss)?,
+        f_scale_s: options.f_scale_s,
+        ftol: options.has_ftol.then_some(options.ftol),
+        xtol: options.has_xtol.then_some(options.xtol),
+        gtol: options.has_gtol.then_some(options.gtol),
+        max_nfev: options.has_max_nfev.then_some(options.max_nfev),
+    })
+}
+
+unsafe fn source_sensors_from_c(
+    fn_name: &str,
+    sensors: *const SidereonSourceSensor,
+    sensor_count: usize,
+) -> Result<Vec<CoreSourceSensor>, SidereonStatus> {
+    let raw = require_slice(sensors, sensor_count, fn_name, "sensors")?;
+    let mut parsed = Vec::with_capacity(raw.len());
+    for sensor in raw {
+        if !(2..=3).contains(&sensor.dimension) {
+            set_last_error(format!("{fn_name}: sensor.dimension must be 2 or 3"));
+            return Err(SidereonStatus::InvalidArgument);
+        }
+        let position_m = sensor.position_m[..sensor.dimension].to_vec();
+        if sensor.has_propagation_speed_m_s {
+            parsed.push(CoreSourceSensor::with_speed(
+                position_m,
+                sensor.propagation_speed_m_s,
+            ));
+        } else {
+            parsed.push(CoreSourceSensor::new(position_m));
+        }
+    }
+    Ok(parsed)
+}
+
+unsafe fn source_position_from_c(
+    fn_name: &str,
+    source_position_m: *const f64,
+    dimension: usize,
+) -> Result<Vec<f64>, SidereonStatus> {
+    if !(2..=3).contains(&dimension) {
+        set_last_error(format!("{fn_name}: source_dimension must be 2 or 3"));
+        return Err(SidereonStatus::InvalidArgument);
+    }
+    Ok(require_slice(source_position_m, dimension, fn_name, "source_position_m")?.to_vec())
+}
+
+fn map_source_localization_error(
+    fn_name: &str,
+    err: CoreSourceLocalizationError,
+) -> SidereonStatus {
+    set_last_error(format!("{fn_name}: {err}"));
+    match err {
+        CoreSourceLocalizationError::InvalidInput { .. }
+        | CoreSourceLocalizationError::TooFewSensors { .. } => SidereonStatus::InvalidArgument,
+        CoreSourceLocalizationError::Geometry(DopError::InvalidInput { .. }) => {
+            SidereonStatus::InvalidArgument
+        }
+        CoreSourceLocalizationError::InitializerSingular
+        | CoreSourceLocalizationError::Geometry(_)
+        | CoreSourceLocalizationError::Solver(_)
+        | CoreSourceLocalizationError::DidNotConverge { .. } => SidereonStatus::Solve,
+    }
+}
+
+/// Initialize source-localization options to the core defaults: ToA mode, timing
+/// sigma 1 second, linear loss, f_scale 1 second, and no explicit tolerances.
+///
+/// Safety: out_options must point to a SidereonSourceLocateOptions.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_source_locate_options_init(
+    out_options: *mut SidereonSourceLocateOptions,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_source_locate_options_init",
+        SidereonStatus::Panic,
+        || {
+            let out_options = c_try!(require_out(
+                out_options,
+                "sidereon_source_locate_options_init",
+                "out_options"
+            ));
+            *out_options = SidereonSourceLocateOptions {
+                mode: SidereonSourceSolveMode::Toa as u32,
+                reference_sensor: 0,
+                timing_sigma_s: 1.0,
+                loss: SidereonSourceLoss::Linear as u32,
+                f_scale_s: 1.0,
+                has_ftol: false,
+                ftol: 0.0,
+                has_xtol: false,
+                xtol: 0.0,
+                has_gtol: false,
+                gtol: 0.0,
+                has_max_nfev: false,
+                max_nfev: 0,
+            };
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Locate a source from sensor arrival times. Sensor positions are caller-owned
+/// 2D or 3D Cartesian coordinates in meters. Arrival times are seconds, and
+/// propagation_speed_m_s is meters per second. options may be NULL for defaults.
+/// On success writes a newly owned handle to *out_solution.
+///
+/// Safety: sensors and arrival_times_s point to sensor_count entries or NULL
+/// when sensor_count is 0; options is NULL or points to options; out_solution
+/// points to storage for a SidereonSourceSolution*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_locate_source(
+    sensors: *const SidereonSourceSensor,
+    sensor_count: usize,
+    arrival_times_s: *const f64,
+    propagation_speed_m_s: f64,
+    options: *const SidereonSourceLocateOptions,
+    out_solution: *mut *mut SidereonSourceSolution,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_locate_source", SidereonStatus::Panic, || {
+        let out_solution = c_try!(require_out(
+            out_solution,
+            "sidereon_locate_source",
+            "out_solution"
+        ));
+        *out_solution = ptr::null_mut();
+        let parsed_sensors = c_try!(source_sensors_from_c(
+            "sidereon_locate_source",
+            sensors,
+            sensor_count
+        ));
+        let arrivals = c_try!(require_slice(
+            arrival_times_s,
+            sensor_count,
+            "sidereon_locate_source",
+            "arrival_times_s"
+        ));
+        let options = c_try!(source_options_from_c("sidereon_locate_source", options));
+        match core_locate_source(&parsed_sensors, arrivals, propagation_speed_m_s, &options) {
+            Ok(inner) => {
+                write_boxed_handle(out_solution, SidereonSourceSolution { inner });
+                SidereonStatus::Ok
+            }
+            Err(err) => map_source_localization_error("sidereon_locate_source", err),
+        }
+    })
+}
+
+/// Compute the closed-form source-localization initial guess.
+///
+/// Safety: sensors and arrival_times_s point to sensor_count entries; out_guess
+/// must point to a SidereonSourceInitialGuess.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_chan_ho_initial_guess(
+    sensors: *const SidereonSourceSensor,
+    sensor_count: usize,
+    arrival_times_s: *const f64,
+    propagation_speed_m_s: f64,
+    mode: u32,
+    reference_sensor: usize,
+    out_guess: *mut SidereonSourceInitialGuess,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_chan_ho_initial_guess",
+        SidereonStatus::Panic,
+        || {
+            let out_guess = c_try!(require_out(
+                out_guess,
+                "sidereon_chan_ho_initial_guess",
+                "out_guess"
+            ));
+            *out_guess = SidereonSourceInitialGuess {
+                dimension: 0,
+                position_m: [0.0; 3],
+                has_origin_time_s: false,
+                origin_time_s: 0.0,
+                residual_rms_s: 0.0,
+            };
+            let parsed_sensors = c_try!(source_sensors_from_c(
+                "sidereon_chan_ho_initial_guess",
+                sensors,
+                sensor_count
+            ));
+            let arrivals = c_try!(require_slice(
+                arrival_times_s,
+                sensor_count,
+                "sidereon_chan_ho_initial_guess",
+                "arrival_times_s"
+            ));
+            let mode = c_try!(source_solve_mode_from_c(
+                "sidereon_chan_ho_initial_guess",
+                mode,
+                reference_sensor
+            ));
+            match core_chan_ho_initial_guess(&parsed_sensors, arrivals, propagation_speed_m_s, mode)
+            {
+                Ok(guess) => {
+                    *out_guess = source_initial_guess_to_c(&guess);
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_source_localization_error("sidereon_chan_ho_initial_guess", err),
+            }
+        },
+    )
+}
+
+/// Compute timing DOP for a proposed source location. DOP position values
+/// multiply timing sigma in seconds to produce meters.
+///
+/// Safety: sensors points to sensor_count entries; source_position_m points to
+/// source_dimension doubles; out_dop points to a SidereonDop.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_source_dop(
+    sensors: *const SidereonSourceSensor,
+    sensor_count: usize,
+    source_position_m: *const f64,
+    source_dimension: usize,
+    propagation_speed_m_s: f64,
+    out_dop: *mut SidereonDop,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_source_dop", SidereonStatus::Panic, || {
+        let out_dop = c_try!(require_out(out_dop, "sidereon_source_dop", "out_dop"));
+        *out_dop = empty_dop();
+        let parsed_sensors = c_try!(source_sensors_from_c(
+            "sidereon_source_dop",
+            sensors,
+            sensor_count
+        ));
+        let source_position = c_try!(source_position_from_c(
+            "sidereon_source_dop",
+            source_position_m,
+            source_dimension
+        ));
+        match core_source_dop(&parsed_sensors, &source_position, propagation_speed_m_s) {
+            Ok(dop) => {
+                *out_dop = dop_to_c(dop);
+                SidereonStatus::Ok
+            }
+            Err(err) => map_source_localization_error("sidereon_source_dop", err),
+        }
+    })
+}
+
+/// Compute a timing CRLB and DOP for a proposed source location.
+///
+/// Safety: sensors points to sensor_count entries; source_position_m points to
+/// source_dimension doubles; out_crlb points to a SidereonSourceCrlb.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_source_crlb(
+    sensors: *const SidereonSourceSensor,
+    sensor_count: usize,
+    source_position_m: *const f64,
+    source_dimension: usize,
+    propagation_speed_m_s: f64,
+    timing_sigma_s: f64,
+    out_crlb: *mut SidereonSourceCrlb,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_source_crlb", SidereonStatus::Panic, || {
+        let out_crlb = c_try!(require_out(out_crlb, "sidereon_source_crlb", "out_crlb"));
+        *out_crlb = SidereonSourceCrlb {
+            dop: empty_dop(),
+            covariance: source_covariance_empty(),
+        };
+        let parsed_sensors = c_try!(source_sensors_from_c(
+            "sidereon_source_crlb",
+            sensors,
+            sensor_count
+        ));
+        let source_position = c_try!(source_position_from_c(
+            "sidereon_source_crlb",
+            source_position_m,
+            source_dimension
+        ));
+        match core_source_crlb(
+            &parsed_sensors,
+            &source_position,
+            propagation_speed_m_s,
+            timing_sigma_s,
+        ) {
+            Ok(CoreSourceCrlb { dop, covariance }) => {
+                *out_crlb = SidereonSourceCrlb {
+                    dop: dop_to_c(dop),
+                    covariance: source_covariance_to_c(&covariance),
+                };
+                SidereonStatus::Ok
+            }
+            Err(err) => map_source_localization_error("sidereon_source_crlb", err),
+        }
+    })
+}
+
+/// Copy a source solution summary into *out_summary.
+///
+/// Safety: solution must be a live handle; out_summary points to a summary.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_source_solution_summary(
+    solution: *const SidereonSourceSolution,
+    out_summary: *mut SidereonSourceSolutionSummary,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_source_solution_summary",
+        SidereonStatus::Panic,
+        || {
+            let solution = c_try!(require_ref(
+                solution,
+                "sidereon_source_solution_summary",
+                "solution"
+            ));
+            let out_summary = c_try!(require_out(
+                out_summary,
+                "sidereon_source_solution_summary",
+                "out_summary"
+            ));
+            *out_summary = source_summary_to_c(&solution.inner);
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy the source solution covariance when available.
+///
+/// Safety: solution must be a live handle; out_covariance and out_available
+/// must point to writable values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_source_solution_covariance(
+    solution: *const SidereonSourceSolution,
+    out_covariance: *mut SidereonSourceCovariance,
+    out_available: *mut bool,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_source_solution_covariance",
+        SidereonStatus::Panic,
+        || {
+            let solution = c_try!(require_ref(
+                solution,
+                "sidereon_source_solution_covariance",
+                "solution"
+            ));
+            let out_covariance = c_try!(require_out(
+                out_covariance,
+                "sidereon_source_solution_covariance",
+                "out_covariance"
+            ));
+            let out_available = c_try!(require_out(
+                out_available,
+                "sidereon_source_solution_covariance",
+                "out_available"
+            ));
+            *out_available = false;
+            *out_covariance = source_covariance_empty();
+            if let Some(covariance) = solution.inner.covariance.as_ref() {
+                *out_covariance = source_covariance_to_c(covariance);
+                *out_available = true;
+            }
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy solution residual rows using the variable-length output contract.
+///
+/// Safety: solution must be a live handle; out points to len residual rows or is
+/// NULL when len is 0; out_written and out_required point to size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_source_solution_residuals(
+    solution: *const SidereonSourceSolution,
+    out: *mut SidereonSourceResidual,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_source_solution_residuals",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_source_solution_residuals",
+                out_written,
+                out_required
+            ));
+            let solution = c_try!(require_ref(
+                solution,
+                "sidereon_source_solution_residuals",
+                "solution"
+            ));
+            let rows: Vec<SidereonSourceResidual> = solution
+                .inner
+                .residuals
+                .iter()
+                .map(source_residual_to_c)
+                .collect();
+            c_try!(copy_prefix_to_c(
+                "sidereon_source_solution_residuals",
+                "out",
+                &rows,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy per-sensor influence diagnostics using the variable-length output
+/// contract.
+///
+/// Safety: solution must be a live handle; out points to len influence rows or
+/// is NULL when len is 0; out_written and out_required point to size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_source_solution_influences(
+    solution: *const SidereonSourceSolution,
+    out: *mut SidereonSourceSensorInfluence,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_source_solution_influences",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_source_solution_influences",
+                out_written,
+                out_required
+            ));
+            let solution = c_try!(require_ref(
+                solution,
+                "sidereon_source_solution_influences",
+                "solution"
+            ));
+            let rows: Vec<SidereonSourceSensorInfluence> = solution
+                .inner
+                .per_sensor_influence
+                .iter()
+                .map(source_influence_to_c)
+                .collect();
+            c_try!(copy_prefix_to_c(
+                "sidereon_source_solution_influences",
+                "out",
+                &rows,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Release a source-localization solution handle. Null is a no-op.
+///
+/// Safety: solution must be NULL or a live handle from sidereon_locate_source.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_source_solution_free(solution: *mut SidereonSourceSolution) {
+    ffi_boundary("sidereon_source_solution_free", (), || {
+        free_boxed(solution);
+    });
 }
 
 // --- Leap-second accessors --------------------------------------------------
