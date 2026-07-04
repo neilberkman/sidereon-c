@@ -100,6 +100,12 @@ static int fail(const char *context, int code) {
     return code;
 }
 
+static int last_error_contains(const char *needle) {
+    char msg[512];
+    size_t written = sidereon_last_error_message(msg, sizeof(msg));
+    return written > 0 && strstr(msg, needle) != NULL;
+}
+
 /* Read an entire file into a heap buffer; caller frees. */
 static uint8_t *read_file(const char *path, size_t *out_len) {
     FILE *f = fopen(path, "rb");
@@ -608,6 +614,12 @@ static int check_rtk_float_solution(const SidereonRtkFloatSolution *solution) {
         metadata.n_observations != 8 || metadata.ambiguity_count != CFIX_RTK_NONREF_COUNT ||
         metadata.residual_count != CFIX_RTK_NONREF_COUNT ||
         metadata.used_sat_count != CFIX_RTK_NONREF_COUNT ||
+        metadata.geometry_quality.tier != SIDEREON_OBSERVABILITY_TIER_NOMINAL ||
+        metadata.geometry_quality.redundancy != 1 || metadata.geometry_quality.rank != 7 ||
+        !isfinite(metadata.geometry_quality.condition_number) ||
+        !isfinite(metadata.geometry_quality.gdop) || metadata.geometry_quality.gdop <= 0.0 ||
+        !metadata.geometry_quality.raim_checkable ||
+        !metadata.geometry_quality.covariance_validated ||
         f64_to_bits(metadata.code_rms_m) != CFIX_RTK_FLOAT_CODE_RMS_BITS ||
         f64_to_bits(metadata.phase_rms_m) != CFIX_RTK_FLOAT_PHASE_RMS_BITS ||
         f64_to_bits(metadata.weighted_rms_m) != CFIX_RTK_FLOAT_WEIGHTED_RMS_BITS) {
@@ -693,6 +705,12 @@ static int check_rtk_fixed_solution(const SidereonRtkFixedSolution *solution) {
         metadata.integer_status != SIDEREON_RTK_INTEGER_STATUS_FIXED ||
         !metadata.has_integer_ratio || !metadata.has_integer_best_score ||
         !metadata.has_integer_second_best_score ||
+        metadata.geometry_quality.tier != SIDEREON_OBSERVABILITY_TIER_NOMINAL ||
+        metadata.geometry_quality.redundancy != 1 || metadata.geometry_quality.rank != 7 ||
+        !isfinite(metadata.geometry_quality.condition_number) ||
+        !isfinite(metadata.geometry_quality.gdop) || metadata.geometry_quality.gdop <= 0.0 ||
+        !metadata.geometry_quality.raim_checkable ||
+        !metadata.geometry_quality.covariance_validated ||
         f64_to_bits(metadata.code_rms_m) != CFIX_RTK_FIXED_CODE_RMS_BITS ||
         f64_to_bits(metadata.phase_rms_m) != CFIX_RTK_FIXED_PHASE_RMS_BITS ||
         f64_to_bits(metadata.weighted_rms_m) != CFIX_RTK_FIXED_WEIGHTED_RMS_BITS ||
@@ -773,6 +791,27 @@ static int exercise_rtk_surface(void) {
     sidereon_rtk_float_solution_free(float_solution);
     if (rc != 0) {
         return rc;
+    }
+
+    SidereonRtkEpoch singular_epoch;
+    SidereonRtkSatMeasurement singular_ref;
+    SidereonRtkSatMeasurement singular_nonref[CFIX_RTK_NONREF_COUNT];
+    fill_rtk_epoch(CFIX_RTK_FLOAT_ROVER_PHASE_BITS, &singular_ref, singular_nonref,
+                   &singular_epoch);
+    for (size_t i = 1; i < CFIX_RTK_NONREF_COUNT; i++) {
+        memcpy(singular_nonref[i].base_tx_pos, singular_nonref[0].base_tx_pos,
+               sizeof(singular_nonref[i].base_tx_pos));
+        memcpy(singular_nonref[i].rover_tx_pos, singular_nonref[0].rover_tx_pos,
+               sizeof(singular_nonref[i].rover_tx_pos));
+        memcpy(singular_nonref[i].pos, singular_nonref[0].pos, sizeof(singular_nonref[i].pos));
+    }
+    SidereonRtkFloatConfig singular_float_config = float_config;
+    singular_float_config.epochs = &singular_epoch;
+    SidereonRtkFloatSolution *singular_float_solution = (SidereonRtkFloatSolution *)(uintptr_t)1;
+    if (sidereon_solve_rtk_float(&singular_float_config, &singular_float_solution) !=
+            SIDEREON_STATUS_SOLVE ||
+        singular_float_solution != NULL || !last_error_contains("singular")) {
+        return fail("sidereon_solve_rtk_float singular geometry", 1);
     }
 
     SidereonRtkSatMeasurement fixed_ref;
@@ -4800,6 +4839,13 @@ int main(int argc, char **argv) {
         metadata.troposphere_applied || metadata.outer_iterations != 0 ||
         metadata.has_final_robust_scale_m || metadata.redundancy != (int64_t)(used - 4) ||
         !metadata.raim_checkable ||
+        metadata.geometry_quality.tier != SIDEREON_OBSERVABILITY_TIER_NOMINAL ||
+        metadata.geometry_quality.redundancy != (int32_t)metadata.redundancy ||
+        metadata.geometry_quality.rank < 4 ||
+        !isfinite(metadata.geometry_quality.condition_number) ||
+        !isfinite(metadata.geometry_quality.gdop) || metadata.geometry_quality.gdop <= 0.0 ||
+        !metadata.geometry_quality.raim_checkable ||
+        !metadata.geometry_quality.covariance_validated ||
         metadata.status > SIDEREON_SPP_SOLVE_STATUS_MAX_EVALUATIONS) {
         sidereon_spp_solution_free(sol);
         sidereon_sp3_free(sp3);

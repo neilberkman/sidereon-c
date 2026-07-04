@@ -183,6 +183,6 @@ fn moving_baseline_summary(
             MovingBaselineStatus::Float => SidereonMovingBaselineStatus::Float,
         },
         float: rtk_float_metadata(&epoch.float),
-        fixed: rtk_fixed_metadata_from_solution(&epoch.fixed),
+        fixed: rtk_fixed_metadata_from_solution(&epoch.fixed, &epoch.float.geometry_quality),
     }
 }

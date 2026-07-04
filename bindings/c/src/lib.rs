@@ -142,6 +142,9 @@ use sidereon_core::geometry::{
     LineOfSight, VisibilityOptions, VisibilityPass, VisibilitySeriesPoint,
     VisibleSatellite as GeometryVisibleSatellite,
 };
+use sidereon_core::geometry_quality::{
+    GeometryQuality as CoreGeometryQuality, ObservabilityTier as CoreObservabilityTier,
+};
 use sidereon_core::ils::{bounded_ils_search, lambda_ils_search, IlsError, IlsResult};
 use sidereon_core::observables::{
     predict as observables_predict, predict_ranges as observables_predict_ranges,
@@ -293,6 +296,45 @@ pub enum SidereonStatus {
     Solve = 5,
     /// An internal panic reached the FFI boundary and was contained.
     Panic = 6,
+}
+
+/// Observability and covariance-validation tier for an estimation geometry.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonObservabilityTier {
+    /// The design rank is below the parameter count; at least one parameter is
+    /// not observable.
+    RankDeficient = 0,
+    /// The design is full rank but has no residual degrees of freedom. Snapshot
+    /// solves report unvalidated covariance bounds at this tier.
+    ZeroRedundancy = 1,
+    /// The design is full rank with residual degrees of freedom, but exceeds a
+    /// condition-number or GDOP cutoff. Bounds are reported unclamped.
+    Weak = 2,
+    /// The design is full rank and within the configured cutoffs.
+    Nominal = 3,
+}
+
+/// Geometry observability and covariance-validation diagnostics.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonGeometryQuality {
+    /// Observability and validation tier.
+    pub tier: SidereonObservabilityTier,
+    /// Observation redundancy, defined as number of observations minus number
+    /// of estimated parameters.
+    pub redundancy: i32,
+    /// Rank of the design matrix used by the solve.
+    pub rank: usize,
+    /// Singular-value condition number of the design matrix.
+    pub condition_number: f64,
+    /// Geometric dilution of precision for the solved state.
+    pub gdop: f64,
+    /// Whether residual-based RAIM can test the solve.
+    pub raim_checkable: bool,
+    /// Whether residuals or a valid propagated prior validate the covariance
+    /// bound.
+    pub covariance_validated: bool,
 }
 
 thread_local! {
@@ -961,6 +1003,39 @@ fn gnss_system_from_c_code(
     }
 }
 
+fn observability_tier_to_c(tier: CoreObservabilityTier) -> SidereonObservabilityTier {
+    match tier {
+        CoreObservabilityTier::RankDeficient => SidereonObservabilityTier::RankDeficient,
+        CoreObservabilityTier::ZeroRedundancy => SidereonObservabilityTier::ZeroRedundancy,
+        CoreObservabilityTier::Weak => SidereonObservabilityTier::Weak,
+        CoreObservabilityTier::Nominal => SidereonObservabilityTier::Nominal,
+    }
+}
+
+fn geometry_quality_to_c(quality: &CoreGeometryQuality) -> SidereonGeometryQuality {
+    SidereonGeometryQuality {
+        tier: observability_tier_to_c(quality.tier),
+        redundancy: quality.redundancy,
+        rank: quality.rank,
+        condition_number: quality.condition_number,
+        gdop: quality.gdop,
+        raim_checkable: quality.raim_checkable,
+        covariance_validated: quality.covariance_validated,
+    }
+}
+
+fn empty_geometry_quality() -> SidereonGeometryQuality {
+    SidereonGeometryQuality {
+        tier: SidereonObservabilityTier::RankDeficient,
+        redundancy: 0,
+        rank: 0,
+        condition_number: 0.0,
+        gdop: 0.0,
+        raim_checkable: false,
+        covariance_validated: false,
+    }
+}
+
 fn time_scale_from_c_code(
     fn_name: &str,
     arg_name: &str,
@@ -1310,10 +1385,14 @@ fn rtk_float_metadata(solution: &FloatBaselineSolution) -> SidereonRtkFloatMetad
         ambiguity_count: solution.ambiguities_m.len(),
         residual_count: solution.residuals.len(),
         used_sat_count: rtk_used_satellite_tokens(&solution.residuals).len(),
+        geometry_quality: geometry_quality_to_c(&solution.geometry_quality),
     }
 }
 
-fn rtk_fixed_metadata_from_solution(fixed: &FixedBaselineSolution) -> SidereonRtkFixedMetadata {
+fn rtk_fixed_metadata_from_solution(
+    fixed: &FixedBaselineSolution,
+    geometry_quality: &CoreGeometryQuality,
+) -> SidereonRtkFixedMetadata {
     SidereonRtkFixedMetadata {
         iterations: fixed.iterations,
         converged: fixed.converged,
@@ -1334,6 +1413,7 @@ fn rtk_fixed_metadata_from_solution(fixed: &FixedBaselineSolution) -> SidereonRt
         has_integer_second_best_score: fixed.search.integer_second_best_score.is_some(),
         integer_second_best_score: fixed.search.integer_second_best_score.unwrap_or(0.0),
         integer_candidates: fixed.search.integer_candidates,
+        geometry_quality: geometry_quality_to_c(geometry_quality),
     }
 }
 
@@ -3864,8 +3944,7 @@ use sidereon_core::source_localization::{
     chan_ho_initial_guess as core_chan_ho_initial_guess, locate_source as core_locate_source,
     source_crlb as core_source_crlb, source_dop as core_source_dop, Loss as SourceLossInner,
     Sensor as CoreSourceSensor, SourceCovariance as CoreSourceCovariance,
-    SourceCrlb as CoreSourceCrlb, SourceGeometryQuality as CoreSourceGeometryQuality,
-    SourceInitialGuess as CoreSourceInitialGuess,
+    SourceCrlb as CoreSourceCrlb, SourceInitialGuess as CoreSourceInitialGuess,
     SourceLocalizationError as CoreSourceLocalizationError,
     SourceLocateOptions as CoreSourceLocateOptions, SourceResidual as CoreSourceResidual,
     SourceSensorInfluence as CoreSourceSensorInfluence, SourceSolution as CoreSourceSolution,

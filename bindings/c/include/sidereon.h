@@ -395,6 +395,31 @@ typedef enum SidereonRtkSolveStatus {
 } SidereonRtkSolveStatus;
 
 /**
+ * Observability and covariance-validation tier for an estimation geometry.
+ */
+typedef enum SidereonObservabilityTier {
+    /**
+     * The design rank is below the parameter count; at least one parameter is
+     * not observable.
+     */
+    SIDEREON_OBSERVABILITY_TIER_RANK_DEFICIENT = 0,
+    /**
+     * The design is full rank but has no residual degrees of freedom. Snapshot
+     * solves report unvalidated covariance bounds at this tier.
+     */
+    SIDEREON_OBSERVABILITY_TIER_ZERO_REDUNDANCY = 1,
+    /**
+     * The design is full rank with residual degrees of freedom, but exceeds a
+     * condition-number or GDOP cutoff. Bounds are reported unclamped.
+     */
+    SIDEREON_OBSERVABILITY_TIER_WEAK = 2,
+    /**
+     * The design is full rank and within the configured cutoffs.
+     */
+    SIDEREON_OBSERVABILITY_TIER_NOMINAL = 3,
+} SidereonObservabilityTier;
+
+/**
  * Integer ambiguity-fix verdict for an RTK fixed solve.
  */
 typedef enum SidereonRtkIntegerStatus {
@@ -5871,6 +5896,42 @@ typedef struct SidereonMoonIllumination {
 } SidereonMoonIllumination;
 
 /**
+ * Geometry observability and covariance-validation diagnostics.
+ */
+typedef struct SidereonGeometryQuality {
+    /**
+     * Observability and validation tier.
+     */
+    enum SidereonObservabilityTier tier;
+    /**
+     * Observation redundancy, defined as number of observations minus number
+     * of estimated parameters.
+     */
+    int32_t redundancy;
+    /**
+     * Rank of the design matrix used by the solve.
+     */
+    size_t rank;
+    /**
+     * Singular-value condition number of the design matrix.
+     */
+    double condition_number;
+    /**
+     * Geometric dilution of precision for the solved state.
+     */
+    double gdop;
+    /**
+     * Whether residual-based RAIM can test the solve.
+     */
+    bool raim_checkable;
+    /**
+     * Whether residuals or a valid propagated prior validate the covariance
+     * bound.
+     */
+    bool covariance_validated;
+} SidereonGeometryQuality;
+
+/**
  * Summary scalars for an RTK float solution.
  */
 typedef struct SidereonRtkFloatMetadata {
@@ -5914,6 +5975,10 @@ typedef struct SidereonRtkFloatMetadata {
      * Number of unique used satellites in residual order.
      */
     size_t used_sat_count;
+    /**
+     * Geometry observability and covariance-validation diagnostics.
+     */
+    struct SidereonGeometryQuality geometry_quality;
 } SidereonRtkFloatMetadata;
 
 /**
@@ -5996,6 +6061,11 @@ typedef struct SidereonRtkFixedMetadata {
      * Number of integer candidates evaluated or reported by the search.
      */
     size_t integer_candidates;
+    /**
+     * Geometry observability and covariance-validation diagnostics from the
+     * float solve used by integer fixing.
+     */
+    struct SidereonGeometryQuality geometry_quality;
 } SidereonRtkFixedMetadata;
 
 /**
@@ -11161,32 +11231,6 @@ typedef struct SidereonSourceResidual {
 } SidereonSourceResidual;
 
 /**
- * Geometry and redundancy diagnostics for a source solve.
- */
-typedef struct SidereonSourceGeometryQuality {
-    /**
-     * Number of residual rows used by the solve.
-     */
-    size_t residual_count;
-    /**
-     * Number of estimated state parameters.
-     */
-    size_t parameter_count;
-    /**
-     * Residual count minus parameter count, saturated at zero.
-     */
-    size_t redundancy;
-    /**
-     * Whether covariance was available from the normal matrix.
-     */
-    bool covariance_available;
-    /**
-     * Whether the final normal matrix was rank deficient.
-     */
-    bool rank_deficient;
-} SidereonSourceGeometryQuality;
-
-/**
  * Source-localization solution summary.
  */
 typedef struct SidereonSourceSolutionSummary {
@@ -11219,9 +11263,9 @@ typedef struct SidereonSourceSolutionSummary {
      */
     size_t influence_count;
     /**
-     * Geometry and redundancy diagnostics.
+     * Geometry observability and covariance-validation diagnostics.
      */
-    struct SidereonSourceGeometryQuality geometry_quality;
+    struct SidereonGeometryQuality geometry_quality;
     /**
      * Closed-form seed used by the iterative solve.
      */
@@ -11700,6 +11744,10 @@ typedef struct SidereonSppMetadata {
      * Whether residual-based RAIM can test the final solve.
      */
     bool raim_checkable;
+    /**
+     * Geometry observability and covariance-validation diagnostics.
+     */
+    struct SidereonGeometryQuality geometry_quality;
 } SidereonSppMetadata;
 
 /**
@@ -19740,6 +19788,16 @@ enum SidereonStatus sidereon_rtk_static_arc_solution_float_metadata(const struct
 void sidereon_rtk_static_arc_solution_free(struct SidereonRtkStaticArcSolution *solution);
 
 /**
+ * Copy static-arc geometry observability and covariance-validation diagnostics
+ * into *out_geometry_quality.
+ *
+ * Safety: solution is a live handle; out_geometry_quality points to a
+ * SidereonGeometryQuality.
+ */
+enum SidereonStatus sidereon_rtk_static_arc_solution_geometry_quality(const struct SidereonRtkStaticArcSolution *solution,
+                                                                      struct SidereonGeometryQuality *out_geometry_quality);
+
+/**
  * Copy static-arc references. Variable-length output contract.
  *
  * Safety: solution is a live handle; out points to len
@@ -19791,6 +19849,16 @@ enum SidereonStatus sidereon_rtk_wide_lane_arc_solution_epoch_count(const struct
  * Safety: solution is a handle from sidereon_fix_wide_lane_rtk_arc or NULL.
  */
 void sidereon_rtk_wide_lane_arc_solution_free(struct SidereonRtkWideLaneArcSolution *solution);
+
+/**
+ * Copy wide-lane geometry observability and covariance-validation diagnostics
+ * into *out_geometry_quality.
+ *
+ * Safety: solution is a live handle; out_geometry_quality points to a
+ * SidereonGeometryQuality.
+ */
+enum SidereonStatus sidereon_rtk_wide_lane_arc_solution_geometry_quality(const struct SidereonRtkWideLaneArcSolution *solution,
+                                                                         struct SidereonGeometryQuality *out_geometry_quality);
 
 /**
  * Copy wide-lane arc references. Variable-length output contract.
