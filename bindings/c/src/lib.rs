@@ -46,6 +46,10 @@ use sidereon::sgp4::{
 use sidereon::state::CartesianState;
 use sidereon::tle::{self, ChecksumWarning, TleElements};
 use sidereon_core::antex::{Antenna, Antex, AntexError};
+use sidereon_core::araim::{
+    araim as core_araim, AraimError, AraimGeometry, AraimResult as CoreAraimResult, AraimRow,
+    ConstellationIsm, IntegrityAllocation, Ism, SatelliteIsm, SatelliteIsmModel,
+};
 use sidereon_core::astro::atmosphere::{
     nrlmsise00_with_lst, ApArray, AtmosphereError, NrlmsiseInput, DEFAULT_AP, DEFAULT_F107,
     DEFAULT_F107A,
@@ -90,12 +94,23 @@ use sidereon_core::astro::{Spk, SpkError, SpkState};
 use sidereon_core::atmosphere::ionosphere::{
     galileo_nequick_g_native, ionex_slant_delay, klobuchar_native, nequick_g_delay_m,
     nequick_g_stec_tecu, GalileoNequickCoeffs, GalileoNequickEval, Ionex, KlobucharParams,
-    NequickGRayEval,
+    NequickGRayEval, TecGridSamples as CoreTecGridSamples, TecSample as CoreTecSample,
+    TecSamplesError,
 };
 use sidereon_core::atmosphere::troposphere::Met;
 use sidereon_core::bias::{
     bias_epoch_instant, BiasEpoch, BiasKind, BiasMode, BiasRecord, BiasSet, BiasTarget,
     ClockReferenceObservables, CodeDcbOptions,
+};
+use sidereon_core::clock_stability::{
+    allan_deviation as core_allan_deviation,
+    compute_allan_deviations as core_compute_allan_deviations,
+    hadamard_deviation as core_hadamard_deviation, modified_adev as core_modified_adev,
+    overlapping_adev as core_overlapping_adev,
+    receiver_clock_phase_deviations as core_receiver_clock_phase_deviations,
+    time_deviation as core_time_deviation, AllanDeviationCurves as CoreAllanDeviationCurves,
+    AllanError, AllanEstimator as CoreAllanEstimator, AllanEstimatorSet, AllanInput, AllanOptions,
+    AllanResult as CoreAllanResult, AllanSeries, GapPolicy, TauGrid,
 };
 use sidereon_core::constants::SECONDS_PER_DAY;
 use sidereon_core::constellation::{
@@ -222,8 +237,11 @@ use sidereon_core::rtk_filter::{
     ValidatedFixedSolveOpts, WideLaneError, WideLaneOptions,
 };
 use sidereon_core::sbas::{
-    SbasBlock, SbasCorrectedEphemeris, SbasCorrectionStore, SbasFastCorrection, SbasGeoState,
-    SbasIgp, SbasLongTermCorrection, SbasMessage, SbasSolveMode, SbasWireForm,
+    SbasBlock, SbasCorrectedEphemeris, SbasCorrectionStore, SbasFastCorrection,
+    SbasFastCorrections, SbasFastDegradation, SbasGeoNav, SbasGeoState, SbasIgp, SbasIgpDelay,
+    SbasIgpMask, SbasIntegrity, SbasIonoDelays, SbasLongTermCorrection, SbasLongTermHalf,
+    SbasLongTermRecord, SbasMessage, SbasMixedFastCorrections, SbasPrnMask, SbasSolveMode,
+    SbasWireForm,
 };
 use sidereon_core::ssr::{
     MissingCorrectionAction, OrbitReferencePoint, RegionalPolicy, SsrClockCorrection,
@@ -11587,6 +11605,597 @@ pub unsafe extern "C" fn sidereon_ionex_free(ionex: *mut SidereonIonex) {
     });
 }
 
+// --- IONEX sample IR --------------------------------------------------------
+
+/// One IONEX vertical-TEC node sample. Angles are degrees, VTEC and RMS are
+/// TECU, and the epoch is seconds since J2000 in `time_scale`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonTecSample {
+    /// Epoch time scale as SidereonTimeScale.
+    pub time_scale: u32,
+    /// Node epoch, seconds since J2000 in `time_scale`.
+    pub epoch_j2000_s: f64,
+    /// Latitude node, degrees.
+    pub lat_deg: f64,
+    /// Longitude node, degrees.
+    pub lon_deg: f64,
+    /// Vertical TEC, TECU.
+    pub vtec_tecu: f64,
+    /// Whether rms_tecu carries an RMS value.
+    pub has_rms_tecu: bool,
+    /// RMS value, TECU, when has_rms_tecu is true.
+    pub rms_tecu: f64,
+}
+
+/// Whole-grid IONEX vertical-TEC samples for sidereon_ionex_from_tec_grid_samples.
+/// Arrays are caller-owned. `tec_maps_tecu` is flattened in
+/// `[map][lat][lon]` order with
+/// `map_epoch_count * lat_node_count * lon_node_count` values. RMS maps use the
+/// same order when `has_rms_maps` is true.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonTecGridSamples {
+    /// Epoch time scale as SidereonTimeScale.
+    pub time_scale: u32,
+    /// Map epochs, seconds since J2000 in `time_scale`.
+    pub map_epochs_j2000_s: *const f64,
+    /// Number of map epochs.
+    pub map_epoch_count: usize,
+    /// Latitude nodes, degrees, descending.
+    pub lat_nodes_deg: *const f64,
+    /// Number of latitude nodes.
+    pub lat_node_count: usize,
+    /// Longitude nodes, degrees, ascending.
+    pub lon_nodes_deg: *const f64,
+    /// Number of longitude nodes.
+    pub lon_node_count: usize,
+    /// Signed latitude step, degrees.
+    pub dlat_deg: f64,
+    /// Signed longitude step, degrees.
+    pub dlon_deg: f64,
+    /// Single-layer shell height, kilometers.
+    pub shell_height_km: f64,
+    /// Mean earth radius used by the IONEX geometry, kilometers.
+    pub base_radius_km: f64,
+    /// IONEX EXPONENT header value.
+    pub exponent: i32,
+    /// Flattened VTEC maps, TECU.
+    pub tec_maps_tecu: *const f64,
+    /// Number of flattened VTEC values.
+    pub tec_map_value_count: usize,
+    /// Whether RMS maps are present.
+    pub has_rms_maps: bool,
+    /// Flattened RMS maps, TECU, when has_rms_maps is true.
+    pub rms_maps_tecu: *const f64,
+    /// Number of flattened RMS values.
+    pub rms_map_value_count: usize,
+}
+
+/// Dimensions and scalar metadata extracted from an IONEX vertical-TEC sample
+/// grid. Heights are kilometers and angular fields are degrees.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonTecGridSamplesInfo {
+    /// Number of map epochs.
+    pub map_epoch_count: usize,
+    /// Number of latitude nodes.
+    pub lat_node_count: usize,
+    /// Number of longitude nodes.
+    pub lon_node_count: usize,
+    /// Signed latitude step, degrees.
+    pub dlat_deg: f64,
+    /// Signed longitude step, degrees.
+    pub dlon_deg: f64,
+    /// Single-layer shell height, kilometers.
+    pub shell_height_km: f64,
+    /// Mean earth radius used by the IONEX geometry, kilometers.
+    pub base_radius_km: f64,
+    /// IONEX EXPONENT header value.
+    pub exponent: i32,
+    /// Whether RMS maps are present.
+    pub has_rms_maps: bool,
+    /// Flattened VTEC value count.
+    pub tec_map_value_count: usize,
+    /// Flattened RMS value count.
+    pub rms_map_value_count: usize,
+}
+
+fn map_tec_samples_error(fn_name: &str, err: TecSamplesError) -> SidereonStatus {
+    set_last_error(format!("{fn_name}: {err}"));
+    SidereonStatus::InvalidArgument
+}
+
+fn checked_tec_grid_value_count(
+    fn_name: &str,
+    map_count: usize,
+    lat_count: usize,
+    lon_count: usize,
+) -> Result<usize, SidereonStatus> {
+    let map_lat = map_count.checked_mul(lat_count).ok_or_else(|| {
+        set_last_error(format!("{fn_name}: IONEX grid dimensions overflow"));
+        SidereonStatus::InvalidArgument
+    })?;
+    let total = map_lat.checked_mul(lon_count).ok_or_else(|| {
+        set_last_error(format!("{fn_name}: IONEX grid dimensions overflow"));
+        SidereonStatus::InvalidArgument
+    })?;
+    validate_element_count::<f64>(fn_name, "IONEX grid values", total)?;
+    Ok(total)
+}
+
+fn nested_tec_maps(
+    flat: &[f64],
+    map_count: usize,
+    lat_count: usize,
+    lon_count: usize,
+) -> Vec<Vec<Vec<f64>>> {
+    let mut maps = Vec::with_capacity(map_count);
+    for map_idx in 0..map_count {
+        let mut rows = Vec::with_capacity(lat_count);
+        for lat_idx in 0..lat_count {
+            let offset = (map_idx * lat_count + lat_idx) * lon_count;
+            rows.push(flat[offset..offset + lon_count].to_vec());
+        }
+        maps.push(rows);
+    }
+    maps
+}
+
+fn flatten_tec_maps(maps: &[Vec<Vec<f64>>]) -> Vec<f64> {
+    maps.iter()
+        .flat_map(|map| map.iter().flat_map(|row| row.iter().copied()))
+        .collect()
+}
+
+unsafe fn tec_grid_samples_from_c(
+    fn_name: &str,
+    samples: &SidereonTecGridSamples,
+) -> Result<CoreTecGridSamples, SidereonStatus> {
+    let scale = time_scale_from_c_code(fn_name, "samples.time_scale", samples.time_scale)?;
+    let map_epochs_s = require_slice(
+        samples.map_epochs_j2000_s,
+        samples.map_epoch_count,
+        fn_name,
+        "samples.map_epochs_j2000_s",
+    )?;
+    let mut map_epochs = Vec::with_capacity(map_epochs_s.len());
+    for (idx, &epoch_s) in map_epochs_s.iter().enumerate() {
+        map_epochs.push(instant_from_j2000_seconds(
+            fn_name,
+            &format!("samples.map_epochs_j2000_s[{idx}]"),
+            scale,
+            epoch_s,
+        )?);
+    }
+    let lat_nodes = require_slice(
+        samples.lat_nodes_deg,
+        samples.lat_node_count,
+        fn_name,
+        "samples.lat_nodes_deg",
+    )?;
+    let lon_nodes = require_slice(
+        samples.lon_nodes_deg,
+        samples.lon_node_count,
+        fn_name,
+        "samples.lon_nodes_deg",
+    )?;
+    let expected = checked_tec_grid_value_count(
+        fn_name,
+        samples.map_epoch_count,
+        samples.lat_node_count,
+        samples.lon_node_count,
+    )?;
+    if samples.tec_map_value_count != expected {
+        set_last_error(format!(
+            "{fn_name}: samples.tec_map_value_count must be {expected}"
+        ));
+        return Err(SidereonStatus::InvalidArgument);
+    }
+    let tec_flat = require_slice(
+        samples.tec_maps_tecu,
+        samples.tec_map_value_count,
+        fn_name,
+        "samples.tec_maps_tecu",
+    )?;
+    let rms_maps = if samples.has_rms_maps {
+        if samples.rms_map_value_count != expected {
+            set_last_error(format!(
+                "{fn_name}: samples.rms_map_value_count must be {expected}"
+            ));
+            return Err(SidereonStatus::InvalidArgument);
+        }
+        let rms_flat = require_slice(
+            samples.rms_maps_tecu,
+            samples.rms_map_value_count,
+            fn_name,
+            "samples.rms_maps_tecu",
+        )?;
+        nested_tec_maps(
+            rms_flat,
+            samples.map_epoch_count,
+            samples.lat_node_count,
+            samples.lon_node_count,
+        )
+    } else {
+        Vec::new()
+    };
+    Ok(CoreTecGridSamples {
+        map_epochs,
+        lat_nodes_deg: lat_nodes.to_vec(),
+        lon_nodes_deg: lon_nodes.to_vec(),
+        dlat_deg: samples.dlat_deg,
+        dlon_deg: samples.dlon_deg,
+        shell_height_km: samples.shell_height_km,
+        base_radius_km: samples.base_radius_km,
+        exponent: samples.exponent,
+        tec_maps: nested_tec_maps(
+            tec_flat,
+            samples.map_epoch_count,
+            samples.lat_node_count,
+            samples.lon_node_count,
+        ),
+        rms_maps,
+    })
+}
+
+fn tec_sample_to_c(sample: &CoreTecSample) -> SidereonTecSample {
+    SidereonTecSample {
+        time_scale: time_scale_to_c_code(sample.epoch.scale),
+        epoch_j2000_s: instant_to_j2000_seconds(&sample.epoch).unwrap_or(f64::NAN),
+        lat_deg: sample.lat_deg,
+        lon_deg: sample.lon_deg,
+        vtec_tecu: sample.vtec_tecu,
+        has_rms_tecu: sample.rms_tecu.is_some(),
+        rms_tecu: sample.rms_tecu.unwrap_or(0.0),
+    }
+}
+
+unsafe fn tec_sample_from_c(
+    fn_name: &str,
+    sample: &SidereonTecSample,
+) -> Result<CoreTecSample, SidereonStatus> {
+    let scale = time_scale_from_c_code(fn_name, "sample.time_scale", sample.time_scale)?;
+    let epoch = instant_from_j2000_seconds(fn_name, "sample", scale, sample.epoch_j2000_s)?;
+    Ok(CoreTecSample {
+        epoch,
+        lat_deg: sample.lat_deg,
+        lon_deg: sample.lon_deg,
+        vtec_tecu: sample.vtec_tecu,
+        rms_tecu: sample.has_rms_tecu.then_some(sample.rms_tecu),
+    })
+}
+
+fn tec_grid_samples_info(samples: &CoreTecGridSamples) -> SidereonTecGridSamplesInfo {
+    let tec_map_value_count = samples
+        .map_epochs
+        .len()
+        .saturating_mul(samples.lat_nodes_deg.len())
+        .saturating_mul(samples.lon_nodes_deg.len());
+    SidereonTecGridSamplesInfo {
+        map_epoch_count: samples.map_epochs.len(),
+        lat_node_count: samples.lat_nodes_deg.len(),
+        lon_node_count: samples.lon_nodes_deg.len(),
+        dlat_deg: samples.dlat_deg,
+        dlon_deg: samples.dlon_deg,
+        shell_height_km: samples.shell_height_km,
+        base_radius_km: samples.base_radius_km,
+        exponent: samples.exponent,
+        has_rms_maps: !samples.rms_maps.is_empty(),
+        tec_map_value_count,
+        rms_map_value_count: if samples.rms_maps.is_empty() {
+            0
+        } else {
+            tec_map_value_count
+        },
+    }
+}
+
+/// Build an IONEX product from whole-grid TEC samples. On success writes a new
+/// handle to *out_ionex; release it with sidereon_ionex_free.
+///
+/// Safety: samples must point to a SidereonTecGridSamples whose arrays match its
+/// counts; out_ionex must point to storage for a SidereonIonex*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ionex_from_tec_grid_samples(
+    samples: *const SidereonTecGridSamples,
+    out_ionex: *mut *mut SidereonIonex,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_ionex_from_tec_grid_samples",
+        SidereonStatus::Panic,
+        || {
+            let out_ionex = c_try!(require_out(
+                out_ionex,
+                "sidereon_ionex_from_tec_grid_samples",
+                "out_ionex"
+            ));
+            *out_ionex = ptr::null_mut();
+            let samples = c_try!(require_ref(
+                samples,
+                "sidereon_ionex_from_tec_grid_samples",
+                "samples"
+            ));
+            let samples = c_try!(tec_grid_samples_from_c(
+                "sidereon_ionex_from_tec_grid_samples",
+                samples
+            ));
+            match Ionex::from_samples(samples) {
+                Ok(inner) => {
+                    write_boxed_handle(out_ionex, SidereonIonex { inner });
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_tec_samples_error("sidereon_ionex_from_tec_grid_samples", err),
+            }
+        },
+    )
+}
+
+/// Build an IONEX product from one sample per grid node. Angles are degrees,
+/// VTEC/RMS are TECU, shell/base radii are kilometers, and epochs are seconds
+/// since J2000 in each sample's time scale.
+///
+/// Safety: samples points to count SidereonTecSample entries, or NULL when count
+/// is zero; out_ionex must point to storage for a SidereonIonex*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ionex_from_tec_samples(
+    samples: *const SidereonTecSample,
+    count: usize,
+    shell_height_km: f64,
+    base_radius_km: f64,
+    exponent: i32,
+    out_ionex: *mut *mut SidereonIonex,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_ionex_from_tec_samples",
+        SidereonStatus::Panic,
+        || {
+            let out_ionex = c_try!(require_out(
+                out_ionex,
+                "sidereon_ionex_from_tec_samples",
+                "out_ionex"
+            ));
+            *out_ionex = ptr::null_mut();
+            let raw = c_try!(require_slice(
+                samples,
+                count,
+                "sidereon_ionex_from_tec_samples",
+                "samples"
+            ));
+            let mut parsed = Vec::with_capacity(raw.len());
+            for sample in raw {
+                parsed.push(c_try!(tec_sample_from_c(
+                    "sidereon_ionex_from_tec_samples",
+                    sample
+                )));
+            }
+            match Ionex::from_node_samples(parsed, shell_height_km, base_radius_km, exponent) {
+                Ok(inner) => {
+                    write_boxed_handle(out_ionex, SidereonIonex { inner });
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_tec_samples_error("sidereon_ionex_from_tec_samples", err),
+            }
+        },
+    )
+}
+
+/// Read IONEX TEC-grid sample dimensions and scalar metadata. Heights are
+/// kilometers and angular fields are degrees.
+///
+/// Safety: ionex must be a live handle; out_info must point to a
+/// SidereonTecGridSamplesInfo.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ionex_tec_grid_samples_info(
+    ionex: *const SidereonIonex,
+    out_info: *mut SidereonTecGridSamplesInfo,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_ionex_tec_grid_samples_info",
+        SidereonStatus::Panic,
+        || {
+            let out_info = c_try!(require_out(
+                out_info,
+                "sidereon_ionex_tec_grid_samples_info",
+                "out_info"
+            ));
+            *out_info = SidereonTecGridSamplesInfo {
+                map_epoch_count: 0,
+                lat_node_count: 0,
+                lon_node_count: 0,
+                dlat_deg: 0.0,
+                dlon_deg: 0.0,
+                shell_height_km: 0.0,
+                base_radius_km: 0.0,
+                exponent: 0,
+                has_rms_maps: false,
+                tec_map_value_count: 0,
+                rms_map_value_count: 0,
+            };
+            let ionex = c_try!(require_ref(
+                ionex,
+                "sidereon_ionex_tec_grid_samples_info",
+                "ionex"
+            ));
+            let samples = ionex.inner.tec_grid_samples();
+            *out_info = tec_grid_samples_info(&samples);
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy TEC-grid map epochs as seconds since J2000. Uses the variable-length
+/// output contract.
+///
+/// Safety: ionex must be a live handle; out points to len writable doubles or
+/// NULL when len is 0; out_written and out_required point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ionex_tec_grid_samples_epochs_j2000_s(
+    ionex: *const SidereonIonex,
+    out: *mut f64,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_ionex_tec_grid_samples_epochs_j2000_s",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_ionex_tec_grid_samples_epochs_j2000_s",
+                out_written,
+                out_required
+            ));
+            let ionex = c_try!(require_ref(
+                ionex,
+                "sidereon_ionex_tec_grid_samples_epochs_j2000_s",
+                "ionex"
+            ));
+            let samples = ionex.inner.tec_grid_samples();
+            let epochs: Vec<f64> = samples
+                .map_epochs
+                .iter()
+                .map(|epoch| instant_to_j2000_seconds(epoch).unwrap_or(f64::NAN))
+                .collect();
+            c_try!(copy_prefix_to_c(
+                "sidereon_ionex_tec_grid_samples_epochs_j2000_s",
+                "out",
+                &epochs,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy flattened IONEX VTEC maps in `[map][lat][lon]` order, TECU. Uses the
+/// variable-length output contract.
+///
+/// Safety: ionex must be a live handle; out points to len writable doubles or
+/// NULL when len is 0; out_written and out_required point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ionex_tec_grid_samples_tec_maps_tecu(
+    ionex: *const SidereonIonex,
+    out: *mut f64,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_ionex_tec_grid_samples_tec_maps_tecu",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_ionex_tec_grid_samples_tec_maps_tecu",
+                out_written,
+                out_required
+            ));
+            let ionex = c_try!(require_ref(
+                ionex,
+                "sidereon_ionex_tec_grid_samples_tec_maps_tecu",
+                "ionex"
+            ));
+            let samples = ionex.inner.tec_grid_samples();
+            let flat = flatten_tec_maps(&samples.tec_maps);
+            c_try!(copy_prefix_to_c(
+                "sidereon_ionex_tec_grid_samples_tec_maps_tecu",
+                "out",
+                &flat,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy flattened IONEX RMS maps in `[map][lat][lon]` order, TECU. If no RMS
+/// maps are present, the required length is zero.
+///
+/// Safety: ionex must be a live handle; out points to len writable doubles or
+/// NULL when len is 0; out_written and out_required point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ionex_tec_grid_samples_rms_maps_tecu(
+    ionex: *const SidereonIonex,
+    out: *mut f64,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_ionex_tec_grid_samples_rms_maps_tecu",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_ionex_tec_grid_samples_rms_maps_tecu",
+                out_written,
+                out_required
+            ));
+            let ionex = c_try!(require_ref(
+                ionex,
+                "sidereon_ionex_tec_grid_samples_rms_maps_tecu",
+                "ionex"
+            ));
+            let samples = ionex.inner.tec_grid_samples();
+            let flat = flatten_tec_maps(&samples.rms_maps);
+            c_try!(copy_prefix_to_c(
+                "sidereon_ionex_tec_grid_samples_rms_maps_tecu",
+                "out",
+                &flat,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy one IONEX TEC sample per grid node. Uses the variable-length output
+/// contract. Angles are degrees and VTEC/RMS values are TECU.
+///
+/// Safety: ionex must be a live handle; out points to len SidereonTecSample
+/// entries or NULL when len is 0; out_written and out_required point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ionex_tec_samples(
+    ionex: *const SidereonIonex,
+    out: *mut SidereonTecSample,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_ionex_tec_samples", SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(
+            "sidereon_ionex_tec_samples",
+            out_written,
+            out_required
+        ));
+        let ionex = c_try!(require_ref(ionex, "sidereon_ionex_tec_samples", "ionex"));
+        let values: Vec<SidereonTecSample> = ionex
+            .inner
+            .tec_samples()
+            .iter()
+            .map(tec_sample_to_c)
+            .collect();
+        c_try!(copy_prefix_to_c(
+            "sidereon_ionex_tec_samples",
+            "out",
+            &values,
+            out,
+            len,
+            out_written,
+            out_required,
+        ));
+        SidereonStatus::Ok
+    })
+}
+
 // === CRINEX (Hatanaka) decode + RINEX 3 observation read ===================
 //
 // This is the first slice of the RINEX surface for C: CRINEX decode and the
@@ -12434,6 +13043,816 @@ pub unsafe extern "C" fn sidereon_rinex_obs_free(obs: *mut SidereonRinexObs) {
     ffi_boundary("sidereon_rinex_obs_free", (), || {
         free_boxed(obs);
     });
+}
+
+// --- Clock stability: Allan-family estimators -------------------------------
+
+/// Sample input kind for Allan-family clock-stability estimators.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonAllanSeriesKind {
+    /// Phase deviations in seconds.
+    PhaseSeconds = 0,
+    /// Fractional-frequency samples, dimensionless.
+    FractionalFrequency = 1,
+    /// Phase deviations in seconds with missing samples.
+    PhaseSecondsWithGaps = 2,
+    /// Fractional-frequency samples with missing samples.
+    FractionalFrequencyWithGaps = 3,
+}
+
+/// Averaging-factor grid for Allan-family estimators.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonAllanTauGrid {
+    /// `m = 1, 2, 4, 8, ...` while the estimator has terms.
+    Octave = 0,
+    /// Every `m = 1..=m_max` while the estimator has terms.
+    All = 1,
+    /// Caller-supplied averaging factors.
+    Explicit = 2,
+}
+
+/// Missing-sample policy for gapped Allan-family inputs.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonAllanGapPolicy {
+    /// Reject any missing sample.
+    Reject = 0,
+    /// Exclude estimator terms that cross a missing sample.
+    OmitTerms = 1,
+}
+
+/// Allan-family estimator selector.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonAllanEstimator {
+    /// Plain non-overlapping Allan deviation.
+    Adev = 0,
+    /// Fully overlapping Allan deviation.
+    OverlappingAdev = 1,
+    /// Modified Allan deviation.
+    Mdev = 2,
+    /// Overlapping Hadamard deviation.
+    Hdev = 3,
+    /// Time deviation.
+    Tdev = 4,
+}
+
+/// One clock-stability sample. For non-gapped series, `has_value` must be true
+/// for every row. Phase samples are seconds. Fractional-frequency samples are
+/// dimensionless.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonAllanSample {
+    /// Whether value carries a sample.
+    pub has_value: bool,
+    /// Phase deviation in seconds or fractional frequency, depending on series.
+    pub value: f64,
+}
+
+/// Estimators to compute in sidereon_clock_compute_allan_deviations.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonAllanEstimatorSet {
+    /// Compute plain non-overlapping Allan deviation.
+    pub adev: bool,
+    /// Compute fully overlapping Allan deviation.
+    pub overlapping_adev: bool,
+    /// Compute modified Allan deviation.
+    pub mdev: bool,
+    /// Compute overlapping Hadamard deviation.
+    pub hdev: bool,
+    /// Compute time deviation.
+    pub tdev: bool,
+}
+
+/// Options for sidereon_clock_compute_allan_deviations. Initialize with
+/// sidereon_clock_allan_options_init. Explicit averaging factors are read only
+/// when `tau_grid == SIDEREON_ALLAN_TAU_GRID_EXPLICIT`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonAllanOptions {
+    /// Estimators to compute.
+    pub estimators: SidereonAllanEstimatorSet,
+    /// Tau grid selector as SidereonAllanTauGrid.
+    pub tau_grid: u32,
+    /// Gap policy as SidereonAllanGapPolicy.
+    pub gap_policy: u32,
+    /// Averaging factors for the explicit tau grid.
+    pub averaging_factors: *const usize,
+    /// Number of explicit averaging factors.
+    pub averaging_factor_count: usize,
+}
+
+/// One point on an Allan-family estimator curve. `tau_s` is seconds, deviation
+/// is in the estimator's natural units, and `n` is the number of terms used.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonAllanPoint {
+    /// Averaging time, seconds.
+    pub tau_s: f64,
+    /// Deviation value at tau_s.
+    pub deviation: f64,
+    /// Number of estimator terms used at tau_s.
+    pub n: usize,
+}
+
+/// One RINEX receiver-clock phase-deviation sample in seconds.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonClockPhaseSample {
+    /// Whether phase_s carries a receiver-clock phase deviation.
+    pub has_phase_s: bool,
+    /// Receiver-clock phase deviation, seconds, when present.
+    pub phase_s: f64,
+}
+
+/// Combined Allan-family estimator curves. Opaque to C. Create with
+/// sidereon_clock_compute_allan_deviations and release with
+/// sidereon_clock_allan_deviation_curves_free.
+pub struct SidereonAllanDeviationCurves {
+    inner: CoreAllanDeviationCurves,
+}
+
+enum AllanSeriesStorage {
+    PhaseSeconds(Vec<f64>),
+    FractionalFrequency(Vec<f64>),
+    PhaseSecondsWithGaps(Vec<Option<f64>>),
+    FractionalFrequencyWithGaps(Vec<Option<f64>>),
+}
+
+impl AllanSeriesStorage {
+    fn as_series(&self) -> AllanSeries<'_> {
+        match self {
+            Self::PhaseSeconds(values) => AllanSeries::PhaseSeconds(values),
+            Self::FractionalFrequency(values) => AllanSeries::FractionalFrequency(values),
+            Self::PhaseSecondsWithGaps(values) => AllanSeries::PhaseSecondsWithGaps(values),
+            Self::FractionalFrequencyWithGaps(values) => {
+                AllanSeries::FractionalFrequencyWithGaps(values)
+            }
+        }
+    }
+}
+
+fn map_allan_error(fn_name: &str, err: AllanError) -> SidereonStatus {
+    set_last_error(format!("{fn_name}: {err}"));
+    SidereonStatus::InvalidArgument
+}
+
+fn allan_series_kind_from_c(
+    fn_name: &str,
+    kind: u32,
+) -> Result<SidereonAllanSeriesKind, SidereonStatus> {
+    match kind {
+        value if value == SidereonAllanSeriesKind::PhaseSeconds as u32 => {
+            Ok(SidereonAllanSeriesKind::PhaseSeconds)
+        }
+        value if value == SidereonAllanSeriesKind::FractionalFrequency as u32 => {
+            Ok(SidereonAllanSeriesKind::FractionalFrequency)
+        }
+        value if value == SidereonAllanSeriesKind::PhaseSecondsWithGaps as u32 => {
+            Ok(SidereonAllanSeriesKind::PhaseSecondsWithGaps)
+        }
+        value if value == SidereonAllanSeriesKind::FractionalFrequencyWithGaps as u32 => {
+            Ok(SidereonAllanSeriesKind::FractionalFrequencyWithGaps)
+        }
+        _ => {
+            set_last_error(format!("{fn_name}: invalid Allan series kind"));
+            Err(SidereonStatus::InvalidArgument)
+        }
+    }
+}
+
+fn allan_tau_grid_from_c(
+    fn_name: &str,
+    options: &SidereonAllanOptions,
+) -> Result<TauGrid, SidereonStatus> {
+    match options.tau_grid {
+        value if value == SidereonAllanTauGrid::Octave as u32 => Ok(TauGrid::Octave),
+        value if value == SidereonAllanTauGrid::All as u32 => Ok(TauGrid::All),
+        value if value == SidereonAllanTauGrid::Explicit as u32 => {
+            let factors = unsafe {
+                require_slice(
+                    options.averaging_factors,
+                    options.averaging_factor_count,
+                    fn_name,
+                    "options.averaging_factors",
+                )?
+            };
+            Ok(TauGrid::Explicit(factors.to_vec()))
+        }
+        _ => {
+            set_last_error(format!("{fn_name}: invalid Allan tau grid"));
+            Err(SidereonStatus::InvalidArgument)
+        }
+    }
+}
+
+fn allan_gap_policy_from_c(fn_name: &str, policy: u32) -> Result<GapPolicy, SidereonStatus> {
+    match policy {
+        value if value == SidereonAllanGapPolicy::Reject as u32 => Ok(GapPolicy::Reject),
+        value if value == SidereonAllanGapPolicy::OmitTerms as u32 => Ok(GapPolicy::OmitTerms),
+        _ => {
+            set_last_error(format!("{fn_name}: invalid Allan gap policy"));
+            Err(SidereonStatus::InvalidArgument)
+        }
+    }
+}
+
+fn allan_estimator_from_c(
+    fn_name: &str,
+    estimator: u32,
+) -> Result<CoreAllanEstimator, SidereonStatus> {
+    match estimator {
+        value if value == SidereonAllanEstimator::Adev as u32 => Ok(CoreAllanEstimator::Adev),
+        value if value == SidereonAllanEstimator::OverlappingAdev as u32 => {
+            Ok(CoreAllanEstimator::OverlappingAdev)
+        }
+        value if value == SidereonAllanEstimator::Mdev as u32 => Ok(CoreAllanEstimator::Mdev),
+        value if value == SidereonAllanEstimator::Hdev as u32 => Ok(CoreAllanEstimator::Hdev),
+        value if value == SidereonAllanEstimator::Tdev as u32 => Ok(CoreAllanEstimator::Tdev),
+        _ => {
+            set_last_error(format!("{fn_name}: invalid Allan estimator"));
+            Err(SidereonStatus::InvalidArgument)
+        }
+    }
+}
+
+fn allan_estimator_set_from_c(set: SidereonAllanEstimatorSet) -> AllanEstimatorSet {
+    AllanEstimatorSet {
+        adev: set.adev,
+        overlapping_adev: set.overlapping_adev,
+        mdev: set.mdev,
+        hdev: set.hdev,
+        tdev: set.tdev,
+    }
+}
+
+unsafe fn allan_options_from_c(
+    fn_name: &str,
+    options: *const SidereonAllanOptions,
+) -> Result<AllanOptions, SidereonStatus> {
+    if options.is_null() {
+        return Ok(AllanOptions::default());
+    }
+    let options = require_ref(options, fn_name, "options")?;
+    Ok(AllanOptions {
+        estimators: allan_estimator_set_from_c(options.estimators),
+        tau_grid: allan_tau_grid_from_c(fn_name, options)?,
+        gap_policy: allan_gap_policy_from_c(fn_name, options.gap_policy)?,
+    })
+}
+
+unsafe fn allan_series_from_c(
+    fn_name: &str,
+    samples: *const SidereonAllanSample,
+    count: usize,
+    kind: u32,
+) -> Result<AllanSeriesStorage, SidereonStatus> {
+    let kind = allan_series_kind_from_c(fn_name, kind)?;
+    let raw = require_slice(samples, count, fn_name, "samples")?;
+    match kind {
+        SidereonAllanSeriesKind::PhaseSeconds => {
+            let mut values = Vec::with_capacity(raw.len());
+            for (idx, sample) in raw.iter().enumerate() {
+                if !sample.has_value {
+                    set_last_error(format!("{fn_name}: samples[{idx}] is missing"));
+                    return Err(SidereonStatus::InvalidArgument);
+                }
+                values.push(sample.value);
+            }
+            Ok(AllanSeriesStorage::PhaseSeconds(values))
+        }
+        SidereonAllanSeriesKind::FractionalFrequency => {
+            let mut values = Vec::with_capacity(raw.len());
+            for (idx, sample) in raw.iter().enumerate() {
+                if !sample.has_value {
+                    set_last_error(format!("{fn_name}: samples[{idx}] is missing"));
+                    return Err(SidereonStatus::InvalidArgument);
+                }
+                values.push(sample.value);
+            }
+            Ok(AllanSeriesStorage::FractionalFrequency(values))
+        }
+        SidereonAllanSeriesKind::PhaseSecondsWithGaps => {
+            Ok(AllanSeriesStorage::PhaseSecondsWithGaps(
+                raw.iter()
+                    .map(|sample| sample.has_value.then_some(sample.value))
+                    .collect(),
+            ))
+        }
+        SidereonAllanSeriesKind::FractionalFrequencyWithGaps => {
+            Ok(AllanSeriesStorage::FractionalFrequencyWithGaps(
+                raw.iter()
+                    .map(|sample| sample.has_value.then_some(sample.value))
+                    .collect(),
+            ))
+        }
+    }
+}
+
+fn allan_points(result: &CoreAllanResult) -> Vec<SidereonAllanPoint> {
+    result
+        .tau_s
+        .iter()
+        .zip(&result.deviation)
+        .zip(&result.n)
+        .map(|((&tau_s, &deviation), &n)| SidereonAllanPoint {
+            tau_s,
+            deviation,
+            n,
+        })
+        .collect()
+}
+
+fn allan_curve_for_estimator<'a>(
+    curves: &'a CoreAllanDeviationCurves,
+    estimator: CoreAllanEstimator,
+) -> Option<&'a CoreAllanResult> {
+    match estimator {
+        CoreAllanEstimator::Adev => curves.adev.as_ref(),
+        CoreAllanEstimator::OverlappingAdev => curves.overlapping_adev.as_ref(),
+        CoreAllanEstimator::Mdev => curves.mdev.as_ref(),
+        CoreAllanEstimator::Hdev => curves.hdev.as_ref(),
+        CoreAllanEstimator::Tdev => curves.tdev.as_ref(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn allan_explicit_common(
+    fn_name: &str,
+    samples: *const SidereonAllanSample,
+    count: usize,
+    series_kind: u32,
+    tau0_s: f64,
+    averaging_factors: *const usize,
+    averaging_factor_count: usize,
+    estimator: CoreAllanEstimator,
+    out: *mut SidereonAllanPoint,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    c_try!(init_copy_counts(fn_name, out_written, out_required));
+    let storage = c_try!(allan_series_from_c(fn_name, samples, count, series_kind));
+    let factors = c_try!(require_slice(
+        averaging_factors,
+        averaging_factor_count,
+        fn_name,
+        "averaging_factors"
+    ));
+    let result = match estimator {
+        CoreAllanEstimator::Adev => core_allan_deviation(storage.as_series(), tau0_s, factors),
+        CoreAllanEstimator::OverlappingAdev => {
+            core_overlapping_adev(storage.as_series(), tau0_s, factors)
+        }
+        CoreAllanEstimator::Mdev => core_modified_adev(storage.as_series(), tau0_s, factors),
+        CoreAllanEstimator::Hdev => core_hadamard_deviation(storage.as_series(), tau0_s, factors),
+        CoreAllanEstimator::Tdev => core_time_deviation(storage.as_series(), tau0_s, factors),
+    };
+    let result = match result {
+        Ok(result) => result,
+        Err(err) => return map_allan_error(fn_name, err),
+    };
+    let points = allan_points(&result);
+    c_try!(copy_prefix_to_c(
+        fn_name,
+        "out",
+        &points,
+        out,
+        len,
+        out_written,
+        out_required,
+    ));
+    SidereonStatus::Ok
+}
+
+/// Initialize Allan-family options with the core defaults: standard estimators,
+/// octave tau grid, and gap rejection.
+///
+/// Safety: out_options must point to a SidereonAllanOptions.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_clock_allan_options_init(
+    out_options: *mut SidereonAllanOptions,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_clock_allan_options_init",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_options,
+                "sidereon_clock_allan_options_init",
+                "out_options"
+            ));
+            let defaults = AllanOptions::default();
+            *out = SidereonAllanOptions {
+                estimators: SidereonAllanEstimatorSet {
+                    adev: defaults.estimators.adev,
+                    overlapping_adev: defaults.estimators.overlapping_adev,
+                    mdev: defaults.estimators.mdev,
+                    hdev: defaults.estimators.hdev,
+                    tdev: defaults.estimators.tdev,
+                },
+                tau_grid: SidereonAllanTauGrid::Octave as u32,
+                gap_policy: SidereonAllanGapPolicy::Reject as u32,
+                averaging_factors: ptr::null(),
+                averaging_factor_count: 0,
+            };
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Compute selected Allan-family estimator curves from phase seconds or
+/// fractional-frequency samples. `tau0_s` is the sample interval in seconds.
+/// On success writes a handle to *out_curves; release it with
+/// sidereon_clock_allan_deviation_curves_free.
+///
+/// Safety: samples points to count SidereonAllanSample entries, or NULL when
+/// count is zero; options may be NULL for defaults; out_curves points to a
+/// SidereonAllanDeviationCurves*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_clock_compute_allan_deviations(
+    samples: *const SidereonAllanSample,
+    count: usize,
+    series_kind: u32,
+    tau0_s: f64,
+    options: *const SidereonAllanOptions,
+    out_curves: *mut *mut SidereonAllanDeviationCurves,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_clock_compute_allan_deviations",
+        SidereonStatus::Panic,
+        || {
+            let out_curves = c_try!(require_out(
+                out_curves,
+                "sidereon_clock_compute_allan_deviations",
+                "out_curves"
+            ));
+            *out_curves = ptr::null_mut();
+            let storage = c_try!(allan_series_from_c(
+                "sidereon_clock_compute_allan_deviations",
+                samples,
+                count,
+                series_kind,
+            ));
+            let options = c_try!(allan_options_from_c(
+                "sidereon_clock_compute_allan_deviations",
+                options,
+            ));
+            let input = AllanInput {
+                series: storage.as_series(),
+                tau0_s,
+                options,
+            };
+            match core_compute_allan_deviations(&input) {
+                Ok(inner) => {
+                    write_boxed_handle(out_curves, SidereonAllanDeviationCurves { inner });
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_allan_error("sidereon_clock_compute_allan_deviations", err),
+            }
+        },
+    )
+}
+
+/// Report whether a combined Allan-family result contains a curve for the
+/// requested estimator.
+///
+/// Safety: curves must be a live handle; out_present must point to a bool.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_clock_allan_curve_present(
+    curves: *const SidereonAllanDeviationCurves,
+    estimator: u32,
+    out_present: *mut bool,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_clock_allan_curve_present",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_present,
+                "sidereon_clock_allan_curve_present",
+                "out_present"
+            ));
+            *out = false;
+            let curves = c_try!(require_ref(
+                curves,
+                "sidereon_clock_allan_curve_present",
+                "curves"
+            ));
+            let estimator = c_try!(allan_estimator_from_c(
+                "sidereon_clock_allan_curve_present",
+                estimator,
+            ));
+            *out = allan_curve_for_estimator(&curves.inner, estimator).is_some();
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy one curve from a combined Allan-family result. Missing curves copy zero
+/// points and return OK. Uses the variable-length output contract.
+///
+/// Safety: curves must be a live handle; out points to len SidereonAllanPoint
+/// entries or NULL when len is 0; out_written and out_required point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_clock_allan_curve(
+    curves: *const SidereonAllanDeviationCurves,
+    estimator: u32,
+    out: *mut SidereonAllanPoint,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_clock_allan_curve", SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(
+            "sidereon_clock_allan_curve",
+            out_written,
+            out_required
+        ));
+        let curves = c_try!(require_ref(curves, "sidereon_clock_allan_curve", "curves"));
+        let estimator = c_try!(allan_estimator_from_c(
+            "sidereon_clock_allan_curve",
+            estimator,
+        ));
+        let points = allan_curve_for_estimator(&curves.inner, estimator)
+            .map(allan_points)
+            .unwrap_or_default();
+        c_try!(copy_prefix_to_c(
+            "sidereon_clock_allan_curve",
+            "out",
+            &points,
+            out,
+            len,
+            out_written,
+            out_required,
+        ));
+        SidereonStatus::Ok
+    })
+}
+
+/// Release combined Allan-family curves. Passing NULL is a no-op.
+///
+/// Safety: curves must be NULL or a live handle from
+/// sidereon_clock_compute_allan_deviations.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_clock_allan_deviation_curves_free(
+    curves: *mut SidereonAllanDeviationCurves,
+) {
+    ffi_boundary("sidereon_clock_allan_deviation_curves_free", (), || {
+        free_boxed(curves);
+    });
+}
+
+/// Plain non-overlapping Allan deviation for explicit averaging factors. Each
+/// output point has tau in seconds.
+///
+/// Safety: samples and averaging_factors point to their counts; out follows the
+/// variable-length output contract.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_clock_allan_deviation(
+    samples: *const SidereonAllanSample,
+    count: usize,
+    series_kind: u32,
+    tau0_s: f64,
+    averaging_factors: *const usize,
+    averaging_factor_count: usize,
+    out: *mut SidereonAllanPoint,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_clock_allan_deviation",
+        SidereonStatus::Panic,
+        || {
+            allan_explicit_common(
+                "sidereon_clock_allan_deviation",
+                samples,
+                count,
+                series_kind,
+                tau0_s,
+                averaging_factors,
+                averaging_factor_count,
+                CoreAllanEstimator::Adev,
+                out,
+                len,
+                out_written,
+                out_required,
+            )
+        },
+    )
+}
+
+/// Fully overlapping Allan deviation for explicit averaging factors. Each
+/// output point has tau in seconds.
+///
+/// Safety: samples and averaging_factors point to their counts; out follows the
+/// variable-length output contract.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_clock_overlapping_adev(
+    samples: *const SidereonAllanSample,
+    count: usize,
+    series_kind: u32,
+    tau0_s: f64,
+    averaging_factors: *const usize,
+    averaging_factor_count: usize,
+    out: *mut SidereonAllanPoint,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_clock_overlapping_adev",
+        SidereonStatus::Panic,
+        || {
+            allan_explicit_common(
+                "sidereon_clock_overlapping_adev",
+                samples,
+                count,
+                series_kind,
+                tau0_s,
+                averaging_factors,
+                averaging_factor_count,
+                CoreAllanEstimator::OverlappingAdev,
+                out,
+                len,
+                out_written,
+                out_required,
+            )
+        },
+    )
+}
+
+/// Modified Allan deviation for explicit averaging factors. Each output point
+/// has tau in seconds.
+///
+/// Safety: samples and averaging_factors point to their counts; out follows the
+/// variable-length output contract.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_clock_modified_adev(
+    samples: *const SidereonAllanSample,
+    count: usize,
+    series_kind: u32,
+    tau0_s: f64,
+    averaging_factors: *const usize,
+    averaging_factor_count: usize,
+    out: *mut SidereonAllanPoint,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_clock_modified_adev",
+        SidereonStatus::Panic,
+        || {
+            allan_explicit_common(
+                "sidereon_clock_modified_adev",
+                samples,
+                count,
+                series_kind,
+                tau0_s,
+                averaging_factors,
+                averaging_factor_count,
+                CoreAllanEstimator::Mdev,
+                out,
+                len,
+                out_written,
+                out_required,
+            )
+        },
+    )
+}
+
+/// Overlapping Hadamard deviation for explicit averaging factors. Each output
+/// point has tau in seconds.
+///
+/// Safety: samples and averaging_factors point to their counts; out follows the
+/// variable-length output contract.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_clock_hadamard_deviation(
+    samples: *const SidereonAllanSample,
+    count: usize,
+    series_kind: u32,
+    tau0_s: f64,
+    averaging_factors: *const usize,
+    averaging_factor_count: usize,
+    out: *mut SidereonAllanPoint,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_clock_hadamard_deviation",
+        SidereonStatus::Panic,
+        || {
+            allan_explicit_common(
+                "sidereon_clock_hadamard_deviation",
+                samples,
+                count,
+                series_kind,
+                tau0_s,
+                averaging_factors,
+                averaging_factor_count,
+                CoreAllanEstimator::Hdev,
+                out,
+                len,
+                out_written,
+                out_required,
+            )
+        },
+    )
+}
+
+/// Time deviation for explicit averaging factors. Tau and deviation are seconds.
+///
+/// Safety: samples and averaging_factors point to their counts; out follows the
+/// variable-length output contract.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_clock_time_deviation(
+    samples: *const SidereonAllanSample,
+    count: usize,
+    series_kind: u32,
+    tau0_s: f64,
+    averaging_factors: *const usize,
+    averaging_factor_count: usize,
+    out: *mut SidereonAllanPoint,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_clock_time_deviation",
+        SidereonStatus::Panic,
+        || {
+            allan_explicit_common(
+                "sidereon_clock_time_deviation",
+                samples,
+                count,
+                series_kind,
+                tau0_s,
+                averaging_factors,
+                averaging_factor_count,
+                CoreAllanEstimator::Tdev,
+                out,
+                len,
+                out_written,
+                out_required,
+            )
+        },
+    )
+}
+
+/// Extract RINEX receiver-clock offsets as phase deviations in seconds. Event
+/// epochs are returned with `has_phase_s == false`.
+///
+/// Safety: obs must be a live RINEX OBS handle; out points to len
+/// SidereonClockPhaseSample entries or NULL when len is 0; out_written and
+/// out_required point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rinex_obs_receiver_clock_phase_deviations(
+    obs: *const SidereonRinexObs,
+    out: *mut SidereonClockPhaseSample,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rinex_obs_receiver_clock_phase_deviations",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_rinex_obs_receiver_clock_phase_deviations",
+                out_written,
+                out_required
+            ));
+            let obs = c_try!(require_ref(
+                obs,
+                "sidereon_rinex_obs_receiver_clock_phase_deviations",
+                "obs"
+            ));
+            let values: Vec<SidereonClockPhaseSample> =
+                core_receiver_clock_phase_deviations(&obs.inner)
+                    .into_iter()
+                    .map(|value| SidereonClockPhaseSample {
+                        has_phase_s: value.is_some(),
+                        phase_s: value.unwrap_or(0.0),
+                    })
+                    .collect();
+            c_try!(copy_prefix_to_c(
+                "sidereon_rinex_obs_receiver_clock_phase_deviations",
+                "out",
+                &values,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
 }
 
 // === GNSS constellation identity catalog (CelesTrak + NAVCEN) ==============
@@ -23849,6 +25268,523 @@ pub unsafe extern "C" fn sidereon_raim(
     })
 }
 
+// --- ARAIM integrity (sidereon_core::araim) ---------------------------------
+
+/// One satellite row in an ARAIM geometry snapshot.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonAraimRow {
+    /// Null-terminated satellite token.
+    pub sat_id: *const c_char,
+    /// Receiver-to-satellite ECEF unit line of sight.
+    pub line_of_sight: SidereonLineOfSight,
+    /// GNSS system as SidereonGnssSystem.
+    pub system: u32,
+    /// Elevation angle at the receiver, radians.
+    pub elevation_rad: f64,
+}
+
+/// ARAIM geometry input. `rows` and `clock_systems` are caller-owned arrays.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonAraimGeometry {
+    /// Satellite rows.
+    pub rows: *const SidereonAraimRow,
+    /// Number of satellite rows.
+    pub row_count: usize,
+    /// Receiver WGS84 geodetic position.
+    pub receiver: SidereonGeodetic,
+    /// Receiver-clock systems as SidereonGnssSystem values.
+    pub clock_systems: *const u32,
+    /// Number of receiver-clock systems.
+    pub clock_system_count: usize,
+}
+
+/// Per-satellite ARAIM integrity and accuracy model without an identity.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonAraimSatelliteIsmModel {
+    /// Integrity one-sigma SIS range error, meters.
+    pub sigma_ura_m: f64,
+    /// Accuracy and continuity one-sigma SIS range error, meters.
+    pub sigma_ure_m: f64,
+    /// Nominal SIS bias bound, meters.
+    pub b_nom_m: f64,
+    /// Prior probability for a satellite fault.
+    pub p_sat: f64,
+}
+
+/// Per-constellation ARAIM ISM default.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonAraimConstellationIsm {
+    /// GNSS system as SidereonGnssSystem.
+    pub system: u32,
+    /// Prior probability for a constellation-wide fault.
+    pub p_const: f64,
+    /// Default satellite model for this constellation.
+    pub default_sat: SidereonAraimSatelliteIsmModel,
+}
+
+/// Per-satellite ARAIM ISM override.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonAraimSatelliteIsm {
+    /// Null-terminated satellite token.
+    pub sat_id: *const c_char,
+    /// Integrity one-sigma SIS range error, meters.
+    pub sigma_ura_m: f64,
+    /// Accuracy and continuity one-sigma SIS range error, meters.
+    pub sigma_ure_m: f64,
+    /// Nominal SIS bias bound, meters.
+    pub b_nom_m: f64,
+    /// Prior probability for a satellite fault.
+    pub p_sat: f64,
+}
+
+/// ARAIM integrity support message input. Arrays are caller-owned.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonAraimIsm {
+    /// Per-constellation defaults.
+    pub constellations: *const SidereonAraimConstellationIsm,
+    /// Number of constellation rows.
+    pub constellation_count: usize,
+    /// Per-satellite overrides.
+    pub satellites: *const SidereonAraimSatelliteIsm,
+    /// Number of satellite override rows.
+    pub satellite_count: usize,
+}
+
+/// Integrity and continuity risk allocation for one ARAIM solve.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonAraimIntegrityAllocation {
+    /// Total probability of hazardous misleading information.
+    pub phmi_total: f64,
+    /// Vertical PHMI allocation.
+    pub phmi_vert: f64,
+    /// Horizontal PHMI allocation.
+    pub phmi_hor: f64,
+    /// Vertical false-alert allocation.
+    pub pfa_vert: f64,
+    /// Horizontal false-alert allocation.
+    pub pfa_hor: f64,
+    /// Maximum acceptable unmonitored fault probability mass.
+    pub p_threshold_unmonitored: f64,
+    /// Maximum enumerated satellite-fault order. Zero keeps only fault-free.
+    pub max_fault_order: usize,
+}
+
+/// ARAIM protection-level summary. HPL, VPL, EMT, and accuracy sigma fields are
+/// meters.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonAraimSummary {
+    /// Horizontal protection level, meters.
+    pub hpl_m: f64,
+    /// Vertical protection level, meters.
+    pub vpl_m: f64,
+    /// All-in-view horizontal accuracy sigma, meters.
+    pub sigma_acc_h_m: f64,
+    /// All-in-view vertical accuracy sigma, meters.
+    pub sigma_acc_v_m: f64,
+    /// Effective monitor threshold, meters.
+    pub emt_m: f64,
+    /// Unenumerated plus unmonitorable fault probability mass.
+    pub p_unmonitored: f64,
+    /// True when the solve met the allocation and all roots converged.
+    pub availability: bool,
+    /// Number of fault-mode rows available.
+    pub fault_mode_count: usize,
+}
+
+/// One ARAIM fault-mode row. Sigma, bias, and threshold arrays are local
+/// `[east, north, up]` meters.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonAraimFaultMode {
+    /// Number of excluded satellites for this mode.
+    pub excluded_count: usize,
+    /// Whether excluded_constellation carries a GNSS system.
+    pub has_excluded_constellation: bool,
+    /// Excluded constellation as SidereonGnssSystem when present.
+    pub excluded_constellation: u32,
+    /// Fault prior probability for this mode.
+    pub prior: f64,
+    /// Integrity sigma in local ENU, meters.
+    pub sigma_int_enu_m: [f64; 3],
+    /// Nominal bias bound in local ENU, meters.
+    pub bias_enu_m: [f64; 3],
+    /// Separation monitor threshold in local ENU, meters.
+    pub threshold_enu_m: [f64; 3],
+    /// True when the subset geometry is full rank.
+    pub monitorable: bool,
+}
+
+/// ARAIM protection-level result. Opaque to C. Create with sidereon_araim and
+/// release with sidereon_araim_result_free.
+pub struct SidereonAraimResult {
+    inner: CoreAraimResult,
+}
+
+fn araim_allocation_to_c(value: IntegrityAllocation) -> SidereonAraimIntegrityAllocation {
+    SidereonAraimIntegrityAllocation {
+        phmi_total: value.phmi_total,
+        phmi_vert: value.phmi_vert,
+        phmi_hor: value.phmi_hor,
+        pfa_vert: value.pfa_vert,
+        pfa_hor: value.pfa_hor,
+        p_threshold_unmonitored: value.p_threshold_unmonitored,
+        max_fault_order: value.max_fault_order,
+    }
+}
+
+fn araim_allocation_from_c(value: &SidereonAraimIntegrityAllocation) -> IntegrityAllocation {
+    IntegrityAllocation {
+        phmi_total: value.phmi_total,
+        phmi_vert: value.phmi_vert,
+        phmi_hor: value.phmi_hor,
+        pfa_vert: value.pfa_vert,
+        pfa_hor: value.pfa_hor,
+        p_threshold_unmonitored: value.p_threshold_unmonitored,
+        max_fault_order: value.max_fault_order,
+    }
+}
+
+fn araim_sat_model_from_c(value: SidereonAraimSatelliteIsmModel) -> SatelliteIsmModel {
+    SatelliteIsmModel::new(
+        value.sigma_ura_m,
+        value.sigma_ure_m,
+        value.b_nom_m,
+        value.p_sat,
+    )
+}
+
+unsafe fn araim_geometry_from_c(
+    fn_name: &str,
+    value: &SidereonAraimGeometry,
+) -> Result<AraimGeometry, SidereonStatus> {
+    let rows = require_slice(value.rows, value.row_count, fn_name, "geometry.rows")?;
+    let mut parsed_rows = Vec::with_capacity(rows.len());
+    for (idx, row) in rows.iter().enumerate() {
+        let id = parse_satellite_token(fn_name, row.sat_id)?;
+        let system =
+            gnss_system_from_c_code(fn_name, &format!("geometry.rows[{idx}].system"), row.system)?;
+        parsed_rows.push(AraimRow {
+            id,
+            line_of_sight: LineOfSight::new(
+                row.line_of_sight.e_x,
+                row.line_of_sight.e_y,
+                row.line_of_sight.e_z,
+            ),
+            system,
+            elevation_rad: row.elevation_rad,
+        });
+    }
+    let receiver = geodetic_to_wgs84(fn_name, "geometry.receiver", value.receiver)?;
+    let raw_systems = require_slice(
+        value.clock_systems,
+        value.clock_system_count,
+        fn_name,
+        "geometry.clock_systems",
+    )?;
+    let mut clock_systems = Vec::with_capacity(raw_systems.len());
+    for (idx, &system) in raw_systems.iter().enumerate() {
+        clock_systems.push(gnss_system_from_c_code(
+            fn_name,
+            &format!("geometry.clock_systems[{idx}]"),
+            system,
+        )?);
+    }
+    Ok(AraimGeometry {
+        rows: parsed_rows,
+        receiver,
+        clock_systems,
+    })
+}
+
+unsafe fn araim_ism_from_c(fn_name: &str, value: &SidereonAraimIsm) -> Result<Ism, SidereonStatus> {
+    let raw_constellations = require_slice(
+        value.constellations,
+        value.constellation_count,
+        fn_name,
+        "ism.constellations",
+    )?;
+    let mut constellations = Vec::with_capacity(raw_constellations.len());
+    for (idx, row) in raw_constellations.iter().enumerate() {
+        let system = gnss_system_from_c_code(
+            fn_name,
+            &format!("ism.constellations[{idx}].system"),
+            row.system,
+        )?;
+        constellations.push(ConstellationIsm::new(
+            system,
+            row.p_const,
+            araim_sat_model_from_c(row.default_sat),
+        ));
+    }
+
+    let raw_satellites = require_slice(
+        value.satellites,
+        value.satellite_count,
+        fn_name,
+        "ism.satellites",
+    )?;
+    let mut satellites = Vec::with_capacity(raw_satellites.len());
+    for row in raw_satellites {
+        let id = parse_satellite_token(fn_name, row.sat_id)?;
+        satellites.push(SatelliteIsm::new(
+            id,
+            row.sigma_ura_m,
+            row.sigma_ure_m,
+            row.b_nom_m,
+            row.p_sat,
+        ));
+    }
+    Ok(Ism::new(constellations, satellites))
+}
+
+fn map_araim_error(fn_name: &str, err: AraimError) -> SidereonStatus {
+    set_last_error(format!("{fn_name}: {err}"));
+    match err {
+        AraimError::InvalidIsm | AraimError::InvalidAllocation => SidereonStatus::InvalidArgument,
+        AraimError::InsufficientGeometry
+        | AraimError::UnmonitorableFaultMass
+        | AraimError::NumericalFailure => SidereonStatus::Solve,
+    }
+}
+
+fn araim_summary_to_c(value: &CoreAraimResult) -> SidereonAraimSummary {
+    SidereonAraimSummary {
+        hpl_m: value.hpl_m,
+        vpl_m: value.vpl_m,
+        sigma_acc_h_m: value.sigma_acc_h_m,
+        sigma_acc_v_m: value.sigma_acc_v_m,
+        emt_m: value.emt_m,
+        p_unmonitored: value.p_unmonitored,
+        availability: value.availability,
+        fault_mode_count: value.fault_modes.len(),
+    }
+}
+
+fn araim_fault_mode_to_c(value: &sidereon_core::araim::FaultMode) -> SidereonAraimFaultMode {
+    SidereonAraimFaultMode {
+        excluded_count: value.excluded.len(),
+        has_excluded_constellation: value.excluded_constellation.is_some(),
+        excluded_constellation: value
+            .excluded_constellation
+            .map(|system| gnss_system_to_c(system) as u32)
+            .unwrap_or(SidereonGnssSystem::Gps as u32),
+        prior: value.prior,
+        sigma_int_enu_m: value.sigma_int_enu_m,
+        bias_enu_m: value.bias_enu_m,
+        threshold_enu_m: value.threshold_enu_m,
+        monitorable: value.monitorable,
+    }
+}
+
+/// Initialize the ARAIM LPV-200 integrity allocation.
+///
+/// Safety: out_allocation must point to a SidereonAraimIntegrityAllocation.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_araim_allocation_lpv_200(
+    out_allocation: *mut SidereonAraimIntegrityAllocation,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_araim_allocation_lpv_200",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_allocation,
+                "sidereon_araim_allocation_lpv_200",
+                "out_allocation"
+            ));
+            *out = araim_allocation_to_c(IntegrityAllocation::lpv_200());
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Run the ARAIM multi-hypothesis protection-level solve. HPL, VPL, EMT, and
+/// accuracy sigma outputs are meters and are read from the result summary.
+///
+/// Safety: geometry, ism, allocation, and out_result must point to their
+/// documented storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_araim(
+    geometry: *const SidereonAraimGeometry,
+    ism: *const SidereonAraimIsm,
+    allocation: *const SidereonAraimIntegrityAllocation,
+    out_result: *mut *mut SidereonAraimResult,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_araim", SidereonStatus::Panic, || {
+        let out_result = c_try!(require_out(out_result, "sidereon_araim", "out_result"));
+        *out_result = ptr::null_mut();
+        let geometry = c_try!(require_ref(geometry, "sidereon_araim", "geometry"));
+        let ism = c_try!(require_ref(ism, "sidereon_araim", "ism"));
+        let allocation = c_try!(require_ref(allocation, "sidereon_araim", "allocation"));
+        let geometry = c_try!(araim_geometry_from_c("sidereon_araim", geometry));
+        let ism = c_try!(araim_ism_from_c("sidereon_araim", ism));
+        let allocation = araim_allocation_from_c(allocation);
+        match core_araim(&geometry, &ism, &allocation) {
+            Ok(inner) => {
+                write_boxed_handle(out_result, SidereonAraimResult { inner });
+                SidereonStatus::Ok
+            }
+            Err(err) => map_araim_error("sidereon_araim", err),
+        }
+    })
+}
+
+/// Read ARAIM result summary fields. HPL, VPL, EMT, and accuracy sigma fields
+/// are meters.
+///
+/// Safety: result must be a live handle; out_summary must point to a
+/// SidereonAraimSummary.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_araim_result_summary(
+    result: *const SidereonAraimResult,
+    out_summary: *mut SidereonAraimSummary,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_araim_result_summary",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_summary,
+                "sidereon_araim_result_summary",
+                "out_summary"
+            ));
+            *out = SidereonAraimSummary {
+                hpl_m: 0.0,
+                vpl_m: 0.0,
+                sigma_acc_h_m: 0.0,
+                sigma_acc_v_m: 0.0,
+                emt_m: 0.0,
+                p_unmonitored: 0.0,
+                availability: false,
+                fault_mode_count: 0,
+            };
+            let result = c_try!(require_ref(
+                result,
+                "sidereon_araim_result_summary",
+                "result"
+            ));
+            *out = araim_summary_to_c(&result.inner);
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy ARAIM fault-mode rows. Sigma, bias, and threshold arrays are meters in
+/// local `[east, north, up]` order. Uses the variable-length output contract.
+///
+/// Safety: result must be a live handle; out points to len SidereonAraimFaultMode
+/// entries or NULL when len is 0; out_written and out_required point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_araim_result_fault_modes(
+    result: *const SidereonAraimResult,
+    out: *mut SidereonAraimFaultMode,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_araim_result_fault_modes",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_araim_result_fault_modes",
+                out_written,
+                out_required
+            ));
+            let result = c_try!(require_ref(
+                result,
+                "sidereon_araim_result_fault_modes",
+                "result"
+            ));
+            let values: Vec<SidereonAraimFaultMode> = result
+                .inner
+                .fault_modes
+                .iter()
+                .map(araim_fault_mode_to_c)
+                .collect();
+            c_try!(copy_prefix_to_c(
+                "sidereon_araim_result_fault_modes",
+                "out",
+                &values,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy excluded satellite tokens for one ARAIM fault mode. Uses the
+/// variable-length output contract.
+///
+/// Safety: result must be a live handle; out points to len
+/// SidereonSatelliteToken entries or NULL when len is 0; out_written and
+/// out_required point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_araim_result_fault_mode_excluded_sats(
+    result: *const SidereonAraimResult,
+    mode_index: usize,
+    out: *mut SidereonSatelliteToken,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_araim_result_fault_mode_excluded_sats",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_araim_result_fault_mode_excluded_sats",
+                out_written,
+                out_required
+            ));
+            let result = c_try!(require_ref(
+                result,
+                "sidereon_araim_result_fault_mode_excluded_sats",
+                "result"
+            ));
+            let Some(mode) = result.inner.fault_modes.get(mode_index) else {
+                set_last_error(format!(
+                    "sidereon_araim_result_fault_mode_excluded_sats: mode_index {mode_index} out of range"
+                ));
+                return SidereonStatus::InvalidArgument;
+            };
+            let values: Vec<SidereonSatelliteToken> =
+                mode.excluded.iter().copied().map(satellite_token).collect();
+            c_try!(copy_prefix_to_c(
+                "sidereon_araim_result_fault_mode_excluded_sats",
+                "out",
+                &values,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Release an ARAIM result handle. Passing NULL is a no-op.
+///
+/// Safety: result must be NULL or a live handle from sidereon_araim.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_araim_result_free(result: *mut SidereonAraimResult) {
+    ffi_boundary("sidereon_araim_result_free", (), || {
+        free_boxed(result);
+    });
+}
+
 // --- DGNSS differential corrections (sidereon_core::dgnss) -------------------
 
 /// One code-only pseudorange observation, mirroring
@@ -31062,6 +32998,10 @@ unsafe fn angle_scalar_vec3_2(
     }
 }
 
+/// On-sky angular separation in degrees between two direction vectors. Each
+/// vector must point to three finite doubles and must be non-zero.
+///
+/// Safety: a and b must point to three doubles; out must point to a double.
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_angular_separation_deg(
     a: *const f64,
@@ -31083,6 +33023,11 @@ pub unsafe extern "C" fn sidereon_angular_separation_deg(
     )
 }
 
+/// On-sky angular separation in degrees between two coordinate pairs. Inputs are
+/// `(lon_deg, lat_deg)` pairs, which also correspond to `(RA, Dec)` in the
+/// astronomy convention. The second component must be in [-90, 90].
+///
+/// Safety: out must point to a double.
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_angular_separation_coords_deg(
     a_lon_deg: f64,
@@ -31115,6 +33060,11 @@ pub unsafe extern "C" fn sidereon_angular_separation_coords_deg(
     )
 }
 
+/// Position angle in degrees, in [0, 360), of the `to` coordinate as seen from
+/// `from`, measured from North through East. Inputs are `(lon_deg, lat_deg)`
+/// pairs, which also correspond to `(RA, Dec)` in the astronomy convention.
+///
+/// Safety: out must point to a double.
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_position_angle_deg(
     from_lon_deg: f64,
@@ -32822,25 +34772,57 @@ pub unsafe extern "C" fn sidereon_geoid_grid_free(grid: *mut SidereonGeoidGrid) 
 
 // --- DTED terrain lookup (sidereon_core::terrain) ---------------------------
 
+/// DTED terrain cache rooted at a tile directory. Create with
+/// sidereon_dted_terrain_new and release with sidereon_dted_terrain_free.
 pub struct SidereonDtedTerrain {
     inner: DtedTerrain,
 }
 
+/// A loaded DTED tile. Create with sidereon_dted_tile_load and release with
+/// sidereon_dted_tile_free.
 pub struct SidereonDtedTile {
     inner: DtedTile,
 }
 
+/// DTED interpolation mode for orthometric terrain heights.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SidereonDtedInterpolation {
+    /// Nearest posting height.
     NearestPosting = 0,
+    /// Bilinear interpolation across postings.
     Bilinear = 1,
 }
 
+/// Options for DTED lookup. Heights are orthometric meters.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct SidereonDtedLookupOptions {
+    /// Interpolation selector as SidereonDtedInterpolation.
     pub interpolation: u32,
+}
+
+/// One longitude-first terrain lookup point, in degrees.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonLonLatDeg {
+    /// Longitude, degrees.
+    pub lon_deg: f64,
+    /// Latitude, degrees.
+    pub lat_deg: f64,
+}
+
+/// One DTED terrain batch result. When has_height_m is true, height_m is an
+/// orthometric height in meters.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonDtedHeightResult {
+    /// Per-point status.
+    pub status: SidereonStatus,
+    /// Whether height_m carries a valid orthometric height.
+    pub has_height_m: bool,
+    /// Orthometric height, meters, when has_height_m is true.
+    pub height_m: f64,
 }
 
 fn dted_interpolation_from_c(
@@ -32880,6 +34862,25 @@ fn map_dted_core_error(fn_name: &str, err: CoreError) -> SidereonStatus {
     SidereonStatus::InvalidArgument
 }
 
+fn dted_height_result_from_core(result: sidereon_core::Result<f64>) -> SidereonDtedHeightResult {
+    match result {
+        Ok(height_m) => SidereonDtedHeightResult {
+            status: SidereonStatus::Ok,
+            has_height_m: true,
+            height_m,
+        },
+        Err(_) => SidereonDtedHeightResult {
+            status: SidereonStatus::InvalidArgument,
+            has_height_m: false,
+            height_m: 0.0,
+        },
+    }
+}
+
+/// Initialize DTED lookup options to bilinear interpolation. Heights returned by
+/// DTED lookup functions are orthometric meters.
+///
+/// Safety: out_options must point to a SidereonDtedLookupOptions.
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_dted_lookup_options_init(
     out_options: *mut SidereonDtedLookupOptions,
@@ -32907,6 +34908,11 @@ pub unsafe extern "C" fn sidereon_dted_lookup_options_init(
     )
 }
 
+/// Create a DTED terrain cache rooted at `root`. Heights returned by this handle
+/// are orthometric meters.
+///
+/// Safety: root must be a non-empty UTF-8 C string; out_terrain must point to a
+/// SidereonDtedTerrain*.
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_dted_terrain_new(
     root: *const c_char,
@@ -32930,6 +34936,10 @@ pub unsafe extern "C" fn sidereon_dted_terrain_new(
     })
 }
 
+/// Query one terrain height. Inputs are longitude, latitude in degrees. The
+/// returned height is orthometric meters.
+///
+/// Safety: terrain must be a live handle; out_height_m must point to a double.
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_dted_terrain_height_m(
     terrain: *mut SidereonDtedTerrain,
@@ -32963,6 +34973,11 @@ pub unsafe extern "C" fn sidereon_dted_terrain_height_m(
     )
 }
 
+/// Query one terrain height with interpolation options. Inputs are longitude,
+/// latitude in degrees. The returned height is orthometric meters.
+///
+/// Safety: terrain must be a live handle; options must point to a
+/// SidereonDtedLookupOptions; out_height_m must point to a double.
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_dted_terrain_height_m_with_options(
     terrain: *mut SidereonDtedTerrain,
@@ -33009,11 +35024,88 @@ pub unsafe extern "C" fn sidereon_dted_terrain_height_m_with_options(
     )
 }
 
+/// Query many terrain points using the same mutable DTED tile cache. Points are
+/// longitude-first `(lon_deg, lat_deg)` pairs. Each successful result carries an
+/// orthometric height in meters. Per-point lookup failures are written into
+/// out[i].status and do not fail the whole call.
+///
+/// Safety: terrain must be a live handle; points points to count
+/// SidereonLonLatDeg values; options must point to SidereonDtedLookupOptions;
+/// out points to count writable SidereonDtedHeightResult entries, or NULL when
+/// count is zero.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_dted_terrain_height_batch_m(
+    terrain: *mut SidereonDtedTerrain,
+    points: *const SidereonLonLatDeg,
+    count: usize,
+    options: *const SidereonDtedLookupOptions,
+    out: *mut SidereonDtedHeightResult,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_dted_terrain_height_batch_m",
+        SidereonStatus::Panic,
+        || {
+            let terrain = c_try!(require_out(
+                terrain,
+                "sidereon_dted_terrain_height_batch_m",
+                "terrain"
+            ));
+            let raw_points = c_try!(require_slice(
+                points,
+                count,
+                "sidereon_dted_terrain_height_batch_m",
+                "points"
+            ));
+            let options = c_try!(require_ref(
+                options,
+                "sidereon_dted_terrain_height_batch_m",
+                "options"
+            ));
+            let options = c_try!(dted_options_from_c(
+                "sidereon_dted_terrain_height_batch_m",
+                options
+            ));
+            if count > 0 && out.is_null() {
+                set_last_error("sidereon_dted_terrain_height_batch_m: null out");
+                return SidereonStatus::NullPointer;
+            }
+            c_try!(validate_element_count::<SidereonDtedHeightResult>(
+                "sidereon_dted_terrain_height_batch_m",
+                "out",
+                count
+            ));
+            for idx in 0..count {
+                out.add(idx).write(SidereonDtedHeightResult {
+                    status: SidereonStatus::InvalidArgument,
+                    has_height_m: false,
+                    height_m: 0.0,
+                });
+            }
+            let points: Vec<(f64, f64)> = raw_points
+                .iter()
+                .map(|point| (point.lon_deg, point.lat_deg))
+                .collect();
+            let results = terrain.inner.height_batch(&points, options);
+            for (idx, result) in results.into_iter().enumerate() {
+                out.add(idx).write(dted_height_result_from_core(result));
+            }
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Release a DTED terrain cache. Passing NULL is a no-op.
+///
+/// Safety: terrain must be NULL or a live handle from sidereon_dted_terrain_new.
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_dted_terrain_free(terrain: *mut SidereonDtedTerrain) {
     free_boxed(terrain);
 }
 
+/// Load one DTED tile. Tile heights are orthometric meters.
+///
+/// Safety: path must be a non-empty UTF-8 C string; out_tile must point to a
+/// SidereonDtedTile*.
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_dted_tile_load(
     path: *const c_char,
@@ -33033,6 +35125,11 @@ pub unsafe extern "C" fn sidereon_dted_tile_load(
     })
 }
 
+/// Query the nearest stored posting in a loaded DTED tile. Inputs are longitude,
+/// latitude in degrees. The returned integer elevation is an orthometric height
+/// in meters.
+///
+/// Safety: tile must be a live handle; out_elevation_m must point to an int16_t.
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_dted_tile_get_elevation(
     tile: *const SidereonDtedTile,
@@ -33066,6 +35163,9 @@ pub unsafe extern "C" fn sidereon_dted_tile_get_elevation(
     )
 }
 
+/// Release a DTED tile. Passing NULL is a no-op.
+///
+/// Safety: tile must be NULL or a live handle from sidereon_dted_tile_load.
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_dted_tile_free(tile: *mut SidereonDtedTile) {
     free_boxed(tile);
@@ -35542,6 +37642,196 @@ pub struct SidereonSbasIgp {
     pub give_variance_m2: f64,
 }
 
+/// Decoded SBAS PRN mask message payload.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonSbasPrnMask {
+    /// SBAS preamble byte.
+    pub preamble: u8,
+    /// IODP value.
+    pub iodp: u8,
+    /// PRN mask bits in SBAS broadcast order.
+    pub mask: [bool; 210],
+}
+
+/// Decoded SBAS fast-correction message payload.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonSbasRawFastCorrections {
+    /// SBAS preamble byte.
+    pub preamble: u8,
+    /// Message type, 2 through 5.
+    pub message_type: u8,
+    /// IODF value.
+    pub iodf: u8,
+    /// IODP value.
+    pub iodp: u8,
+    /// Raw pseudorange correction fields.
+    pub prc: [i16; 13],
+    /// UDREI values.
+    pub udrei: [u8; 13],
+}
+
+/// Decoded SBAS integrity message payload.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonSbasIntegrity {
+    /// SBAS preamble byte.
+    pub preamble: u8,
+    /// IODF values.
+    pub iodf: [u8; 4],
+    /// UDREI values.
+    pub udrei: [u8; 51],
+}
+
+/// Decoded SBAS fast-degradation message payload.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonSbasFastDegradation {
+    /// SBAS preamble byte.
+    pub preamble: u8,
+    /// System latency, seconds.
+    pub system_latency_s: u8,
+    /// IODP value.
+    pub iodp: u8,
+    /// Degradation indicator values.
+    pub ai: [u8; 51],
+}
+
+/// Decoded SBAS GEO navigation message payload. Position fields are meters,
+/// velocity fields are meters per second, acceleration fields are meters per
+/// second squared, and clock fields are seconds or seconds per second.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonSbasGeoNavMessage {
+    /// SBAS preamble byte.
+    pub preamble: u8,
+    /// Time of day, seconds.
+    pub time_of_day_s: u16,
+    /// URA indicator.
+    pub ura: u8,
+    /// Raw X position, scaled by the core store when ingested.
+    pub x_m: i32,
+    /// Raw Y position, scaled by the core store when ingested.
+    pub y_m: i32,
+    /// Raw Z position, scaled by the core store when ingested.
+    pub z_m: i32,
+    /// Raw X velocity field.
+    pub x_rate_m_s: i32,
+    /// Raw Y velocity field.
+    pub y_rate_m_s: i32,
+    /// Raw Z velocity field.
+    pub z_rate_m_s: i32,
+    /// Raw X acceleration field.
+    pub x_accel_m_s2: i16,
+    /// Raw Y acceleration field.
+    pub y_accel_m_s2: i16,
+    /// Raw Z acceleration field.
+    pub z_accel_m_s2: i16,
+    /// Raw clock offset field.
+    pub a_gf0_s: i16,
+    /// Raw clock drift field.
+    pub a_gf1_s_s: i16,
+}
+
+/// Decoded SBAS IGP mask message payload.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonSbasIgpMask {
+    /// SBAS preamble byte.
+    pub preamble: u8,
+    /// IGP band number.
+    pub band_number: u8,
+    /// IODI value.
+    pub iodi: u8,
+    /// IGP mask bits in SBAS broadcast order.
+    pub mask: [bool; 201],
+}
+
+/// Decoded fast-correction part of an SBAS mixed-correction message.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonSbasMixedFastCorrections {
+    /// IODF value.
+    pub iodf: u8,
+    /// IODP value.
+    pub iodp: u8,
+    /// SBAS block id.
+    pub block_id: u8,
+    /// Raw pseudorange correction fields.
+    pub prc: [i16; 6],
+    /// UDREI values.
+    pub udrei: [u8; 6],
+}
+
+/// Metadata for one SBAS long-term-correction half.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonSbasLongTermHalfInfo {
+    /// Whether the half carries velocity-code records.
+    pub velocity_code: bool,
+    /// IODP value.
+    pub iodp: u8,
+    /// Number of long-term records in the half.
+    pub record_count: usize,
+}
+
+/// Decoded SBAS long-term-correction record.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonSbasLongTermRecord {
+    /// Monitored satellite index within the active PRN mask.
+    pub monitored_index: u8,
+    /// IODE value.
+    pub iode: u8,
+    /// Raw X correction field.
+    pub delta_x: i32,
+    /// Raw Y correction field.
+    pub delta_y: i32,
+    /// Raw Z correction field.
+    pub delta_z: i32,
+    /// Raw X-rate correction field.
+    pub delta_x_rate: i32,
+    /// Raw Y-rate correction field.
+    pub delta_y_rate: i32,
+    /// Raw Z-rate correction field.
+    pub delta_z_rate: i32,
+    /// Raw clock-offset correction field.
+    pub delta_a_f0: i32,
+    /// Raw clock-drift correction field.
+    pub delta_a_f1: i32,
+    /// Whether time_of_day_s carries a value.
+    pub has_time_of_day_s: bool,
+    /// Time of day, seconds, when present.
+    pub time_of_day_s: u32,
+}
+
+/// Decoded SBAS ionospheric grid-point delay.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonSbasIgpDelay {
+    /// Raw vertical-delay field.
+    pub vertical_delay: u16,
+    /// GIVEI value.
+    pub givei: u8,
+}
+
+/// Decoded SBAS ionospheric-delay message payload.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonSbasIonoDelays {
+    /// SBAS preamble byte.
+    pub preamble: u8,
+    /// IGP band number.
+    pub band_number: u8,
+    /// SBAS block id.
+    pub block_id: u8,
+    /// IODI value.
+    pub iodi: u8,
+    /// Fifteen decoded grid-point delays.
+    pub entries: [SidereonSbasIgpDelay; 15],
+}
+
 fn sbas_wire_form_from_c(fn_name: &str, form: u32) -> Result<SbasWireForm, SidereonStatus> {
     match form {
         value if value == SidereonSbasWireForm::Framed250 as u32 => Ok(SbasWireForm::Framed250),
@@ -35671,6 +37961,140 @@ fn sbas_igp_to_c(value: &SbasIgp) -> SidereonSbasIgp {
     }
 }
 
+fn sbas_prn_mask_to_c(value: &SbasPrnMask) -> SidereonSbasPrnMask {
+    SidereonSbasPrnMask {
+        preamble: value.preamble,
+        iodp: value.iodp,
+        mask: value.mask,
+    }
+}
+
+fn sbas_raw_fast_to_c(value: &SbasFastCorrections) -> SidereonSbasRawFastCorrections {
+    SidereonSbasRawFastCorrections {
+        preamble: value.preamble,
+        message_type: value.message_type,
+        iodf: value.iodf,
+        iodp: value.iodp,
+        prc: value.prc,
+        udrei: value.udrei,
+    }
+}
+
+fn sbas_integrity_to_c(value: &SbasIntegrity) -> SidereonSbasIntegrity {
+    SidereonSbasIntegrity {
+        preamble: value.preamble,
+        iodf: value.iodf,
+        udrei: value.udrei,
+    }
+}
+
+fn sbas_fast_degradation_to_c(value: &SbasFastDegradation) -> SidereonSbasFastDegradation {
+    SidereonSbasFastDegradation {
+        preamble: value.preamble,
+        system_latency_s: value.system_latency_s,
+        iodp: value.iodp,
+        ai: value.ai,
+    }
+}
+
+fn sbas_geo_nav_message_to_c(value: &SbasGeoNav) -> SidereonSbasGeoNavMessage {
+    SidereonSbasGeoNavMessage {
+        preamble: value.preamble,
+        time_of_day_s: value.time_of_day_s,
+        ura: value.ura,
+        x_m: value.x_m,
+        y_m: value.y_m,
+        z_m: value.z_m,
+        x_rate_m_s: value.x_rate_m_s,
+        y_rate_m_s: value.y_rate_m_s,
+        z_rate_m_s: value.z_rate_m_s,
+        x_accel_m_s2: value.x_accel_m_s2,
+        y_accel_m_s2: value.y_accel_m_s2,
+        z_accel_m_s2: value.z_accel_m_s2,
+        a_gf0_s: value.a_gf0_s,
+        a_gf1_s_s: value.a_gf1_s_s,
+    }
+}
+
+fn sbas_igp_mask_to_c(value: &SbasIgpMask) -> SidereonSbasIgpMask {
+    SidereonSbasIgpMask {
+        preamble: value.preamble,
+        band_number: value.band_number,
+        iodi: value.iodi,
+        mask: value.mask,
+    }
+}
+
+fn sbas_mixed_fast_to_c(value: &SbasMixedFastCorrections) -> SidereonSbasMixedFastCorrections {
+    SidereonSbasMixedFastCorrections {
+        iodf: value.iodf,
+        iodp: value.iodp,
+        block_id: value.block_id,
+        prc: value.prc,
+        udrei: value.udrei,
+    }
+}
+
+fn sbas_long_half_to_c(value: &SbasLongTermHalf) -> SidereonSbasLongTermHalfInfo {
+    SidereonSbasLongTermHalfInfo {
+        velocity_code: value.velocity_code,
+        iodp: value.iodp,
+        record_count: value.records.len(),
+    }
+}
+
+fn sbas_long_record_to_c(value: &SbasLongTermRecord) -> SidereonSbasLongTermRecord {
+    SidereonSbasLongTermRecord {
+        monitored_index: value.monitored_index,
+        iode: value.iode,
+        delta_x: value.delta_x,
+        delta_y: value.delta_y,
+        delta_z: value.delta_z,
+        delta_x_rate: value.delta_x_rate,
+        delta_y_rate: value.delta_y_rate,
+        delta_z_rate: value.delta_z_rate,
+        delta_a_f0: value.delta_a_f0,
+        delta_a_f1: value.delta_a_f1,
+        has_time_of_day_s: value.time_of_day_s.is_some(),
+        time_of_day_s: value.time_of_day_s.unwrap_or(0),
+    }
+}
+
+fn sbas_igp_delay_to_c(value: &SbasIgpDelay) -> SidereonSbasIgpDelay {
+    SidereonSbasIgpDelay {
+        vertical_delay: value.vertical_delay,
+        givei: value.givei,
+    }
+}
+
+fn sbas_iono_delays_to_c(value: &SbasIonoDelays) -> SidereonSbasIonoDelays {
+    SidereonSbasIonoDelays {
+        preamble: value.preamble,
+        band_number: value.band_number,
+        block_id: value.block_id,
+        iodi: value.iodi,
+        entries: std::array::from_fn(|idx| sbas_igp_delay_to_c(&value.entries[idx])),
+    }
+}
+
+fn sbas_long_half_for_index(message: &SbasMessage, index: usize) -> Option<&SbasLongTermHalf> {
+    match message {
+        SbasMessage::LongTermCorrections(value) => value.halves.get(index),
+        SbasMessage::MixedCorrections(value) if index == 0 => Some(&value.long_term),
+        _ => None,
+    }
+}
+
+fn sbas_raw_data(message: &SbasMessage) -> Option<&[u8]> {
+    match message {
+        SbasMessage::DoNotUse(value) => Some(&value.data),
+        SbasMessage::NetworkTime(value) => Some(&value.data),
+        SbasMessage::GeoAlmanac(value) => Some(&value.data),
+        SbasMessage::Unsupported(value) => Some(&value.data),
+        _ => None,
+    }
+}
+
 fn map_sbas_error(fn_name: &str, err: CoreError) -> SidereonStatus {
     set_last_error(format!("{fn_name}: {err}"));
     match err {
@@ -35725,6 +38149,503 @@ pub unsafe extern "C" fn sidereon_sbas_block_info(
         *out = sbas_message_info(&block.inner);
         SidereonStatus::Ok
     })
+}
+
+/// Read a decoded SBAS PRN mask payload. If the block is not a PRN mask,
+/// out_present is false and out_mask is zeroed.
+///
+/// Safety: block must be a live handle; out_present and out_mask must point to
+/// writable storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sbas_block_prn_mask(
+    block: *const SidereonSbasBlock,
+    out_present: *mut bool,
+    out_mask: *mut SidereonSbasPrnMask,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_sbas_block_prn_mask",
+        SidereonStatus::Panic,
+        || {
+            let out_present = c_try!(require_out(
+                out_present,
+                "sidereon_sbas_block_prn_mask",
+                "out_present"
+            ));
+            *out_present = false;
+            let out = c_try!(require_out(
+                out_mask,
+                "sidereon_sbas_block_prn_mask",
+                "out_mask"
+            ));
+            *out = SidereonSbasPrnMask {
+                preamble: 0,
+                iodp: 0,
+                mask: [false; 210],
+            };
+            let block = c_try!(require_ref(block, "sidereon_sbas_block_prn_mask", "block"));
+            if let SbasMessage::PrnMask(value) = &block.inner.message {
+                *out_present = true;
+                *out = sbas_prn_mask_to_c(value);
+            }
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Read a decoded SBAS fast-correction payload. If the block is not a fast
+/// correction, out_present is false and out_fast is zeroed.
+///
+/// Safety: block must be a live handle; out_present and out_fast must point to
+/// writable storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sbas_block_fast_corrections(
+    block: *const SidereonSbasBlock,
+    out_present: *mut bool,
+    out_fast: *mut SidereonSbasRawFastCorrections,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_sbas_block_fast_corrections",
+        SidereonStatus::Panic,
+        || {
+            let out_present = c_try!(require_out(
+                out_present,
+                "sidereon_sbas_block_fast_corrections",
+                "out_present"
+            ));
+            *out_present = false;
+            let out = c_try!(require_out(
+                out_fast,
+                "sidereon_sbas_block_fast_corrections",
+                "out_fast"
+            ));
+            *out = SidereonSbasRawFastCorrections {
+                preamble: 0,
+                message_type: 0,
+                iodf: 0,
+                iodp: 0,
+                prc: [0; 13],
+                udrei: [0; 13],
+            };
+            let block = c_try!(require_ref(
+                block,
+                "sidereon_sbas_block_fast_corrections",
+                "block"
+            ));
+            if let SbasMessage::FastCorrections(value) = &block.inner.message {
+                *out_present = true;
+                *out = sbas_raw_fast_to_c(value);
+            }
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Read a decoded SBAS integrity payload. If the block is not an integrity
+/// message, out_present is false and out_integrity is zeroed.
+///
+/// Safety: block must be a live handle; out_present and out_integrity must point
+/// to writable storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sbas_block_integrity(
+    block: *const SidereonSbasBlock,
+    out_present: *mut bool,
+    out_integrity: *mut SidereonSbasIntegrity,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_sbas_block_integrity",
+        SidereonStatus::Panic,
+        || {
+            let out_present = c_try!(require_out(
+                out_present,
+                "sidereon_sbas_block_integrity",
+                "out_present"
+            ));
+            *out_present = false;
+            let out = c_try!(require_out(
+                out_integrity,
+                "sidereon_sbas_block_integrity",
+                "out_integrity"
+            ));
+            *out = SidereonSbasIntegrity {
+                preamble: 0,
+                iodf: [0; 4],
+                udrei: [0; 51],
+            };
+            let block = c_try!(require_ref(block, "sidereon_sbas_block_integrity", "block"));
+            if let SbasMessage::Integrity(value) = &block.inner.message {
+                *out_present = true;
+                *out = sbas_integrity_to_c(value);
+            }
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Read a decoded SBAS fast-degradation payload. If the block is not a
+/// fast-degradation message, out_present is false and out_degradation is zeroed.
+///
+/// Safety: block must be a live handle; out_present and out_degradation must
+/// point to writable storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sbas_block_fast_degradation(
+    block: *const SidereonSbasBlock,
+    out_present: *mut bool,
+    out_degradation: *mut SidereonSbasFastDegradation,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_sbas_block_fast_degradation",
+        SidereonStatus::Panic,
+        || {
+            let out_present = c_try!(require_out(
+                out_present,
+                "sidereon_sbas_block_fast_degradation",
+                "out_present"
+            ));
+            *out_present = false;
+            let out = c_try!(require_out(
+                out_degradation,
+                "sidereon_sbas_block_fast_degradation",
+                "out_degradation"
+            ));
+            *out = SidereonSbasFastDegradation {
+                preamble: 0,
+                system_latency_s: 0,
+                iodp: 0,
+                ai: [0; 51],
+            };
+            let block = c_try!(require_ref(
+                block,
+                "sidereon_sbas_block_fast_degradation",
+                "block"
+            ));
+            if let SbasMessage::FastDegradation(value) = &block.inner.message {
+                *out_present = true;
+                *out = sbas_fast_degradation_to_c(value);
+            }
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Read a decoded SBAS GEO navigation payload. If the block is not a GEO
+/// navigation message, out_present is false and out_geo_nav is zeroed.
+///
+/// Safety: block must be a live handle; out_present and out_geo_nav must point
+/// to writable storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sbas_block_geo_nav(
+    block: *const SidereonSbasBlock,
+    out_present: *mut bool,
+    out_geo_nav: *mut SidereonSbasGeoNavMessage,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_sbas_block_geo_nav", SidereonStatus::Panic, || {
+        let out_present = c_try!(require_out(
+            out_present,
+            "sidereon_sbas_block_geo_nav",
+            "out_present"
+        ));
+        *out_present = false;
+        let out = c_try!(require_out(
+            out_geo_nav,
+            "sidereon_sbas_block_geo_nav",
+            "out_geo_nav"
+        ));
+        *out = SidereonSbasGeoNavMessage {
+            preamble: 0,
+            time_of_day_s: 0,
+            ura: 0,
+            x_m: 0,
+            y_m: 0,
+            z_m: 0,
+            x_rate_m_s: 0,
+            y_rate_m_s: 0,
+            z_rate_m_s: 0,
+            x_accel_m_s2: 0,
+            y_accel_m_s2: 0,
+            z_accel_m_s2: 0,
+            a_gf0_s: 0,
+            a_gf1_s_s: 0,
+        };
+        let block = c_try!(require_ref(block, "sidereon_sbas_block_geo_nav", "block"));
+        if let SbasMessage::GeoNav(value) = &block.inner.message {
+            *out_present = true;
+            *out = sbas_geo_nav_message_to_c(value);
+        }
+        SidereonStatus::Ok
+    })
+}
+
+/// Read a decoded SBAS IGP mask payload. If the block is not an IGP mask,
+/// out_present is false and out_mask is zeroed.
+///
+/// Safety: block must be a live handle; out_present and out_mask must point to
+/// writable storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sbas_block_igp_mask(
+    block: *const SidereonSbasBlock,
+    out_present: *mut bool,
+    out_mask: *mut SidereonSbasIgpMask,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_sbas_block_igp_mask",
+        SidereonStatus::Panic,
+        || {
+            let out_present = c_try!(require_out(
+                out_present,
+                "sidereon_sbas_block_igp_mask",
+                "out_present"
+            ));
+            *out_present = false;
+            let out = c_try!(require_out(
+                out_mask,
+                "sidereon_sbas_block_igp_mask",
+                "out_mask"
+            ));
+            *out = SidereonSbasIgpMask {
+                preamble: 0,
+                band_number: 0,
+                iodi: 0,
+                mask: [false; 201],
+            };
+            let block = c_try!(require_ref(block, "sidereon_sbas_block_igp_mask", "block"));
+            if let SbasMessage::IgpMask(value) = &block.inner.message {
+                *out_present = true;
+                *out = sbas_igp_mask_to_c(value);
+            }
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Read the decoded fast-correction part of an SBAS mixed-correction payload.
+/// If the block is not mixed corrections, out_present is false and out_fast is
+/// zeroed.
+///
+/// Safety: block must be a live handle; out_present and out_fast must point to
+/// writable storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sbas_block_mixed_fast_corrections(
+    block: *const SidereonSbasBlock,
+    out_present: *mut bool,
+    out_fast: *mut SidereonSbasMixedFastCorrections,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_sbas_block_mixed_fast_corrections",
+        SidereonStatus::Panic,
+        || {
+            let out_present = c_try!(require_out(
+                out_present,
+                "sidereon_sbas_block_mixed_fast_corrections",
+                "out_present"
+            ));
+            *out_present = false;
+            let out = c_try!(require_out(
+                out_fast,
+                "sidereon_sbas_block_mixed_fast_corrections",
+                "out_fast"
+            ));
+            *out = SidereonSbasMixedFastCorrections {
+                iodf: 0,
+                iodp: 0,
+                block_id: 0,
+                prc: [0; 6],
+                udrei: [0; 6],
+            };
+            let block = c_try!(require_ref(
+                block,
+                "sidereon_sbas_block_mixed_fast_corrections",
+                "block"
+            ));
+            if let SbasMessage::MixedCorrections(value) = &block.inner.message {
+                *out_present = true;
+                *out = sbas_mixed_fast_to_c(&value.fast);
+            }
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Read long-term half metadata from a long-term or mixed-correction block.
+/// Long-term correction blocks have half_index 0 and 1. Mixed correction blocks
+/// expose their long-term half at half_index 0.
+///
+/// Safety: block must be a live handle; out_present and out_info must point to
+/// writable storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sbas_block_long_term_half_info(
+    block: *const SidereonSbasBlock,
+    half_index: usize,
+    out_present: *mut bool,
+    out_info: *mut SidereonSbasLongTermHalfInfo,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_sbas_block_long_term_half_info",
+        SidereonStatus::Panic,
+        || {
+            let out_present = c_try!(require_out(
+                out_present,
+                "sidereon_sbas_block_long_term_half_info",
+                "out_present"
+            ));
+            *out_present = false;
+            let out = c_try!(require_out(
+                out_info,
+                "sidereon_sbas_block_long_term_half_info",
+                "out_info"
+            ));
+            *out = SidereonSbasLongTermHalfInfo {
+                velocity_code: false,
+                iodp: 0,
+                record_count: 0,
+            };
+            let block = c_try!(require_ref(
+                block,
+                "sidereon_sbas_block_long_term_half_info",
+                "block"
+            ));
+            if let Some(half) = sbas_long_half_for_index(&block.inner.message, half_index) {
+                *out_present = true;
+                *out = sbas_long_half_to_c(half);
+            }
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy decoded long-term records from one long-term half. Uses the
+/// variable-length output contract.
+///
+/// Safety: block must be a live handle; out points to len
+/// SidereonSbasLongTermRecord entries or NULL when len is 0; out_written and
+/// out_required point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sbas_block_long_term_records(
+    block: *const SidereonSbasBlock,
+    half_index: usize,
+    out: *mut SidereonSbasLongTermRecord,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_sbas_block_long_term_records",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_sbas_block_long_term_records",
+                out_written,
+                out_required
+            ));
+            let block = c_try!(require_ref(
+                block,
+                "sidereon_sbas_block_long_term_records",
+                "block"
+            ));
+            let records: Vec<SidereonSbasLongTermRecord> =
+                sbas_long_half_for_index(&block.inner.message, half_index)
+                    .map(|half| half.records.iter().map(sbas_long_record_to_c).collect())
+                    .unwrap_or_default();
+            c_try!(copy_prefix_to_c(
+                "sidereon_sbas_block_long_term_records",
+                "out",
+                &records,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Read a decoded SBAS ionospheric-delay payload. If the block is not an
+/// ionospheric-delay message, out_present is false and out_delays is zeroed.
+///
+/// Safety: block must be a live handle; out_present and out_delays must point to
+/// writable storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sbas_block_iono_delays(
+    block: *const SidereonSbasBlock,
+    out_present: *mut bool,
+    out_delays: *mut SidereonSbasIonoDelays,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_sbas_block_iono_delays",
+        SidereonStatus::Panic,
+        || {
+            let out_present = c_try!(require_out(
+                out_present,
+                "sidereon_sbas_block_iono_delays",
+                "out_present"
+            ));
+            *out_present = false;
+            let out = c_try!(require_out(
+                out_delays,
+                "sidereon_sbas_block_iono_delays",
+                "out_delays"
+            ));
+            *out = SidereonSbasIonoDelays {
+                preamble: 0,
+                band_number: 0,
+                block_id: 0,
+                iodi: 0,
+                entries: [SidereonSbasIgpDelay {
+                    vertical_delay: 0,
+                    givei: 0,
+                }; 15],
+            };
+            let block = c_try!(require_ref(
+                block,
+                "sidereon_sbas_block_iono_delays",
+                "block"
+            ));
+            if let SbasMessage::IonoDelays(value) = &block.inner.message {
+                *out_present = true;
+                *out = sbas_iono_delays_to_c(value);
+            }
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy raw 212-bit message data bytes for DoNotUse, NetworkTime, GeoAlmanac,
+/// and unsupported SBAS message blocks. Other decoded message kinds return zero
+/// required bytes.
+///
+/// Safety: block must be a live handle; out points to len writable bytes or NULL
+/// when len is 0; out_written and out_required point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sbas_block_raw_data(
+    block: *const SidereonSbasBlock,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_sbas_block_raw_data",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_sbas_block_raw_data",
+                out_written,
+                out_required
+            ));
+            let block = c_try!(require_ref(block, "sidereon_sbas_block_raw_data", "block"));
+            let data = sbas_raw_data(&block.inner.message).unwrap_or(&[]);
+            c_try!(copy_prefix_to_c(
+                "sidereon_sbas_block_raw_data",
+                "out",
+                data,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
 }
 
 #[no_mangle]

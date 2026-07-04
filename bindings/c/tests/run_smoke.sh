@@ -68,7 +68,7 @@ target_dir="$(cargo metadata --format-version 1 --quiet \
 lib_dir="${target_dir}/release"
 
 echo "== regenerating header =="
-cbindgen --config cbindgen.toml --crate sidereon-c --output include/sidereon.h
+cbindgen --quiet --config cbindgen.toml --crate sidereon-c --output include/sidereon.h
 
 echo "== checking header docs =="
 grep -Fq "sidereon_sp3_load or sidereon_sp3_merge" include/sidereon.h
@@ -369,6 +369,25 @@ cc -std=c11 -Wall -Wextra -Werror \
 
 echo "== running precise_samples_smoke program =="
 "${precise_samples_out}" "${sp3_path}"
+
+# 0.12 core capabilities: Allan-family clock stability, terrain batch lookup,
+# IONEX sample construction/extraction, SBAS decoded payload accessors, ARAIM,
+# and coordinate angular separation / position angle. Uses the IONEX binding
+# fixture and local core DTED tiles.
+echo "== compiling core012_smoke program =="
+core012_out="${target_dir}/core012_smoke"
+cc -std=c11 -Wall -Wextra -Werror \
+    -I"${binding_root}/include" \
+    -I"${here}" \
+    "${here}/core012_smoke.c" \
+    -L"${lib_dir}" \
+    -lsidereon \
+    -Wl,-rpath,"${lib_dir}" \
+    -lm \
+    -o "${core012_out}"
+
+echo "== running core012_smoke program =="
+"${core012_out}" "${ionex_path}" "${dted_root_path}"
 
 # Round-2 local-core parity sweep: covariance propagation/transport,
 # CNAV/RINEX-4 accessors, SGP4 TLE fitting, RINEX QC/lint/repair, EGM96/geoid
