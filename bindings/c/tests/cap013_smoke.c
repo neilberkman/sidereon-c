@@ -32,6 +32,12 @@ static int require_ok(SidereonStatus status, const char *what) {
     return 0;
 }
 
+static bool last_error_contains(const char *needle) {
+    char message[512];
+    size_t written = sidereon_last_error_message(message, sizeof(message));
+    return written > 0 && strstr(message, needle) != NULL;
+}
+
 static bool close_abs(double actual, double expected, double tol) {
     return fabs(actual - expected) <= tol;
 }
@@ -379,24 +385,24 @@ static bool vec_close3(const double *actual, const double *expected, size_t dime
 static int exercise_source_localization(void) {
     SidereonSourceSensor toa_sensors[5] = {
         {3, {0.0, 0.0, 0.0}, false, 0.0},
-        {3, {1200.0, 0.0, 0.0}, false, 0.0},
-        {3, {0.0, 900.0, 0.0}, false, 0.0},
-        {3, {0.0, 0.0, 700.0}, false, 0.0},
-        {3, {1100.0, 800.0, 600.0}, false, 0.0},
+        {3, {2.0, 0.0, 0.0}, false, 0.0},
+        {3, {0.0, 2.0, 0.0}, false, 0.0},
+        {3, {0.0, 0.0, 2.0}, false, 0.0},
+        {3, {2.0, 2.0, 2.0}, false, 0.0},
     };
-    double toa_source[3] = {320.0, 260.0, 180.0};
+    double toa_source[3] = {0.4, 0.6, 0.5};
     double toa_times[5];
-    fill_arrivals(toa_sensors, 5, toa_source, 12.5, 343.0, toa_times);
+    fill_arrivals(toa_sensors, 5, toa_source, 1.25, 1.0, toa_times);
 
     SidereonSourceInitialGuess guess;
-    if (require_ok(sidereon_chan_ho_initial_guess(toa_sensors, 5, toa_times, 343.0,
+    if (require_ok(sidereon_chan_ho_initial_guess(toa_sensors, 5, toa_times, 1.0,
                                                   SIDEREON_SOURCE_SOLVE_MODE_TOA, 0, &guess),
                    "chan-ho toa") != 0) {
         return 1;
     }
     if (guess.dimension != 3 || !guess.has_origin_time_s ||
         !vec_close3(guess.position_m, toa_source, 3, 1.0e-7) ||
-        !close_abs(guess.origin_time_s, 12.5, 1.0e-10) || guess.residual_rms_s > 1.0e-10) {
+        !close_abs(guess.origin_time_s, 1.25, 1.0e-10) || guess.residual_rms_s > 1.0e-10) {
         return fail("source localization: toa seed");
     }
 
@@ -407,7 +413,7 @@ static int exercise_source_localization(void) {
     options.timing_sigma_s = 0.001;
 
     SidereonSourceSolution *solution = NULL;
-    if (require_ok(sidereon_locate_source(toa_sensors, 5, toa_times, 343.0, &options, &solution),
+    if (require_ok(sidereon_locate_source(toa_sensors, 5, toa_times, 1.0, &options, &solution),
                    "locate source toa") != 0) {
         return 1;
     }
@@ -418,8 +424,14 @@ static int exercise_source_localization(void) {
     }
     if (summary.dimension != 3 || !summary.has_origin_time_s || !summary.has_covariance ||
         summary.residual_count != 5 || summary.influence_count != 5 ||
+        summary.geometry_quality.tier != SIDEREON_OBSERVABILITY_TIER_NOMINAL ||
+        summary.geometry_quality.redundancy != 1 || summary.geometry_quality.rank != 4 ||
+        !summary.geometry_quality.raim_checkable ||
+        !summary.geometry_quality.covariance_validated ||
+        !isfinite(summary.geometry_quality.condition_number) ||
+        !isfinite(summary.geometry_quality.gdop) || summary.geometry_quality.gdop <= 0.0 ||
         !vec_close3(summary.position_m, toa_source, 3, 1.0e-7) ||
-        !close_abs(summary.origin_time_s, 12.5, 1.0e-10)) {
+        !close_abs(summary.origin_time_s, 1.25, 1.0e-10)) {
         sidereon_source_solution_free(solution);
         return fail("source localization: toa summary");
     }
@@ -525,6 +537,19 @@ static int exercise_source_localization(void) {
         !crlb.covariance.has_origin_time_s2 ||
         !close_abs(crlb.covariance.origin_time_s2, 0.000025, 1.0e-18)) {
         return fail("source localization: dop crlb");
+    }
+
+    SidereonSourceSensor singular_sensors[4] = {
+        {2, {0.0, 0.0, 0.0}, false, 0.0},
+        {2, {100.0, 0.0, 0.0}, false, 0.0},
+        {2, {200.0, 0.0, 0.0}, false, 0.0},
+        {2, {300.0, 0.0, 0.0}, false, 0.0},
+    };
+    double singular_source[2] = {50.0, 0.0};
+    if (sidereon_source_dop(singular_sensors, 4, singular_source, 2, 300.0, &dop) !=
+            SIDEREON_STATUS_SOLVE ||
+        !last_error_contains("singular")) {
+        return fail("source localization: singular geometry status");
     }
 
     printf("cap013_source_localization_smoke: OK\n");

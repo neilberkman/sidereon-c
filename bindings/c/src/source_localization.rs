@@ -158,22 +158,6 @@ pub struct SidereonSourceSensorInfluence {
     pub score: f64,
 }
 
-/// Geometry and redundancy diagnostics for a source solve.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct SidereonSourceGeometryQuality {
-    /// Number of residual rows used by the solve.
-    pub residual_count: usize,
-    /// Number of estimated state parameters.
-    pub parameter_count: usize,
-    /// Residual count minus parameter count, saturated at zero.
-    pub redundancy: usize,
-    /// Whether covariance was available from the normal matrix.
-    pub covariance_available: bool,
-    /// Whether the final normal matrix was rank deficient.
-    pub rank_deficient: bool,
-}
-
 /// Source-localization solution summary.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -192,8 +176,8 @@ pub struct SidereonSourceSolutionSummary {
     pub residual_count: usize,
     /// Number of per-sensor influence rows.
     pub influence_count: usize,
-    /// Geometry and redundancy diagnostics.
-    pub geometry_quality: SidereonSourceGeometryQuality,
+    /// Geometry observability and covariance-validation diagnostics.
+    pub geometry_quality: SidereonGeometryQuality,
     /// Closed-form seed used by the iterative solve.
     pub initial_guess: SidereonSourceInitialGuess,
     /// Trust-region termination status.
@@ -692,7 +676,7 @@ fn source_summary_to_c(solution: &CoreSourceSolution) -> SidereonSourceSolutionS
         has_covariance: solution.covariance.is_some(),
         residual_count: solution.residuals.len(),
         influence_count: solution.per_sensor_influence.len(),
-        geometry_quality: source_geometry_quality_to_c(&solution.geometry_quality),
+        geometry_quality: geometry_quality_to_c(&solution.geometry_quality),
         initial_guess: source_initial_guess_to_c(&solution.initial_guess),
         status: solution.status,
         nfev: solution.nfev,
@@ -784,18 +768,6 @@ fn source_initial_guess_to_c(initial: &CoreSourceInitialGuess) -> SidereonSource
         has_origin_time_s: initial.origin_time_s.is_some(),
         origin_time_s: initial.origin_time_s.unwrap_or(0.0),
         residual_rms_s: initial.residual_rms_s,
-    }
-}
-
-fn source_geometry_quality_to_c(
-    quality: &CoreSourceGeometryQuality,
-) -> SidereonSourceGeometryQuality {
-    SidereonSourceGeometryQuality {
-        residual_count: quality.residual_count,
-        parameter_count: quality.parameter_count,
-        redundancy: quality.redundancy,
-        covariance_available: quality.covariance_available,
-        rank_deficient: quality.rank_deficient,
     }
 }
 

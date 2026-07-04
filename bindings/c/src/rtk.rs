@@ -299,6 +299,8 @@ pub struct SidereonRtkFloatMetadata {
     pub residual_count: usize,
     /// Number of unique used satellites in residual order.
     pub used_sat_count: usize,
+    /// Geometry observability and covariance-validation diagnostics.
+    pub geometry_quality: SidereonGeometryQuality,
 }
 
 /// Summary scalars and integer-search metadata for an RTK fixed solution.
@@ -343,6 +345,9 @@ pub struct SidereonRtkFixedMetadata {
     pub integer_second_best_score: f64,
     /// Number of integer candidates evaluated or reported by the search.
     pub integer_candidates: usize,
+    /// Geometry observability and covariance-validation diagnostics from the
+    /// float solve used by integer fixing.
+    pub geometry_quality: SidereonGeometryQuality,
 }
 
 /// Initialize an RTK measurement model with engine binding defaults.
@@ -538,6 +543,7 @@ pub unsafe extern "C" fn sidereon_rtk_float_solution_metadata(
                 ambiguity_count: 0,
                 residual_count: 0,
                 used_sat_count: 0,
+                geometry_quality: empty_geometry_quality(),
             };
             let sol = c_try!(require_ref(
                 sol,
@@ -787,6 +793,7 @@ pub unsafe extern "C" fn sidereon_rtk_fixed_solution_metadata(
                 has_integer_second_best_score: false,
                 integer_second_best_score: 0.0,
                 integer_candidates: 0,
+                geometry_quality: empty_geometry_quality(),
             };
             let sol = c_try!(require_ref(
                 sol,
@@ -1683,6 +1690,37 @@ pub unsafe extern "C" fn sidereon_rtk_static_arc_solution_fixed_metadata(
     )
 }
 
+/// Copy static-arc geometry observability and covariance-validation diagnostics
+/// into *out_geometry_quality.
+///
+/// Safety: solution is a live handle; out_geometry_quality points to a
+/// SidereonGeometryQuality.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtk_static_arc_solution_geometry_quality(
+    solution: *const SidereonRtkStaticArcSolution,
+    out_geometry_quality: *mut SidereonGeometryQuality,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtk_static_arc_solution_geometry_quality",
+        SidereonStatus::Panic,
+        || {
+            let out_geometry_quality = c_try!(require_out(
+                out_geometry_quality,
+                "sidereon_rtk_static_arc_solution_geometry_quality",
+                "out_geometry_quality"
+            ));
+            *out_geometry_quality = empty_geometry_quality();
+            let solution = c_try!(require_ref(
+                solution,
+                "sidereon_rtk_static_arc_solution_geometry_quality",
+                "solution"
+            ));
+            *out_geometry_quality = geometry_quality_to_c(&solution.inner.geometry_quality);
+            SidereonStatus::Ok
+        },
+    )
+}
+
 /// Copy static-arc float ambiguity estimates in metres. Variable-length output
 /// contract.
 ///
@@ -2120,6 +2158,37 @@ pub unsafe extern "C" fn sidereon_rtk_wide_lane_arc_solution_epoch_count(
                 "solution"
             ));
             *out_count = solution.inner.epochs.len();
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy wide-lane geometry observability and covariance-validation diagnostics
+/// into *out_geometry_quality.
+///
+/// Safety: solution is a live handle; out_geometry_quality points to a
+/// SidereonGeometryQuality.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtk_wide_lane_arc_solution_geometry_quality(
+    solution: *const SidereonRtkWideLaneArcSolution,
+    out_geometry_quality: *mut SidereonGeometryQuality,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtk_wide_lane_arc_solution_geometry_quality",
+        SidereonStatus::Panic,
+        || {
+            let out_geometry_quality = c_try!(require_out(
+                out_geometry_quality,
+                "sidereon_rtk_wide_lane_arc_solution_geometry_quality",
+                "out_geometry_quality"
+            ));
+            *out_geometry_quality = empty_geometry_quality();
+            let solution = c_try!(require_ref(
+                solution,
+                "sidereon_rtk_wide_lane_arc_solution_geometry_quality",
+                "solution"
+            ));
+            *out_geometry_quality = geometry_quality_to_c(&solution.inner.geometry_quality);
             SidereonStatus::Ok
         },
     )
@@ -3444,7 +3513,10 @@ pub unsafe extern "C" fn sidereon_prepare_ionosphere_free_rtk_arc(
 }
 
 fn rtk_fixed_metadata(solution: &ValidatedFixedBaselineSolution) -> SidereonRtkFixedMetadata {
-    rtk_fixed_metadata_from_solution(&solution.fixed_solution)
+    rtk_fixed_metadata_from_solution(
+        &solution.fixed_solution,
+        &solution.float_solution.geometry_quality,
+    )
 }
 
 fn rtk_ambiguities_to_c(values: &[(String, f64)]) -> Vec<SidereonRtkAmbiguity> {

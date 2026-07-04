@@ -204,6 +204,8 @@ pub struct SidereonSppMetadata {
     pub redundancy: i64,
     /// Whether residual-based RAIM can test the final solve.
     pub raim_checkable: bool,
+    /// Geometry observability and covariance-validation diagnostics.
+    pub geometry_quality: SidereonGeometryQuality,
 }
 
 /// Initialize an SPP V2 input struct with engine defaults for optional controls.
@@ -697,6 +699,7 @@ pub unsafe extern "C" fn sidereon_spp_solution_metadata(
                 system_count: metadata.systems.len(),
                 redundancy: metadata.redundancy as i64,
                 raim_checkable: metadata.raim_checkable,
+                geometry_quality: geometry_quality_to_c(&sol.inner.geometry_quality),
             };
             SidereonStatus::Ok
         },
@@ -1016,5 +1019,6 @@ fn empty_metadata() -> SidereonSppMetadata {
         system_count: 0,
         redundancy: 0,
         raim_checkable: false,
+        geometry_quality: empty_geometry_quality(),
     }
 }

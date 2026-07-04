@@ -429,8 +429,18 @@ static void test_rtk_arc(void) {
         check(sidereon_rtk_static_arc_solution_fixed_metadata(static_sol, &fixed_meta) ==
                       SIDEREON_STATUS_OK &&
                   fixed_meta.fixed_ambiguity_count > 0 &&
+                  fixed_meta.geometry_quality.tier == SIDEREON_OBSERVABILITY_TIER_NOMINAL &&
+                  fixed_meta.geometry_quality.covariance_validated &&
                   fixed_meta.integer_status == SIDEREON_RTK_INTEGER_STATUS_FIXED,
               "static_rtk_arc fixed metadata");
+
+        SidereonGeometryQuality static_geometry;
+        check(sidereon_rtk_static_arc_solution_geometry_quality(static_sol, &static_geometry) ==
+                      SIDEREON_STATUS_OK &&
+                  static_geometry.tier == fixed_meta.geometry_quality.tier &&
+                  static_geometry.redundancy == fixed_meta.geometry_quality.redundancy &&
+                  static_geometry.covariance_validated,
+              "static_rtk_arc geometry quality");
 
         SidereonRtkFixedAmbiguity static_fixed[8];
         written = 0;
@@ -628,6 +638,15 @@ static void test_rtk_dual_arc_drivers(void) {
                   SIDEREON_STATUS_OK &&
               epoch_count == 3,
           "wide_lane_rtk_arc epoch count");
+
+    SidereonGeometryQuality wl_geometry;
+    check(sidereon_rtk_wide_lane_arc_solution_geometry_quality(wl_sol, &wl_geometry) ==
+                  SIDEREON_STATUS_OK &&
+              wl_geometry.tier == SIDEREON_OBSERVABILITY_TIER_NOMINAL &&
+              wl_geometry.rank > 0 && wl_geometry.redundancy > 0 &&
+              isfinite(wl_geometry.condition_number) && isfinite(wl_geometry.gdop) &&
+              wl_geometry.covariance_validated,
+          "wide_lane_rtk_arc geometry quality");
 
     SidereonRtkWideLaneCycle cycles[8];
     size_t written = 0;
