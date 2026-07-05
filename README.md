@@ -338,6 +338,15 @@ code, and per-function ownership note) lives in `bindings/c/include/sidereon.h`.
 - **Terrain and geoid.** DTED elevation lookup on tiles you supply, EGM96 geoid
   undulation, and orthometric / ellipsoidal height conversion.
 - **RF.** Link-budget computation.
+- **GNSS/INS fusion.** Strapdown mechanization with an error-state EKF (UKF
+  option), loose and tight coupling, robust loose updates, an RTS smoother,
+  and a serializable filter state.
+- **Scenario simulation.** Deterministic synthetic observables and a
+  ground-truth error ledger from a versioned scenario; identical bytes for the
+  same scenario and seed.
+- **Signal analysis.** Closed-form BPSK/BOC spectra, spectral separation
+  coefficients, DLL jitter, and multipath error envelopes against published
+  constants.
 - **Formats.** Parsing and serialization for TLE/OMM, CCSDS (OEM/OPM/CDM/TDM),
   RINEX (observation, navigation, clock), CRINEX, SP3, IONEX, ANTEX,
   Bias-SINEX, RTCM 3, and SBAS messages.
