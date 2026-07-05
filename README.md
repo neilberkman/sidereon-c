@@ -283,12 +283,14 @@ code, and per-function ownership note) lives in `bindings/c/include/sidereon.h`.
 ## Capabilities
 
 - **Orbit propagation.** SGP4 from TLE/OMM, numerical state propagation with a
-  composable force model (zonal harmonics through J6, Sun/Moon third-body,
-  solar radiation pressure, relativistic correction, atmospheric drag) and
-  orbital decay estimation, Kepler two-body propagation, batch and
+  composable force model (spherical-harmonic geopotential to selectable degree
+  and order, Sun/Moon third-body, solar radiation pressure, relativistic
+  correction, atmospheric drag) and orbital decay estimation with a post-decay
+  validity latch, Kepler two-body propagation, batch and
   constellation propagation, pass prediction, look angles, ground tracks,
   coverage grids, and batch least-squares orbit fitting against precise
-  ephemerides with a per-satellite residual ledger.
+  ephemerides (including terrestrial-frame SP3 through the Earth-orientation
+  chain) with a per-satellite residual ledger.
 - **GNSS positioning.** Single-point positioning (SPP), RTK float and fixed
   (static, kinematic, and moving baseline), PPP float and fixed, DGNSS,
   velocity solving, RAIM / FDE fault detection and exclusion, robust solving,
@@ -303,8 +305,10 @@ code, and per-function ownership note) lives in `bindings/c/include/sidereon.h`.
   power-law noise identification (IEEE 1139), scalar Kalman and alpha-beta
   trackers with innovation gating and CFAR thresholds, source localization
   (ToA/TDOA), robust station velocity (MIDAS) with trajectory fitting, step
-  detection, and network motion fields, and repeating-geometry (sidereal)
-  filtering.
+  detection, and network motion fields, repeating-geometry (sidereal)
+  filtering, geodesic direct and inverse problems (Karney), an epoch-aware
+  terrestrial frame catalog (ITRF/ETRF Helmert sets), and EGM2008 geoid grids
+  alongside EGM96.
 - **GNSS corrections and biases.** SBAS message decode and corrected solving,
   SSR orbit / clock / bias corrections from RTCM SSR or Galileo HAS,
   Bias-SINEX DCB and OSB products, and DGNSS pseudorange corrections.
@@ -334,7 +338,7 @@ code, and per-function ownership note) lives in `bindings/c/include/sidereon.h`.
 - **Terrain and geoid.** DTED elevation lookup on tiles you supply, EGM96 geoid
   undulation, and orthometric / ellipsoidal height conversion.
 - **RF.** Link-budget computation.
-- **Formats.** Parsing and serialization for TLE/OMM, CCSDS (OEM/OPM/CDM),
+- **Formats.** Parsing and serialization for TLE/OMM, CCSDS (OEM/OPM/CDM/TDM),
   RINEX (observation, navigation, clock), CRINEX, SP3, IONEX, ANTEX,
   Bias-SINEX, RTCM 3, and SBAS messages.
 

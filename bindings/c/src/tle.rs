@@ -11,6 +11,13 @@ pub struct SidereonTle {
     pub(crate) checksum_warnings: Vec<ChecksumWarning>,
 }
 
+/// Stateful SGP4 decay latch. Opaque to C. Create with
+/// sidereon_sgp4_decay_latch_new and release with
+/// sidereon_sgp4_decay_latch_free.
+pub struct SidereonSgp4DecayLatch {
+    pub(crate) inner: DecayLatch,
+}
+
 /// A parsed multi-record CelesTrak/Space-Track TLE file. Opaque to C. Create
 /// with sidereon_parse_tle_file and release with sidereon_tle_file_free.
 pub struct SidereonTleFile {
@@ -592,6 +599,58 @@ pub unsafe extern "C" fn sidereon_tle_propagate(
         write_boxed_handle(out_propagation, SidereonTlePropagation { inner });
         SidereonStatus::Ok
     })
+}
+
+/// Propagate one TLE at minutes since element epoch using a decay latch.
+///
+/// The latch records the first decay-like SGP4 failure and rejects later
+/// requests at the same or later epoch without returning a raw post-decay state.
+/// Use sidereon_tle_propagate for the existing stateless UTC arc path.
+///
+/// Safety: tle and latch must be live handles; out_state must point to a
+/// SidereonTemeState.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_tle_propagate_with_decay_latch(
+    tle: *const SidereonTle,
+    minutes_since_epoch: f64,
+    latch: *mut SidereonSgp4DecayLatch,
+    out_state: *mut SidereonTemeState,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_tle_propagate_with_decay_latch",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_state,
+                "sidereon_tle_propagate_with_decay_latch",
+                "out_state"
+            ));
+            *out = SidereonTemeState {
+                position_km: [0.0; 3],
+                velocity_km_s: [0.0; 3],
+            };
+            let tle = c_try!(require_ref(
+                tle,
+                "sidereon_tle_propagate_with_decay_latch",
+                "tle"
+            ));
+            let latch = c_try!(require_mut(
+                latch,
+                "sidereon_tle_propagate_with_decay_latch",
+                "latch"
+            ));
+            match tle.satellite.propagate_with_decay_latch(
+                MinutesSinceEpoch(minutes_since_epoch),
+                &mut latch.inner,
+            ) {
+                Ok(prediction) => {
+                    *out = prediction_to_c(&prediction);
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_decay_latched_error("sidereon_tle_propagate_with_decay_latch", err),
+            }
+        },
+    )
 }
 
 /// Write the number of epochs in a TLE propagation arc to *out_count.
@@ -1330,6 +1389,107 @@ pub unsafe extern "C" fn sidereon_tle_free(tle: *mut SidereonTle) {
     });
 }
 
+/// Create an empty SGP4 decay latch.
+///
+/// Safety: out_latch must point to storage for a SidereonSgp4DecayLatch*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sgp4_decay_latch_new(
+    out_latch: *mut *mut SidereonSgp4DecayLatch,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_sgp4_decay_latch_new",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_latch,
+                "sidereon_sgp4_decay_latch_new",
+                "out_latch"
+            ));
+            *out = ptr::null_mut();
+            write_boxed_handle(
+                out,
+                SidereonSgp4DecayLatch {
+                    inner: DecayLatch::new(),
+                },
+            );
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Clear the recorded decay state from a latch.
+///
+/// Safety: latch must be a live SidereonSgp4DecayLatch handle.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sgp4_decay_latch_clear(
+    latch: *mut SidereonSgp4DecayLatch,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_sgp4_decay_latch_clear",
+        SidereonStatus::Panic,
+        || {
+            let latch = c_try!(require_mut(
+                latch,
+                "sidereon_sgp4_decay_latch_clear",
+                "latch"
+            ));
+            latch.inner.clear();
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy the first failing epoch recorded by a decay latch.
+///
+/// Safety: latch must be live; out_has_epoch and out_minutes_since_epoch must
+/// point to writable storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sgp4_decay_latch_first_failing_epoch(
+    latch: *const SidereonSgp4DecayLatch,
+    out_has_epoch: *mut bool,
+    out_minutes_since_epoch: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_sgp4_decay_latch_first_failing_epoch",
+        SidereonStatus::Panic,
+        || {
+            let out_has = c_try!(require_out(
+                out_has_epoch,
+                "sidereon_sgp4_decay_latch_first_failing_epoch",
+                "out_has_epoch"
+            ));
+            *out_has = false;
+            let out_minutes = c_try!(require_out(
+                out_minutes_since_epoch,
+                "sidereon_sgp4_decay_latch_first_failing_epoch",
+                "out_minutes_since_epoch"
+            ));
+            *out_minutes = 0.0;
+            let latch = c_try!(require_ref(
+                latch,
+                "sidereon_sgp4_decay_latch_first_failing_epoch",
+                "latch"
+            ));
+            if let Some(epoch) = latch.inner.first_failing_epoch() {
+                *out_has = true;
+                *out_minutes = epoch.0;
+            }
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Release an SGP4 decay latch handle. Passing NULL is a no-op.
+///
+/// Safety: latch must be NULL or a live handle from
+/// sidereon_sgp4_decay_latch_new.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sgp4_decay_latch_free(latch: *mut SidereonSgp4DecayLatch) {
+    ffi_boundary("sidereon_sgp4_decay_latch_free", (), || {
+        free_boxed(latch);
+    });
+}
+
 /// Release a parsed TLE file handle. Null is a no-op. A non-null handle must
 /// come from sidereon_parse_tle_file and must be freed exactly once with this
 /// function. TLE handles previously obtained with sidereon_tle_file_satellite
@@ -1718,5 +1878,18 @@ fn map_sgp4_error(fn_name: &str, err: Sgp4Error) -> SidereonStatus {
         Sgp4Error::NonFiniteOutput { .. } => SidereonStatus::Solve,
         Sgp4Error::InvalidTle(_) => SidereonStatus::InvalidArgument,
         Sgp4Error::Sgp4 { .. } => SidereonStatus::Solve,
+    }
+}
+
+fn map_decay_latched_error(fn_name: &str, err: DecayLatchedError) -> SidereonStatus {
+    set_last_error(format!("{fn_name}: {err}"));
+    match err {
+        DecayLatchedError::Decayed { .. } => SidereonStatus::Solve,
+        DecayLatchedError::Propagation(err) => match err {
+            Sgp4Error::InvalidInput { .. } => SidereonStatus::InvalidArgument,
+            Sgp4Error::NonFiniteOutput { .. }
+            | Sgp4Error::Sgp4 { .. }
+            | Sgp4Error::InvalidTle(_) => SidereonStatus::Solve,
+        },
     }
 }

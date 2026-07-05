@@ -9,6 +9,32 @@ pub struct SidereonGeoidGrid {
     pub(crate) inner: GeoidGrid,
 }
 
+/// EGM2008 raster grid spacing selector.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonEgm2008GridSpacing {
+    /// One-arcminute global raster.
+    OneMinute = 0,
+    /// Two-and-a-half-arcminute global raster.
+    TwoPointFiveMinute = 1,
+}
+
+/// EGM2008 raster window descriptor.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonEgm2008RasterWindow {
+    /// Raster spacing as SidereonEgm2008GridSpacing.
+    pub spacing: u32,
+    /// Minimum latitude of the crop, degrees.
+    pub lat_min_deg: f64,
+    /// Minimum longitude of the crop, degrees.
+    pub lon_min_deg: f64,
+    /// Number of latitude samples.
+    pub n_lat: usize,
+    /// Number of longitude samples.
+    pub n_lon: usize,
+}
+
 /// Geoid undulation N (metres above the WGS84 ellipsoid) at a geodetic position
 /// in radians, from the coarse built-in global grid. Delegates to
 /// sidereon_core::geoid::geoid_undulation.
@@ -612,6 +638,96 @@ pub unsafe extern "C" fn sidereon_geoid_grid_from_egm96_dac(
     )
 }
 
+/// Load a global EGM2008 raster into the generic geoid grid handle.
+///
+/// Safety: data must point to len readable bytes; out_grid must point to a
+/// SidereonGeoidGrid*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_geoid_grid_from_egm2008_raster(
+    data: *const u8,
+    len: usize,
+    spacing: u32,
+    out_grid: *mut *mut SidereonGeoidGrid,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_geoid_grid_from_egm2008_raster",
+        SidereonStatus::Panic,
+        || {
+            let out_grid = c_try!(require_out(
+                out_grid,
+                "sidereon_geoid_grid_from_egm2008_raster",
+                "out_grid"
+            ));
+            *out_grid = ptr::null_mut();
+            let bytes = c_try!(require_slice(
+                data,
+                len,
+                "sidereon_geoid_grid_from_egm2008_raster",
+                "data"
+            ));
+            let spacing = c_try!(egm2008_spacing_from_c(
+                "sidereon_geoid_grid_from_egm2008_raster",
+                "spacing",
+                spacing
+            ));
+            match GeoidGrid::from_egm2008_raster(bytes, spacing) {
+                Ok(inner) => {
+                    write_boxed_handle(out_grid, SidereonGeoidGrid { inner });
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_geoid_error("sidereon_geoid_grid_from_egm2008_raster", err),
+            }
+        },
+    )
+}
+
+/// Load an EGM2008 raster crop into the generic geoid grid handle.
+///
+/// Safety: data and window must point to readable storage; out_grid must point
+/// to a SidereonGeoidGrid*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_geoid_grid_from_egm2008_raster_window(
+    data: *const u8,
+    len: usize,
+    window: *const SidereonEgm2008RasterWindow,
+    out_grid: *mut *mut SidereonGeoidGrid,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_geoid_grid_from_egm2008_raster_window",
+        SidereonStatus::Panic,
+        || {
+            let out_grid = c_try!(require_out(
+                out_grid,
+                "sidereon_geoid_grid_from_egm2008_raster_window",
+                "out_grid"
+            ));
+            *out_grid = ptr::null_mut();
+            let bytes = c_try!(require_slice(
+                data,
+                len,
+                "sidereon_geoid_grid_from_egm2008_raster_window",
+                "data"
+            ));
+            let window = c_try!(require_ref(
+                window,
+                "sidereon_geoid_grid_from_egm2008_raster_window",
+                "window"
+            ));
+            let window = c_try!(egm2008_window_from_c(
+                "sidereon_geoid_grid_from_egm2008_raster_window",
+                *window
+            ));
+            match GeoidGrid::from_egm2008_raster_window(bytes, window) {
+                Ok(inner) => {
+                    write_boxed_handle(out_grid, SidereonGeoidGrid { inner });
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_geoid_error("sidereon_geoid_grid_from_egm2008_raster_window", err),
+            }
+        },
+    )
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_geoid_grid_undulations_rad(
     grid: *const SidereonGeoidGrid,
@@ -759,6 +875,43 @@ pub unsafe extern "C" fn sidereon_geoid_grid_ellipsoidal_height_rad(
 fn map_geoid_error(fn_name: &str, err: GeoidError) -> SidereonStatus {
     set_last_error(format!("{fn_name}: {err}"));
     SidereonStatus::InvalidArgument
+}
+
+fn egm2008_spacing_from_c(
+    fn_name: &str,
+    arg_name: &str,
+    value: u32,
+) -> Result<Egm2008GridSpacing, SidereonStatus> {
+    match value {
+        value if value == SidereonEgm2008GridSpacing::OneMinute as u32 => {
+            Ok(Egm2008GridSpacing::OneMinute)
+        }
+        value if value == SidereonEgm2008GridSpacing::TwoPointFiveMinute as u32 => {
+            Ok(Egm2008GridSpacing::TwoPointFiveMinute)
+        }
+        _ => {
+            set_last_error(format!("{fn_name}: invalid {arg_name} EGM2008 spacing"));
+            Err(SidereonStatus::InvalidArgument)
+        }
+    }
+}
+
+fn egm2008_window_from_c(
+    fn_name: &str,
+    window: SidereonEgm2008RasterWindow,
+) -> Result<Egm2008RasterWindow, SidereonStatus> {
+    let spacing = egm2008_spacing_from_c(fn_name, "window.spacing", window.spacing)?;
+    Egm2008RasterWindow::new(
+        spacing,
+        window.lat_min_deg,
+        window.lon_min_deg,
+        window.n_lat,
+        window.n_lon,
+    )
+    .map_err(|err| {
+        set_last_error(format!("{fn_name}: {err}"));
+        SidereonStatus::InvalidArgument
+    })
 }
 
 fn geoid_points_from_c(

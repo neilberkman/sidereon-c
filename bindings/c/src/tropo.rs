@@ -56,6 +56,30 @@ pub struct SidereonMappingFactors {
     pub wet: f64,
 }
 
+/// Troposphere mapping error category.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonTropoMappingErrorKind {
+    /// No mapping error.
+    None = 0,
+    /// Elevation is below the Niell mapping validity bound.
+    LowElevation = 1,
+    /// Another invalid input was rejected by core.
+    InvalidInput = 2,
+}
+
+/// Typed troposphere mapping error detail.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonTropoMappingError {
+    /// Error kind as SidereonTropoMappingErrorKind.
+    pub kind: u32,
+    /// Input elevation, radians.
+    pub elevation_rad: f64,
+    /// Minimum supported mapping elevation, radians.
+    pub min_elevation_rad: f64,
+}
+
 /// Zenith hydrostatic and wet troposphere delay for a receiver and surface met.
 /// Delegates to sidereon_core::atmosphere::troposphere::tropo_zenith, selecting
 /// the model (Saastamoinen) as a parameter to the core call rather than baking it
@@ -118,34 +142,57 @@ pub unsafe extern "C" fn sidereon_tropo_mapping_factors(
         "sidereon_tropo_mapping_factors",
         SidereonStatus::Panic,
         || {
-            let out = c_try!(require_out(out, "sidereon_tropo_mapping_factors", "out"));
-            *out = SidereonMappingFactors { dry: 0.0, wet: 0.0 };
-            let receiver = c_try!(geodetic_to_wgs84(
+            tropo_mapping_factors_common(
                 "sidereon_tropo_mapping_factors",
-                "receiver",
-                receiver
-            ));
-            let epoch = c_try!(instant_from_jd_c(
-                "sidereon_tropo_mapping_factors",
-                scale,
-                jd_whole,
-                jd_fraction
-            ));
-            match sidereon_core::atmosphere::troposphere::tropo_mapping(
-                sidereon_core::atmosphere::troposphere::MappingModel::Niell,
                 elevation_rad,
                 receiver,
-                epoch,
-            ) {
-                Ok(m) => {
-                    *out = SidereonMappingFactors {
-                        dry: m.dry,
-                        wet: m.wet,
-                    };
-                    SidereonStatus::Ok
-                }
-                Err(err) => extra_invalid_arg("sidereon_tropo_mapping_factors", err),
-            }
+                TropoMappingEpoch {
+                    scale,
+                    jd_whole,
+                    jd_fraction,
+                },
+                out,
+                ptr::null_mut(),
+            )
+        },
+    )
+}
+
+/// Hydrostatic and wet mapping factors with typed low-elevation error detail.
+///
+/// Safety: out must point to a SidereonMappingFactors; out_error must point to
+/// a SidereonTropoMappingError.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_tropo_mapping_factors_checked(
+    elevation_rad: f64,
+    receiver: SidereonGeodetic,
+    scale: u32,
+    jd_whole: f64,
+    jd_fraction: f64,
+    out: *mut SidereonMappingFactors,
+    out_error: *mut SidereonTropoMappingError,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_tropo_mapping_factors_checked",
+        SidereonStatus::Panic,
+        || {
+            let _ = c_try!(require_out(
+                out_error,
+                "sidereon_tropo_mapping_factors_checked",
+                "out_error"
+            ));
+            tropo_mapping_factors_common(
+                "sidereon_tropo_mapping_factors_checked",
+                elevation_rad,
+                receiver,
+                TropoMappingEpoch {
+                    scale,
+                    jd_whole,
+                    jd_fraction,
+                },
+                out,
+                out_error,
+            )
         },
     )
 }
@@ -218,4 +265,74 @@ fn instant_from_jd_c(
     let jd = sidereon_core::astro::time::JulianDateSplit::new(jd_whole, jd_fraction)
         .map_err(|err| extra_invalid_arg(fn_name, err))?;
     Ok(Instant::from_julian_date(scale, jd))
+}
+
+fn zero_tropo_mapping_error(elevation_rad: f64) -> SidereonTropoMappingError {
+    SidereonTropoMappingError {
+        kind: SidereonTropoMappingErrorKind::None as u32,
+        elevation_rad,
+        min_elevation_rad: sidereon_core::atmosphere::troposphere::NIELL_MIN_MAPPING_ELEVATION_RAD,
+    }
+}
+
+fn classify_tropo_mapping_error(elevation_rad: f64) -> SidereonTropoMappingError {
+    let min_elevation_rad = sidereon_core::atmosphere::troposphere::NIELL_MIN_MAPPING_ELEVATION_RAD;
+    let kind = if elevation_rad.is_finite() && elevation_rad < min_elevation_rad {
+        SidereonTropoMappingErrorKind::LowElevation
+    } else {
+        SidereonTropoMappingErrorKind::InvalidInput
+    };
+    SidereonTropoMappingError {
+        kind: kind as u32,
+        elevation_rad,
+        min_elevation_rad,
+    }
+}
+
+struct TropoMappingEpoch {
+    scale: u32,
+    jd_whole: f64,
+    jd_fraction: f64,
+}
+
+unsafe fn tropo_mapping_factors_common(
+    fn_name: &str,
+    elevation_rad: f64,
+    receiver: SidereonGeodetic,
+    epoch: TropoMappingEpoch,
+    out: *mut SidereonMappingFactors,
+    out_error: *mut SidereonTropoMappingError,
+) -> SidereonStatus {
+    let out = c_try!(require_out(out, fn_name, "out"));
+    *out = SidereonMappingFactors { dry: 0.0, wet: 0.0 };
+    if !out_error.is_null() {
+        *out_error = zero_tropo_mapping_error(elevation_rad);
+    }
+    let receiver = c_try!(geodetic_to_wgs84(fn_name, "receiver", receiver));
+    let epoch = c_try!(instant_from_jd_c(
+        fn_name,
+        epoch.scale,
+        epoch.jd_whole,
+        epoch.jd_fraction
+    ));
+    match sidereon_core::atmosphere::troposphere::tropo_mapping(
+        sidereon_core::atmosphere::troposphere::MappingModel::Niell,
+        elevation_rad,
+        receiver,
+        epoch,
+    ) {
+        Ok(m) => {
+            *out = SidereonMappingFactors {
+                dry: m.dry,
+                wet: m.wet,
+            };
+            SidereonStatus::Ok
+        }
+        Err(err) => {
+            if !out_error.is_null() {
+                *out_error = classify_tropo_mapping_error(elevation_rad);
+            }
+            extra_invalid_arg(fn_name, err)
+        }
+    }
 }

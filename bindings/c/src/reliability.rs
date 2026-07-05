@@ -139,11 +139,11 @@ pub unsafe extern "C" fn sidereon_wtest_noncentrality(
                 delta0: 0.0,
                 lambda0: 0.0,
             };
-            match core_wtest_noncentrality(alpha, beta) {
-                Ok(lambda0) => {
+            match core_wtest_noncentrality_components(alpha, beta) {
+                Ok(components) => {
                     *out = SidereonWTestNoncentrality {
-                        delta0: lambda0.sqrt(),
-                        lambda0,
+                        delta0: components.delta0,
+                        lambda0: components.lambda0,
                     };
                     SidereonStatus::Ok
                 }
