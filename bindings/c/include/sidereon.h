@@ -286,6 +286,28 @@ typedef enum SidereonGnssSystem {
     SIDEREON_GNSS_SYSTEM_SBAS = 6,
 } SidereonGnssSystem;
 
+/**
+ * Per-satellite status for an emission-epoch state and media batch row.
+ */
+typedef enum SidereonEmissionMediaStatus {
+    /**
+     * The row contains state, clock, ionosphere, and troposphere outputs.
+     */
+    SIDEREON_EMISSION_MEDIA_STATUS_VALID = 0,
+    /**
+     * The ephemeris product has no usable state for this satellite and epoch.
+     */
+    SIDEREON_EMISSION_MEDIA_STATUS_GAP = 1,
+    /**
+     * The row had a state, but its elevation was below the requested cutoff.
+     */
+    SIDEREON_EMISSION_MEDIA_STATUS_BELOW_ELEVATION_CUTOFF = 2,
+    /**
+     * The scalar evaluator returned a non-gap error.
+     */
+    SIDEREON_EMISSION_MEDIA_STATUS_ERROR = 3,
+} SidereonEmissionMediaStatus;
+
 typedef enum SidereonEphemerisSampleStatus {
     SIDEREON_EPHEMERIS_SAMPLE_STATUS_VALID = 0,
     SIDEREON_EPHEMERIS_SAMPLE_STATUS_GAP = 1,
@@ -407,6 +429,36 @@ typedef enum SidereonObservabilityTier {
 } SidereonObservabilityTier;
 
 /**
+ * Geofence error category returned through out_error fields.
+ */
+typedef enum SidereonGeofenceErrorKind {
+    /**
+     * No geofence error occurred.
+     */
+    SIDEREON_GEOFENCE_ERROR_KIND_NONE = 0,
+    /**
+     * The fence had fewer than three distinct vertices.
+     */
+    SIDEREON_GEOFENCE_ERROR_KIND_TOO_FEW_VERTICES = 1,
+    /**
+     * A geofence input failed validation.
+     */
+    SIDEREON_GEOFENCE_ERROR_KIND_INVALID_INPUT = 2,
+    /**
+     * A geodesic calculation failed.
+     */
+    SIDEREON_GEOFENCE_ERROR_KIND_GEODESIC = 3,
+    /**
+     * A covariance rotation failed.
+     */
+    SIDEREON_GEOFENCE_ERROR_KIND_DOP = 4,
+    /**
+     * Uncertainty or percentile-radius validation failed.
+     */
+    SIDEREON_GEOFENCE_ERROR_KIND_ERROR_METRICS = 5,
+} SidereonGeofenceErrorKind;
+
+/**
  * Terrain store vertical datum. Terrain store postings are orthometric heights.
  */
 typedef enum SidereonVerticalDatum {
@@ -486,6 +538,48 @@ typedef enum SidereonPppIntegerStatus {
      */
     SIDEREON_PPP_INTEGER_STATUS_NOT_FIXED = 1,
 } SidereonPppIntegerStatus;
+
+/**
+ * Precise-interpolant artifact open error category returned through out_error.
+ */
+typedef enum SidereonPreciseInterpolantArtifactErrorKind {
+    /**
+     * No artifact error occurred.
+     */
+    SIDEREON_PRECISE_INTERPOLANT_ARTIFACT_ERROR_KIND_NONE = 0,
+    /**
+     * The byte span ended before the declared artifact length.
+     */
+    SIDEREON_PRECISE_INTERPOLANT_ARTIFACT_ERROR_KIND_TRUNCATED = 1,
+    /**
+     * A file-level or satellite-level checksum did not match.
+     */
+    SIDEREON_PRECISE_INTERPOLANT_ARTIFACT_ERROR_KIND_CORRUPT = 2,
+    /**
+     * Artifact bytes could not be parsed for another reason.
+     */
+    SIDEREON_PRECISE_INTERPOLANT_ARTIFACT_ERROR_KIND_PARSE = 3,
+    /**
+     * The artifact version is not supported.
+     */
+    SIDEREON_PRECISE_INTERPOLANT_ARTIFACT_ERROR_KIND_UNSUPPORTED_VERSION = 4,
+    /**
+     * The artifact time-scale tag is not supported.
+     */
+    SIDEREON_PRECISE_INTERPOLANT_ARTIFACT_ERROR_KIND_UNSUPPORTED_TIME_SCALE = 5,
+    /**
+     * A satellite-system tag is not supported.
+     */
+    SIDEREON_PRECISE_INTERPOLANT_ARTIFACT_ERROR_KIND_UNSUPPORTED_SATELLITE_SYSTEM = 6,
+    /**
+     * A satellite appears more than once in the index.
+     */
+    SIDEREON_PRECISE_INTERPOLANT_ARTIFACT_ERROR_KIND_DUPLICATE_SATELLITE = 7,
+    /**
+     * File I/O failed in the core artifact reader.
+     */
+    SIDEREON_PRECISE_INTERPOLANT_ARTIFACT_ERROR_KIND_IO = 8,
+} SidereonPreciseInterpolantArtifactErrorKind;
 
 /**
  * Which MSM variant an observation message is, mirroring
@@ -685,6 +779,48 @@ typedef enum SidereonDegradationKind {
 } SidereonDegradationKind;
 
 /**
+ * Static-position solve error category returned through out_error fields.
+ */
+typedef enum SidereonStaticPositionErrorKind {
+    /**
+     * No static-position error occurred.
+     */
+    SIDEREON_STATIC_POSITION_ERROR_KIND_NONE = 0,
+    /**
+     * No epochs were supplied.
+     */
+    SIDEREON_STATIC_POSITION_ERROR_KIND_EMPTY_EPOCHS = 1,
+    /**
+     * A public static solve input was malformed.
+     */
+    SIDEREON_STATIC_POSITION_ERROR_KIND_INVALID_INPUT = 2,
+    /**
+     * A per-epoch SPP input was malformed.
+     */
+    SIDEREON_STATIC_POSITION_ERROR_KIND_EPOCH_INPUT = 3,
+    /**
+     * The same satellite appeared twice in one epoch.
+     */
+    SIDEREON_STATIC_POSITION_ERROR_KIND_DUPLICATE_OBSERVATION = 4,
+    /**
+     * An ionosphere-corrected epoch used a satellite without a carrier model.
+     */
+    SIDEREON_STATIC_POSITION_ERROR_KIND_IONOSPHERE_UNSUPPORTED = 5,
+    /**
+     * Too few accepted measurements remained for the stacked state.
+     */
+    SIDEREON_STATIC_POSITION_ERROR_KIND_TOO_FEW_MEASUREMENTS = 6,
+    /**
+     * A satellite lost ephemeris during the solve.
+     */
+    SIDEREON_STATIC_POSITION_ERROR_KIND_EPHEMERIS_LOST = 7,
+    /**
+     * The stacked design was rank deficient.
+     */
+    SIDEREON_STATIC_POSITION_ERROR_KIND_SINGULAR = 8,
+} SidereonStaticPositionErrorKind;
+
+/**
  * Typed outcome of sidereon_solve_with_fallback. SIDEREON_FALLBACK_STATUS_OK is
  * the only success; PreciseSolve / BroadcastSolve name which path's SPP solve
  * failed (FallbackError::Precise / ::Broadcast). The reason is available from
@@ -757,6 +893,48 @@ typedef enum SidereonFixSourceKind {
 } SidereonFixSourceKind;
 
 /**
+ * SPP Doppler velocity solve error category.
+ */
+typedef enum SidereonSppDopplerVelocityErrorKind {
+    /**
+     * No Doppler velocity error occurred.
+     */
+    SIDEREON_SPP_DOPPLER_VELOCITY_ERROR_KIND_NONE = 0,
+    /**
+     * No Doppler rows were supplied.
+     */
+    SIDEREON_SPP_DOPPLER_VELOCITY_ERROR_KIND_NO_OBSERVATIONS = 1,
+    /**
+     * Fewer than four usable satellites remained.
+     */
+    SIDEREON_SPP_DOPPLER_VELOCITY_ERROR_KIND_TOO_FEW_SATELLITES = 2,
+    /**
+     * The velocity normal matrix was singular.
+     */
+    SIDEREON_SPP_DOPPLER_VELOCITY_ERROR_KIND_SINGULAR_GEOMETRY = 3,
+    /**
+     * A satellite appeared more than once.
+     */
+    SIDEREON_SPP_DOPPLER_VELOCITY_ERROR_KIND_DUPLICATE_OBSERVATION = 4,
+    /**
+     * Doppler conversion needed a positive finite carrier frequency.
+     */
+    SIDEREON_SPP_DOPPLER_VELOCITY_ERROR_KIND_INVALID_CARRIER = 5,
+    /**
+     * A scalar input was malformed.
+     */
+    SIDEREON_SPP_DOPPLER_VELOCITY_ERROR_KIND_INVALID_INPUT = 6,
+    /**
+     * A Doppler row carried a non-finite value.
+     */
+    SIDEREON_SPP_DOPPLER_VELOCITY_ERROR_KIND_INVALID_OBSERVATION = 7,
+    /**
+     * The receiver state or receive epoch was non-finite.
+     */
+    SIDEREON_SPP_DOPPLER_VELOCITY_ERROR_KIND_INVALID_RECEIVER_STATE = 8,
+} SidereonSppDopplerVelocityErrorKind;
+
+/**
  * Solver termination status.
  */
 typedef enum SidereonSppSolveStatus {
@@ -804,6 +982,36 @@ typedef enum SidereonSsrReferencePoint {
     SIDEREON_SSR_REFERENCE_POINT_ANTENNA_PHASE_CENTER = 0,
     SIDEREON_SSR_REFERENCE_POINT_CENTER_OF_MASS = 1,
 } SidereonSsrReferencePoint;
+
+/**
+ * Status for a leave-one-out diagnostic solve.
+ */
+typedef enum SidereonStaticPositionInfluenceStatus {
+    /**
+     * The diagnostic solve completed.
+     */
+    SIDEREON_STATIC_POSITION_INFLUENCE_STATUS_SOLVED = 0,
+    /**
+     * The omitted data left too few measurements.
+     */
+    SIDEREON_STATIC_POSITION_INFLUENCE_STATUS_TOO_FEW_MEASUREMENTS = 1,
+    /**
+     * The omitted data left rank-deficient geometry.
+     */
+    SIDEREON_STATIC_POSITION_INFLUENCE_STATUS_SINGULAR_GEOMETRY = 2,
+    /**
+     * Input validation failed for the diagnostic subset.
+     */
+    SIDEREON_STATIC_POSITION_INFLUENCE_STATUS_INVALID_INPUT = 3,
+    /**
+     * Ephemeris was unavailable for the diagnostic subset.
+     */
+    SIDEREON_STATIC_POSITION_INFLUENCE_STATUS_EPHEMERIS_UNAVAILABLE = 4,
+    /**
+     * The diagnostic subset failed for another solve reason.
+     */
+    SIDEREON_STATIC_POSITION_INFLUENCE_STATUS_SOLVE_FAILED = 5,
+} SidereonStaticPositionInfluenceStatus;
 
 /**
  * A time scale, tagging the system a time reading is expressed in. Pass as a
@@ -1757,6 +1965,52 @@ typedef enum SidereonAllanEstimator {
 } SidereonAllanEstimator;
 
 /**
+ * Position uncertainty representation for geofence probability calls.
+ */
+typedef enum SidereonGeofenceUncertaintyKind {
+    /**
+     * Local east-north-up covariance in square meters.
+     */
+    SIDEREON_GEOFENCE_UNCERTAINTY_KIND_ENU_COVARIANCE_M2 = 0,
+    /**
+     * ECEF covariance in square meters, rotated at the supplied position.
+     */
+    SIDEREON_GEOFENCE_UNCERTAINTY_KIND_ECEF_COVARIANCE_M2 = 1,
+    /**
+     * Circular error probable radius in meters.
+     */
+    SIDEREON_GEOFENCE_UNCERTAINTY_KIND_CEP_RADIUS_M = 2,
+} SidereonGeofenceUncertaintyKind;
+
+/**
+ * Probability integration method.
+ */
+typedef enum SidereonGeofenceProbabilityMethod {
+    /**
+     * Boundary-normal Gaussian half-space approximation.
+     */
+    SIDEREON_GEOFENCE_PROBABILITY_METHOD_BOUNDARY_NORMAL = 0,
+    /**
+     * Local planar quadrature over the fence.
+     */
+    SIDEREON_GEOFENCE_PROBABILITY_METHOD_PLANAR_QUADRATURE = 1,
+} SidereonGeofenceProbabilityMethod;
+
+/**
+ * Geofence crossing event kind.
+ */
+typedef enum SidereonGeofenceCrossingKind {
+    /**
+     * The sequence entered the fence.
+     */
+    SIDEREON_GEOFENCE_CROSSING_KIND_ENTERED = 0,
+    /**
+     * The sequence left the fence.
+     */
+    SIDEREON_GEOFENCE_CROSSING_KIND_LEFT = 1,
+} SidereonGeofenceCrossingKind;
+
+/**
  * Source-localization solve mode.
  */
 typedef enum SidereonSourceSolveMode {
@@ -2255,6 +2509,12 @@ typedef struct SidereonGeodeticMotionField SidereonGeodeticMotionField;
 typedef struct SidereonGeodeticTrajectory SidereonGeodeticTrajectory;
 
 /**
+ * A geodesic polygon fence on WGS84. Opaque to C. Create with
+ * sidereon_geofence_create and release with sidereon_geofence_free.
+ */
+typedef struct SidereonGeofence SidereonGeofence;
+
+/**
  * A loaded geoid undulation grid. Opaque to C. Create with
  * sidereon_geoid_grid_from_text or sidereon_geoid_grid_new; release with
  * sidereon_geoid_grid_free.
@@ -2399,6 +2659,14 @@ typedef struct SidereonPreciseEphemerisInterpolant SidereonPreciseEphemerisInter
  * through the same substrate as a loaded SP3 product.
  */
 typedef struct SidereonPreciseEphemerisSamples SidereonPreciseEphemerisSamples;
+
+/**
+ * A memory-mappable precise-ephemeris interpolant artifact reader. Opaque to C.
+ * Create with sidereon_precise_interpolant_artifact_open_owned or
+ * sidereon_precise_interpolant_artifact_open_borrowed and release with
+ * sidereon_precise_interpolant_artifact_free.
+ */
+typedef struct SidereonPreciseInterpolantArtifact SidereonPreciseInterpolantArtifact;
 
 /**
  * Result of sidereon_raim_fde_design. Opaque to C. Read with the
@@ -2618,12 +2886,27 @@ typedef struct SidereonSpk SidereonSpk;
 typedef struct SidereonSppBatch SidereonSppBatch;
 
 /**
+ * A combined SPP position plus optional Doppler velocity result. Opaque to C.
+ * Create with sidereon_solve_spp_with_doppler_velocity or
+ * sidereon_solve_broadcast_with_doppler_velocity and release with
+ * sidereon_spp_doppler_solution_free.
+ */
+typedef struct SidereonSppDopplerSolution SidereonSppDopplerSolution;
+
+/**
  * The result of an SPP solve. Opaque to C. Create with sidereon_solve_spp or
  * sidereon_solve_spp_v2 and release with sidereon_spp_solution_free.
  */
 typedef struct SidereonSppSolution SidereonSppSolution;
 
 typedef struct SidereonSsrCorrectionStore SidereonSsrCorrectionStore;
+
+/**
+ * A multi-epoch static pseudorange position solution. Opaque to C. Create with
+ * sidereon_solve_static_position_sp3 or sidereon_solve_static_position_broadcast
+ * and release with sidereon_static_position_solution_free.
+ */
+typedef struct SidereonStaticPositionSolution SidereonStaticPositionSolution;
 
 /**
  * A parsed CCSDS Tracking Data Message. Opaque to C. Create with
@@ -3416,6 +3699,55 @@ typedef struct SidereonCompareStats {
      */
     double clock_datum_removed_max_m;
 } SidereonCompareStats;
+
+/**
+ * Surface meteorology, mirroring sidereon_core::atmosphere::troposphere::Met.
+ */
+typedef struct SidereonMet {
+    /**
+     * Pressure in hectopascals (millibars).
+     */
+    double pressure_hpa;
+    /**
+     * Temperature in kelvin.
+     */
+    double temperature_k;
+    /**
+     * Relative humidity as a unit fraction in [0, 1].
+     */
+    double relative_humidity;
+} SidereonMet;
+
+/**
+ * Options for one-call emission-epoch state and media correction batches.
+ * Initialize with sidereon_emission_media_options_init for engine defaults.
+ */
+typedef struct SidereonEmissionMediaOptions {
+    /**
+     * Carrier frequency used for ionospheric group delay, hertz.
+     */
+    double carrier_hz;
+    /**
+     * Whether min_elevation_rad is applied.
+     */
+    bool min_elevation_enabled;
+    /**
+     * Optional minimum topocentric elevation, radians.
+     */
+    double min_elevation_rad;
+    /**
+     * Whether troposphere correction is enabled.
+     */
+    bool troposphere_enabled;
+    /**
+     * Surface meteorology for troposphere correction.
+     */
+    struct SidereonMet met;
+    /**
+     * Optional IONEX handle for ionosphere correction. NULL disables IONEX.
+     */
+    const struct SidereonIonex *ionex;
+} SidereonEmissionMediaOptions;
 
 typedef struct SidereonCnavParameters {
     bool present;
@@ -6589,6 +6921,82 @@ typedef struct SidereonGeodeticTrajectoryTerm {
 } SidereonGeodeticTrajectoryTerm;
 
 /**
+ * Position uncertainty for geofence probability calls.
+ */
+typedef struct SidereonGeofenceUncertainty {
+    /**
+     * Uncertainty kind as a SidereonGeofenceUncertaintyKind discriminant.
+     */
+    uint32_t kind;
+    /**
+     * Row-major 3x3 covariance in square meters for covariance kinds.
+     */
+    double covariance_m2[9];
+    /**
+     * Radius in meters for radius kinds.
+     */
+    double radius_m;
+} SidereonGeofenceUncertainty;
+
+/**
+ * Probability integration options. Initialize with
+ * sidereon_geofence_probability_options_init for engine defaults.
+ */
+typedef struct SidereonGeofenceProbabilityOptions {
+    /**
+     * Method as a SidereonGeofenceProbabilityMethod discriminant.
+     */
+    uint32_t method;
+} SidereonGeofenceProbabilityOptions;
+
+/**
+ * Position estimate with uncertainty for probabilistic crossing detection.
+ */
+typedef struct SidereonGeofencePositionEstimate {
+    /**
+     * Estimated WGS84 geodetic position.
+     */
+    struct SidereonGeodetic position;
+    /**
+     * Position uncertainty associated with the estimate.
+     */
+    struct SidereonGeofenceUncertainty uncertainty;
+} SidereonGeofencePositionEstimate;
+
+/**
+ * Probability hysteresis thresholds. Initialize with
+ * sidereon_geofence_hysteresis_init for engine defaults.
+ */
+typedef struct SidereonGeofenceHysteresis {
+    /**
+     * Inside probability required before emitting an entered event.
+     */
+    double enter_confidence;
+    /**
+     * Outside probability required before emitting a left event.
+     */
+    double leave_confidence;
+} SidereonGeofenceHysteresis;
+
+/**
+ * A probabilistic geofence crossing event.
+ */
+typedef struct SidereonGeofenceCrossingEvent {
+    /**
+     * Index of the input sample that first satisfied the crossing condition.
+     */
+    size_t sample_index;
+    /**
+     * Event kind as a SidereonGeofenceCrossingKind discriminant.
+     */
+    uint32_t kind;
+    /**
+     * Inside probability at the event sample.
+     */
+    double inside_probability;
+} SidereonGeofenceCrossingEvent;
+
+/**
  * EGM2008 raster window descriptor.
  */
 typedef struct SidereonEgm2008RasterWindow {
@@ -7285,24 +7693,6 @@ typedef struct SidereonLookAngle {
      */
     double range_km;
 } SidereonLookAngle;
-
-/**
- * Surface meteorology, mirroring sidereon_core::atmosphere::troposphere::Met.
- */
-typedef struct SidereonMet {
-    /**
-     * Pressure in hectopascals (millibars).
-     */
-    double pressure_hpa;
-    /**
-     * Temperature in kelvin.
-     */
-    double temperature_k;
-    /**
-     * Relative humidity as a unit fraction in [0, 1].
-     */
-    double relative_humidity;
-} SidereonMet;
 
 /**
  * Ellipsoidal height h in metres above the WGS84 reference ellipsoid.
@@ -9061,6 +9451,56 @@ typedef struct SidereonRangePrediction {
      */
     double sat_pos_ecef_m[3];
 } SidereonRangePrediction;
+
+/**
+ * Exact parsed state of one satellite at one SP3 epoch.
+ */
+typedef struct SidereonSp3State {
+    /**
+     * ECEF position in meters.
+     */
+    double position_m[3];
+    /**
+     * Whether clock_s is present.
+     */
+    bool has_clock_s;
+    /**
+     * Clock offset in seconds when has_clock_s is true.
+     */
+    double clock_s;
+    /**
+     * Whether velocity_m_s is present.
+     */
+    bool has_velocity_m_s;
+    /**
+     * ECEF velocity in meters per second when has_velocity_m_s is true.
+     */
+    double velocity_m_s[3];
+    /**
+     * Whether clock_rate_s_s is present.
+     */
+    bool has_clock_rate_s_s;
+    /**
+     * Clock rate in seconds per second when has_clock_rate_s_s is true.
+     */
+    double clock_rate_s_s;
+    /**
+     * Clock discontinuity flag.
+     */
+    bool clock_event;
+    /**
+     * Clock prediction flag.
+     */
+    bool clock_predicted;
+    /**
+     * Satellite maneuver flag.
+     */
+    bool maneuver;
+    /**
+     * Orbit prediction flag.
+     */
+    bool orbit_predicted;
+} SidereonSp3State;
 
 /**
  * Fixed-size null-terminated RTK ambiguity id storage. Values returned by
@@ -12277,6 +12717,28 @@ typedef struct SidereonSolutionValidationOptions {
     double max_converged_residual_rms_m;
 } SidereonSolutionValidationOptions;
 
+/**
+ * One Doppler row for an SPP-family receiver velocity solve.
+ */
+typedef struct SidereonSppDopplerObservation {
+    /**
+     * Null-terminated satellite token, for example G08.
+     */
+    const char *sat_id;
+    /**
+     * Doppler shift in hertz.
+     */
+    double doppler_hz;
+    /**
+     * Carrier frequency in hertz.
+     */
+    double carrier_hz;
+    /**
+     * Satellite clock drift in seconds per second.
+     */
+    double sat_clock_drift_s_s;
+} SidereonSppDopplerObservation;
+
 typedef struct SidereonKeplerSolution {
     double anomaly_rad;
     size_t iterations;
@@ -12998,6 +13460,48 @@ typedef struct SidereonRtkFloatConfig {
 } SidereonRtkFloatConfig;
 
 /**
+ * One static-position epoch, expressed with the existing SPP V2 input bundle.
+ */
+typedef struct SidereonStaticPositionEpoch {
+    /**
+     * Single-epoch SPP fields for this receive epoch.
+     */
+    struct SidereonSppInputsV2 inputs;
+    /**
+     * Optional positive measurement-weight multipliers aligned with
+     * inputs.base.observations.
+     */
+    const double *weights;
+    /**
+     * Number of entries in weights. Zero means no caller multipliers.
+     */
+    size_t weight_count;
+} SidereonStaticPositionEpoch;
+
+/**
+ * Static-position solver options. Initialize with
+ * sidereon_static_position_options_init for engine defaults.
+ */
+typedef struct SidereonStaticPositionOptions {
+    /**
+     * Initial shared receiver ECEF position in meters.
+     */
+    double initial_position_m[3];
+    /**
+     * Whether to include the geodetic position in the result.
+     */
+    bool with_geodetic;
+    /**
+     * Whether robust Huber/IRLS reweighting is enabled.
+     */
+    bool robust_enabled;
+    /**
+     * Robust reweighting controls, used only when robust_enabled is true.
+     */
+    struct SidereonSppRobustConfig robust;
+} SidereonStaticPositionOptions;
+
+/**
  * Static RTK arc driver configuration, mirroring
  * sidereon_core::rtk_filter::RtkStaticArcConfig. The arc field carries the raw
  * arc setup; the option fields carry the float, fixed, and residual-validation
@@ -13488,56 +13992,6 @@ typedef struct SidereonSp3MergeFlag {
     size_t source_count;
 } SidereonSp3MergeFlag;
 
-/**
- * Exact parsed state of one satellite at one SP3 epoch.
- */
-typedef struct SidereonSp3State {
-    /**
-     * ECEF position in meters.
-     */
-    double position_m[3];
-    /**
-     * Whether clock_s is present.
-     */
-    bool has_clock_s;
-    /**
-     * Clock offset in seconds when has_clock_s is true.
-     */
-    double clock_s;
-    /**
-     * Whether velocity_m_s is present.
-     */
-    bool has_velocity_m_s;
-    /**
-     * ECEF velocity in meters per second when has_velocity_m_s is true.
-     */
-    double velocity_m_s[3];
-    /**
-     * Whether clock_rate_s_s is present.
-     */
-    bool has_clock_rate_s_s;
-    /**
-     * Clock rate in seconds per second when has_clock_rate_s_s is true.
-     */
-    double clock_rate_s_s;
-    /**
-     * Clock discontinuity flag.
-     */
-    bool clock_event;
-    /**
-     * Clock prediction flag.
-     */
-    bool clock_predicted;
-    /**
-     * Satellite maneuver flag.
-     */
-    bool maneuver;
-    /**
-     * Orbit prediction flag.
-     */
-    bool orbit_predicted;
-} SidereonSp3State;
-
 typedef struct SidereonSpaceWeatherCoverage {
     double first_j2000_s;
     bool has_last_observed_j2000_s;
@@ -13777,6 +14231,238 @@ typedef struct SidereonSsrOrbitCorrection {
     double ref_epoch_j2000_s;
     double update_interval_s;
 } SidereonSsrOrbitCorrection;
+
+/**
+ * One solved epoch-local receiver clock.
+ */
+typedef struct SidereonStaticPositionClockBias {
+    /**
+     * Epoch index in the input slice.
+     */
+    size_t epoch_index;
+    /**
+     * GNSS system.
+     */
+    enum SidereonGnssSystem system;
+    /**
+     * Receiver clock bias in seconds.
+     */
+    double clock_s;
+} SidereonStaticPositionClockBias;
+
+/**
+ * Leave-one-epoch-out diagnostic.
+ */
+typedef struct SidereonStaticPositionEpochInfluence {
+    /**
+     * Epoch index omitted from the diagnostic solve.
+     */
+    size_t epoch_index;
+    /**
+     * Number of measurements omitted.
+     */
+    size_t omitted_measurements;
+    /**
+     * Diagnostic status.
+     */
+    enum SidereonStaticPositionInfluenceStatus status;
+    /**
+     * Whether position_delta_m and position_delta_norm_m are present.
+     */
+    bool has_position_delta_m;
+    /**
+     * Difference diagnostic_position minus full_position, ECEF meters.
+     */
+    double position_delta_m[3];
+    /**
+     * Norm of position_delta_m, meters.
+     */
+    double position_delta_norm_m;
+    /**
+     * Whether residual_rms_m is present.
+     */
+    bool has_residual_rms_m;
+    /**
+     * Diagnostic residual RMS, meters.
+     */
+    double residual_rms_m;
+    /**
+     * Minimum robust weight ratio among this epoch's full-solve rows.
+     */
+    double min_robust_weight_ratio;
+} SidereonStaticPositionEpochInfluence;
+
+/**
+ * Static-position solve metadata.
+ */
+typedef struct SidereonStaticPositionMetadata {
+    /**
+     * Number of accepted trust-region iterations in the final inner solve.
+     */
+    size_t iterations;
+    /**
+     * Whether the final inner solve reached a convergence criterion.
+     */
+    bool converged;
+    /**
+     * Final inner solver termination status.
+     */
+    enum SidereonSppSolveStatus status;
+    /**
+     * Number of robust outer iterations performed.
+     */
+    size_t outer_iterations;
+    /**
+     * Whether final_robust_scale_m is present.
+     */
+    bool has_final_robust_scale_m;
+    /**
+     * Final MAD robust scale in meters when present.
+     */
+    double final_robust_scale_m;
+    /**
+     * Number of measurements used by the final solve.
+     */
+    size_t used_measurements;
+    /**
+     * Number of fitted state parameters.
+     */
+    size_t n_parameters;
+    /**
+     * Degrees of freedom.
+     */
+    int64_t redundancy;
+    /**
+     * Geometry observability and covariance-validation diagnostics.
+     */
+    struct SidereonGeometryQuality geometry_quality;
+} SidereonStaticPositionMetadata;
+
+/**
+ * One post-fit residual from a static-position solve.
+ */
+typedef struct SidereonStaticPositionResidual {
+    /**
+     * Epoch index in the input slice.
+     */
+    size_t epoch_index;
+    /**
+     * Satellite token.
+     */
+    struct SidereonSatelliteToken sat_id;
+    /**
+     * Unweighted observed-minus-computed pseudorange residual, meters.
+     */
+    double residual_m;
+    /**
+     * Base row weight before robust reweighting.
+     */
+    double base_weight;
+    /**
+     * Final row weight after robust reweighting.
+     */
+    double effective_weight;
+    /**
+     * Ratio effective_weight/base_weight.
+     */
+    double robust_weight_ratio;
+} SidereonStaticPositionResidual;
+
+/**
+ * Leave-one-satellite-out diagnostic across all epochs where a satellite appears.
+ */
+typedef struct SidereonStaticPositionSatelliteBatchInfluence {
+    /**
+     * Omitted satellite token.
+     */
+    struct SidereonSatelliteToken sat_id;
+    /**
+     * Number of measurements omitted across the static batch.
+     */
+    size_t omitted_measurements;
+    /**
+     * Diagnostic status.
+     */
+    enum SidereonStaticPositionInfluenceStatus status;
+    /**
+     * Whether position_delta_m and position_delta_norm_m are present.
+     */
+    bool has_position_delta_m;
+    /**
+     * Difference diagnostic_position minus full_position, ECEF meters.
+     */
+    double position_delta_m[3];
+    /**
+     * Norm of position_delta_m, meters.
+     */
+    double position_delta_norm_m;
+    /**
+     * Whether residual_rms_m is present.
+     */
+    bool has_residual_rms_m;
+    /**
+     * Diagnostic residual RMS, meters.
+     */
+    double residual_rms_m;
+    /**
+     * Minimum robust weight ratio among this satellite's full-solve rows.
+     */
+    double min_robust_weight_ratio;
+} SidereonStaticPositionSatelliteBatchInfluence;
+
+/**
+ * Leave-one-satellite-out diagnostic for one epoch.
+ */
+typedef struct SidereonStaticPositionSatelliteInfluence {
+    /**
+     * Epoch index containing the omitted satellite.
+     */
+    size_t epoch_index;
+    /**
+     * Omitted satellite token.
+     */
+    struct SidereonSatelliteToken sat_id;
+    /**
+     * Diagnostic status.
+     */
+    enum SidereonStaticPositionInfluenceStatus status;
+    /**
+     * Whether position_delta_m and position_delta_norm_m are present.
+     */
+    bool has_position_delta_m;
+    /**
+     * Difference diagnostic_position minus full_position, ECEF meters.
+     */
+    double position_delta_m[3];
+    /**
+     * Norm of position_delta_m, meters.
+     */
+    double position_delta_norm_m;
+    /**
+     * Whether residual_rms_m is present.
+     */
+    bool has_residual_rms_m;
+    /**
+     * Diagnostic residual RMS, meters.
+     */
+    double residual_rms_m;
+    /**
+     * Full-solve residual for this satellite, meters.
+     */
+    double residual_m;
+    /**
+     * Base row weight before robust reweighting.
+     */
+    double base_weight;
+    /**
+     * Final row weight after robust reweighting.
+     */
+    double effective_weight;
+    /**
+     * Ratio effective_weight/base_weight.
+     */
+    double robust_weight_ratio;
+} SidereonStaticPositionSatelliteInfluence;
 
 /**
  * A surface point as geocentric latitude/longitude (degrees), mirroring
@@ -14662,6 +15348,32 @@ enum SidereonStatus sidereon_broadcast_eccentric_anomaly(double mean_anomaly_rad
                                                          double eccentricity,
                                                          double *out_eccentric_anomaly_rad,
                                                          size_t *out_iterations);
+
+/**
+ * Evaluate emission-epoch states, clocks, and media delays from broadcast
+ * ephemeris in one call. Output arrays are index-aligned with satellites.
+ *
+ * Safety: broadcast must be a live handle; satellites and
+ * emission_epochs_j2000_s point to count entries; receiver_ecef_m points to
+ * three doubles; options may be NULL for defaults. Position output points to
+ * count*3 doubles; all other output arrays point to count entries.
+ */
+enum SidereonStatus sidereon_broadcast_emission_media_batch_at_j2000_s(const struct SidereonBroadcastEphemeris *broadcast,
+                                                                       const char *const *satellites,
+                                                                       const double *emission_epochs_j2000_s,
+                                                                       size_t count,
+                                                                       const double *receiver_ecef_m,
+                                                                       const struct SidereonEmissionMediaOptions *options,
+                                                                       double *out_positions_ecef_m,
+                                                                       bool *out_has_positions,
+                                                                       double *out_clocks_s,
+                                                                       bool *out_has_clocks_s,
+                                                                       double *out_ionosphere_slant_delays_m,
+                                                                       bool *out_has_ionosphere_slant_delays_m,
+                                                                       double *out_troposphere_delays_m,
+                                                                       bool *out_has_troposphere_delays_m,
+                                                                       enum SidereonEmissionMediaStatus *out_statuses,
+                                                                       enum SidereonStatus *out_result_statuses);
 
 /**
  * Release a broadcast ephemeris handle from
@@ -16727,6 +17439,13 @@ enum SidereonStatus sidereon_ellipsoidal_height_m(double orthometric_height_m_in
                                                   double *out_height_m);
 
 /**
+ * Populate *out_options with emission media batch defaults.
+ *
+ * Safety: out_options must point to a SidereonEmissionMediaOptions.
+ */
+enum SidereonStatus sidereon_emission_media_options_init(struct SidereonEmissionMediaOptions *out_options);
+
+/**
  * Build the encounter (B-plane) frame from two objects' position/velocity.
  * Delegates to sidereon_core::astro::conjunction::encounter_frame.
  *
@@ -17691,6 +18410,127 @@ enum SidereonStatus sidereon_geodetic_trajectory_terms(const struct SidereonGeod
 enum SidereonStatus sidereon_geodetic_velocity_midas(const struct SidereonGeodeticPositionSeries *series,
                                                      const struct SidereonMidasOptions *options,
                                                      struct SidereonMidasVelocity *out_velocity);
+
+/**
+ * Write containment probability using engine default probability options.
+ *
+ * Safety: fence must be a live handle; out_error and out_probability must point
+ * to writable storage.
+ */
+enum SidereonStatus sidereon_geofence_containment_probability(const struct SidereonGeofence *fence,
+                                                              struct SidereonGeodetic position,
+                                                              const struct SidereonGeofenceUncertainty *uncertainty,
+                                                              enum SidereonGeofenceErrorKind *out_error,
+                                                              double *out_probability);
+
+/**
+ * Write containment probability using explicit probability options.
+ *
+ * Safety: fence must be a live handle; uncertainty and options must point to
+ * readable structs; out_error and out_probability must point to writable
+ * storage.
+ */
+enum SidereonStatus sidereon_geofence_containment_probability_with_options(const struct SidereonGeofence *fence,
+                                                                           struct SidereonGeodetic position,
+                                                                           const struct SidereonGeofenceUncertainty *uncertainty,
+                                                                           const struct SidereonGeofenceProbabilityOptions *options,
+                                                                           enum SidereonGeofenceErrorKind *out_error,
+                                                                           double *out_probability);
+
+/**
+ * Write whether position is inside fence to *out_contains.
+ *
+ * Safety: fence must be a live handle; out_contains and out_error must point to
+ * writable storage.
+ */
+enum SidereonStatus sidereon_geofence_contains(const struct SidereonGeofence *fence,
+                                               struct SidereonGeodetic position,
+                                               enum SidereonGeofenceErrorKind *out_error,
+                                               bool *out_contains);
+
+/**
+ * Construct a WGS84 geodesic polygon fence from count vertices. Height is
+ * ignored by containment and distance calculations.
+ *
+ * Safety: vertices points to count SidereonGeodetic values or is NULL when
+ * count is 0; out_error and out_fence must point to writable storage.
+ */
+enum SidereonStatus sidereon_geofence_create(const struct SidereonGeodetic *vertices,
+                                             size_t count,
+                                             enum SidereonGeofenceErrorKind *out_error,
+                                             struct SidereonGeofence **out_fence);
+
+/**
+ * Compute probabilistic crossing events using engine default probability
+ * options. Output uses the variable-length contract documented in the header.
+ *
+ * Safety: fence must be a live handle; samples points to count estimates or is
+ * NULL when count is 0; out must point to len events or be NULL when len is 0;
+ * out_written, out_required, and out_error must point to writable storage.
+ */
+enum SidereonStatus sidereon_geofence_crossing_probability(const struct SidereonGeofence *fence,
+                                                           const struct SidereonGeofencePositionEstimate *samples,
+                                                           size_t count,
+                                                           const struct SidereonGeofenceHysteresis *hysteresis,
+                                                           enum SidereonGeofenceErrorKind *out_error,
+                                                           struct SidereonGeofenceCrossingEvent *out,
+                                                           size_t len,
+                                                           size_t *out_written,
+                                                           size_t *out_required);
+
+/**
+ * Compute probabilistic crossing events using explicit probability options.
+ * Output uses the variable-length contract documented in the header.
+ *
+ * Safety: fence must be a live handle; samples points to count estimates or is
+ * NULL when count is 0; hysteresis and options point to readable structs; out
+ * must point to len events or be NULL when len is 0; count pointers and
+ * out_error must point to writable storage.
+ */
+enum SidereonStatus sidereon_geofence_crossing_probability_with_options(const struct SidereonGeofence *fence,
+                                                                        const struct SidereonGeofencePositionEstimate *samples,
+                                                                        size_t count,
+                                                                        const struct SidereonGeofenceHysteresis *hysteresis,
+                                                                        const struct SidereonGeofenceProbabilityOptions *options,
+                                                                        enum SidereonGeofenceErrorKind *out_error,
+                                                                        struct SidereonGeofenceCrossingEvent *out,
+                                                                        size_t len,
+                                                                        size_t *out_written,
+                                                                        size_t *out_required);
+
+/**
+ * Write signed distance to the fence boundary in meters to *out_distance_m.
+ * Positive values are inside and negative values are outside.
+ *
+ * Safety: fence must be a live handle; out_error and out_distance_m must point
+ * to writable storage.
+ */
+enum SidereonStatus sidereon_geofence_distance_to_boundary(const struct SidereonGeofence *fence,
+                                                           struct SidereonGeodetic position,
+                                                           enum SidereonGeofenceErrorKind *out_error,
+                                                           double *out_distance_m);
+
+/**
+ * Release a geofence handle. Passing NULL is a no-op.
+ *
+ * Safety: fence must be NULL or a live handle from sidereon_geofence_create
+ * that has not already been freed.
+ */
+void sidereon_geofence_free(struct SidereonGeofence *fence);
+
+/**
+ * Populate *out_hysteresis with geofence hysteresis defaults.
+ *
+ * Safety: out_hysteresis must point to a SidereonGeofenceHysteresis.
+ */
+enum SidereonStatus sidereon_geofence_hysteresis_init(struct SidereonGeofenceHysteresis *out_hysteresis);
+
+/**
+ * Populate *out_options with geofence probability defaults.
+ *
+ * Safety: out_options must point to a SidereonGeofenceProbabilityOptions.
+ */
+enum SidereonStatus sidereon_geofence_probability_options_init(struct SidereonGeofenceProbabilityOptions *out_options);
 
 enum SidereonStatus sidereon_geoid_grid_ellipsoidal_height_rad(const struct SidereonGeoidGrid *grid,
                                                                double orthometric_height_m,
@@ -20293,6 +21133,80 @@ enum SidereonStatus sidereon_precise_ephemeris_samples_sample(const struct Sider
                                                               size_t len,
                                                               size_t *out_written,
                                                               size_t *out_required);
+
+/**
+ * Compute the artifact checksum for a byte span.
+ *
+ * Safety: data must point to len readable bytes or be NULL when len is 0;
+ * out_checksum must point to a uint64_t.
+ */
+enum SidereonStatus sidereon_precise_interpolant_artifact_checksum64(const uint8_t *data,
+                                                                     size_t len,
+                                                                     uint64_t *out_checksum);
+
+/**
+ * Release a precise-interpolant artifact handle. Passing NULL is a no-op.
+ *
+ * Safety: artifact must be NULL or a live handle from an artifact open function
+ * that has not already been freed.
+ */
+void sidereon_precise_interpolant_artifact_free(struct SidereonPreciseInterpolantArtifact *artifact);
+
+/**
+ * Write the checksum of an opened artifact to *out_checksum.
+ *
+ * Safety: artifact must be a live handle; out_checksum must point to a uint64_t.
+ */
+enum SidereonStatus sidereon_precise_interpolant_artifact_handle_checksum64(const struct SidereonPreciseInterpolantArtifact *artifact,
+                                                                            uint64_t *out_checksum);
+
+/**
+ * Open an artifact from caller-owned bytes without copying the payload arrays.
+ *
+ * Safety: data must point to len readable bytes aligned as required by the core
+ * reader. The bytes must remain alive, fixed in memory, and unmodified until
+ * sidereon_precise_interpolant_artifact_free is called on the returned handle.
+ * out_error and out_artifact must point to writable storage.
+ */
+enum SidereonStatus sidereon_precise_interpolant_artifact_open_borrowed(const uint8_t *data,
+                                                                        size_t len,
+                                                                        enum SidereonPreciseInterpolantArtifactErrorKind *out_error,
+                                                                        struct SidereonPreciseInterpolantArtifact **out_artifact);
+
+/**
+ * Open an artifact from bytes by copying them into the handle.
+ *
+ * Safety: data must point to len readable bytes; out_error and out_artifact
+ * must point to writable storage.
+ */
+enum SidereonStatus sidereon_precise_interpolant_artifact_open_owned(const uint8_t *data,
+                                                                     size_t len,
+                                                                     enum SidereonPreciseInterpolantArtifactErrorKind *out_error,
+                                                                     struct SidereonPreciseInterpolantArtifact **out_artifact);
+
+/**
+ * Copy satellites present in an opened artifact. Output uses the
+ * variable-length contract documented in the header.
+ *
+ * Safety: artifact must be a live handle; out must point to len tokens or be
+ * NULL when len is 0; out_written and out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_precise_interpolant_artifact_satellites(const struct SidereonPreciseInterpolantArtifact *artifact,
+                                                                     struct SidereonSatelliteToken *out,
+                                                                     size_t len,
+                                                                     size_t *out_written,
+                                                                     size_t *out_required);
+
+/**
+ * Evaluate one satellite state from an opened artifact at seconds since J2000.
+ *
+ * Safety: artifact must be a live handle; sat_id must be a null-terminated
+ * satellite token; out_state must point to a SidereonSp3State.
+ */
+enum SidereonStatus sidereon_precise_interpolant_artifact_state(const struct SidereonPreciseInterpolantArtifact *artifact,
+                                                                const char *sat_id,
+                                                                double epoch_j2000_s,
+                                                                struct SidereonSp3State *out_state);
 
 /**
  * Prepare an ionosphere-free single-frequency RTK arc from dual-frequency input
@@ -23766,6 +24680,20 @@ enum SidereonStatus sidereon_solve_broadcast(const struct SidereonBroadcastEphem
                                              struct SidereonSppSolution **out_solution);
 
 /**
+ * Solve SPP position from broadcast ephemeris and attach a Doppler velocity
+ * solution when the Doppler rows are usable.
+ *
+ * Safety: broadcast must be a live handle; inputs must point to a valid SPP V2
+ * input; doppler_observations points to doppler_count rows or is NULL when
+ * count is 0; out_solution must point to storage for a SidereonSppDopplerSolution*.
+ */
+enum SidereonStatus sidereon_solve_broadcast_with_doppler_velocity(const struct SidereonBroadcastEphemeris *broadcast,
+                                                                   const struct SidereonSppInputsV2 *inputs,
+                                                                   const struct SidereonSppDopplerObservation *doppler_observations,
+                                                                   size_t doppler_count,
+                                                                   struct SidereonSppDopplerSolution **out_solution);
+
+/**
  * Solve a data-driven least-squares problem, transferring a solution handle to
  * `*out_solution`. Delegates to the core `solve_data_problem` (native backend)
  * or `solve_data_problem_with` (host-LAPACK backend). The trust-region loop
@@ -23969,6 +24897,48 @@ enum SidereonStatus sidereon_solve_spp_batch_serial(const struct SidereonSp3 *sp
 enum SidereonStatus sidereon_solve_spp_v2(const struct SidereonSp3 *sp3,
                                           const struct SidereonSppInputsV2 *inputs,
                                           struct SidereonSppSolution **out_solution);
+
+/**
+ * Solve SPP position from an SP3 source and attach a Doppler velocity solution
+ * when the Doppler rows are usable.
+ *
+ * Safety: sp3 must be a live handle; inputs must point to a valid SPP V2 input;
+ * doppler_observations points to doppler_count rows or is NULL when count is 0;
+ * out_solution must point to storage for a SidereonSppDopplerSolution*.
+ */
+enum SidereonStatus sidereon_solve_spp_with_doppler_velocity(const struct SidereonSp3 *sp3,
+                                                             const struct SidereonSppInputsV2 *inputs,
+                                                             const struct SidereonSppDopplerObservation *doppler_observations,
+                                                             size_t doppler_count,
+                                                             struct SidereonSppDopplerSolution **out_solution);
+
+/**
+ * Solve a static multi-epoch pseudorange position from broadcast ephemeris.
+ *
+ * Safety: broadcast must be a live handle; epochs points to epoch_count epoch
+ * structs or is NULL when epoch_count is 0; options may be NULL for defaults;
+ * out_error and out_solution must point to writable storage.
+ */
+enum SidereonStatus sidereon_solve_static_position_broadcast(const struct SidereonBroadcastEphemeris *broadcast,
+                                                             const struct SidereonStaticPositionEpoch *epochs,
+                                                             size_t epoch_count,
+                                                             const struct SidereonStaticPositionOptions *options,
+                                                             enum SidereonStaticPositionErrorKind *out_error,
+                                                             struct SidereonStaticPositionSolution **out_solution);
+
+/**
+ * Solve a static multi-epoch pseudorange position from a loaded SP3 source.
+ *
+ * Safety: sp3 must be a live handle; epochs points to epoch_count epoch
+ * structs or is NULL when epoch_count is 0; options may be NULL for defaults;
+ * out_error and out_solution must point to writable storage.
+ */
+enum SidereonStatus sidereon_solve_static_position_sp3(const struct SidereonSp3 *sp3,
+                                                       const struct SidereonStaticPositionEpoch *epochs,
+                                                       size_t epoch_count,
+                                                       const struct SidereonStaticPositionOptions *options,
+                                                       enum SidereonStaticPositionErrorKind *out_error,
+                                                       struct SidereonStaticPositionSolution **out_solution);
 
 /**
  * Solve one static float+fixed RTK baseline over a raw rover+base arc. On
@@ -24237,6 +25207,32 @@ enum SidereonStatus sidereon_sp3_clock_reference_offsets(const struct SidereonSp
                                                          size_t len,
                                                          size_t *out_written,
                                                          size_t *out_required);
+
+/**
+ * Evaluate emission-epoch states, clocks, and media delays from a loaded SP3
+ * product in one call. Output arrays are index-aligned with satellites.
+ *
+ * Safety: sp3 must be a live handle; satellites and emission_epochs_j2000_s
+ * point to count entries; receiver_ecef_m points to three doubles; options may
+ * be NULL for defaults. Position output points to count*3 doubles; all other
+ * output arrays point to count entries.
+ */
+enum SidereonStatus sidereon_sp3_emission_media_batch_at_j2000_s(const struct SidereonSp3 *sp3,
+                                                                 const char *const *satellites,
+                                                                 const double *emission_epochs_j2000_s,
+                                                                 size_t count,
+                                                                 const double *receiver_ecef_m,
+                                                                 const struct SidereonEmissionMediaOptions *options,
+                                                                 double *out_positions_ecef_m,
+                                                                 bool *out_has_positions,
+                                                                 double *out_clocks_s,
+                                                                 bool *out_has_clocks_s,
+                                                                 double *out_ionosphere_slant_delays_m,
+                                                                 bool *out_has_ionosphere_slant_delays_m,
+                                                                 double *out_troposphere_delays_m,
+                                                                 bool *out_has_troposphere_delays_m,
+                                                                 enum SidereonEmissionMediaStatus *out_statuses,
+                                                                 enum SidereonStatus *out_result_statuses);
 
 /**
  * Sample a loaded SP3 source over a regular satellite/epoch grid.
@@ -24611,6 +25607,21 @@ enum SidereonStatus sidereon_sp3_precise_ephemeris_samples(const struct Sidereon
                                                            size_t *out_required);
 
 /**
+ * Build memory-mappable precise-interpolant artifact bytes from a loaded SP3
+ * product. Output uses the variable-length contract documented in the header.
+ *
+ * Safety: sp3 must be a live handle; out_error, out_written, and out_required
+ * must point to writable storage; out must point to len bytes or be NULL when
+ * len is 0.
+ */
+enum SidereonStatus sidereon_sp3_precise_interpolant_artifact_bytes(const struct SidereonSp3 *sp3,
+                                                                    enum SidereonPreciseInterpolantArtifactErrorKind *out_error,
+                                                                    uint8_t *out,
+                                                                    size_t len,
+                                                                    size_t *out_written,
+                                                                    size_t *out_required);
+
+/**
  * Predict geometric ranges for many (satellite, receiver, epoch) requests from a
  * loaded SP3 product in one call, writing out[i] for requests[i]. Delegates to
  * sidereon_core::observables::predict_ranges. options may be NULL for the engine
@@ -24844,6 +25855,53 @@ enum SidereonStatus sidereon_spp_batch_solution(const struct SidereonSppBatch *b
                                                 struct SidereonSppSolution **out_solution);
 
 /**
+ * Release a combined SPP Doppler solution handle. Passing NULL is a no-op.
+ *
+ * Safety: solution must be NULL or a live handle from a combined SPP Doppler
+ * solve that has not already been freed.
+ */
+void sidereon_spp_doppler_solution_free(struct SidereonSppDopplerSolution *solution);
+
+/**
+ * Write whether a combined result carries a Doppler velocity solution.
+ *
+ * Safety: solution must be a live combined handle; out_has_velocity must point
+ * to a bool.
+ */
+enum SidereonStatus sidereon_spp_doppler_solution_has_velocity(const struct SidereonSppDopplerSolution *solution,
+                                                               bool *out_has_velocity);
+
+/**
+ * Copy the receiver solution from a combined SPP Doppler result into a newly
+ * owned SPP solution handle.
+ *
+ * Safety: solution must be a live combined handle; out_receiver must point to
+ * storage for a SidereonSppSolution*.
+ */
+enum SidereonStatus sidereon_spp_doppler_solution_receiver(const struct SidereonSppDopplerSolution *solution,
+                                                           struct SidereonSppSolution **out_receiver);
+
+/**
+ * Copy the Doppler velocity solution into a newly owned velocity handle.
+ * Returns SIDEREON_STATUS_SOLVE when no velocity solution is present.
+ *
+ * Safety: solution must be a live combined handle; out_velocity must point to
+ * storage for a SidereonVelocitySolution*.
+ */
+enum SidereonStatus sidereon_spp_doppler_solution_velocity(const struct SidereonSppDopplerSolution *solution,
+                                                           struct SidereonVelocitySolution **out_velocity);
+
+/**
+ * Write the retained Doppler velocity error kind. The kind is None when the
+ * combined result has a velocity solution or no Doppler rows were supplied.
+ *
+ * Safety: solution must be a live combined handle; out_error must point to
+ * writable storage.
+ */
+enum SidereonStatus sidereon_spp_doppler_solution_velocity_error_kind(const struct SidereonSppDopplerSolution *solution,
+                                                                      enum SidereonSppDopplerVelocityErrorKind *out_error);
+
+/**
  * Initialize an SPP V2 input struct with engine defaults for optional controls.
  * After this call, fill inputs->base with the ordinary SPP fields and override
  * any V2 controls needed by the solve.
@@ -24907,6 +25965,26 @@ enum SidereonStatus sidereon_spp_solution_position(const struct SidereonSppSolut
                                                    size_t len);
 
 /**
+ * Copy the SPP 3x3 ECEF position covariance in row-major order.
+ *
+ * Safety: sol must be a live solution handle; out_m2 must point to len writable
+ * doubles and len must be at least 9.
+ */
+enum SidereonStatus sidereon_spp_solution_position_covariance_ecef_m2(const struct SidereonSppSolution *sol,
+                                                                      double *out_m2,
+                                                                      size_t len);
+
+/**
+ * Copy the SPP 3x3 ENU position covariance in row-major order.
+ *
+ * Safety: sol must be a live solution handle; out_m2 must point to len writable
+ * doubles and len must be at least 9.
+ */
+enum SidereonStatus sidereon_spp_solution_position_covariance_enu_m2(const struct SidereonSppSolution *sol,
+                                                                     double *out_m2,
+                                                                     size_t len);
+
+/**
  * Copy rejected satellites and reasons. Uses the variable-length output
  * contract documented at the top of the header.
  *
@@ -24938,6 +26016,17 @@ enum SidereonStatus sidereon_spp_solution_residuals(const struct SidereonSppSolu
                                                     size_t len,
                                                     size_t *out_written,
                                                     size_t *out_required);
+
+/**
+ * Write the optional receiver clock drift in seconds per second and set
+ * *out_present. Pseudorange-only solves set *out_present false and drift 0.
+ *
+ * Safety: sol must be a live solution handle; out_present and out_drift_s_s
+ * must point to writable storage.
+ */
+enum SidereonStatus sidereon_spp_solution_rx_clock_drift_s_s(const struct SidereonSppSolution *sol,
+                                                             bool *out_present,
+                                                             double *out_drift_s_s);
 
 /**
  * Write the receiver clock bias in seconds to *out_rx_clock_s.
@@ -25101,6 +26190,159 @@ struct SidereonStalenessPolicy sidereon_staleness_policy_seconds(double seconds)
  * Safety: out_config must point to a SidereonStatePropagationConfig.
  */
 enum SidereonStatus sidereon_state_propagation_config_init(struct SidereonStatePropagationConfig *out_config);
+
+/**
+ * Populate *out_options with static-position engine defaults.
+ *
+ * Safety: out_options must point to a SidereonStaticPositionOptions.
+ */
+enum SidereonStatus sidereon_static_position_options_init(struct SidereonStaticPositionOptions *out_options);
+
+/**
+ * Copy epoch-local receiver clocks. Output uses the variable-length contract.
+ *
+ * Safety: solution must be a live handle; out must point to len entries or be
+ * NULL when len is 0; out_written and out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_static_position_solution_clock_biases(const struct SidereonStaticPositionSolution *solution,
+                                                                   struct SidereonStaticPositionClockBias *out,
+                                                                   size_t len,
+                                                                   size_t *out_written,
+                                                                   size_t *out_required);
+
+/**
+ * Copy leave-one-epoch-out diagnostics. Output uses the variable-length contract.
+ *
+ * Safety: solution must be a live handle; out must point to len entries or be
+ * NULL when len is 0; out_written and out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_static_position_solution_epoch_influence(const struct SidereonStaticPositionSolution *solution,
+                                                                      struct SidereonStaticPositionEpochInfluence *out,
+                                                                      size_t len,
+                                                                      size_t *out_written,
+                                                                      size_t *out_required);
+
+/**
+ * Release a static-position solution handle. Passing NULL is a no-op.
+ *
+ * Safety: solution must be NULL or a live handle from a static-position solve
+ * that has not already been freed.
+ */
+void sidereon_static_position_solution_free(struct SidereonStaticPositionSolution *solution);
+
+/**
+ * Copy the optional geodetic receiver position and set *out_present.
+ *
+ * Safety: solution must be a live handle; out_geodetic and out_present must
+ * point to writable storage.
+ */
+enum SidereonStatus sidereon_static_position_solution_geodetic(const struct SidereonStaticPositionSolution *solution,
+                                                               struct SidereonGeodetic *out_geodetic,
+                                                               bool *out_present);
+
+/**
+ * Copy static-position solve metadata.
+ *
+ * Safety: solution must be a live handle; out_metadata must point to writable
+ * storage.
+ */
+enum SidereonStatus sidereon_static_position_solution_metadata(const struct SidereonStaticPositionSolution *solution,
+                                                               struct SidereonStaticPositionMetadata *out_metadata);
+
+/**
+ * Copy the static receiver ECEF position [x_m, y_m, z_m] into out_xyz.
+ *
+ * Safety: solution must be a live handle; out_xyz must point to len writable
+ * doubles and len must be at least 3.
+ */
+enum SidereonStatus sidereon_static_position_solution_position(const struct SidereonStaticPositionSolution *solution,
+                                                               double *out_xyz,
+                                                               size_t len);
+
+/**
+ * Copy the 3x3 ECEF position covariance in row-major order.
+ *
+ * Safety: solution must be a live handle; out_m2 must point to len writable
+ * doubles and len must be at least 9.
+ */
+enum SidereonStatus sidereon_static_position_solution_position_covariance_ecef_m2(const struct SidereonStaticPositionSolution *solution,
+                                                                                  double *out_m2,
+                                                                                  size_t len);
+
+/**
+ * Copy the 3x3 ENU position covariance in row-major order.
+ *
+ * Safety: solution must be a live handle; out_m2 must point to len writable
+ * doubles and len must be at least 9.
+ */
+enum SidereonStatus sidereon_static_position_solution_position_covariance_enu_m2(const struct SidereonStaticPositionSolution *solution,
+                                                                                 double *out_m2,
+                                                                                 size_t len);
+
+/**
+ * Copy rejected satellites for one input epoch. Output uses the
+ * variable-length contract.
+ *
+ * Safety: solution must be a live handle; out must point to len entries or be
+ * NULL when len is 0; out_written and out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_static_position_solution_rejected_sats(const struct SidereonStaticPositionSolution *solution,
+                                                                    size_t epoch_index,
+                                                                    struct SidereonSppRejectedSat *out,
+                                                                    size_t len,
+                                                                    size_t *out_written,
+                                                                    size_t *out_required);
+
+/**
+ * Copy post-fit residual rows. Output uses the variable-length contract.
+ *
+ * Safety: solution must be a live handle; out must point to len entries or be
+ * NULL when len is 0; out_written and out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_static_position_solution_residuals(const struct SidereonStaticPositionSolution *solution,
+                                                                struct SidereonStaticPositionResidual *out,
+                                                                size_t len,
+                                                                size_t *out_written,
+                                                                size_t *out_required);
+
+/**
+ * Copy leave-one-satellite-out diagnostics grouped across epochs. Output uses
+ * the variable-length contract.
+ *
+ * Safety: solution must be a live handle; out must point to len entries or be
+ * NULL when len is 0; out_written and out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_static_position_solution_satellite_batch_influence(const struct SidereonStaticPositionSolution *solution,
+                                                                                struct SidereonStaticPositionSatelliteBatchInfluence *out,
+                                                                                size_t len,
+                                                                                size_t *out_written,
+                                                                                size_t *out_required);
+
+/**
+ * Copy leave-one-satellite-out diagnostics by epoch. Output uses the
+ * variable-length contract.
+ *
+ * Safety: solution must be a live handle; out must point to len entries or be
+ * NULL when len is 0; out_written and out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_static_position_solution_satellite_influence(const struct SidereonStaticPositionSolution *solution,
+                                                                          struct SidereonStaticPositionSatelliteInfluence *out,
+                                                                          size_t len,
+                                                                          size_t *out_written,
+                                                                          size_t *out_required);
+
+/**
+ * Copy the full static state covariance in row-major order. Output uses the
+ * variable-length contract documented in the header.
+ *
+ * Safety: solution must be a live handle; out must point to len doubles or be
+ * NULL when len is 0; out_written and out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_static_position_solution_state_covariance_m2(const struct SidereonStaticPositionSolution *solution,
+                                                                          double *out,
+                                                                          size_t len,
+                                                                          size_t *out_written,
+                                                                          size_t *out_required);
 
 /**
  * Return a static, null-terminated, human-readable name for a status code.
@@ -26020,6 +27262,19 @@ enum SidereonStatus sidereon_velocity_solution_residuals(const struct SidereonVe
  */
 enum SidereonStatus sidereon_velocity_solution_speed(const struct SidereonVelocitySolution *solution,
                                                      double *out_speed);
+
+/**
+ * Copy the unit-variance 4x4 state covariance in row-major order. The state is
+ * [vx, vy, vz, clock_drift], where velocity is ECEF meters per second and clock
+ * drift is seconds per second.
+ *
+ * Safety: solution must be a live handle from sidereon_solve_velocity or a
+ * related velocity solve; out_m2 must point to len writable doubles and len
+ * must be at least 16.
+ */
+enum SidereonStatus sidereon_velocity_solution_state_covariance(const struct SidereonVelocitySolution *solution,
+                                                                double *out_m2,
+                                                                size_t len);
 
 /**
  * Write the number of satellites that contributed rows to *out_count.

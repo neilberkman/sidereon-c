@@ -262,6 +262,41 @@ pub unsafe extern "C" fn sidereon_velocity_solution_clock_drift(
     )
 }
 
+/// Copy the unit-variance 4x4 state covariance in row-major order. The state is
+/// [vx, vy, vz, clock_drift], where velocity is ECEF meters per second and clock
+/// drift is seconds per second.
+///
+/// Safety: solution must be a live handle from sidereon_solve_velocity or a
+/// related velocity solve; out_m2 must point to len writable doubles and len
+/// must be at least 16.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_velocity_solution_state_covariance(
+    solution: *const SidereonVelocitySolution,
+    out_m2: *mut f64,
+    len: usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_velocity_solution_state_covariance",
+        SidereonStatus::Panic,
+        || {
+            let solution = c_try!(require_ref(
+                solution,
+                "sidereon_velocity_solution_state_covariance",
+                "solution"
+            ));
+            let values = flatten_velocity_covariance(solution.inner.state_covariance);
+            c_try!(copy_exact_f64s(
+                "sidereon_velocity_solution_state_covariance",
+                "out_m2",
+                out_m2,
+                len,
+                &values,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
 /// Write the number of satellites that contributed rows to *out_count.
 ///
 /// Safety: solution must be a live handle from sidereon_solve_velocity; out_count
@@ -402,6 +437,27 @@ pub unsafe extern "C" fn sidereon_velocity_solution_free(solution: *mut Sidereon
     });
 }
 
+fn flatten_velocity_covariance(matrix: [[f64; 4]; 4]) -> [f64; 16] {
+    [
+        matrix[0][0],
+        matrix[0][1],
+        matrix[0][2],
+        matrix[0][3],
+        matrix[1][0],
+        matrix[1][1],
+        matrix[1][2],
+        matrix[1][3],
+        matrix[2][0],
+        matrix[2][1],
+        matrix[2][2],
+        matrix[2][3],
+        matrix[3][0],
+        matrix[3][1],
+        matrix[3][2],
+        matrix[3][3],
+    ]
+}
+
 /// Solve receiver ECEF velocity and clock drift from one epoch of range-rate or
 /// Doppler observations against a broadcast source. Mirror of
 /// sidereon_solve_velocity for the broadcast (navigation message) source; it
@@ -499,6 +555,152 @@ pub unsafe extern "C" fn sidereon_solve_velocity_broadcast(
             SidereonStatus::Ok
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
+    const T_RX_J2000_S: f64 = 646_272_000.0;
+    const RECEIVER: [f64; 3] = [4_500_000.0, 500_000.0, 4_500_000.0];
+    const V_TRUE: [f64; 3] = [12.0, -7.0, 3.0];
+    const DRIFT_TRUE: f64 = 1.0e-9;
+
+    fn fixture_sp3() -> Sp3 {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/sp3/GRG0MGXFIN_20201760000_01D_15M_ORB.SP3");
+        let bytes = fs::read(path).expect("read SP3 fixture");
+        Sp3::parse(&bytes).expect("parse SP3")
+    }
+
+    fn visible_gps(sp3: &Sp3) -> Vec<GnssSatelliteId> {
+        let planning = PredictOptions {
+            light_time: false,
+            ..PredictOptions::default()
+        };
+        sp3.satellites()
+            .iter()
+            .copied()
+            .filter(|sat| sat.system == GnssSystem::Gps)
+            .filter(|sat| {
+                observables_predict(sp3, *sat, RECEIVER, T_RX_J2000_S, planning)
+                    .map(|obs| obs.elevation_deg >= 5.0)
+                    .unwrap_or(false)
+            })
+            .collect()
+    }
+
+    fn synth_range_rate(sp3: &Sp3, sat: GnssSatelliteId) -> f64 {
+        let obs = observables_predict(sp3, sat, RECEIVER, T_RX_J2000_S, PredictOptions::default())
+            .expect("predict synthetic observation");
+        let receiver_projection =
+            obs.los_unit[0] * V_TRUE[0] + obs.los_unit[1] * V_TRUE[1] + obs.los_unit[2] * V_TRUE[2];
+        obs.range_rate_m_s - receiver_projection + sidereon_core::constants::C_M_S * DRIFT_TRUE
+    }
+
+    fn assert_close(got: f64, want: f64, tol: f64) {
+        assert!(
+            (got - want).abs() <= tol,
+            "got {got:e}, want {want:e}, tol {tol:e}"
+        );
+    }
+
+    #[test]
+    fn doppler_velocity_covariance_matches_core_reference() {
+        let sp3 = fixture_sp3();
+        let sats = visible_gps(&sp3);
+        assert!(sats.len() >= 4);
+        let core_observations = sats
+            .iter()
+            .copied()
+            .map(|sat| {
+                let range_rate = synth_range_rate(&sp3, sat);
+                VelocityObservation {
+                    satellite_id: sat,
+                    value: sidereon_core::velocity::range_rate_to_doppler(
+                        range_rate,
+                        sidereon_core::constants::F_L1_HZ,
+                    )
+                    .expect("range-rate to Doppler"),
+                    carrier_hz: sidereon_core::constants::F_L1_HZ,
+                    sat_clock_drift_s_s: 0.0,
+                }
+            })
+            .collect::<Vec<_>>();
+        let expected = sidereon_core::velocity::solve(
+            &sp3,
+            &core_observations,
+            RECEIVER,
+            T_RX_J2000_S,
+            VelocitySolveOptions {
+                observable: VelocityObservable::Doppler,
+                ..VelocitySolveOptions::default()
+            },
+        )
+        .expect("core velocity solve");
+
+        let sat_tokens = core_observations
+            .iter()
+            .map(|obs| CString::new(obs.satellite_id.to_string()).expect("sat token"))
+            .collect::<Vec<_>>();
+        let c_observations = core_observations
+            .iter()
+            .zip(&sat_tokens)
+            .map(|(obs, token)| SidereonVelocityObservation {
+                sat_id: token.as_ptr(),
+                value: obs.value,
+                carrier_hz: obs.carrier_hz,
+                sat_clock_drift_s_s: obs.sat_clock_drift_s_s,
+            })
+            .collect::<Vec<_>>();
+        let sp3_handle = SidereonSp3 { inner: sp3 };
+        let options = SidereonVelocityOptions {
+            observable: SidereonVelocityObservable::Doppler as u32,
+            light_time: true,
+            sagnac: true,
+        };
+        let mut solution = ptr::null_mut();
+        let status = unsafe {
+            sidereon_solve_velocity(
+                &sp3_handle,
+                c_observations.as_ptr(),
+                c_observations.len(),
+                RECEIVER.as_ptr(),
+                T_RX_J2000_S,
+                &options,
+                &mut solution,
+            )
+        };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert!(!solution.is_null());
+
+        let mut velocity = [0.0; 3];
+        let status =
+            unsafe { sidereon_velocity_solution_velocity(solution, velocity.as_mut_ptr(), 3) };
+        assert_eq!(status, SidereonStatus::Ok);
+        for (got, want) in velocity.iter().zip(expected.velocity_m_s) {
+            assert_close(*got, want, 1.0e-9);
+        }
+
+        let mut drift = 0.0;
+        let status = unsafe { sidereon_velocity_solution_clock_drift(solution, &mut drift) };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert_close(drift, expected.clock_drift_s_s, 1.0e-18);
+
+        let mut covariance = [0.0; 16];
+        let status = unsafe {
+            sidereon_velocity_solution_state_covariance(solution, covariance.as_mut_ptr(), 16)
+        };
+        assert_eq!(status, SidereonStatus::Ok);
+        let expected_covariance = flatten_velocity_covariance(expected.state_covariance);
+        for (got, want) in covariance.iter().zip(expected_covariance) {
+            assert_close(*got, want, 1.0e-12);
+        }
+
+        unsafe { sidereon_velocity_solution_free(solution) };
+    }
 }
 
 // ===========================================================================

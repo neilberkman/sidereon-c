@@ -6,6 +6,16 @@ pub struct SidereonSppSolution {
     pub(crate) inner: ReceiverSolution,
 }
 
+/// A combined SPP position plus optional Doppler velocity result. Opaque to C.
+/// Create with sidereon_solve_spp_with_doppler_velocity or
+/// sidereon_solve_broadcast_with_doppler_velocity and release with
+/// sidereon_spp_doppler_solution_free.
+pub struct SidereonSppDopplerSolution {
+    pub(crate) receiver: ReceiverSolution,
+    pub(crate) velocity: Option<VelocitySolution>,
+    pub(crate) velocity_error: Option<VelocityError>,
+}
+
 /// Caller-populated inputs for a single SPP solve. Mirrors the engine solve
 /// input field for field; the binding adds no defaults or modeling of its own.
 #[repr(C)]
@@ -160,6 +170,44 @@ pub struct SidereonSppSystemTdop {
     /// Time DOP for this system. The reference system's value equals
     /// SidereonDop.tdop.
     pub tdop: f64,
+}
+
+/// One Doppler row for an SPP-family receiver velocity solve.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonSppDopplerObservation {
+    /// Null-terminated satellite token, for example G08.
+    pub sat_id: *const c_char,
+    /// Doppler shift in hertz.
+    pub doppler_hz: f64,
+    /// Carrier frequency in hertz.
+    pub carrier_hz: f64,
+    /// Satellite clock drift in seconds per second.
+    pub sat_clock_drift_s_s: f64,
+}
+
+/// SPP Doppler velocity solve error category.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonSppDopplerVelocityErrorKind {
+    /// No Doppler velocity error occurred.
+    None = 0,
+    /// No Doppler rows were supplied.
+    NoObservations = 1,
+    /// Fewer than four usable satellites remained.
+    TooFewSatellites = 2,
+    /// The velocity normal matrix was singular.
+    SingularGeometry = 3,
+    /// A satellite appeared more than once.
+    DuplicateObservation = 4,
+    /// Doppler conversion needed a positive finite carrier frequency.
+    InvalidCarrier = 5,
+    /// A scalar input was malformed.
+    InvalidInput = 6,
+    /// A Doppler row carried a non-finite value.
+    InvalidObservation = 7,
+    /// The receiver state or receive epoch was non-finite.
+    InvalidReceiverState = 8,
 }
 
 /// Solver termination status.
@@ -338,6 +386,111 @@ pub unsafe extern "C" fn sidereon_spp_solution_rx_clock_s(
                 "solution"
             ));
             *out_rx_clock_s = sol.inner.rx_clock_s;
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Write the optional receiver clock drift in seconds per second and set
+/// *out_present. Pseudorange-only solves set *out_present false and drift 0.
+///
+/// Safety: sol must be a live solution handle; out_present and out_drift_s_s
+/// must point to writable storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_spp_solution_rx_clock_drift_s_s(
+    sol: *const SidereonSppSolution,
+    out_present: *mut bool,
+    out_drift_s_s: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_spp_solution_rx_clock_drift_s_s",
+        SidereonStatus::Panic,
+        || {
+            let out_present = c_try!(require_out(
+                out_present,
+                "sidereon_spp_solution_rx_clock_drift_s_s",
+                "out_present"
+            ));
+            *out_present = false;
+            let out_drift_s_s = c_try!(require_out(
+                out_drift_s_s,
+                "sidereon_spp_solution_rx_clock_drift_s_s",
+                "out_drift_s_s"
+            ));
+            *out_drift_s_s = 0.0;
+            let sol = c_try!(require_ref(
+                sol,
+                "sidereon_spp_solution_rx_clock_drift_s_s",
+                "solution"
+            ));
+            if let Some(drift) = sol.inner.rx_clock_drift_s_s {
+                *out_present = true;
+                *out_drift_s_s = drift;
+            }
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy the SPP 3x3 ECEF position covariance in row-major order.
+///
+/// Safety: sol must be a live solution handle; out_m2 must point to len writable
+/// doubles and len must be at least 9.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_spp_solution_position_covariance_ecef_m2(
+    sol: *const SidereonSppSolution,
+    out_m2: *mut f64,
+    len: usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_spp_solution_position_covariance_ecef_m2",
+        SidereonStatus::Panic,
+        || {
+            let sol = c_try!(require_ref(
+                sol,
+                "sidereon_spp_solution_position_covariance_ecef_m2",
+                "solution"
+            ));
+            let values = flatten_spp_mat3(sol.inner.position_covariance.ecef_m2);
+            c_try!(copy_exact_f64s(
+                "sidereon_spp_solution_position_covariance_ecef_m2",
+                "out_m2",
+                out_m2,
+                len,
+                &values,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy the SPP 3x3 ENU position covariance in row-major order.
+///
+/// Safety: sol must be a live solution handle; out_m2 must point to len writable
+/// doubles and len must be at least 9.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_spp_solution_position_covariance_enu_m2(
+    sol: *const SidereonSppSolution,
+    out_m2: *mut f64,
+    len: usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_spp_solution_position_covariance_enu_m2",
+        SidereonStatus::Panic,
+        || {
+            let sol = c_try!(require_ref(
+                sol,
+                "sidereon_spp_solution_position_covariance_enu_m2",
+                "solution"
+            ));
+            let values = flatten_spp_mat3(sol.inner.position_covariance.enu_m2);
+            c_try!(copy_exact_f64s(
+                "sidereon_spp_solution_position_covariance_enu_m2",
+                "out_m2",
+                out_m2,
+                len,
+                &values,
+            ));
             SidereonStatus::Ok
         },
     )
@@ -720,6 +873,230 @@ pub unsafe extern "C" fn sidereon_spp_solution_free(sol: *mut SidereonSppSolutio
     });
 }
 
+/// Solve SPP position from an SP3 source and attach a Doppler velocity solution
+/// when the Doppler rows are usable.
+///
+/// Safety: sp3 must be a live handle; inputs must point to a valid SPP V2 input;
+/// doppler_observations points to doppler_count rows or is NULL when count is 0;
+/// out_solution must point to storage for a SidereonSppDopplerSolution*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_solve_spp_with_doppler_velocity(
+    sp3: *const SidereonSp3,
+    inputs: *const SidereonSppInputsV2,
+    doppler_observations: *const SidereonSppDopplerObservation,
+    doppler_count: usize,
+    out_solution: *mut *mut SidereonSppDopplerSolution,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_solve_spp_with_doppler_velocity",
+        SidereonStatus::Panic,
+        || {
+            let sp3 = c_try!(require_ref(
+                sp3,
+                "sidereon_solve_spp_with_doppler_velocity",
+                "sp3"
+            ));
+            solve_spp_with_doppler_common(
+                "sidereon_solve_spp_with_doppler_velocity",
+                &sp3.inner,
+                inputs,
+                doppler_observations,
+                doppler_count,
+                out_solution,
+            )
+        },
+    )
+}
+
+/// Solve SPP position from broadcast ephemeris and attach a Doppler velocity
+/// solution when the Doppler rows are usable.
+///
+/// Safety: broadcast must be a live handle; inputs must point to a valid SPP V2
+/// input; doppler_observations points to doppler_count rows or is NULL when
+/// count is 0; out_solution must point to storage for a SidereonSppDopplerSolution*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_solve_broadcast_with_doppler_velocity(
+    broadcast: *const SidereonBroadcastEphemeris,
+    inputs: *const SidereonSppInputsV2,
+    doppler_observations: *const SidereonSppDopplerObservation,
+    doppler_count: usize,
+    out_solution: *mut *mut SidereonSppDopplerSolution,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_solve_broadcast_with_doppler_velocity",
+        SidereonStatus::Panic,
+        || {
+            let broadcast = c_try!(require_ref(
+                broadcast,
+                "sidereon_solve_broadcast_with_doppler_velocity",
+                "broadcast"
+            ));
+            solve_spp_with_doppler_common(
+                "sidereon_solve_broadcast_with_doppler_velocity",
+                &broadcast.inner,
+                inputs,
+                doppler_observations,
+                doppler_count,
+                out_solution,
+            )
+        },
+    )
+}
+
+/// Copy the receiver solution from a combined SPP Doppler result into a newly
+/// owned SPP solution handle.
+///
+/// Safety: solution must be a live combined handle; out_receiver must point to
+/// storage for a SidereonSppSolution*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_spp_doppler_solution_receiver(
+    solution: *const SidereonSppDopplerSolution,
+    out_receiver: *mut *mut SidereonSppSolution,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_spp_doppler_solution_receiver",
+        SidereonStatus::Panic,
+        || {
+            let out_receiver = c_try!(require_out(
+                out_receiver,
+                "sidereon_spp_doppler_solution_receiver",
+                "out_receiver"
+            ));
+            *out_receiver = ptr::null_mut();
+            let solution = c_try!(require_ref(
+                solution,
+                "sidereon_spp_doppler_solution_receiver",
+                "solution"
+            ));
+            write_boxed_handle(
+                out_receiver,
+                SidereonSppSolution {
+                    inner: solution.receiver.clone(),
+                },
+            );
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Write whether a combined result carries a Doppler velocity solution.
+///
+/// Safety: solution must be a live combined handle; out_has_velocity must point
+/// to a bool.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_spp_doppler_solution_has_velocity(
+    solution: *const SidereonSppDopplerSolution,
+    out_has_velocity: *mut bool,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_spp_doppler_solution_has_velocity",
+        SidereonStatus::Panic,
+        || {
+            let out_has_velocity = c_try!(require_out(
+                out_has_velocity,
+                "sidereon_spp_doppler_solution_has_velocity",
+                "out_has_velocity"
+            ));
+            *out_has_velocity = false;
+            let solution = c_try!(require_ref(
+                solution,
+                "sidereon_spp_doppler_solution_has_velocity",
+                "solution"
+            ));
+            *out_has_velocity = solution.velocity.is_some();
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy the Doppler velocity solution into a newly owned velocity handle.
+/// Returns SIDEREON_STATUS_SOLVE when no velocity solution is present.
+///
+/// Safety: solution must be a live combined handle; out_velocity must point to
+/// storage for a SidereonVelocitySolution*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_spp_doppler_solution_velocity(
+    solution: *const SidereonSppDopplerSolution,
+    out_velocity: *mut *mut SidereonVelocitySolution,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_spp_doppler_solution_velocity",
+        SidereonStatus::Panic,
+        || {
+            let out_velocity = c_try!(require_out(
+                out_velocity,
+                "sidereon_spp_doppler_solution_velocity",
+                "out_velocity"
+            ));
+            *out_velocity = ptr::null_mut();
+            let solution = c_try!(require_ref(
+                solution,
+                "sidereon_spp_doppler_solution_velocity",
+                "solution"
+            ));
+            let Some(velocity) = &solution.velocity else {
+                set_last_error("sidereon_spp_doppler_solution_velocity: no velocity solution");
+                return SidereonStatus::Solve;
+            };
+            write_boxed_handle(
+                out_velocity,
+                SidereonVelocitySolution {
+                    inner: velocity.clone(),
+                },
+            );
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Write the retained Doppler velocity error kind. The kind is None when the
+/// combined result has a velocity solution or no Doppler rows were supplied.
+///
+/// Safety: solution must be a live combined handle; out_error must point to
+/// writable storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_spp_doppler_solution_velocity_error_kind(
+    solution: *const SidereonSppDopplerSolution,
+    out_error: *mut SidereonSppDopplerVelocityErrorKind,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_spp_doppler_solution_velocity_error_kind",
+        SidereonStatus::Panic,
+        || {
+            let out_error = c_try!(require_out(
+                out_error,
+                "sidereon_spp_doppler_solution_velocity_error_kind",
+                "out_error"
+            ));
+            *out_error = SidereonSppDopplerVelocityErrorKind::None;
+            let solution = c_try!(require_ref(
+                solution,
+                "sidereon_spp_doppler_solution_velocity_error_kind",
+                "solution"
+            ));
+            *out_error = solution
+                .velocity_error
+                .as_ref()
+                .map(spp_doppler_velocity_error_to_c)
+                .unwrap_or(SidereonSppDopplerVelocityErrorKind::None);
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Release a combined SPP Doppler solution handle. Passing NULL is a no-op.
+///
+/// Safety: solution must be NULL or a live handle from a combined SPP Doppler
+/// solve that has not already been freed.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_spp_doppler_solution_free(
+    solution: *mut SidereonSppDopplerSolution,
+) {
+    ffi_boundary("sidereon_spp_doppler_solution_free", (), || {
+        free_boxed(solution);
+    });
+}
+
 /// Receiver-solution plausibility-gate options, mirroring
 /// sidereon_core::quality::SolutionValidationOptions.
 #[repr(C)]
@@ -996,6 +1373,111 @@ fn rejection_reason_to_c(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+unsafe fn solve_spp_with_doppler_common<E>(
+    fn_name: &str,
+    source: &E,
+    inputs: *const SidereonSppInputsV2,
+    doppler_observations: *const SidereonSppDopplerObservation,
+    doppler_count: usize,
+    out_solution: *mut *mut SidereonSppDopplerSolution,
+) -> SidereonStatus
+where
+    E: EphemerisSource + ObservableEphemerisSource,
+{
+    let out_solution = c_try!(require_out(out_solution, fn_name, "out_solution"));
+    *out_solution = ptr::null_mut();
+    let inputs = c_try!(require_ref(inputs, fn_name, "inputs"));
+    let glonass_channels = c_try!(glonass_channels_from_c(fn_name, inputs));
+    let solve_inputs = c_try!(build_spp_solve_inputs(
+        fn_name,
+        &inputs.base,
+        beidou_klobuchar_from_c(inputs),
+        robust_config_from_c(inputs),
+        glonass_channels,
+    ));
+    let doppler = c_try!(spp_doppler_observations_from_c(
+        fn_name,
+        doppler_observations,
+        doppler_count
+    ));
+    match core_solve_with_doppler_velocity(
+        source,
+        &solve_inputs,
+        &doppler,
+        inputs.base.with_geodetic,
+    ) {
+        Ok(solution) => {
+            write_boxed_handle(
+                out_solution,
+                SidereonSppDopplerSolution {
+                    receiver: solution.receiver,
+                    velocity: solution.velocity,
+                    velocity_error: solution.velocity_error,
+                },
+            );
+            SidereonStatus::Ok
+        }
+        Err(err) => {
+            set_last_error(format!("{fn_name}: {err}"));
+            SidereonStatus::Solve
+        }
+    }
+}
+
+unsafe fn spp_doppler_observations_from_c(
+    fn_name: &str,
+    observations: *const SidereonSppDopplerObservation,
+    count: usize,
+) -> Result<Vec<CoreDopplerObservation>, SidereonStatus> {
+    let raw = require_slice(observations, count, fn_name, "doppler_observations")?;
+    let mut parsed = Vec::with_capacity(raw.len());
+    for obs in raw {
+        parsed.push(CoreDopplerObservation {
+            satellite_id: parse_satellite_token(fn_name, obs.sat_id)?,
+            doppler_hz: obs.doppler_hz,
+            carrier_hz: obs.carrier_hz,
+            sat_clock_drift_s_s: obs.sat_clock_drift_s_s,
+        });
+    }
+    Ok(parsed)
+}
+
+fn spp_doppler_velocity_error_to_c(error: &VelocityError) -> SidereonSppDopplerVelocityErrorKind {
+    match error {
+        VelocityError::NoObservations => SidereonSppDopplerVelocityErrorKind::NoObservations,
+        VelocityError::TooFewSatellites { .. } => {
+            SidereonSppDopplerVelocityErrorKind::TooFewSatellites
+        }
+        VelocityError::SingularGeometry => SidereonSppDopplerVelocityErrorKind::SingularGeometry,
+        VelocityError::DuplicateObservation { .. } => {
+            SidereonSppDopplerVelocityErrorKind::DuplicateObservation
+        }
+        VelocityError::InvalidCarrier { .. } => SidereonSppDopplerVelocityErrorKind::InvalidCarrier,
+        VelocityError::InvalidInput { .. } => SidereonSppDopplerVelocityErrorKind::InvalidInput,
+        VelocityError::InvalidObservation { .. } => {
+            SidereonSppDopplerVelocityErrorKind::InvalidObservation
+        }
+        VelocityError::InvalidReceiverState => {
+            SidereonSppDopplerVelocityErrorKind::InvalidReceiverState
+        }
+    }
+}
+
+fn flatten_spp_mat3(matrix: [[f64; 3]; 3]) -> [f64; 9] {
+    [
+        matrix[0][0],
+        matrix[0][1],
+        matrix[0][2],
+        matrix[1][0],
+        matrix[1][1],
+        matrix[1][2],
+        matrix[2][0],
+        matrix[2][1],
+        matrix[2][2],
+    ]
+}
+
 fn solve_status_to_c(status: Status) -> SidereonSppSolveStatus {
     match status {
         Status::GradientTolerance => SidereonSppSolveStatus::GradientTolerance,
@@ -1020,5 +1502,278 @@ fn empty_metadata() -> SidereonSppMetadata {
         redundancy: 0,
         raim_checkable: false,
         geometry_quality: empty_geometry_quality(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::mem::MaybeUninit;
+    use std::path::PathBuf;
+
+    const T_RX_J2000_S: f64 = 646_272_000.0;
+    const T_RX_SOD_S: f64 = 43_200.0;
+    const DAY_OF_YEAR: f64 = 176.5;
+    const RECEIVER: [f64; 3] = [4_500_000.0, 500_000.0, 4_500_000.0];
+    const RECEIVER_VELOCITY: [f64; 3] = [12.0, -7.0, 3.0];
+    const CLOCK_BIAS_M: f64 = 8.0;
+    const CLOCK_DRIFT_S_S: f64 = 1.0e-9;
+
+    fn fixture_sp3() -> Sp3 {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/sp3/GRG0MGXFIN_20201760000_01D_15M_ORB.SP3");
+        let bytes = fs::read(path).expect("read SP3 fixture");
+        Sp3::parse(&bytes).expect("parse SP3")
+    }
+
+    fn visible_gps(sp3: &Sp3) -> Vec<GnssSatelliteId> {
+        let planning = PredictOptions {
+            light_time: false,
+            ..PredictOptions::default()
+        };
+        sp3.satellites()
+            .iter()
+            .copied()
+            .filter(|sat| sat.system == GnssSystem::Gps)
+            .filter(|sat| {
+                observables_predict(sp3, *sat, RECEIVER, T_RX_J2000_S, planning)
+                    .map(|obs| obs.elevation_deg >= 5.0)
+                    .unwrap_or(false)
+            })
+            .take(8)
+            .collect()
+    }
+
+    fn pseudorange(sp3: &Sp3, sat: GnssSatelliteId) -> f64 {
+        let obs = observables_predict(sp3, sat, RECEIVER, T_RX_J2000_S, PredictOptions::default())
+            .expect("predict pseudorange");
+        obs.geometric_range_m - sidereon_core::constants::C_M_S * obs.sat_clock_s.unwrap_or(0.0)
+            + CLOCK_BIAS_M
+    }
+
+    fn doppler(sp3: &Sp3, sat: GnssSatelliteId) -> f64 {
+        let obs = observables_predict(sp3, sat, RECEIVER, T_RX_J2000_S, PredictOptions::default())
+            .expect("predict Doppler");
+        let receiver_projection = obs.los_unit[0] * RECEIVER_VELOCITY[0]
+            + obs.los_unit[1] * RECEIVER_VELOCITY[1]
+            + obs.los_unit[2] * RECEIVER_VELOCITY[2];
+        let range_rate = obs.range_rate_m_s - receiver_projection
+            + sidereon_core::constants::C_M_S * CLOCK_DRIFT_S_S;
+        sidereon_core::velocity::range_rate_to_doppler(
+            range_rate,
+            sidereon_core::constants::F_L1_HZ,
+        )
+        .expect("range-rate to Doppler")
+    }
+
+    fn core_inputs(
+        sp3: &Sp3,
+        sats: &[GnssSatelliteId],
+    ) -> (SolveInputs, Vec<CoreDopplerObservation>) {
+        let observations = sats
+            .iter()
+            .copied()
+            .map(|sat| Observation {
+                satellite_id: sat,
+                pseudorange_m: pseudorange(sp3, sat),
+            })
+            .collect::<Vec<_>>();
+        let doppler_observations = sats
+            .iter()
+            .copied()
+            .map(|sat| CoreDopplerObservation {
+                satellite_id: sat,
+                doppler_hz: doppler(sp3, sat),
+                carrier_hz: sidereon_core::constants::F_L1_HZ,
+                sat_clock_drift_s_s: 0.0,
+            })
+            .collect::<Vec<_>>();
+        (
+            SolveInputs {
+                observations,
+                t_rx_j2000_s: T_RX_J2000_S,
+                t_rx_second_of_day_s: T_RX_SOD_S,
+                day_of_year: DAY_OF_YEAR,
+                initial_guess: [
+                    RECEIVER[0] + 25.0,
+                    RECEIVER[1] - 20.0,
+                    RECEIVER[2] + 15.0,
+                    0.0,
+                ],
+                corrections: Corrections::NONE,
+                klobuchar: KlobucharCoeffs {
+                    alpha: [0.0; 4],
+                    beta: [0.0; 4],
+                },
+                beidou_klobuchar: None,
+                galileo_nequick: None,
+                sbas_iono: None,
+                glonass_channels: BTreeMap::new(),
+                met: SurfaceMet::default(),
+                robust: None,
+            },
+            doppler_observations,
+        )
+    }
+
+    fn c_inputs(
+        inputs: &SolveInputs,
+        doppler_observations: &[CoreDopplerObservation],
+        tokens: &[CString],
+    ) -> (
+        Vec<SidereonObservation>,
+        Vec<SidereonSppDopplerObservation>,
+        SidereonSppInputsV2,
+    ) {
+        let observations = inputs
+            .observations
+            .iter()
+            .zip(tokens)
+            .map(|(obs, token)| SidereonObservation {
+                sat_id: token.as_ptr(),
+                pseudorange_m: obs.pseudorange_m,
+            })
+            .collect::<Vec<_>>();
+        let c_doppler = doppler_observations
+            .iter()
+            .zip(tokens)
+            .map(|(obs, token)| SidereonSppDopplerObservation {
+                sat_id: token.as_ptr(),
+                doppler_hz: obs.doppler_hz,
+                carrier_hz: obs.carrier_hz,
+                sat_clock_drift_s_s: obs.sat_clock_drift_s_s,
+            })
+            .collect::<Vec<_>>();
+
+        let mut c_inputs = MaybeUninit::<SidereonSppInputsV2>::uninit();
+        let status = unsafe { sidereon_spp_inputs_v2_init(c_inputs.as_mut_ptr()) };
+        assert_eq!(status, SidereonStatus::Ok);
+        let mut c_inputs = unsafe { c_inputs.assume_init() };
+        c_inputs.base = SidereonSppInputs {
+            observations: observations.as_ptr(),
+            observation_count: observations.len(),
+            t_rx_j2000_s: inputs.t_rx_j2000_s,
+            t_rx_second_of_day_s: inputs.t_rx_second_of_day_s,
+            day_of_year: inputs.day_of_year,
+            initial_guess: inputs.initial_guess,
+            ionosphere: false,
+            troposphere: false,
+            klobuchar_alpha: [0.0; 4],
+            klobuchar_beta: [0.0; 4],
+            pressure_hpa: SurfaceMet::default().pressure_hpa,
+            temperature_k: SurfaceMet::default().temperature_k,
+            relative_humidity: SurfaceMet::default().relative_humidity,
+            with_geodetic: true,
+        };
+        (observations, c_doppler, c_inputs)
+    }
+
+    fn assert_close(got: f64, want: f64, tol: f64) {
+        assert!(
+            (got - want).abs() <= tol,
+            "got {got:e}, want {want:e}, tol {tol:e}"
+        );
+    }
+
+    #[test]
+    fn spp_doppler_solution_surfaces_receiver_drift_and_covariance() {
+        let sp3 = fixture_sp3();
+        let sats = visible_gps(&sp3);
+        assert!(sats.len() >= 4);
+        let (inputs, doppler_observations) = core_inputs(&sp3, &sats);
+        let expected = core_solve_with_doppler_velocity(&sp3, &inputs, &doppler_observations, true)
+            .expect("core combined solve");
+        assert!(expected.velocity.is_some());
+        assert!(expected.receiver.rx_clock_drift_s_s.is_some());
+
+        let tokens = sats
+            .iter()
+            .map(|sat| CString::new(sat.to_string()).expect("sat token"))
+            .collect::<Vec<_>>();
+        let (observations, c_doppler, c_inputs) = c_inputs(&inputs, &doppler_observations, &tokens);
+        let sp3_handle = SidereonSp3 { inner: sp3 };
+        let mut solution = ptr::null_mut();
+        let status = unsafe {
+            sidereon_solve_spp_with_doppler_velocity(
+                &sp3_handle,
+                &c_inputs,
+                c_doppler.as_ptr(),
+                c_doppler.len(),
+                &mut solution,
+            )
+        };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert!(!solution.is_null());
+        drop(observations);
+
+        let mut has_velocity = false;
+        let status =
+            unsafe { sidereon_spp_doppler_solution_has_velocity(solution, &mut has_velocity) };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert!(has_velocity);
+
+        let mut velocity_error = SidereonSppDopplerVelocityErrorKind::InvalidInput;
+        let status = unsafe {
+            sidereon_spp_doppler_solution_velocity_error_kind(solution, &mut velocity_error)
+        };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert_eq!(velocity_error, SidereonSppDopplerVelocityErrorKind::None);
+
+        let mut receiver = ptr::null_mut();
+        let status = unsafe { sidereon_spp_doppler_solution_receiver(solution, &mut receiver) };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert!(!receiver.is_null());
+
+        let mut position = [0.0; 3];
+        let status = unsafe { sidereon_spp_solution_position(receiver, position.as_mut_ptr(), 3) };
+        assert_eq!(status, SidereonStatus::Ok);
+        for (got, want) in position.iter().zip(expected.receiver.position.as_array()) {
+            assert_close(*got, want, 1.0e-8);
+        }
+
+        let mut drift_present = false;
+        let mut drift = 0.0;
+        let status = unsafe {
+            sidereon_spp_solution_rx_clock_drift_s_s(receiver, &mut drift_present, &mut drift)
+        };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert!(drift_present);
+        assert_close(
+            drift,
+            expected.receiver.rx_clock_drift_s_s.expect("clock drift"),
+            1.0e-18,
+        );
+
+        let mut covariance = [0.0; 9];
+        let status = unsafe {
+            sidereon_spp_solution_position_covariance_ecef_m2(receiver, covariance.as_mut_ptr(), 9)
+        };
+        assert_eq!(status, SidereonStatus::Ok);
+        for (got, want) in covariance.iter().zip(flatten_spp_mat3(
+            expected.receiver.position_covariance.ecef_m2,
+        )) {
+            assert_close(*got, want, 1.0e-12);
+        }
+
+        let mut velocity = ptr::null_mut();
+        let status = unsafe { sidereon_spp_doppler_solution_velocity(solution, &mut velocity) };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert!(!velocity.is_null());
+
+        let mut velocity_xyz = [0.0; 3];
+        let status =
+            unsafe { sidereon_velocity_solution_velocity(velocity, velocity_xyz.as_mut_ptr(), 3) };
+        assert_eq!(status, SidereonStatus::Ok);
+        let expected_velocity = expected.velocity.as_ref().expect("velocity");
+        for (got, want) in velocity_xyz.iter().zip(expected_velocity.velocity_m_s) {
+            assert_close(*got, want, 1.0e-9);
+        }
+
+        unsafe {
+            sidereon_velocity_solution_free(velocity);
+            sidereon_spp_solution_free(receiver);
+            sidereon_spp_doppler_solution_free(solution);
+        }
     }
 }
