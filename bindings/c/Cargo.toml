@@ -1,6 +1,6 @@
 [package]
 name = "sidereon-c"
-version = "0.16.1"
+version = "0.17.0"
 authors = []
 edition = "2021"
 description = "C ABI bindings over the sidereon ergonomic API: opaque handles, integer error codes, caller-allocated buffers"
@@ -19,8 +19,8 @@ crate-type = ["cdylib", "staticlib"]
 # lives here: every solve delegates to a `sidereon` entry point, which in turn
 # delegates to `sidereon-core`. The numbers are exactly what the engine produces.
 # Dev mode for the local core surface.
-sidereon = "0.16.1"
-sidereon-core = "0.16.1"
+sidereon = "0.17.0"
+sidereon-core = "0.17.0"
 serde_json = "1"
 # The generic data-driven trust-region least-squares engine the headline TRLS
 # entry points marshal to. Not re-exported by the `sidereon` facade, so it is a
