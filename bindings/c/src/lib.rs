@@ -104,7 +104,7 @@ use sidereon_core::atmosphere::ionosphere::{
     NequickGRayEval, TecGridSamples as CoreTecGridSamples, TecSample as CoreTecSample,
     TecSamplesError,
 };
-use sidereon_core::atmosphere::troposphere::Met;
+use sidereon_core::atmosphere::troposphere::{MappingModel, Met};
 use sidereon_core::bias::{
     bias_epoch_instant, BiasEpoch, BiasKind, BiasMode, BiasRecord, BiasSet, BiasTarget,
     ClockReferenceObservables, CodeDcbOptions,
@@ -136,15 +136,29 @@ use sidereon_core::constellation::{
     Validation as ConstValidation,
 };
 use sidereon_core::ephemeris::{
-    align_clock_reference, clock_reference_offset, merge, EpochAgreement, MergeCombine, MergeFlag,
-    MergeOptions, MergeReport, PreciseEphemerisInterpolant, PreciseEphemerisSample,
-    PreciseEphemerisSamples, PreciseInterpolantError, PreciseSamplesError, Sp3, Sp3State,
+    align_clock_reference, clock_reference_offset, merge, precise_interpolant_store_checksum64,
+    EpochAgreement, MergeCombine, MergeFlag, MergeOptions, MergeReport,
+    MmapPreciseEphemerisInterpolant, PreciseEphemerisInterpolant, PreciseEphemerisSample,
+    PreciseEphemerisSamples, PreciseInterpolantError, PreciseInterpolantStoreError,
+    PreciseSamplesError, Sp3, Sp3State,
 };
 use sidereon_core::ephemeris::{
     sample as ephemeris_sample, BroadcastEphemeris, EphemerisSampleRow, EphemerisSampleStatus,
 };
 use sidereon_core::frame::{
     geocentric_neu_basis, geodetic_to_itrf, itrf_to_geodetic, ItrfPositionM, Wgs84Geodetic,
+};
+use sidereon_core::geofence::{
+    containment as geofence_containment, containment_probability as geofence_probability,
+    containment_probability_with_options as geofence_probability_with_options,
+    crossing_probability as geofence_crossing_probability,
+    crossing_probability_with_options as geofence_crossing_probability_with_options,
+    distance_to_boundary as geofence_distance_to_boundary, CrossingEvent as CoreGeofenceEvent,
+    CrossingKind as CoreGeofenceCrossingKind, Fence as CoreGeofence,
+    GeofenceError as CoreGeofenceError, GeofencePositionEstimate as CoreGeofencePositionEstimate,
+    PositionUncertainty as CoreGeofenceUncertainty,
+    ProbabilityHysteresis as CoreGeofenceHysteresis, ProbabilityMethod as CoreGeofenceMethod,
+    ProbabilityOptions as CoreGeofenceOptions,
 };
 use sidereon_core::geoid::{
     ellipsoidal_height_m, geoid_undulation, orthometric_height_m, Egm2008GridSpacing,
@@ -161,11 +175,13 @@ use sidereon_core::geometry_quality::{
 };
 use sidereon_core::ils::{bounded_ils_search, lambda_ils_search, IlsError, IlsResult};
 use sidereon_core::observables::{
+    emission_media_batch_at_j2000_s as observables_emission_media_batch_at_j2000_s,
     predict as observables_predict, predict_ranges as observables_predict_ranges,
-    ObservableEphemerisSource, ObservableStateBatch,
-    ObservableStateElementStatus as CoreObservableStateElementStatus, ObservablesError,
-    PredictOptions, PredictedObservables, RangePrediction, RangePredictionRequest,
-    OBSERVABLE_STATE_MISSING_POSITION_ECEF_M,
+    EmissionMediaBatch, EmissionMediaBatchOptions, EmissionMediaStatus, ObservableEphemerisSource,
+    ObservableIonosphereCorrection, ObservableMediaOptions, ObservableStateBatch,
+    ObservableStateElementStatus as CoreObservableStateElementStatus,
+    ObservableTroposphereCorrection, ObservablesError, PredictOptions, PredictedObservables,
+    RangePrediction, RangePredictionRequest, OBSERVABLE_STATE_MISSING_POSITION_ECEF_M,
 };
 use sidereon_core::orbit::{
     drift as reduced_orbit_drift_core,
@@ -188,9 +204,18 @@ use sidereon_core::orbit::{
     ReducedOrbitSourceError, ReducedOrbitSourceFitOptions, ReducedOrbitSourceSampling,
 };
 use sidereon_core::positioning::{
-    solve_broadcast, solve_with_fallback, BroadcastReason, Corrections, EphemerisSource,
-    FallbackError, FixSource, KlobucharCoeffs, Observation, ReceiverSolution, RobustConfig,
-    SolveInputs, SolvePolicy, SurfaceMet,
+    solve_broadcast, solve_static as core_solve_static,
+    solve_with_doppler_velocity as core_solve_with_doppler_velocity, solve_with_fallback,
+    BroadcastReason, Corrections, DopplerObservation as CoreDopplerObservation, EphemerisSource,
+    FallbackError, FixSource, KlobucharCoeffs, Observation, ReceiverSolution,
+    RejectionReason as CoreSppRejectionReason, RobustConfig, SolveInputs, SolvePolicy,
+    StaticClockBias as CoreStaticClockBias, StaticEpoch as CoreStaticEpoch,
+    StaticEpochInfluence as CoreStaticEpochInfluence,
+    StaticInfluenceStatus as CoreStaticInfluenceStatus, StaticResidual as CoreStaticResidual,
+    StaticSatelliteBatchInfluence as CoreStaticSatelliteBatchInfluence,
+    StaticSatelliteInfluence as CoreStaticSatelliteInfluence, StaticSolution as CoreStaticSolution,
+    StaticSolutionMetadata as CoreStaticSolutionMetadata, StaticSolveError as CoreStaticSolveError,
+    StaticSolveOptions as CoreStaticSolveOptions, SurfaceMet,
 };
 use sidereon_core::ppp_corrections::{CivilDateTime, CodeBiasOptions as PppCodeBiasOptions};
 use sidereon_core::precise_positioning::defaults as ppp_defaults;
@@ -294,7 +319,7 @@ use sidereon_core::terrain_store::{
     TerrainStoreTileIndex as CoreTerrainStoreTileIndex, VerticalDatum as CoreVerticalDatum,
 };
 use sidereon_core::velocity::{
-    VelocityObservable, VelocityObservation, VelocitySolution, VelocitySolveOptions,
+    VelocityError, VelocityObservable, VelocityObservation, VelocitySolution, VelocitySolveOptions,
 };
 use sidereon_core::{Error as CoreError, GnssSatelliteId, GnssSystem};
 
@@ -473,6 +498,7 @@ mod frame;
 mod frame_catalog;
 mod geodesic;
 mod geodetic_time_series;
+mod geofence;
 mod geoid;
 mod geometry;
 mod glonass;
@@ -492,6 +518,7 @@ mod orbit;
 mod orbit_fit;
 mod ppp;
 mod precise;
+mod precise_artifact;
 mod raim;
 mod range;
 mod reduced;
@@ -515,6 +542,7 @@ mod spk;
 mod spp;
 mod ssr;
 mod staleness;
+mod static_positioning;
 mod tca;
 mod tdm;
 mod terrain;
@@ -551,6 +579,7 @@ pub use frame::*;
 pub use frame_catalog::*;
 pub use geodesic::*;
 pub use geodetic_time_series::*;
+pub use geofence::*;
 pub use geoid::*;
 pub use geometry::*;
 pub use glonass::*;
@@ -570,6 +599,7 @@ pub use orbit::*;
 pub use orbit_fit::*;
 pub use ppp::*;
 pub use precise::*;
+pub use precise_artifact::*;
 pub use raim::*;
 pub use range::*;
 pub use reduced::*;
@@ -593,6 +623,7 @@ pub use spk::*;
 pub use spp::*;
 pub use ssr::*;
 pub use staleness::*;
+pub use static_positioning::*;
 pub use tca::*;
 pub use tdm::*;
 pub use terrain::*;
@@ -2745,7 +2776,9 @@ fn guard_dop<T>(
 fn map_observables_error(fn_name: &str, err: ObservablesError) -> SidereonStatus {
     set_last_error(format!("{fn_name}: {err}"));
     match err {
-        ObservablesError::InvalidInput { .. } => SidereonStatus::InvalidArgument,
+        ObservablesError::InvalidInput { .. } | ObservablesError::Media(_) => {
+            SidereonStatus::InvalidArgument
+        }
         ObservablesError::NoEphemeris | ObservablesError::Ephemeris(_) => SidereonStatus::Solve,
     }
 }
@@ -4000,6 +4033,7 @@ fn observable_state_result_status(result: &Result<(), ObservablesError>) -> Side
     match result {
         Ok(()) => SidereonStatus::Ok,
         Err(ObservablesError::InvalidInput { .. })
+        | Err(ObservablesError::Media(_))
         | Err(ObservablesError::Ephemeris(CoreError::InvalidInput(_))) => {
             SidereonStatus::InvalidArgument
         }
