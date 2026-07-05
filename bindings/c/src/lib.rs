@@ -1095,6 +1095,8 @@ fn time_scale_from_c_code(
         value if value == SidereonTimeScale::Bdt as u32 => Ok(TimeScale::Bdt),
         value if value == SidereonTimeScale::Glonasst as u32 => Ok(TimeScale::Glonasst),
         value if value == SidereonTimeScale::Qzsst as u32 => Ok(TimeScale::Qzsst),
+        value if value == SidereonTimeScale::Tcg as u32 => Ok(TimeScale::Tcg),
+        value if value == SidereonTimeScale::Tcb as u32 => Ok(TimeScale::Tcb),
         _ => {
             set_last_error(format!("{fn_name}: invalid {arg_name} time scale {scale}"));
             Err(SidereonStatus::InvalidArgument)
@@ -1113,6 +1115,8 @@ fn time_scale_to_c_code(scale: TimeScale) -> u32 {
         TimeScale::Bdt => SidereonTimeScale::Bdt as u32,
         TimeScale::Glonasst => SidereonTimeScale::Glonasst as u32,
         TimeScale::Qzsst => SidereonTimeScale::Qzsst as u32,
+        TimeScale::Tcg => SidereonTimeScale::Tcg as u32,
+        TimeScale::Tcb => SidereonTimeScale::Tcb as u32,
     }
 }
 
@@ -2326,6 +2330,10 @@ pub enum SidereonTimeScale {
     Glonasst = 7,
     /// QZSS system time (steered to GPST).
     Qzsst = 8,
+    /// Geocentric Coordinate Time.
+    Tcg = 9,
+    /// Barycentric Coordinate Time.
+    Tcb = 10,
 }
 
 const _: () = assert!(
@@ -3295,6 +3303,15 @@ fn terrain_store_error_to_c(err: &TerrainStoreError) -> SidereonTerrainStoreErro
             out.kind = SidereonTerrainStoreErrorKind::DuplicateTile as u32;
             out.lat_index = *lat_index;
             out.lon_index = *lon_index;
+        }
+        TerrainStoreError::TileIdMismatch {
+            path,
+            expected,
+            found,
+        } => {
+            out.kind = SidereonTerrainStoreErrorKind::TileIdMismatch as u32;
+            out.path = fixed_c_chars(&path.display().to_string());
+            out.message = fixed_c_chars(&format!("expected tile {expected:?}, parsed {found:?}"));
         }
         TerrainStoreError::Checksum {
             lat_index,

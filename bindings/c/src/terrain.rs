@@ -41,6 +41,8 @@ pub enum SidereonTerrainStoreErrorKind {
     DuplicateTile = 5,
     /// A tile payload checksum did not match its index record.
     Checksum = 6,
+    /// A DTED input's parsed origin did not match the supplied tile id.
+    TileIdMismatch = 7,
 }
 
 /// Last typed terrain store error for this thread.

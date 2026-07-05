@@ -45,9 +45,9 @@
 #include <stdlib.h>
 
 #define SIDEREON_VERSION_MAJOR 0
-#define SIDEREON_VERSION_MINOR 15
+#define SIDEREON_VERSION_MINOR 16
 #define SIDEREON_VERSION_PATCH 0
-#define SIDEREON_VERSION_STRING "0.15.0"
+#define SIDEREON_VERSION_STRING "0.16.0"
 
 #define BIAS_OBS_C_BYTES (MAX_BIAS_OBS_BYTES + 1)
 
@@ -846,6 +846,14 @@ typedef enum SidereonTimeScale {
      * QZSS system time (steered to GPST).
      */
     SIDEREON_TIME_SCALE_QZSST = 8,
+    /**
+     * Geocentric Coordinate Time.
+     */
+    SIDEREON_TIME_SCALE_TCG = 9,
+    /**
+     * Barycentric Coordinate Time.
+     */
+    SIDEREON_TIME_SCALE_TCB = 10,
 } SidereonTimeScale;
 
 /**
@@ -1314,6 +1322,10 @@ typedef enum SidereonTerrainStoreErrorKind {
      * A tile payload checksum did not match its index record.
      */
     SIDEREON_TERRAIN_STORE_ERROR_KIND_CHECKSUM = 6,
+    /**
+     * A DTED input's parsed origin did not match the supplied tile id.
+     */
+    SIDEREON_TERRAIN_STORE_ERROR_KIND_TILE_ID_MISMATCH = 7,
 } SidereonTerrainStoreErrorKind;
 
 /**

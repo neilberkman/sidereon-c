@@ -972,7 +972,10 @@ pub unsafe extern "C" fn sidereon_rinex_clock_to_text(
                 out_required
             ));
             let clock = c_try!(require_ref(clock, "sidereon_rinex_clock_to_text", "clock"));
-            let text = clock.inner.to_rinex_string();
+            let text = c_try!(clock.inner.to_rinex_string().map_err(|err| {
+                set_last_error(format!("sidereon_rinex_clock_to_text: {err}"));
+                SidereonStatus::InvalidArgument
+            }));
             c_try!(copy_prefix_to_c(
                 "sidereon_rinex_clock_to_text",
                 "out",
