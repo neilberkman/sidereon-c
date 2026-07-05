@@ -3007,6 +3007,43 @@ static int exercise_iono_surface(const char *ionex_path) {
             sidereon_ionex_free(ionex);
             return 1;
         }
+        if (c == 0) {
+            SidereonIonexSlantDelayEvaluation eval;
+            if (sidereon_ionex_slant_delay_with_policy(
+                    ionex, bits_to_f64(ic->lat_deg_bits), bits_to_f64(ic->lon_deg_bits),
+                    bits_to_f64(ic->az_deg_bits), bits_to_f64(ic->el_deg_bits),
+                    ic->epoch_j2000_s, bits_to_f64(ic->frequency_hz_bits),
+                    SIDEREON_IONEX_COVERAGE_POLICY_STRICT, &eval) != SIDEREON_STATUS_OK ||
+                f64_to_bits(eval.delay_m) != ic->delay_m_bits ||
+                eval.status != SIDEREON_IONEX_SLANT_DELAY_STATUS_VALID ||
+                eval.coverage_error != SIDEREON_IONEX_COVERAGE_ERROR_KIND_NONE) {
+                sidereon_ionex_free(ionex);
+                return fail("sidereon_ionex_slant_delay_with_policy valid status", 1);
+            }
+        }
+        if (strcmp(ic->name, "epoch_before_hold") == 0) {
+            SidereonIonexSlantDelayEvaluation held;
+            if (sidereon_ionex_slant_delay_with_policy(
+                    ionex, bits_to_f64(ic->lat_deg_bits), bits_to_f64(ic->lon_deg_bits),
+                    bits_to_f64(ic->az_deg_bits), bits_to_f64(ic->el_deg_bits),
+                    ic->epoch_j2000_s, bits_to_f64(ic->frequency_hz_bits),
+                    SIDEREON_IONEX_COVERAGE_POLICY_HOLD, &held) != SIDEREON_STATUS_OK ||
+                f64_to_bits(held.delay_m) != ic->delay_m_bits ||
+                held.status != SIDEREON_IONEX_SLANT_DELAY_STATUS_HELD ||
+                held.coverage_error !=
+                    SIDEREON_IONEX_COVERAGE_ERROR_KIND_EPOCH_BEFORE_FIRST_MAP) {
+                sidereon_ionex_free(ionex);
+                return fail("sidereon_ionex_slant_delay_with_policy held status", 1);
+            }
+            if (sidereon_ionex_slant_delay_with_policy(
+                    ionex, bits_to_f64(ic->lat_deg_bits), bits_to_f64(ic->lon_deg_bits),
+                    bits_to_f64(ic->az_deg_bits), bits_to_f64(ic->el_deg_bits),
+                    ic->epoch_j2000_s, bits_to_f64(ic->frequency_hz_bits),
+                    SIDEREON_IONEX_COVERAGE_POLICY_STRICT, &held) == SIDEREON_STATUS_OK) {
+                sidereon_ionex_free(ionex);
+                return fail("sidereon_ionex_slant_delay_with_policy strict coverage", 1);
+            }
+        }
     }
 
     /* IONEX argument gates. */

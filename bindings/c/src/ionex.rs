@@ -6,6 +6,54 @@ pub struct SidereonIonex {
     pub(crate) inner: Ionex,
 }
 
+/// Policy applied when an IONEX slant-delay request is outside product coverage.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonIonexCoveragePolicy {
+    /// Return a typed error when the query is outside coverage.
+    Strict = 0,
+    /// Hold the nearest map or grid edge and return a held status.
+    Hold = 1,
+}
+
+/// Successful IONEX slant-delay coverage status.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonIonexSlantDelayStatus {
+    /// The query was inside product coverage.
+    Valid = 0,
+    /// The value was produced by the explicit hold policy.
+    Held = 1,
+}
+
+/// IONEX coverage miss associated with a held slant-delay value.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonIonexCoverageErrorKind {
+    /// No coverage error is associated with the value.
+    None = 0,
+    /// Query epoch precedes the first map epoch.
+    EpochBeforeFirstMap = 1,
+    /// Query epoch follows the last map epoch.
+    EpochAfterLastMap = 2,
+    /// Pierce-point latitude is outside the latitude nodes.
+    LatitudeOutOfRange = 3,
+    /// Pierce-point longitude is outside the longitude nodes.
+    LongitudeOutOfRange = 4,
+}
+
+/// IONEX slant-delay value plus explicit coverage status.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonIonexSlantDelayEvaluation {
+    /// Slant ionospheric group delay in meters.
+    pub delay_m: f64,
+    /// One of SidereonIonexSlantDelayStatus_*.
+    pub status: u32,
+    /// One of SidereonIonexCoverageErrorKind_*.
+    pub coverage_error: u32,
+}
+
 /// Standalone GPS broadcast Klobuchar ionospheric group delay in the model's
 /// native units (positive meters). This is the bit-exact (0-ULP) entry: it feeds
 /// the kernel directly with no angle or time conversion.
@@ -93,8 +141,10 @@ pub unsafe extern "C" fn sidereon_ionex_parse(
 /// the satellite azimuth/elevation are in degrees; the pierce point rides on the
 /// IONEX shell so no receiver height enters. `epoch_j2000_s` is integer seconds
 /// since J2000, landing exactly on the product's epoch axis. `frequency_hz` is
-/// the carrier the dispersive delay is reported on. The numbers are exactly what
-/// the engine produces.
+/// the carrier the dispersive delay is reported on. Requests outside the product
+/// time or grid coverage hold to the nearest product sample, matching the
+/// binding's legacy scalar behavior. The numbers are exactly what the engine
+/// produces under that coverage policy.
 ///
 /// Safety: ionex must be a live handle from sidereon_ionex_parse; out_delay_m
 /// must point to a double.
@@ -116,30 +166,76 @@ pub unsafe extern "C" fn sidereon_ionex_slant_delay(
             "out_delay_m"
         ));
         *out_delay_m = 0.0;
-        let ionex = c_try!(require_ref(ionex, "sidereon_ionex_slant_delay", "ionex"));
-        let receiver = c_try!(geodetic_to_wgs84(
-            "sidereon_ionex_slant_delay",
-            "receiver",
-            SidereonGeodetic {
-                lat_rad: lat_deg * IONO_DEG_TO_RAD,
-                lon_rad: lon_deg * IONO_DEG_TO_RAD,
-                height_m: 0.0,
-            }
-        ));
-        let delay = match ionex_slant_delay(
-            &ionex.inner,
-            receiver,
-            elevation_deg * IONO_DEG_TO_RAD,
-            azimuth_deg * IONO_DEG_TO_RAD,
+        let request = IonexSlantDelayCRequest {
+            lat_deg,
+            lon_deg,
+            azimuth_deg,
+            elevation_deg,
             epoch_j2000_s,
             frequency_hz,
-        ) {
-            Ok(delay) => delay,
-            Err(err) => return map_iono_error("sidereon_ionex_slant_delay", err),
         };
-        *out_delay_m = delay;
+        let evaluation = c_try!(ionex_slant_delay_eval_from_c(
+            "sidereon_ionex_slant_delay",
+            ionex,
+            request,
+            IonexCoveragePolicy::Hold,
+        ));
+        *out_delay_m = evaluation.delay_m;
         SidereonStatus::Ok
     })
+}
+
+/// IONEX vertical-TEC-grid slant ionospheric group delay with explicit coverage
+/// policy and status. Receiver geodetic latitude/longitude and satellite
+/// azimuth/elevation are in degrees; `epoch_j2000_s` is integer seconds since
+/// J2000; `frequency_hz` is the carrier the dispersive delay is reported on.
+///
+/// Safety: ionex must be a live handle from sidereon_ionex_parse; out must
+/// point to a SidereonIonexSlantDelayEvaluation.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ionex_slant_delay_with_policy(
+    ionex: *const SidereonIonex,
+    lat_deg: f64,
+    lon_deg: f64,
+    azimuth_deg: f64,
+    elevation_deg: f64,
+    epoch_j2000_s: i64,
+    frequency_hz: f64,
+    policy: u32,
+    out: *mut SidereonIonexSlantDelayEvaluation,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_ionex_slant_delay_with_policy",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out,
+                "sidereon_ionex_slant_delay_with_policy",
+                "out"
+            ));
+            *out = zero_ionex_slant_delay_evaluation();
+            let policy = c_try!(ionex_coverage_policy_from_c(
+                "sidereon_ionex_slant_delay_with_policy",
+                policy
+            ));
+            let request = IonexSlantDelayCRequest {
+                lat_deg,
+                lon_deg,
+                azimuth_deg,
+                elevation_deg,
+                epoch_j2000_s,
+                frequency_hz,
+            };
+            let evaluation = c_try!(ionex_slant_delay_eval_from_c(
+                "sidereon_ionex_slant_delay_with_policy",
+                ionex,
+                request,
+                policy,
+            ));
+            *out = ionex_slant_delay_evaluation_to_c(evaluation);
+            SidereonStatus::Ok
+        },
+    )
 }
 
 /// Write the number of TEC map epochs in the product to *out_count.
@@ -921,6 +1017,107 @@ pub unsafe extern "C" fn sidereon_nequick_g_delay_m(
             Err(err) => map_iono_error("sidereon_nequick_g_delay_m", err),
         }
     })
+}
+
+fn zero_ionex_slant_delay_evaluation() -> SidereonIonexSlantDelayEvaluation {
+    SidereonIonexSlantDelayEvaluation {
+        delay_m: 0.0,
+        status: SidereonIonexSlantDelayStatus::Valid as u32,
+        coverage_error: SidereonIonexCoverageErrorKind::None as u32,
+    }
+}
+
+fn ionex_coverage_policy_from_c(
+    fn_name: &str,
+    policy: u32,
+) -> Result<IonexCoveragePolicy, SidereonStatus> {
+    match policy {
+        value if value == SidereonIonexCoveragePolicy::Strict as u32 => {
+            Ok(IonexCoveragePolicy::Strict)
+        }
+        value if value == SidereonIonexCoveragePolicy::Hold as u32 => Ok(IonexCoveragePolicy::Hold),
+        _ => {
+            set_last_error(format!("{fn_name}: invalid IONEX coverage policy"));
+            Err(SidereonStatus::InvalidArgument)
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct IonexSlantDelayCRequest {
+    lat_deg: f64,
+    lon_deg: f64,
+    azimuth_deg: f64,
+    elevation_deg: f64,
+    epoch_j2000_s: i64,
+    frequency_hz: f64,
+}
+
+unsafe fn ionex_slant_delay_eval_from_c(
+    fn_name: &str,
+    ionex: *const SidereonIonex,
+    request: IonexSlantDelayCRequest,
+    policy: IonexCoveragePolicy,
+) -> Result<IonexSlantDelayEvaluation, SidereonStatus> {
+    let ionex = require_ref(ionex, fn_name, "ionex")?;
+    let receiver = geodetic_to_wgs84(
+        fn_name,
+        "receiver",
+        SidereonGeodetic {
+            lat_rad: request.lat_deg * IONO_DEG_TO_RAD,
+            lon_rad: request.lon_deg * IONO_DEG_TO_RAD,
+            height_m: 0.0,
+        },
+    )?;
+    match ionex_slant_delay_with_policy(
+        &ionex.inner,
+        receiver,
+        request.elevation_deg * IONO_DEG_TO_RAD,
+        request.azimuth_deg * IONO_DEG_TO_RAD,
+        request.epoch_j2000_s,
+        request.frequency_hz,
+        policy,
+    ) {
+        Ok(evaluation) => Ok(evaluation),
+        Err(err) => Err(map_iono_error(fn_name, err)),
+    }
+}
+
+fn ionex_slant_delay_evaluation_to_c(
+    evaluation: IonexSlantDelayEvaluation,
+) -> SidereonIonexSlantDelayEvaluation {
+    let (status, coverage_error) = match evaluation.status {
+        IonexSlantDelayStatus::Valid => (
+            SidereonIonexSlantDelayStatus::Valid as u32,
+            SidereonIonexCoverageErrorKind::None as u32,
+        ),
+        IonexSlantDelayStatus::Held(error) => (
+            SidereonIonexSlantDelayStatus::Held as u32,
+            ionex_coverage_error_to_c(error),
+        ),
+    };
+    SidereonIonexSlantDelayEvaluation {
+        delay_m: evaluation.delay_m,
+        status,
+        coverage_error,
+    }
+}
+
+fn ionex_coverage_error_to_c(error: IonexCoverageError) -> u32 {
+    match error {
+        IonexCoverageError::EpochBeforeFirstMap => {
+            SidereonIonexCoverageErrorKind::EpochBeforeFirstMap as u32
+        }
+        IonexCoverageError::EpochAfterLastMap => {
+            SidereonIonexCoverageErrorKind::EpochAfterLastMap as u32
+        }
+        IonexCoverageError::LatitudeOutOfRange => {
+            SidereonIonexCoverageErrorKind::LatitudeOutOfRange as u32
+        }
+        IonexCoverageError::LongitudeOutOfRange => {
+            SidereonIonexCoverageErrorKind::LongitudeOutOfRange as u32
+        }
+    }
 }
 
 /// Map a core ionosphere error to a status code: malformed inputs report

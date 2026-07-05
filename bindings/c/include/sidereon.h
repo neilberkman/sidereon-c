@@ -1316,6 +1316,179 @@ typedef enum SidereonCarrierBand {
 } SidereonCarrierBand;
 
 /**
+ * Error-state update algorithm used by a GNSS/INS fusion filter.
+ */
+typedef enum SidereonFusionFilterKind {
+    /**
+     * Extended Kalman filter update.
+     */
+    SIDEREON_FUSION_FILTER_KIND_EKF = 0,
+    /**
+     * Unscented Kalman filter update.
+     */
+    SIDEREON_FUSION_FILTER_KIND_UKF = 1,
+} SidereonFusionFilterKind;
+
+/**
+ * Error-state covariance layout used by a GNSS/INS fusion filter.
+ */
+typedef enum SidereonFusionErrorStateLayout {
+    /**
+     * Fifteen-state layout: position, velocity, attitude, accelerometer bias,
+     * and gyroscope bias.
+     */
+    SIDEREON_FUSION_ERROR_STATE_LAYOUT_FIFTEEN = 0,
+    /**
+     * Twenty-one-state layout adding accelerometer and gyroscope scale factors.
+     */
+    SIDEREON_FUSION_ERROR_STATE_LAYOUT_TWENTY_ONE = 1,
+} SidereonFusionErrorStateLayout;
+
+/**
+ * IMU preset grade for built-in stochastic parameters.
+ */
+typedef enum SidereonFusionImuGrade {
+    /**
+     * Low-cost MEMS class.
+     */
+    SIDEREON_FUSION_IMU_GRADE_MEMS = 0,
+    /**
+     * Tactical class.
+     */
+    SIDEREON_FUSION_IMU_GRADE_TACTICAL = 1,
+    /**
+     * Navigation class.
+     */
+    SIDEREON_FUSION_IMU_GRADE_NAVIGATION = 2,
+} SidereonFusionImuGrade;
+
+/**
+ * Strapdown coning-correction selector.
+ */
+typedef enum SidereonFusionConingCorrection {
+    /**
+     * Do not apply coning correction.
+     */
+    SIDEREON_FUSION_CONING_CORRECTION_OFF = 0,
+} SidereonFusionConingCorrection;
+
+/**
+ * IMU sample payload selector.
+ */
+typedef enum SidereonFusionImuSampleKind {
+    /**
+     * Specific force and angular-rate sample.
+     */
+    SIDEREON_FUSION_IMU_SAMPLE_KIND_RATE = 0,
+    /**
+     * Sensor-integrated delta-velocity and delta-angle sample.
+     */
+    SIDEREON_FUSION_IMU_SAMPLE_KIND_INCREMENT = 1,
+} SidereonFusionImuSampleKind;
+
+/**
+ * Policy applied when an IONEX slant-delay request is outside product coverage.
+ */
+typedef enum SidereonIonexCoveragePolicy {
+    /**
+     * Return a typed error when the query is outside coverage.
+     */
+    SIDEREON_IONEX_COVERAGE_POLICY_STRICT = 0,
+    /**
+     * Hold the nearest map or grid edge and return a held status.
+     */
+    SIDEREON_IONEX_COVERAGE_POLICY_HOLD = 1,
+} SidereonIonexCoveragePolicy;
+
+/**
+ * Successful IONEX slant-delay coverage status.
+ */
+typedef enum SidereonIonexSlantDelayStatus {
+    /**
+     * The query was inside product coverage.
+     */
+    SIDEREON_IONEX_SLANT_DELAY_STATUS_VALID = 0,
+    /**
+     * The value was produced by the explicit hold policy.
+     */
+    SIDEREON_IONEX_SLANT_DELAY_STATUS_HELD = 1,
+} SidereonIonexSlantDelayStatus;
+
+/**
+ * IONEX coverage miss associated with a held slant-delay value.
+ */
+typedef enum SidereonIonexCoverageErrorKind {
+    /**
+     * No coverage error is associated with the value.
+     */
+    SIDEREON_IONEX_COVERAGE_ERROR_KIND_NONE = 0,
+    /**
+     * Query epoch precedes the first map epoch.
+     */
+    SIDEREON_IONEX_COVERAGE_ERROR_KIND_EPOCH_BEFORE_FIRST_MAP = 1,
+    /**
+     * Query epoch follows the last map epoch.
+     */
+    SIDEREON_IONEX_COVERAGE_ERROR_KIND_EPOCH_AFTER_LAST_MAP = 2,
+    /**
+     * Pierce-point latitude is outside the latitude nodes.
+     */
+    SIDEREON_IONEX_COVERAGE_ERROR_KIND_LATITUDE_OUT_OF_RANGE = 3,
+    /**
+     * Pierce-point longitude is outside the longitude nodes.
+     */
+    SIDEREON_IONEX_COVERAGE_ERROR_KIND_LONGITUDE_OUT_OF_RANGE = 4,
+} SidereonIonexCoverageErrorKind;
+
+/**
+ * Navigation modulation family for signal-analysis metrics.
+ */
+typedef enum SidereonSignalAnalysisModulationKind {
+    /**
+     * BPSK(n), with code rate n * 1.023 MHz.
+     */
+    SIDEREON_SIGNAL_ANALYSIS_MODULATION_KIND_BPSK = 0,
+    /**
+     * Sine-phased BOC(m,n).
+     */
+    SIDEREON_SIGNAL_ANALYSIS_MODULATION_KIND_BOC_SINE = 1,
+    /**
+     * Cosine-phased BOC(m,n).
+     */
+    SIDEREON_SIGNAL_ANALYSIS_MODULATION_KIND_BOC_COSINE = 2,
+    /**
+     * MBOC(6,1,1/11), the weighted BOC(1,1) and BOC(6,1) spectrum.
+     */
+    SIDEREON_SIGNAL_ANALYSIS_MODULATION_KIND_MBOC611_OVER11 = 3,
+    /**
+     * GPS L1C pilot TMBOC(6,1,4/33) spectrum.
+     */
+    SIDEREON_SIGNAL_ANALYSIS_MODULATION_KIND_TMBOC614_OVER33 = 4,
+    /**
+     * Galileo E1 CBOC(6,1,1/11) with positive high-rate component.
+     */
+    SIDEREON_SIGNAL_ANALYSIS_MODULATION_KIND_CBOC611_OVER11_PLUS = 5,
+    /**
+     * Galileo E1 CBOC(6,1,1/11) with negative high-rate component.
+     */
+    SIDEREON_SIGNAL_ANALYSIS_MODULATION_KIND_CBOC611_OVER11_MINUS = 6,
+} SidereonSignalAnalysisModulationKind;
+
+/**
+ * DLL thermal-noise processing selector.
+ */
+typedef enum SidereonSignalAnalysisDllProcessing {
+    /**
+     * Coherent early-minus-late processing.
+     */
+    SIDEREON_SIGNAL_ANALYSIS_DLL_PROCESSING_COHERENT = 0,
+    /**
+     * Non-coherent early-minus-late power processing.
+     */
+    SIDEREON_SIGNAL_ANALYSIS_DLL_PROCESSING_NON_COHERENT = 1,
+} SidereonSignalAnalysisDllProcessing;
+
+/**
  * Pseudorange variance model.
  */
 typedef enum SidereonPseudorangeVarianceModel {
@@ -2497,6 +2670,12 @@ typedef struct SidereonEphemeris SidereonEphemeris;
 typedef struct SidereonFdeSolution SidereonFdeSolution;
 
 /**
+ * Opaque GNSS/INS fusion filter. Create with sidereon_fusion_filter_create and
+ * release with sidereon_fusion_filter_free.
+ */
+typedef struct SidereonFusionFilter SidereonFusionFilter;
+
+/**
  * Network motion field handle. Create with sidereon_geodetic_network_field and
  * release with sidereon_geodetic_motion_field_free.
  */
@@ -2825,6 +3004,13 @@ typedef struct SidereonSatelliteConstellationPasses SidereonSatelliteConstellati
 typedef struct SidereonSbasBlock SidereonSbasBlock;
 
 typedef struct SidereonSbasCorrectionStore SidereonSbasCorrectionStore;
+
+/**
+ * Synthetic scenario simulation output. Create with
+ * sidereon_scenario_simulate_json and release with
+ * sidereon_scenario_simulation_free.
+ */
+typedef struct SidereonScenarioSimulation SidereonScenarioSimulation;
 
 /**
  * Stateful SGP4 decay latch. Opaque to C. Create with
@@ -6437,6 +6623,561 @@ typedef struct SidereonTerrestrialState {
 } SidereonTerrestrialState;
 
 /**
+ * Datasheet-level IMU stochastic parameters for fusion filter prediction.
+ */
+typedef struct SidereonFusionImuSpec {
+    /**
+     * Accelerometer velocity random walk in m/s per square-root second.
+     */
+    double accel_vrw_mps_sqrt_s;
+    /**
+     * Gyroscope angular random walk in rad per square-root second.
+     */
+    double gyro_arw_rad_sqrt_s;
+    /**
+     * Accelerometer bias instability in m/s^2.
+     */
+    double accel_bias_instab_mps2;
+    /**
+     * Gyroscope bias instability in rad/s.
+     */
+    double gyro_bias_instab_rps;
+    /**
+     * Accelerometer Gauss-Markov bias time constant in seconds.
+     */
+    double accel_bias_tau_s;
+    /**
+     * Gyroscope Gauss-Markov bias time constant in seconds.
+     */
+    double gyro_bias_tau_s;
+    /**
+     * Whether accel_scale_instab_ppm carries a value.
+     */
+    bool has_accel_scale_instab_ppm;
+    /**
+     * Accelerometer scale-factor instability in parts per million.
+     */
+    double accel_scale_instab_ppm;
+    /**
+     * Whether gyro_scale_instab_ppm carries a value.
+     */
+    bool has_gyro_scale_instab_ppm;
+    /**
+     * Gyroscope scale-factor instability in parts per million.
+     */
+    double gyro_scale_instab_ppm;
+} SidereonFusionImuSpec;
+
+/**
+ * Strapdown mechanization configuration.
+ */
+typedef struct SidereonFusionMechanizationConfig {
+    /**
+     * One of SidereonFusionConingCorrection_*.
+     */
+    uint32_t coning_correction;
+} SidereonFusionMechanizationConfig;
+
+/**
+ * Optional normalized-innovation screen for fusion measurement updates.
+ */
+typedef struct SidereonFusionInnovationGate {
+    /**
+     * Rejection threshold in normalized sigma units.
+     */
+    double threshold_sigma;
+    /**
+     * Minimum accepted rows required to apply an update after screening.
+     */
+    size_t min_rows;
+} SidereonFusionInnovationGate;
+
+/**
+ * Fusion filter configuration. Initialize with
+ * sidereon_fusion_filter_config_init before overriding fields.
+ */
+typedef struct SidereonFusionFilterConfig {
+    /**
+     * One of SidereonFusionFilterKind_*.
+     */
+    uint32_t filter_kind;
+    /**
+     * One of SidereonFusionErrorStateLayout_*.
+     */
+    uint32_t error_state_layout;
+    /**
+     * IMU stochastic model.
+     */
+    struct SidereonFusionImuSpec imu_spec;
+    /**
+     * Accelerometer bias subtracted from raw IMU samples before mechanization.
+     */
+    double imu_bias_accel_mps2[3];
+    /**
+     * Gyroscope bias subtracted from raw IMU samples before mechanization.
+     */
+    double imu_bias_gyro_rps[3];
+    /**
+     * Row-major accelerometer scale and misalignment matrix.
+     */
+    double imu_accel_scale_misalignment[9];
+    /**
+     * Row-major gyroscope scale and misalignment matrix.
+     */
+    double imu_gyro_scale_misalignment[9];
+    /**
+     * Strapdown mechanization options.
+     */
+    struct SidereonFusionMechanizationConfig mechanization;
+    /**
+     * Loose-coupling body-frame lever arm from IMU origin to GNSS antenna, meters.
+     */
+    double loose_lever_arm_body_m[3];
+    /**
+     * Whether loose_innovation_gate carries a loose-update screen.
+     */
+    bool has_loose_innovation_gate;
+    /**
+     * EKF loose-update innovation screen.
+     */
+    struct SidereonFusionInnovationGate loose_innovation_gate;
+    /**
+     * Tight-coupling body-frame lever arm from IMU origin to GNSS antenna, meters.
+     */
+    double tight_lever_arm_body_m[3];
+    /**
+     * Whether tight raw GNSS updates apply light-time correction.
+     */
+    bool tight_light_time;
+    /**
+     * Whether tight raw GNSS updates apply Sagnac correction.
+     */
+    bool tight_sagnac;
+    /**
+     * Initial tight receiver-clock bias variance in square meters.
+     */
+    double tight_initial_clock_bias_variance_m2;
+    /**
+     * Initial tight receiver-clock drift variance in (m/s)^2.
+     */
+    double tight_initial_clock_drift_variance_m2_s2;
+    /**
+     * Tight clock-bias random-walk spectral density in m^2/s.
+     */
+    double tight_clock_bias_random_walk_m2_s;
+    /**
+     * Tight clock-drift random-walk spectral density in m^2/s^3.
+     */
+    double tight_clock_drift_random_walk_m2_s3;
+    /**
+     * Whether tight_innovation_gate carries a tight-update screen.
+     */
+    bool has_tight_innovation_gate;
+    /**
+     * EKF tight-update innovation screen.
+     */
+    struct SidereonFusionInnovationGate tight_innovation_gate;
+    /**
+     * UKF sigma-point spread parameter.
+     */
+    double ukf_alpha;
+    /**
+     * UKF prior-distribution shape parameter.
+     */
+    double ukf_beta;
+    /**
+     * UKF secondary sigma-point scaling parameter.
+     */
+    double ukf_kappa;
+    /**
+     * Whether ukf_innovation_gate carries a UKF update screen.
+     */
+    bool has_ukf_innovation_gate;
+    /**
+     * UKF innovation screen used by loose and tight UKF updates.
+     */
+    struct SidereonFusionInnovationGate ukf_innovation_gate;
+    /**
+     * Retained IMU sample capacity for time-synchronization replay.
+     */
+    size_t time_sync_imu_capacity;
+    /**
+     * Retained checkpoint capacity for time-synchronization replay.
+     */
+    size_t time_sync_checkpoint_capacity;
+} SidereonFusionFilterConfig;
+
+/**
+ * Initial nominal navigation state for a fusion filter.
+ */
+typedef struct SidereonFusionNavState {
+    /**
+     * State epoch, seconds since J2000 on the caller's GNSS time scale.
+     */
+    double t_j2000_s;
+    /**
+     * IMU position in ECEF meters.
+     */
+    double position_ecef_m[3];
+    /**
+     * IMU velocity in ECEF meters per second.
+     */
+    double velocity_ecef_mps[3];
+    /**
+     * Row-major body-to-ECEF direction cosine matrix.
+     */
+    double attitude_body_to_ecef[9];
+    /**
+     * Closed-loop accelerometer bias estimate in m/s^2.
+     */
+    double accel_bias_mps2[3];
+    /**
+     * Closed-loop gyroscope bias estimate in rad/s.
+     */
+    double gyro_bias_rps[3];
+    /**
+     * Closed-loop accelerometer scale-factor estimate for the 21-state layout.
+     */
+    double accel_scale_factor[3];
+    /**
+     * Closed-loop gyroscope scale-factor estimate for the 21-state layout.
+     */
+    double gyro_scale_factor[3];
+} SidereonFusionNavState;
+
+/**
+ * IMU sample for inertial propagation.
+ */
+typedef struct SidereonFusionImuSample {
+    /**
+     * Sample end epoch, seconds since J2000.
+     */
+    double t_j2000_s;
+    /**
+     * One of SidereonFusionImuSampleKind_*.
+     */
+    uint32_t kind;
+    /**
+     * Body-frame specific force in m/s^2 for rate samples.
+     */
+    double specific_force_mps2[3];
+    /**
+     * Body-frame angular rate in rad/s for rate samples.
+     */
+    double angular_rate_rps[3];
+    /**
+     * Body-frame delta velocity in m/s for increment samples.
+     */
+    double delta_velocity_mps[3];
+    /**
+     * Body-frame delta angle in radians for increment samples.
+     */
+    double delta_theta_rad[3];
+    /**
+     * Sample integration interval in seconds for increment samples.
+     */
+    double dt_s;
+} SidereonFusionImuSample;
+
+/**
+ * Current fusion filter state summary.
+ */
+typedef struct SidereonFusionState {
+    /**
+     * State epoch, seconds since J2000.
+     */
+    double t_j2000_s;
+    /**
+     * IMU position in ECEF meters.
+     */
+    double position_ecef_m[3];
+    /**
+     * IMU velocity in ECEF meters per second.
+     */
+    double velocity_ecef_mps[3];
+    /**
+     * Row-major body-to-ECEF direction cosine matrix.
+     */
+    double attitude_body_to_ecef[9];
+    /**
+     * Accelerometer bias estimate in m/s^2.
+     */
+    double accel_bias_mps2[3];
+    /**
+     * Gyroscope bias estimate in rad/s.
+     */
+    double gyro_bias_rps[3];
+    /**
+     * Accelerometer scale-factor estimate.
+     */
+    double accel_scale_factor[3];
+    /**
+     * Gyroscope scale-factor estimate.
+     */
+    double gyro_scale_factor[3];
+    /**
+     * Error-state covariance dimension.
+     */
+    size_t covariance_dimension;
+    /**
+     * Last body angular rate relative to ECEF, resolved in body axes.
+     */
+    double last_body_rate_wrt_ecef_rps[3];
+    /**
+     * Tight receiver-clock range bias in meters.
+     */
+    double tight_clock_bias_m;
+    /**
+     * Tight receiver-clock drift in meters per second.
+     */
+    double tight_clock_drift_m_s;
+    /**
+     * Row-major 2x2 tight receiver-clock covariance.
+     */
+    double tight_clock_covariance[4];
+} SidereonFusionState;
+
+/**
+ * Retained history occupancy for time-synchronized updates.
+ */
+typedef struct SidereonFusionTimeSyncStatus {
+    /**
+     * Configured IMU sample capacity.
+     */
+    size_t imu_capacity;
+    /**
+     * Number of retained IMU samples.
+     */
+    size_t imu_len;
+    /**
+     * Configured checkpoint capacity.
+     */
+    size_t checkpoint_capacity;
+    /**
+     * Number of retained filter checkpoints.
+     */
+    size_t checkpoint_len;
+    /**
+     * Whether oldest_imu_epoch_j2000_s carries a value.
+     */
+    bool has_oldest_imu_epoch_j2000_s;
+    /**
+     * Oldest retained IMU sample end epoch.
+     */
+    double oldest_imu_epoch_j2000_s;
+    /**
+     * Whether newest_imu_epoch_j2000_s carries a value.
+     */
+    bool has_newest_imu_epoch_j2000_s;
+    /**
+     * Newest retained IMU sample end epoch.
+     */
+    double newest_imu_epoch_j2000_s;
+    /**
+     * Whether oldest_checkpoint_epoch_j2000_s carries a value.
+     */
+    bool has_oldest_checkpoint_epoch_j2000_s;
+    /**
+     * Oldest retained checkpoint epoch.
+     */
+    double oldest_checkpoint_epoch_j2000_s;
+    /**
+     * Whether newest_checkpoint_epoch_j2000_s carries a value.
+     */
+    bool has_newest_checkpoint_epoch_j2000_s;
+    /**
+     * Newest retained checkpoint epoch.
+     */
+    double newest_checkpoint_epoch_j2000_s;
+} SidereonFusionTimeSyncStatus;
+
+/**
+ * Loose GNSS position or position-velocity fix measurement.
+ */
+typedef struct SidereonFusionLooseMeasurement {
+    /**
+     * Measurement epoch, seconds since J2000.
+     */
+    double t_j2000_s;
+    /**
+     * GNSS antenna ECEF position in meters.
+     */
+    double position_ecef_m[3];
+    /**
+     * Whether velocity_ecef_mps carries a velocity measurement.
+     */
+    bool has_velocity;
+    /**
+     * GNSS antenna ECEF velocity in meters per second.
+     */
+    double velocity_ecef_mps[3];
+    /**
+     * Row-major covariance matrix: 3x3 for position-only, 6x6 with velocity.
+     */
+    const double *covariance;
+    /**
+     * Number of doubles in covariance.
+     */
+    size_t covariance_len;
+    /**
+     * Number of satellites used by the upstream GNSS fix.
+     */
+    size_t satellites_used;
+    /**
+     * Whether the upstream GNSS fix is valid.
+     */
+    bool solution_valid;
+} SidereonFusionLooseMeasurement;
+
+/**
+ * Report returned by loose and tight fusion updates.
+ */
+typedef struct SidereonFusionUpdate {
+    /**
+     * Whether the update modified state and covariance.
+     */
+    bool applied;
+    /**
+     * Normalized innovation squared.
+     */
+    double nis;
+    /**
+     * Number of measurement rows entering the update.
+     */
+    size_t rows;
+    /**
+     * Number of rows accepted by innovation screening.
+     */
+    size_t accepted_rows;
+    /**
+     * Number of rows rejected by innovation screening.
+     */
+    size_t rejected_rows;
+} SidereonFusionUpdate;
+
+/**
+ * Report returned by time-synchronized fusion updates.
+ */
+typedef struct SidereonFusionTimeSyncUpdate {
+    /**
+     * Fusion update applied at the supplied measurement epoch.
+     */
+    struct SidereonFusionUpdate update;
+    /**
+     * Whether the supplied measurement was older than the current inertial epoch.
+     */
+    bool late_measurement;
+    /**
+     * Number of IMU segments replayed.
+     */
+    size_t replayed_imu_segments;
+    /**
+     * Checkpoint epoch used as the replay start.
+     */
+    double restored_checkpoint_epoch_j2000_s;
+    /**
+     * Filter epoch after replay.
+     */
+    double current_epoch_j2000_s;
+} SidereonFusionTimeSyncUpdate;
+
+/**
+ * Doppler-derived range-rate row for a tight GNSS observation.
+ */
+typedef struct SidereonFusionTightRangeRate {
+    /**
+     * Measured pseudorange rate in meters per second.
+     */
+    double measured_range_rate_m_s;
+    /**
+     * One-sigma range-rate uncertainty in meters per second.
+     */
+    double sigma_m_s;
+    /**
+     * Satellite clock drift as range-rate bias in meters per second.
+     */
+    double satellite_clock_drift_m_s;
+} SidereonFusionTightRangeRate;
+
+/**
+ * Carrier-phase range row for a tight GNSS observation.
+ */
+typedef struct SidereonFusionTightCarrierPhase {
+    /**
+     * Carrier phase converted to range units in meters.
+     */
+    double phase_range_m;
+    /**
+     * One-sigma carrier-phase range uncertainty in meters.
+     */
+    double sigma_m;
+    /**
+     * Caller-supplied float ambiguity in meters.
+     */
+    double float_ambiguity_m;
+} SidereonFusionTightCarrierPhase;
+
+/**
+ * Raw GNSS observation row for a tight update.
+ */
+typedef struct SidereonFusionTightObservation {
+    /**
+     * Null-terminated satellite token, for example G08.
+     */
+    const char *sat_id;
+    /**
+     * Measured code pseudorange in meters.
+     */
+    double pseudorange_m;
+    /**
+     * One-sigma pseudorange uncertainty in meters.
+     */
+    double pseudorange_sigma_m;
+    /**
+     * Whether range_rate carries a Doppler-derived row.
+     */
+    bool has_range_rate;
+    /**
+     * Optional Doppler-derived range-rate row.
+     */
+    struct SidereonFusionTightRangeRate range_rate;
+    /**
+     * Whether carrier_phase carries a carrier-phase row.
+     */
+    bool has_carrier_phase;
+    /**
+     * Optional carrier-phase range row.
+     */
+    struct SidereonFusionTightCarrierPhase carrier_phase;
+    /**
+     * Ionospheric group delay correction for code in meters.
+     */
+    double ionosphere_delay_m;
+    /**
+     * Tropospheric delay correction in meters.
+     */
+    double troposphere_delay_m;
+} SidereonFusionTightObservation;
+
+/**
+ * One raw GNSS measurement epoch for tight coupling.
+ */
+typedef struct SidereonFusionTightEpoch {
+    /**
+     * Measurement epoch, seconds since J2000.
+     */
+    double t_j2000_s;
+    /**
+     * Pointer to observation_count tight observation rows.
+     */
+    const struct SidereonFusionTightObservation *observations;
+    /**
+     * Number of tight observation rows.
+     */
+    size_t observation_count;
+} SidereonFusionTightEpoch;
+
+/**
  * Geodesic direct solution on WGS84.
  */
 typedef struct SidereonGeodesicDirectResult {
@@ -7152,6 +7893,24 @@ typedef struct SidereonTecSample {
      */
     double rms_tecu;
 } SidereonTecSample;
+
+/**
+ * IONEX slant-delay value plus explicit coverage status.
+ */
+typedef struct SidereonIonexSlantDelayEvaluation {
+    /**
+     * Slant ionospheric group delay in meters.
+     */
+    double delay_m;
+    /**
+     * One of SidereonIonexSlantDelayStatus_*.
+     */
+    uint32_t status;
+    /**
+     * One of SidereonIonexCoverageErrorKind_*.
+     */
+    uint32_t coverage_error;
+} SidereonIonexSlantDelayEvaluation;
 
 /**
  * Dimensions and scalar metadata extracted from an IONEX vertical-TEC sample
@@ -12266,6 +13025,214 @@ typedef struct SidereonSbasLongTermCorrection {
 } SidereonSbasLongTermCorrection;
 
 /**
+ * Synthetic observable row.
+ */
+typedef struct SidereonScenarioObservation {
+    /**
+     * Epoch index for this observation.
+     */
+    size_t epoch_index;
+    /**
+     * Satellite token for this observation.
+     */
+    struct SidereonSatelliteToken sat_id;
+    /**
+     * Null-terminated RINEX code observable label.
+     */
+    char code_observable[RINEX_OBS_CODE_C_BYTES];
+    /**
+     * Null-terminated RINEX phase observable label.
+     */
+    char phase_observable[RINEX_OBS_CODE_C_BYTES];
+    /**
+     * Null-terminated RINEX Doppler observable label.
+     */
+    char doppler_observable[RINEX_OBS_CODE_C_BYTES];
+    /**
+     * Carrier frequency in hertz.
+     */
+    double carrier_hz;
+    /**
+     * Synthetic code pseudorange in meters.
+     */
+    double pseudorange_m;
+    /**
+     * Synthetic carrier phase in cycles.
+     */
+    double carrier_phase_cycles;
+    /**
+     * Synthetic Doppler shift in hertz.
+     */
+    double doppler_hz;
+} SidereonScenarioObservation;
+
+/**
+ * Receiver truth row from a synthetic scenario.
+ */
+typedef struct SidereonScenarioReceiverTruth {
+    /**
+     * Receive epoch, seconds since J2000.
+     */
+    double t_rx_j2000_s;
+    /**
+     * Receiver ECEF position in meters.
+     */
+    double position_ecef_m[3];
+    /**
+     * Receiver ECEF velocity in meters per second.
+     */
+    double velocity_ecef_m_s[3];
+    /**
+     * Receiver clock contribution in meters.
+     */
+    double clock_m;
+    /**
+     * Receiver clock range-rate contribution in meters per second.
+     */
+    double clock_rate_m_s;
+} SidereonScenarioReceiverTruth;
+
+/**
+ * Summary of a deterministic scenario simulation.
+ */
+typedef struct SidereonScenarioSummary {
+    /**
+     * Scenario schema version used for the output.
+     */
+    uint32_t schema_version;
+    /**
+     * Seed used by deterministic streams.
+     */
+    uint64_t seed;
+    /**
+     * Number of receiver truth rows.
+     */
+    size_t receiver_truth_count;
+    /**
+     * Number of synthetic observation rows.
+     */
+    size_t observation_count;
+    /**
+     * Number of epoch offset entries.
+     */
+    size_t epoch_offset_count;
+    /**
+     * Deterministic FNV-1a fingerprint over output bits.
+     */
+    uint64_t determinism_fingerprint;
+    /**
+     * Number of bytes in the JSON serialization of the output set.
+     */
+    size_t json_len;
+} SidereonScenarioSummary;
+
+/**
+ * Ground-truth term ledger row for one synthetic observation.
+ */
+typedef struct SidereonScenarioTerms {
+    /**
+     * Geometric range in meters.
+     */
+    double geometric_range_m;
+    /**
+     * Nominal ephemeris satellite-clock contribution in meters.
+     */
+    double satellite_clock_m;
+    /**
+     * Receiver-clock contribution in meters.
+     */
+    double receiver_clock_m;
+    /**
+     * Injected satellite-clock contribution in meters.
+     */
+    double satellite_clock_error_m;
+    /**
+     * Ionospheric code delay in meters.
+     */
+    double ionosphere_m;
+    /**
+     * Tropospheric delay in meters.
+     */
+    double troposphere_m;
+    /**
+     * Thermal code noise in meters.
+     */
+    double thermal_noise_m;
+    /**
+     * Specular code multipath in meters.
+     */
+    double multipath_m;
+    /**
+     * Core quantization contribution in meters.
+     */
+    double quantization_m;
+    /**
+     * Carrier geometric range contribution in cycles.
+     */
+    double carrier_phase_geometric_cycles;
+    /**
+     * Carrier receiver-clock contribution in cycles.
+     */
+    double carrier_phase_receiver_clock_cycles;
+    /**
+     * Carrier nominal satellite-clock contribution in cycles.
+     */
+    double carrier_phase_satellite_clock_cycles;
+    /**
+     * Carrier injected satellite-clock contribution in cycles.
+     */
+    double carrier_phase_satellite_clock_error_cycles;
+    /**
+     * Carrier ionosphere contribution in cycles.
+     */
+    double carrier_phase_ionosphere_cycles;
+    /**
+     * Carrier troposphere contribution in cycles.
+     */
+    double carrier_phase_troposphere_cycles;
+    /**
+     * Carrier thermal-noise contribution in cycles.
+     */
+    double carrier_phase_thermal_noise_cycles;
+    /**
+     * Constant carrier-phase ambiguity contribution in cycles.
+     */
+    double carrier_phase_bias_cycles;
+    /**
+     * Core carrier quantization contribution in cycles.
+     */
+    double carrier_phase_quantization_cycles;
+    /**
+     * Doppler contribution from satellite line-of-sight motion in hertz.
+     */
+    double doppler_satellite_motion_hz;
+    /**
+     * Doppler contribution from receiver line-of-sight motion in hertz.
+     */
+    double doppler_receiver_motion_hz;
+    /**
+     * Doppler contribution from nominal ephemeris satellite-clock rate in hertz.
+     */
+    double doppler_satellite_clock_hz;
+    /**
+     * Doppler contribution from receiver-clock rate in hertz.
+     */
+    double doppler_receiver_clock_hz;
+    /**
+     * Doppler contribution from injected satellite-clock rate in hertz.
+     */
+    double doppler_satellite_clock_error_hz;
+    /**
+     * Doppler thermal-noise contribution in hertz.
+     */
+    double doppler_thermal_noise_hz;
+    /**
+     * Core Doppler quantization contribution in hertz.
+     */
+    double doppler_quantization_hz;
+} SidereonScenarioTerms;
+
+/**
  * One borrowed TLE pair for a TCA secondary catalog.
  */
 typedef struct SidereonTcaTlePair {
@@ -12576,6 +13543,190 @@ typedef struct SidereonAcquisitionResult {
      */
     size_t grid_doppler_bin_count;
 } SidereonAcquisitionResult;
+
+/**
+ * Navigation modulation descriptor for signal-analysis metrics.
+ */
+typedef struct SidereonSignalAnalysisModulation {
+    /**
+     * One of SidereonSignalAnalysisModulationKind_*.
+     */
+    uint32_t kind;
+    /**
+     * BPSK order n for BPSK(n); ignored by BOC and fixed composite variants.
+     */
+    double order;
+    /**
+     * BOC subcarrier multiplier m for BOC(m,n); ignored by fixed composite variants.
+     */
+    double m;
+    /**
+     * BOC code-rate multiplier n for BOC(m,n); ignored by fixed composite variants.
+     */
+    double n;
+} SidereonSignalAnalysisModulation;
+
+/**
+ * Inputs for DLL tracking thermal-noise metrics.
+ */
+typedef struct SidereonSignalAnalysisDllTrackingOptions {
+    /**
+     * Carrier-to-noise-density ratio in decibel-hertz.
+     */
+    double cn0_db_hz;
+    /**
+     * One-sided DLL loop bandwidth in hertz.
+     */
+    double loop_bandwidth_hz;
+    /**
+     * Predetection coherent integration time in seconds.
+     */
+    double integration_time_s;
+    /**
+     * Early-late correlator spacing in code chips.
+     */
+    double correlator_spacing_chips;
+    /**
+     * Two-sided receiver bandwidth in hertz.
+     */
+    double receiver_bandwidth_hz;
+} SidereonSignalAnalysisDllTrackingOptions;
+
+/**
+ * DLL thermal-noise jitter result.
+ */
+typedef struct SidereonSignalAnalysisDllJitter {
+    /**
+     * One-sigma delay jitter in seconds.
+     */
+    double seconds;
+    /**
+     * One-sigma delay jitter in code chips.
+     */
+    double chips;
+    /**
+     * One-sigma range jitter in meters.
+     */
+    double meters;
+    /**
+     * Non-coherent squaring-loss multiplier.
+     */
+    double squaring_loss;
+} SidereonSignalAnalysisDllJitter;
+
+/**
+ * Interference term for effective C/N0 degradation.
+ */
+typedef struct SidereonSignalAnalysisInterference {
+    /**
+     * Interference modulation.
+     */
+    struct SidereonSignalAnalysisModulation modulation;
+    /**
+     * Interference received power divided by desired-signal received power.
+     */
+    double power_ratio_to_carrier;
+} SidereonSignalAnalysisInterference;
+
+/**
+ * Effective C/N0 degradation result.
+ */
+typedef struct SidereonSignalAnalysisCn0Degradation {
+    /**
+     * Effective carrier-to-noise-density ratio in hertz.
+     */
+    double effective_cn0_hz;
+    /**
+     * Effective carrier-to-noise-density ratio in decibel-hertz.
+     */
+    double effective_cn0_db_hz;
+    /**
+     * Loss from the input C/N0 to the effective C/N0, in decibels.
+     */
+    double degradation_db;
+} SidereonSignalAnalysisCn0Degradation;
+
+/**
+ * Inputs for one-path specular multipath envelope metrics.
+ */
+typedef struct SidereonSignalAnalysisMultipathOptions {
+    /**
+     * Reflected-path amplitude divided by direct-path amplitude.
+     */
+    double multipath_to_direct_ratio;
+    /**
+     * Early-late correlator spacing in code chips.
+     */
+    double correlator_spacing_chips;
+    /**
+     * Two-sided receiver bandwidth in hertz.
+     */
+    double receiver_bandwidth_hz;
+} SidereonSignalAnalysisMultipathOptions;
+
+/**
+ * Multipath envelope value at one reflected-path delay.
+ */
+typedef struct SidereonSignalAnalysisMultipathEnvelopePoint {
+    /**
+     * Reflected-path delay in code chips.
+     */
+    double delay_chips;
+    /**
+     * Reflected-path delay in seconds.
+     */
+    double delay_s;
+    /**
+     * In-phase tracking error in code chips.
+     */
+    double in_phase_chips;
+    /**
+     * In-phase tracking error in seconds.
+     */
+    double in_phase_s;
+    /**
+     * In-phase tracking error in meters.
+     */
+    double in_phase_m;
+    /**
+     * Anti-phase tracking error in code chips.
+     */
+    double anti_phase_chips;
+    /**
+     * Anti-phase tracking error in seconds.
+     */
+    double anti_phase_s;
+    /**
+     * Anti-phase tracking error in meters.
+     */
+    double anti_phase_m;
+    /**
+     * Running average of the absolute envelope in code chips.
+     */
+    double running_average_chips;
+    /**
+     * Running average of the absolute envelope in seconds.
+     */
+    double running_average_s;
+    /**
+     * Running average of the absolute envelope in meters.
+     */
+    double running_average_m;
+} SidereonSignalAnalysisMultipathEnvelopePoint;
+
+/**
+ * Spectral separation coefficient result.
+ */
+typedef struct SidereonSignalAnalysisSpectralSeparation {
+    /**
+     * Linear SSC value in hertz.
+     */
+    double hz;
+    /**
+     * SSC value in decibel-hertz.
+     */
+    double db_hz;
+} SidereonSignalAnalysisSpectralSeparation;
 
 /**
  * Options for sidereon_signal_correlate, mirroring
@@ -18197,6 +19348,186 @@ enum SidereonStatus sidereon_frame_teme_to_gcrs(const double *position_km,
 enum SidereonStatus sidereon_frequency_hz(uint32_t system, uint32_t band, double *out);
 
 /**
+ * Initialize fusion filter configuration with core defaults.
+ *
+ * Safety: out must point to a SidereonFusionFilterConfig.
+ */
+enum SidereonStatus sidereon_fusion_filter_config_init(struct SidereonFusionFilterConfig *out);
+
+/**
+ * Replace retained-history capacities for later time-synchronized updates.
+ *
+ * Safety: filter must be a live handle.
+ */
+enum SidereonStatus sidereon_fusion_filter_configure_time_sync(struct SidereonFusionFilter *filter,
+                                                               size_t imu_capacity,
+                                                               size_t checkpoint_capacity);
+
+/**
+ * Copy the current error-state covariance in row-major order.
+ *
+ * Safety: filter must be a live handle; out must point to len doubles or NULL
+ * when len is 0; out_written and out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_fusion_filter_covariance(const struct SidereonFusionFilter *filter,
+                                                      double *out,
+                                                      size_t len,
+                                                      size_t *out_written,
+                                                      size_t *out_required);
+
+/**
+ * Create a stateful GNSS/INS fusion filter.
+ *
+ * Safety: initial and config must point to readable structs; covariance_diagonal
+ * must point to covariance_len doubles; out_filter must point to storage for a
+ * SidereonFusionFilter*.
+ */
+enum SidereonStatus sidereon_fusion_filter_create(const struct SidereonFusionNavState *initial,
+                                                  const double *covariance_diagonal,
+                                                  size_t covariance_len,
+                                                  const struct SidereonFusionFilterConfig *config,
+                                                  struct SidereonFusionFilter **out_filter);
+
+/**
+ * Encode the current fusion state, including retained time-sync history, as
+ * versioned bytes.
+ *
+ * Safety: filter must be a live handle; out must point to len bytes or NULL
+ * when len is 0; out_written and out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_fusion_filter_encode_state(const struct SidereonFusionFilter *filter,
+                                                        uint8_t *out,
+                                                        size_t len,
+                                                        size_t *out_written,
+                                                        size_t *out_required);
+
+/**
+ * Release a fusion filter handle from sidereon_fusion_filter_create. Passing
+ * NULL is a no-op.
+ *
+ * Safety: filter must be NULL or a live SidereonFusionFilter handle that has
+ * not already been freed.
+ */
+void sidereon_fusion_filter_free(struct SidereonFusionFilter *filter);
+
+/**
+ * Propagate a fusion filter with one IMU sample.
+ *
+ * Safety: filter must be a live handle and sample must point to a readable
+ * SidereonFusionImuSample.
+ */
+enum SidereonStatus sidereon_fusion_filter_propagate(struct SidereonFusionFilter *filter,
+                                                     const struct SidereonFusionImuSample *sample);
+
+/**
+ * Restore a fusion filter from bytes produced by
+ * sidereon_fusion_filter_encode_state.
+ *
+ * Safety: filter must be a live handle and data must point to len readable
+ * bytes.
+ */
+enum SidereonStatus sidereon_fusion_filter_restore_state(struct SidereonFusionFilter *filter,
+                                                         const uint8_t *data,
+                                                         size_t len);
+
+/**
+ * Copy the current fusion state summary.
+ *
+ * Safety: filter must be a live handle and out must point to a
+ * SidereonFusionState.
+ */
+enum SidereonStatus sidereon_fusion_filter_state(const struct SidereonFusionFilter *filter,
+                                                 struct SidereonFusionState *out);
+
+/**
+ * Copy retained-history capacity and occupancy for time synchronization.
+ *
+ * Safety: filter must be a live handle and out must point to a
+ * SidereonFusionTimeSyncStatus.
+ */
+enum SidereonStatus sidereon_fusion_filter_time_sync_status(const struct SidereonFusionFilter *filter,
+                                                            struct SidereonFusionTimeSyncStatus *out);
+
+/**
+ * Apply a loose GNSS position or position-velocity update.
+ *
+ * Safety: filter must be a live handle; measurement must point to a readable
+ * SidereonFusionLooseMeasurement; out_update must point to a
+ * SidereonFusionUpdate.
+ */
+enum SidereonStatus sidereon_fusion_filter_update_loose(struct SidereonFusionFilter *filter,
+                                                        const struct SidereonFusionLooseMeasurement *measurement,
+                                                        struct SidereonFusionUpdate *out_update);
+
+/**
+ * Apply a time-synchronized loose GNSS update, replaying retained IMU samples
+ * when the measurement is late.
+ *
+ * Safety: filter must be a live handle; measurement must point to a readable
+ * SidereonFusionLooseMeasurement; out_update must point to a
+ * SidereonFusionTimeSyncUpdate.
+ */
+enum SidereonStatus sidereon_fusion_filter_update_loose_time_sync(struct SidereonFusionFilter *filter,
+                                                                  const struct SidereonFusionLooseMeasurement *measurement,
+                                                                  struct SidereonFusionTimeSyncUpdate *out_update);
+
+/**
+ * Apply a tight raw GNSS update using a broadcast ephemeris source.
+ *
+ * Safety: filter and broadcast must be live handles; epoch must point to a
+ * readable SidereonFusionTightEpoch; out_update must point to a
+ * SidereonFusionUpdate.
+ */
+enum SidereonStatus sidereon_fusion_filter_update_tight_broadcast(struct SidereonFusionFilter *filter,
+                                                                  const struct SidereonBroadcastEphemeris *broadcast,
+                                                                  const struct SidereonFusionTightEpoch *epoch,
+                                                                  struct SidereonFusionUpdate *out_update);
+
+/**
+ * Apply a time-synchronized tight raw GNSS update using a broadcast ephemeris
+ * source.
+ *
+ * Safety: filter and broadcast must be live handles; epoch must point to a
+ * readable SidereonFusionTightEpoch; out_update must point to a
+ * SidereonFusionTimeSyncUpdate.
+ */
+enum SidereonStatus sidereon_fusion_filter_update_tight_broadcast_time_sync(struct SidereonFusionFilter *filter,
+                                                                            const struct SidereonBroadcastEphemeris *broadcast,
+                                                                            const struct SidereonFusionTightEpoch *epoch,
+                                                                            struct SidereonFusionTimeSyncUpdate *out_update);
+
+/**
+ * Apply a tight raw GNSS update using an SP3 ephemeris source.
+ *
+ * Safety: filter and sp3 must be live handles; epoch must point to a readable
+ * SidereonFusionTightEpoch; out_update must point to a SidereonFusionUpdate.
+ */
+enum SidereonStatus sidereon_fusion_filter_update_tight_sp3(struct SidereonFusionFilter *filter,
+                                                            const struct SidereonSp3 *sp3,
+                                                            const struct SidereonFusionTightEpoch *epoch,
+                                                            struct SidereonFusionUpdate *out_update);
+
+/**
+ * Apply a time-synchronized tight raw GNSS update using an SP3 ephemeris source.
+ *
+ * Safety: filter and sp3 must be live handles; epoch must point to a readable
+ * SidereonFusionTightEpoch; out_update must point to a
+ * SidereonFusionTimeSyncUpdate.
+ */
+enum SidereonStatus sidereon_fusion_filter_update_tight_sp3_time_sync(struct SidereonFusionFilter *filter,
+                                                                      const struct SidereonSp3 *sp3,
+                                                                      const struct SidereonFusionTightEpoch *epoch,
+                                                                      struct SidereonFusionTimeSyncUpdate *out_update);
+
+/**
+ * Fill an IMU spec with one of the core preset grades.
+ *
+ * Safety: out must point to a SidereonFusionImuSpec.
+ */
+enum SidereonStatus sidereon_fusion_imu_spec_preset(uint32_t grade,
+                                                    struct SidereonFusionImuSpec *out);
+
+/**
  * Galileo coefficient-driven single-frequency ionospheric group delay in the
  * model's native units (positive meters). Delegates to
  * sidereon_core::atmosphere::ionosphere::galileo_nequick_g_native.
@@ -18993,8 +20324,10 @@ enum SidereonStatus sidereon_ionex_parse(const uint8_t *data,
  * the satellite azimuth/elevation are in degrees; the pierce point rides on the
  * IONEX shell so no receiver height enters. `epoch_j2000_s` is integer seconds
  * since J2000, landing exactly on the product's epoch axis. `frequency_hz` is
- * the carrier the dispersive delay is reported on. The numbers are exactly what
- * the engine produces.
+ * the carrier the dispersive delay is reported on. Requests outside the product
+ * time or grid coverage hold to the nearest product sample, matching the
+ * binding's legacy scalar behavior. The numbers are exactly what the engine
+ * produces under that coverage policy.
  *
  * Safety: ionex must be a live handle from sidereon_ionex_parse; out_delay_m
  * must point to a double.
@@ -19007,6 +20340,25 @@ enum SidereonStatus sidereon_ionex_slant_delay(const struct SidereonIonex *ionex
                                                int64_t epoch_j2000_s,
                                                double frequency_hz,
                                                double *out_delay_m);
+
+/**
+ * IONEX vertical-TEC-grid slant ionospheric group delay with explicit coverage
+ * policy and status. Receiver geodetic latitude/longitude and satellite
+ * azimuth/elevation are in degrees; `epoch_j2000_s` is integer seconds since
+ * J2000; `frequency_hz` is the carrier the dispersive delay is reported on.
+ *
+ * Safety: ionex must be a live handle from sidereon_ionex_parse; out must
+ * point to a SidereonIonexSlantDelayEvaluation.
+ */
+enum SidereonStatus sidereon_ionex_slant_delay_with_policy(const struct SidereonIonex *ionex,
+                                                           double lat_deg,
+                                                           double lon_deg,
+                                                           double azimuth_deg,
+                                                           double elevation_deg,
+                                                           int64_t epoch_j2000_s,
+                                                           double frequency_hz,
+                                                           uint32_t policy,
+                                                           struct SidereonIonexSlantDelayEvaluation *out);
 
 /**
  * Copy TEC-grid map epochs as seconds since J2000. Uses the variable-length
@@ -24138,6 +25490,162 @@ enum SidereonStatus sidereon_sbas_store_ready_geos(const struct SidereonSbasCorr
                                                    size_t *out_required);
 
 /**
+ * Copy epoch offsets from a scenario simulation.
+ *
+ * Safety: simulation must be a live handle; out must point to len size_t
+ * entries or NULL when len is 0; out_written and out_required must point to
+ * size_t.
+ */
+enum SidereonStatus sidereon_scenario_epoch_offsets(const struct SidereonScenarioSimulation *simulation,
+                                                    size_t *out,
+                                                    size_t len,
+                                                    size_t *out_written,
+                                                    size_t *out_required);
+
+/**
+ * Copy synthetic observation rows from a scenario simulation.
+ *
+ * Safety: simulation must be a live handle; out must point to len rows or NULL
+ * when len is 0; out_written and out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_scenario_observations(const struct SidereonScenarioSimulation *simulation,
+                                                   struct SidereonScenarioObservation *out,
+                                                   size_t len,
+                                                   size_t *out_written,
+                                                   size_t *out_required);
+
+/**
+ * Copy receiver truth rows from a scenario simulation.
+ *
+ * Safety: simulation must be a live handle; out must point to len rows or NULL
+ * when len is 0; out_written and out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_scenario_receiver_truth(const struct SidereonScenarioSimulation *simulation,
+                                                     struct SidereonScenarioReceiverTruth *out,
+                                                     size_t len,
+                                                     size_t *out_written,
+                                                     size_t *out_required);
+
+/**
+ * Simulate a deterministic synthetic GNSS scenario from JSON text.
+ *
+ * Safety: data must point to len readable UTF-8 bytes; out_simulation must
+ * point to storage for a SidereonScenarioSimulation*.
+ */
+enum SidereonStatus sidereon_scenario_simulate_json(const uint8_t *data,
+                                                    size_t len,
+                                                    struct SidereonScenarioSimulation **out_simulation);
+
+/**
+ * Simulate a deterministic external-product scenario from JSON text and a
+ * parsed broadcast ephemeris declared by the scenario constellation.
+ *
+ * Safety: data must point to len readable UTF-8 bytes; broadcast must be a live
+ * handle from sidereon_broadcast_ephemeris_parse_nav; out_simulation must point
+ * to storage for a SidereonScenarioSimulation*.
+ */
+enum SidereonStatus sidereon_scenario_simulate_json_with_broadcast(const uint8_t *data,
+                                                                   size_t len,
+                                                                   const struct SidereonBroadcastEphemeris *broadcast,
+                                                                   struct SidereonScenarioSimulation **out_simulation);
+
+/**
+ * Simulate a deterministic external-product scenario from JSON text, parsed
+ * broadcast ephemeris, and a parsed IONEX product declared by the scenario.
+ *
+ * Safety: data must point to len readable UTF-8 bytes; broadcast and ionex must
+ * be live handles; out_simulation must point to storage for a
+ * SidereonScenarioSimulation*.
+ */
+enum SidereonStatus sidereon_scenario_simulate_json_with_broadcast_and_ionex(const uint8_t *data,
+                                                                             size_t len,
+                                                                             const struct SidereonBroadcastEphemeris *broadcast,
+                                                                             const struct SidereonIonex *ionex,
+                                                                             struct SidereonScenarioSimulation **out_simulation);
+
+/**
+ * Simulate a deterministic synthetic GNSS scenario from JSON text and a parsed
+ * IONEX product declared by the scenario's ionosphere model.
+ *
+ * Safety: data must point to len readable UTF-8 bytes; ionex must be a live
+ * handle from sidereon_ionex_parse; out_simulation must point to storage for a
+ * SidereonScenarioSimulation*.
+ */
+enum SidereonStatus sidereon_scenario_simulate_json_with_ionex(const uint8_t *data,
+                                                               size_t len,
+                                                               const struct SidereonIonex *ionex,
+                                                               struct SidereonScenarioSimulation **out_simulation);
+
+/**
+ * Simulate a deterministic external-product scenario from JSON text and a
+ * parsed SP3 product declared by the scenario constellation.
+ *
+ * Safety: data must point to len readable UTF-8 bytes; sp3 must be a live
+ * handle from sidereon_sp3_load or sidereon_sp3_merge; out_simulation must
+ * point to storage for a SidereonScenarioSimulation*.
+ */
+enum SidereonStatus sidereon_scenario_simulate_json_with_sp3(const uint8_t *data,
+                                                             size_t len,
+                                                             const struct SidereonSp3 *sp3,
+                                                             struct SidereonScenarioSimulation **out_simulation);
+
+/**
+ * Simulate a deterministic external-product scenario from JSON text, a parsed
+ * SP3 product, and a parsed IONEX product declared by the scenario.
+ *
+ * Safety: data must point to len readable UTF-8 bytes; sp3 and ionex must be
+ * live handles; out_simulation must point to storage for a
+ * SidereonScenarioSimulation*.
+ */
+enum SidereonStatus sidereon_scenario_simulate_json_with_sp3_and_ionex(const uint8_t *data,
+                                                                       size_t len,
+                                                                       const struct SidereonSp3 *sp3,
+                                                                       const struct SidereonIonex *ionex,
+                                                                       struct SidereonScenarioSimulation **out_simulation);
+
+/**
+ * Release a scenario simulation handle from sidereon_scenario_simulate_json.
+ * Passing NULL is a no-op.
+ *
+ * Safety: simulation must be NULL or a live SidereonScenarioSimulation handle
+ * that has not already been freed.
+ */
+void sidereon_scenario_simulation_free(struct SidereonScenarioSimulation *simulation);
+
+/**
+ * Copy the JSON serialization of a scenario simulation output set.
+ *
+ * Safety: simulation must be a live handle; out must point to len bytes or
+ * NULL when len is 0; out_written and out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_scenario_simulation_json(const struct SidereonScenarioSimulation *simulation,
+                                                      uint8_t *out,
+                                                      size_t len,
+                                                      size_t *out_written,
+                                                      size_t *out_required);
+
+/**
+ * Copy a scenario simulation summary.
+ *
+ * Safety: simulation must be a live handle and out must point to a
+ * SidereonScenarioSummary.
+ */
+enum SidereonStatus sidereon_scenario_simulation_summary(const struct SidereonScenarioSimulation *simulation,
+                                                         struct SidereonScenarioSummary *out);
+
+/**
+ * Copy ground-truth term ledger rows from a scenario simulation.
+ *
+ * Safety: simulation must be a live handle; out must point to len rows or NULL
+ * when len is 0; out_written and out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_scenario_terms(const struct SidereonScenarioSimulation *simulation,
+                                            struct SidereonScenarioTerms *out,
+                                            size_t len,
+                                            size_t *out_written,
+                                            size_t *out_required);
+
+/**
  * Serially screen a primary TLE against a secondary TLE catalog for threshold
  * TCAs. Variable-length output contract. Delegates to
  * sidereon_core::astro::tca::screen_tca_candidates_from_tle_catalog_serial.
@@ -24448,6 +25956,96 @@ enum SidereonStatus sidereon_signal_acquire(const struct SidereonIqSample *sampl
                                             size_t len,
                                             size_t *out_written,
                                             size_t *out_required);
+
+/**
+ * Compute early-late DLL thermal-noise jitter for a modulation.
+ *
+ * Safety: modulation, options, and out must point to readable and writable
+ * objects.
+ */
+enum SidereonStatus sidereon_signal_analysis_dll_jitter(const struct SidereonSignalAnalysisModulation *modulation,
+                                                        const struct SidereonSignalAnalysisDllTrackingOptions *options,
+                                                        uint32_t processing,
+                                                        struct SidereonSignalAnalysisDllJitter *out);
+
+/**
+ * Compute the lower bound for code-delay tracking jitter.
+ *
+ * Safety: modulation, options, and out must point to readable and writable
+ * objects.
+ */
+enum SidereonStatus sidereon_signal_analysis_dll_lower_bound(const struct SidereonSignalAnalysisModulation *modulation,
+                                                             const struct SidereonSignalAnalysisDllTrackingOptions *options,
+                                                             struct SidereonSignalAnalysisDllJitter *out);
+
+/**
+ * Compute effective C/N0 degradation from finite-band interference terms.
+ *
+ * Safety: desired and out must point to readable and writable objects;
+ * interferences must point to interference_count rows or NULL when the count is
+ * zero.
+ */
+enum SidereonStatus sidereon_signal_analysis_effective_cn0_degradation(const struct SidereonSignalAnalysisModulation *desired,
+                                                                       double cn0_db_hz,
+                                                                       double receiver_bandwidth_hz,
+                                                                       const struct SidereonSignalAnalysisInterference *interferences,
+                                                                       size_t interference_count,
+                                                                       struct SidereonSignalAnalysisCn0Degradation *out);
+
+/**
+ * Compute the fraction of modulation power inside a two-sided bandwidth.
+ *
+ * Safety: modulation and out must point to readable and writable objects.
+ */
+enum SidereonStatus sidereon_signal_analysis_fraction_power(const struct SidereonSignalAnalysisModulation *modulation,
+                                                            double receiver_bandwidth_hz,
+                                                            double *out);
+
+/**
+ * Compute one-path early-late multipath envelopes on a delay grid.
+ *
+ * Safety: modulation and options must point to readable objects; delay_chips
+ * must point to delay_count doubles or NULL when count is zero; out must point
+ * to len rows or NULL when len is 0; out_written and out_required must point to
+ * size_t.
+ */
+enum SidereonStatus sidereon_signal_analysis_multipath_envelope(const struct SidereonSignalAnalysisModulation *modulation,
+                                                                const struct SidereonSignalAnalysisMultipathOptions *options,
+                                                                const double *delay_chips,
+                                                                size_t delay_count,
+                                                                struct SidereonSignalAnalysisMultipathEnvelopePoint *out,
+                                                                size_t len,
+                                                                size_t *out_written,
+                                                                size_t *out_required);
+
+/**
+ * Evaluate a normalized modulation PSD at an offset frequency.
+ *
+ * Safety: modulation and out must point to readable and writable objects.
+ */
+enum SidereonStatus sidereon_signal_analysis_psd(const struct SidereonSignalAnalysisModulation *modulation,
+                                                 double offset_hz,
+                                                 double *out);
+
+/**
+ * Compute the RMS, or Gabor, bandwidth over a two-sided receiver bandwidth.
+ *
+ * Safety: modulation and out must point to readable and writable objects.
+ */
+enum SidereonStatus sidereon_signal_analysis_rms_bandwidth_hz(const struct SidereonSignalAnalysisModulation *modulation,
+                                                              double receiver_bandwidth_hz,
+                                                              double *out);
+
+/**
+ * Compute the spectral separation coefficient between two modulations.
+ *
+ * Safety: desired, interference, and out must point to readable and writable
+ * objects.
+ */
+enum SidereonStatus sidereon_signal_analysis_spectral_separation(const struct SidereonSignalAnalysisModulation *desired,
+                                                                 const struct SidereonSignalAnalysisModulation *interference,
+                                                                 double receiver_bandwidth_hz,
+                                                                 struct SidereonSignalAnalysisSpectralSeparation *out);
 
 /**
  * Circular autocorrelation over all lags of a code (infallible).
