@@ -67,8 +67,9 @@ use sidereon_core::astro::forces::drag::{DragForce, DragParameters, SpaceWeather
 use sidereon_core::astro::forces::SpaceWeatherSource;
 use sidereon_core::astro::forces::{
     ForceModel, J2Gravity, SchwarzschildRelativity, SolarRadiationPressure,
-    SphericalHarmonicGravityConfig, ThirdBodyBodies, ThirdBodyGravity, TwoBodyGravity,
-    ZonalCoefficients, ZonalDegrees, ZonalGravity,
+    SolidEarthPoleTideGravity, SolidEarthTideGravity, SphericalHarmonicGravityConfig,
+    ThirdBodyBodies, ThirdBodyGravity, TwoBodyGravity, ZonalCoefficients, ZonalDegrees,
+    ZonalGravity,
 };
 use sidereon_core::astro::frames::transforms::FrameTransformError;
 use sidereon_core::astro::frames::TdbEarthOrientationProvider;
@@ -2022,7 +2023,9 @@ fn propagation_context_from_c(config: &SidereonStatePropagationConfig) -> Propag
 fn propagation_force_model_needs_body_fixed_frame(config: &SidereonStatePropagationConfig) -> bool {
     config.force_model == SidereonPropagationForceModel::EarthPhaseB as u32
         || (config.force_model == SidereonPropagationForceModel::Composite as u32
-            && config.force_components.has_spherical_harmonic)
+            && (config.force_components.has_spherical_harmonic
+                || config.force_components.has_solid_earth_tide
+                || config.force_components.has_solid_earth_pole_tide))
 }
 
 fn composite_force_model_from_c(
@@ -2045,6 +2048,8 @@ fn composite_force_model_from_c(
         && components.has_zonal
         && components.zonal_max_degree == 2
         && !components.has_spherical_harmonic
+        && !components.has_solid_earth_tide
+        && !components.has_solid_earth_pole_tide
         && !components.has_third_body
         && !components.has_solar_radiation_pressure
         && !components.has_relativity
@@ -2101,6 +2106,13 @@ fn composite_force_model_from_c(
                 SidereonStatus::InvalidArgument
             })?;
         force_components = force_components.with_spherical_harmonic(spherical_harmonic);
+    }
+    if components.has_solid_earth_tide {
+        force_components = force_components.with_solid_earth_tide(SolidEarthTideGravity::default());
+    }
+    if components.has_solid_earth_pole_tide {
+        force_components =
+            force_components.with_solid_earth_pole_tide(SolidEarthPoleTideGravity::default());
     }
     if components.has_third_body {
         force_components = force_components.with_third_body(ThirdBodyGravity {
