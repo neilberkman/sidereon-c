@@ -393,6 +393,22 @@ cc -std=c11 -Wall -Wextra -Werror \
 echo "== running cap013_smoke program =="
 "${cap013_out}" "${sp3_path}"
 
+# Track filter and RTS smoother surface, plus tide force-model switches.
+echo "== compiling track_smoke program =="
+track_out="${target_dir}/track_smoke"
+cc -std=c11 -Wall -Wextra -Werror \
+    -I"${binding_root}/include" \
+    -I"${here}" \
+    "${here}/track_smoke.c" \
+    -L"${lib_dir}" \
+    -lsidereon \
+    -Wl,-rpath,"${lib_dir}" \
+    -lm \
+    -o "${track_out}"
+
+echo "== running track_smoke program =="
+"${track_out}"
+
 # 0.15 capabilities: composite perturbation selection, sidereal filtering,
 # geodetic time series, position-error metrics, clock-noise identification, and
 # orbit-fit residual ledgers. Self-contained.

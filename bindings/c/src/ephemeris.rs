@@ -65,6 +65,10 @@ pub struct SidereonForceModelComponents {
     pub spherical_harmonic_max_degree: u32,
     /// Spherical-harmonic maximum order.
     pub spherical_harmonic_max_order: u32,
+    /// Whether to include solid-Earth tide gravity.
+    pub has_solid_earth_tide: bool,
+    /// Whether to include solid-Earth pole-tide gravity.
+    pub has_solid_earth_pole_tide: bool,
     /// Whether to include third-body gravity.
     pub has_third_body: bool,
     /// Include the Sun in third-body gravity.
@@ -346,6 +350,8 @@ fn default_force_model_components() -> SidereonForceModelComponents {
         has_spherical_harmonic: false,
         spherical_harmonic_max_degree: 8,
         spherical_harmonic_max_order: 8,
+        has_solid_earth_tide: false,
+        has_solid_earth_pole_tide: false,
         has_third_body: false,
         third_body_sun: true,
         third_body_moon: true,

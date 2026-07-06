@@ -2184,6 +2184,24 @@ typedef enum SidereonGeofenceCrossingKind {
 } SidereonGeofenceCrossingKind;
 
 /**
+ * Cartesian frame for no-IMU track filtering.
+ */
+typedef enum SidereonTrackCoordinateFrame {
+    /**
+     * Earth-Centered-Earth-Fixed position in metres.
+     */
+    SIDEREON_TRACK_COORDINATE_FRAME_ECEF = 0,
+    /**
+     * Local East-North-Up position in metres.
+     */
+    SIDEREON_TRACK_COORDINATE_FRAME_ENU = 1,
+    /**
+     * Caller-defined fixed Cartesian axes in metres.
+     */
+    SIDEREON_TRACK_COORDINATE_FRAME_CALLER_DEFINED_CARTESIAN = 2,
+} SidereonTrackCoordinateFrame;
+
+/**
  * Source-localization solve mode.
  */
 typedef enum SidereonSourceSolveMode {
@@ -3028,6 +3046,12 @@ typedef struct SidereonSgp4TleFit SidereonSgp4TleFit;
 typedef struct SidereonSiderealFilterOutput SidereonSiderealFilterOutput;
 
 /**
+ * Opaque fixed-interval RTS smoothed track. Create with sidereon_smooth_track_rts
+ * and release with sidereon_smoothed_track_free.
+ */
+typedef struct SidereonSmoothedTrack SidereonSmoothedTrack;
+
+/**
  * Source-localization solution handle. Opaque to C. Create with
  * sidereon_locate_source, read with sidereon_source_solution_* accessors, and
  * release with sidereon_source_solution_free.
@@ -3132,6 +3156,36 @@ typedef struct SidereonTleFile SidereonTleFile;
  * sidereon_tle_propagate and release with sidereon_tle_propagation_free.
  */
 typedef struct SidereonTlePropagation SidereonTlePropagation;
+
+/**
+ * Opaque stateful no-IMU track filter. Create with sidereon_track_filter_new
+ * or sidereon_track_filter_new_from_position and release with
+ * sidereon_track_filter_free.
+ */
+typedef struct SidereonTrackFilter SidereonTrackFilter;
+
+/**
+ * Opaque no-IMU track filter config. Create with
+ * sidereon_track_filter_config_from_position or
+ * sidereon_track_filter_config_from_position_velocity and release with
+ * sidereon_track_filter_config_free.
+ */
+typedef struct SidereonTrackFilterConfig SidereonTrackFilterConfig;
+
+/**
+ * Opaque finished RTS history. Create with
+ * sidereon_track_rts_history_builder_finish and release with
+ * sidereon_track_rts_history_free.
+ */
+typedef struct SidereonTrackRtsHistory SidereonTrackRtsHistory;
+
+/**
+ * Opaque RTS history builder for recorded track filtering. Create with
+ * sidereon_track_rts_history_builder_new or
+ * sidereon_track_rts_history_builder_from_filter and release with
+ * sidereon_track_rts_history_builder_free.
+ */
+typedef struct SidereonTrackRtsHistoryBuilder SidereonTrackRtsHistoryBuilder;
 
 /**
  * Opaque handle to a leave-one-out (RAIM/FDE) report: the base solve plus one
@@ -6131,6 +6185,14 @@ typedef struct SidereonForceModelComponents {
      * Spherical-harmonic maximum order.
      */
     uint32_t spherical_harmonic_max_order;
+    /**
+     * Whether to include solid-Earth tide gravity.
+     */
+    bool has_solid_earth_tide;
+    /**
+     * Whether to include solid-Earth pole-tide gravity.
+     */
+    bool has_solid_earth_pole_tide;
     /**
      * Whether to include third-body gravity.
      */
@@ -13842,6 +13904,47 @@ typedef struct SidereonIonoFreeSmoothResult {
 } SidereonIonoFreeSmoothResult;
 
 /**
+ * Track state metadata. Position, velocity, state-vector, and covariance arrays
+ * are copied with the corresponding state reader functions.
+ */
+typedef struct SidereonTrackState {
+    /**
+     * One of SidereonTrackCoordinateFrame encoded as uint32_t.
+     */
+    uint32_t frame;
+    /**
+     * Epoch seconds in the caller's monotonic time base.
+     */
+    double t_s;
+    /**
+     * Position dimension.
+     */
+    size_t dimension;
+    /**
+     * Full state dimension, position plus velocity.
+     */
+    size_t state_dimension;
+} SidereonTrackState;
+
+/**
+ * One smoothed RTS output epoch.
+ */
+typedef struct SidereonSmoothedTrackEpoch {
+    /**
+     * Epoch seconds.
+     */
+    double t_s;
+    /**
+     * Smoothed state metadata.
+     */
+    struct SidereonTrackState state;
+    /**
+     * Whether rts_gain_to_next is present for this epoch.
+     */
+    bool has_rts_gain_to_next;
+} SidereonSmoothedTrackEpoch;
+
+/**
  * Receiver-solution plausibility-gate options, mirroring
  * sidereon_core::quality::SolutionValidationOptions.
  */
@@ -15877,6 +15980,96 @@ typedef struct SidereonTleMetadata {
      */
     int32_t rev_number;
 } SidereonTleMetadata;
+
+/**
+ * Innovation report for a pending or applied track update.
+ */
+typedef struct SidereonTrackInnovation {
+    /**
+     * Measurement dimension.
+     */
+    size_t dimension;
+    /**
+     * Normalized innovation squared.
+     */
+    double nis;
+} SidereonTrackInnovation;
+
+/**
+ * Prediction report from a no-IMU track filter.
+ */
+typedef struct SidereonTrackPrediction {
+    /**
+     * Propagation step, seconds.
+     */
+    double dt_s;
+    /**
+     * Predicted state metadata after the propagation.
+     */
+    struct SidereonTrackState predicted;
+} SidereonTrackPrediction;
+
+/**
+ * Covariance-weighted track update report.
+ */
+typedef struct SidereonTrackUpdate {
+    /**
+     * State before applying the correction.
+     */
+    struct SidereonTrackState predicted;
+    /**
+     * State after applying the correction.
+     */
+    struct SidereonTrackState updated;
+    /**
+     * Innovation statistics for the correction.
+     */
+    struct SidereonTrackInnovation innovation;
+} SidereonTrackUpdate;
+
+/**
+ * Gated track update report.
+ */
+typedef struct SidereonTrackGatedUpdate {
+    /**
+     * NIS gate result.
+     */
+    struct SidereonNisGate gate;
+    /**
+     * True when update contains an accepted correction.
+     */
+    bool has_update;
+    /**
+     * Accepted correction report when has_update is true; zeroed otherwise.
+     */
+    struct SidereonTrackUpdate update;
+    /**
+     * Current filter state metadata after the gated operation.
+     */
+    struct SidereonTrackState state;
+} SidereonTrackGatedUpdate;
+
+/**
+ * One finished RTS history epoch.
+ */
+typedef struct SidereonTrackRtsEpoch {
+    /**
+     * Epoch seconds.
+     */
+    double t_s;
+    /**
+     * Prediction carried by the epoch.
+     */
+    struct SidereonTrackState predicted;
+    /**
+     * Update carried by the epoch.
+     */
+    struct SidereonTrackState updated;
+    /**
+     * Whether transition_from_previous is present for this epoch.
+     */
+    bool has_transition_from_previous;
+} SidereonTrackRtsEpoch;
 
 /**
  * Scalar summary of a converged trust-region solve.
@@ -26223,6 +26416,78 @@ enum SidereonStatus sidereon_smooth_iono_free_code(const struct SidereonArcEpoch
                                                    size_t *out_required);
 
 /**
+ * Smooth a finished RTS history with the fixed-interval RTS smoother.
+ *
+ * Safety: history must be live; out_smoothed points to handle storage.
+ */
+enum SidereonStatus sidereon_smooth_track_rts(const struct SidereonTrackRtsHistory *history,
+                                              struct SidereonSmoothedTrack **out_smoothed);
+
+/**
+ * Copy one smoothed track epoch summary.
+ *
+ * Safety: smoothed must be live; out_epoch points to a SidereonSmoothedTrackEpoch.
+ */
+enum SidereonStatus sidereon_smoothed_track_epoch(const struct SidereonSmoothedTrack *smoothed,
+                                                  size_t index,
+                                                  struct SidereonSmoothedTrackEpoch *out_epoch);
+
+/**
+ * Copy smoothed track epoch count.
+ *
+ * Safety: smoothed must be live; out_count points to size_t storage.
+ */
+enum SidereonStatus sidereon_smoothed_track_epoch_count(const struct SidereonSmoothedTrack *smoothed,
+                                                        size_t *out_count);
+
+/**
+ * Copy one smoothed epoch's covariance over `[position, velocity]`.
+ *
+ * Safety: smoothed must be live; out follows the standard variable-length
+ * output contract.
+ */
+enum SidereonStatus sidereon_smoothed_track_epoch_covariance(const struct SidereonSmoothedTrack *smoothed,
+                                                             size_t index,
+                                                             double *out,
+                                                             size_t len,
+                                                             size_t *out_written,
+                                                             size_t *out_required);
+
+/**
+ * Copy one smoothed epoch's position vector.
+ *
+ * Safety: smoothed must be live; out follows the standard variable-length
+ * output contract.
+ */
+enum SidereonStatus sidereon_smoothed_track_epoch_position_m(const struct SidereonSmoothedTrack *smoothed,
+                                                             size_t index,
+                                                             double *out,
+                                                             size_t len,
+                                                             size_t *out_written,
+                                                             size_t *out_required);
+
+/**
+ * Copy one smoothed epoch's RTS gain to the next epoch. When the epoch has no
+ * next gain, required is zero.
+ *
+ * Safety: smoothed must be live; out follows the standard variable-length
+ * output contract.
+ */
+enum SidereonStatus sidereon_smoothed_track_epoch_rts_gain_to_next(const struct SidereonSmoothedTrack *smoothed,
+                                                                   size_t index,
+                                                                   double *out,
+                                                                   size_t len,
+                                                                   size_t *out_written,
+                                                                   size_t *out_required);
+
+/**
+ * Release a smoothed track handle. Passing NULL is a no-op.
+ *
+ * Safety: smoothed must be NULL or a live smoothed-track handle.
+ */
+void sidereon_smoothed_track_free(struct SidereonSmoothedTrack *smoothed);
+
+/**
  * Solid-earth pole tide displacement of an ITRF station, metres ECEF.
  * Delegates to sidereon_core::tides::solid_earth_pole_tide.
  *
@@ -28566,6 +28831,382 @@ enum SidereonStatus sidereon_tle_propagation_states(const struct SidereonTleProp
  */
 enum SidereonStatus sidereon_tle_to_lines(const struct SidereonTle *tle,
                                           struct SidereonTleLines *out_lines);
+
+/**
+ * Copy config dimension.
+ *
+ * Safety: config must be live; out_dimension must point to a size_t.
+ */
+enum SidereonStatus sidereon_track_filter_config_dimension(const struct SidereonTrackFilterConfig *config,
+                                                           size_t *out_dimension);
+
+/**
+ * Copy config frame selector.
+ *
+ * Safety: config must be live; out_frame must point to uint32_t storage.
+ */
+enum SidereonStatus sidereon_track_filter_config_frame(const struct SidereonTrackFilterConfig *config,
+                                                       uint32_t *out_frame);
+
+/**
+ * Release a track filter config handle. Passing NULL is a no-op.
+ *
+ * Safety: config must be NULL or a live handle from a config constructor.
+ */
+void sidereon_track_filter_config_free(struct SidereonTrackFilterConfig *config);
+
+/**
+ * Build a no-IMU track filter config from a position fix and uncertain zero
+ * initial velocity. `position_covariance_m2` is row-major dimension-by-dimension.
+ *
+ * Safety: initial_position_m points to dimension doubles; position_covariance_m2
+ * points to position_covariance_len doubles; out_config points to handle storage.
+ */
+enum SidereonStatus sidereon_track_filter_config_from_position(uint32_t frame,
+                                                               double initial_t_s,
+                                                               const double *initial_position_m,
+                                                               size_t dimension,
+                                                               const double *position_covariance_m2,
+                                                               size_t position_covariance_len,
+                                                               double initial_velocity_variance_m2_s2,
+                                                               double acceleration_variance_spectral_density_m2_s3,
+                                                               struct SidereonTrackFilterConfig **out_config);
+
+/**
+ * Build a no-IMU track filter config from position, velocity, and full
+ * covariance. `initial_covariance` is row-major over `[position, velocity]`.
+ *
+ * Safety: initial_position_m and initial_velocity_m_s point to dimension
+ * doubles; initial_covariance points to initial_covariance_len doubles;
+ * out_config points to handle storage.
+ */
+enum SidereonStatus sidereon_track_filter_config_from_position_velocity(uint32_t frame,
+                                                                        double initial_t_s,
+                                                                        const double *initial_position_m,
+                                                                        const double *initial_velocity_m_s,
+                                                                        size_t dimension,
+                                                                        const double *initial_covariance,
+                                                                        size_t initial_covariance_len,
+                                                                        double acceleration_variance_spectral_density_m2_s3,
+                                                                        struct SidereonTrackFilterConfig **out_config);
+
+/**
+ * Copy the current row-major filter covariance over `[position, velocity]`.
+ *
+ * Safety: filter must be live; out follows the standard variable-length output
+ * contract.
+ */
+enum SidereonStatus sidereon_track_filter_covariance(const struct SidereonTrackFilter *filter,
+                                                     double *out,
+                                                     size_t len,
+                                                     size_t *out_written,
+                                                     size_t *out_required);
+
+/**
+ * Release a track filter handle. Passing NULL is a no-op.
+ *
+ * Safety: filter must be NULL or a live handle from a filter constructor.
+ */
+void sidereon_track_filter_free(struct SidereonTrackFilter *filter);
+
+/**
+ * Build a stateful no-IMU track filter from a config.
+ *
+ * Safety: config must be live; out_filter points to handle storage.
+ */
+enum SidereonStatus sidereon_track_filter_new(const struct SidereonTrackFilterConfig *config,
+                                              struct SidereonTrackFilter **out_filter);
+
+/**
+ * Build a stateful no-IMU track filter directly from a position fix and
+ * uncertain zero initial velocity.
+ *
+ * Safety: same pointer contract as sidereon_track_filter_config_from_position;
+ * out_filter points to handle storage.
+ */
+enum SidereonStatus sidereon_track_filter_new_from_position(uint32_t frame,
+                                                            double initial_t_s,
+                                                            const double *initial_position_m,
+                                                            size_t dimension,
+                                                            const double *position_covariance_m2,
+                                                            size_t position_covariance_len,
+                                                            double initial_velocity_variance_m2_s2,
+                                                            double acceleration_variance_spectral_density_m2_s3,
+                                                            struct SidereonTrackFilter **out_filter);
+
+/**
+ * Compute a position-only innovation without updating the filter. The
+ * innovation and covariance buffers are exact-size outputs: dimension and
+ * dimension*dimension doubles.
+ *
+ * Safety: filter must be live; position_m and covariance_m2 point to readable
+ * arrays; innovation, innovation_covariance, and out_report point to writable
+ * storage.
+ */
+enum SidereonStatus sidereon_track_filter_position_innovation(const struct SidereonTrackFilter *filter,
+                                                              const double *position_m,
+                                                              size_t dimension,
+                                                              const double *covariance_m2,
+                                                              size_t covariance_len,
+                                                              double *innovation,
+                                                              size_t innovation_len,
+                                                              double *innovation_covariance,
+                                                              size_t innovation_covariance_len,
+                                                              struct SidereonTrackInnovation *out_report);
+
+/**
+ * Copy the current filter position vector in metres.
+ *
+ * Safety: filter must be live; out follows the standard variable-length output
+ * contract.
+ */
+enum SidereonStatus sidereon_track_filter_position_m(const struct SidereonTrackFilter *filter,
+                                                     double *out,
+                                                     size_t len,
+                                                     size_t *out_written,
+                                                     size_t *out_required);
+
+/**
+ * Predict the filter state by dt_s seconds.
+ *
+ * Safety: filter must be live; out_prediction points to a report.
+ */
+enum SidereonStatus sidereon_track_filter_predict(struct SidereonTrackFilter *filter,
+                                                  double dt_s,
+                                                  struct SidereonTrackPrediction *out_prediction);
+
+/**
+ * Predict the filter state and append the prediction to an RTS history builder.
+ *
+ * Safety: filter and history must be live; out_prediction points to a report.
+ */
+enum SidereonStatus sidereon_track_filter_predict_recorded(struct SidereonTrackFilter *filter,
+                                                           double dt_s,
+                                                           struct SidereonTrackRtsHistoryBuilder *history,
+                                                           struct SidereonTrackPrediction *out_prediction);
+
+/**
+ * Record the filter's current predicted state without applying a correction.
+ *
+ * Safety: filter and history must be live.
+ */
+enum SidereonStatus sidereon_track_filter_record_prediction_only(const struct SidereonTrackFilter *filter,
+                                                                 struct SidereonTrackRtsHistoryBuilder *history);
+
+/**
+ * Copy current filter state metadata.
+ *
+ * Safety: filter must be live; out_state points to a SidereonTrackState.
+ */
+enum SidereonStatus sidereon_track_filter_state(const struct SidereonTrackFilter *filter,
+                                                struct SidereonTrackState *out_state);
+
+/**
+ * Compute a full-state innovation without updating the filter. The innovation
+ * and covariance buffers are exact-size outputs: state_dimension and
+ * state_dimension*state_dimension doubles.
+ *
+ * Safety: filter must be live; state and covariance point to readable arrays;
+ * innovation, innovation_covariance, and out_report point to writable storage.
+ */
+enum SidereonStatus sidereon_track_filter_state_innovation(const struct SidereonTrackFilter *filter,
+                                                           const double *state,
+                                                           size_t state_len,
+                                                           const double *covariance,
+                                                           size_t covariance_len,
+                                                           double *innovation,
+                                                           size_t innovation_len,
+                                                           double *innovation_covariance,
+                                                           size_t innovation_covariance_len,
+                                                           struct SidereonTrackInnovation *out_report);
+
+/**
+ * Copy the current filter state vector `[position, velocity]`.
+ *
+ * Safety: filter must be live; out follows the standard variable-length output
+ * contract.
+ */
+enum SidereonStatus sidereon_track_filter_state_vector(const struct SidereonTrackFilter *filter,
+                                                       double *out,
+                                                       size_t len,
+                                                       size_t *out_written,
+                                                       size_t *out_required);
+
+/**
+ * Apply a position-only track update.
+ *
+ * Safety: filter must be live; position_m and covariance_m2 point to readable
+ * arrays; out_update points to a report.
+ */
+enum SidereonStatus sidereon_track_filter_update_position(struct SidereonTrackFilter *filter,
+                                                          const double *position_m,
+                                                          size_t dimension,
+                                                          const double *covariance_m2,
+                                                          size_t covariance_len,
+                                                          struct SidereonTrackUpdate *out_update);
+
+/**
+ * Apply a NIS-gated position-only track update.
+ *
+ * Safety: filter must be live; position_m and covariance_m2 point to readable
+ * arrays; out_update points to a report.
+ */
+enum SidereonStatus sidereon_track_filter_update_position_gated(struct SidereonTrackFilter *filter,
+                                                                const double *position_m,
+                                                                size_t dimension,
+                                                                const double *covariance_m2,
+                                                                size_t covariance_len,
+                                                                double confidence,
+                                                                struct SidereonTrackGatedUpdate *out_update);
+
+/**
+ * Apply a NIS-gated position-only track update and record accepted or rejected
+ * epochs for RTS smoothing.
+ *
+ * Safety: filter and history must be live; position_m and covariance_m2 point
+ * to readable arrays; out_update points to a report.
+ */
+enum SidereonStatus sidereon_track_filter_update_position_gated_recorded(struct SidereonTrackFilter *filter,
+                                                                         const double *position_m,
+                                                                         size_t dimension,
+                                                                         const double *covariance_m2,
+                                                                         size_t covariance_len,
+                                                                         double confidence,
+                                                                         struct SidereonTrackRtsHistoryBuilder *history,
+                                                                         struct SidereonTrackGatedUpdate *out_update);
+
+/**
+ * Apply a position-only track update and record the epoch for RTS smoothing.
+ *
+ * Safety: filter and history must be live; position_m and covariance_m2 point
+ * to readable arrays; out_update points to a report.
+ */
+enum SidereonStatus sidereon_track_filter_update_position_recorded(struct SidereonTrackFilter *filter,
+                                                                   const double *position_m,
+                                                                   size_t dimension,
+                                                                   const double *covariance_m2,
+                                                                   size_t covariance_len,
+                                                                   struct SidereonTrackRtsHistoryBuilder *history,
+                                                                   struct SidereonTrackUpdate *out_update);
+
+/**
+ * Apply a full-state track update.
+ *
+ * Safety: filter must be live; state and covariance point to readable arrays;
+ * out_update points to a report.
+ */
+enum SidereonStatus sidereon_track_filter_update_state(struct SidereonTrackFilter *filter,
+                                                       const double *state,
+                                                       size_t state_len,
+                                                       const double *covariance,
+                                                       size_t covariance_len,
+                                                       struct SidereonTrackUpdate *out_update);
+
+/**
+ * Copy the current filter velocity vector in metres per second.
+ *
+ * Safety: filter must be live; out follows the standard variable-length output
+ * contract.
+ */
+enum SidereonStatus sidereon_track_filter_velocity_m_s(const struct SidereonTrackFilter *filter,
+                                                       double *out,
+                                                       size_t len,
+                                                       size_t *out_written,
+                                                       size_t *out_required);
+
+/**
+ * Finish an RTS history builder into a newly owned history handle.
+ *
+ * Safety: history must be live; out_history points to handle storage.
+ */
+enum SidereonStatus sidereon_track_rts_history_builder_finish(const struct SidereonTrackRtsHistoryBuilder *history,
+                                                              struct SidereonTrackRtsHistory **out_history);
+
+/**
+ * Release an RTS history builder. Passing NULL is a no-op.
+ *
+ * Safety: history must be NULL or a live builder handle.
+ */
+void sidereon_track_rts_history_builder_free(struct SidereonTrackRtsHistoryBuilder *history);
+
+/**
+ * Create an RTS history builder from a filter's current state.
+ *
+ * Safety: filter must be live; out_history points to handle storage.
+ */
+enum SidereonStatus sidereon_track_rts_history_builder_from_filter(const struct SidereonTrackFilter *filter,
+                                                                   struct SidereonTrackRtsHistoryBuilder **out_history);
+
+/**
+ * Create an empty RTS history builder.
+ *
+ * Safety: out_history points to handle storage.
+ */
+enum SidereonStatus sidereon_track_rts_history_builder_new(struct SidereonTrackRtsHistoryBuilder **out_history);
+
+/**
+ * Copy one finished history epoch summary.
+ *
+ * Safety: history must be live; out_epoch points to a SidereonTrackRtsEpoch.
+ */
+enum SidereonStatus sidereon_track_rts_history_epoch(const struct SidereonTrackRtsHistory *history,
+                                                     size_t index,
+                                                     struct SidereonTrackRtsEpoch *out_epoch);
+
+/**
+ * Copy finished history epoch count.
+ *
+ * Safety: history must be live; out_count points to size_t storage.
+ */
+enum SidereonStatus sidereon_track_rts_history_epoch_count(const struct SidereonTrackRtsHistory *history,
+                                                           size_t *out_count);
+
+/**
+ * Copy one history epoch's predicted position vector.
+ *
+ * Safety: history must be live; out follows the standard variable-length
+ * output contract.
+ */
+enum SidereonStatus sidereon_track_rts_history_epoch_predicted_position_m(const struct SidereonTrackRtsHistory *history,
+                                                                          size_t index,
+                                                                          double *out,
+                                                                          size_t len,
+                                                                          size_t *out_written,
+                                                                          size_t *out_required);
+
+/**
+ * Copy one history epoch's transition from the previous epoch. When the epoch
+ * has no transition, required is zero.
+ *
+ * Safety: history must be live; out follows the standard variable-length
+ * output contract.
+ */
+enum SidereonStatus sidereon_track_rts_history_epoch_transition_from_previous(const struct SidereonTrackRtsHistory *history,
+                                                                              size_t index,
+                                                                              double *out,
+                                                                              size_t len,
+                                                                              size_t *out_written,
+                                                                              size_t *out_required);
+
+/**
+ * Copy one history epoch's updated position vector.
+ *
+ * Safety: history must be live; out follows the standard variable-length
+ * output contract.
+ */
+enum SidereonStatus sidereon_track_rts_history_epoch_updated_position_m(const struct SidereonTrackRtsHistory *history,
+                                                                        size_t index,
+                                                                        double *out,
+                                                                        size_t len,
+                                                                        size_t *out_written,
+                                                                        size_t *out_required);
+
+/**
+ * Release a finished RTS history handle. Passing NULL is a no-op.
+ *
+ * Safety: history must be NULL or a live history handle.
+ */
+void sidereon_track_rts_history_free(struct SidereonTrackRtsHistory *history);
 
 /**
  * Copy the base (all-rows) solve summary into *out_summary.

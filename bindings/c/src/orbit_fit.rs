@@ -700,6 +700,7 @@ unsafe fn orbit_fit_options_from_c(
         min_ledger_samples: options.min_ledger_samples,
         drag,
         space_weather: None,
+        propagation_context: propagation_context_from_c(&propagation_config),
     })
 }
 
@@ -746,6 +747,8 @@ fn orbit_fit_default_force_components() -> SidereonForceModelComponents {
         has_spherical_harmonic: false,
         spherical_harmonic_max_degree: 8,
         spherical_harmonic_max_order: 8,
+        has_solid_earth_tide: false,
+        has_solid_earth_pole_tide: false,
         has_third_body: false,
         third_body_sun: true,
         third_body_moon: true,
