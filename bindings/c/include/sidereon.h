@@ -2694,6 +2694,21 @@ typedef struct SidereonFdeSolution SidereonFdeSolution;
 typedef struct SidereonFusionFilter SidereonFusionFilter;
 
 /**
+ * Opaque recorded fusion RTS history. Create with
+ * sidereon_fusion_rts_history_builder_finish and release with
+ * sidereon_fusion_rts_history_free.
+ */
+typedef struct SidereonFusionRtsHistory SidereonFusionRtsHistory;
+
+/**
+ * Opaque builder for recorded fusion RTS histories. Create with
+ * sidereon_fusion_rts_history_builder_new or
+ * sidereon_fusion_rts_history_builder_from_filter and release with
+ * sidereon_fusion_rts_history_builder_free.
+ */
+typedef struct SidereonFusionRtsHistoryBuilder SidereonFusionRtsHistoryBuilder;
+
+/**
  * Network motion field handle. Create with sidereon_geodetic_network_field and
  * release with sidereon_geodetic_motion_field_free.
  */
@@ -3044,6 +3059,12 @@ typedef struct SidereonSgp4TleFit SidereonSgp4TleFit;
  * and release with sidereon_sidereal_filter_output_free.
  */
 typedef struct SidereonSiderealFilterOutput SidereonSiderealFilterOutput;
+
+/**
+ * Opaque smoothed fusion trajectory. Create with sidereon_smooth_fusion_rts
+ * and release with sidereon_smoothed_fusion_trajectory_free.
+ */
+typedef struct SidereonSmoothedFusionTrajectory SidereonSmoothedFusionTrajectory;
 
 /**
  * Opaque fixed-interval RTS smoothed track. Create with sidereon_smooth_track_rts
@@ -6755,6 +6776,34 @@ typedef struct SidereonFusionInnovationGate {
 } SidereonFusionInnovationGate;
 
 /**
+ * IGG-III measurement variance inflation break points for loose GNSS updates.
+ */
+typedef struct SidereonFusionIggIiiMeasurementReweighting {
+    /**
+     * Lower standardized-innovation break point in sigma.
+     */
+    double k0_sigma;
+    /**
+     * Upper standardized-innovation break point in sigma.
+     */
+    double k1_sigma;
+} SidereonFusionIggIiiMeasurementReweighting;
+
+/**
+ * Yang predicted-covariance adaptive factor for loose GNSS updates.
+ */
+typedef struct SidereonFusionYangPredictionAdaptiveFactor {
+    /**
+     * Two-segment threshold for the predicted-residual statistic.
+     */
+    double threshold;
+    /**
+     * Chi-square probability used for the Mahalanobis outlier gate.
+     */
+    double outlier_gate_probability;
+} SidereonFusionYangPredictionAdaptiveFactor;
+
+/**
  * Fusion filter configuration. Initialize with
  * sidereon_fusion_filter_config_init before overriding fields.
  */
@@ -6803,6 +6852,22 @@ typedef struct SidereonFusionFilterConfig {
      * EKF loose-update innovation screen.
      */
     struct SidereonFusionInnovationGate loose_innovation_gate;
+    /**
+     * Whether loose_measurement_reweighting carries IGG-III robust settings.
+     */
+    bool has_loose_measurement_reweighting;
+    /**
+     * IGG-III measurement variance inflation settings for loose updates.
+     */
+    struct SidereonFusionIggIiiMeasurementReweighting loose_measurement_reweighting;
+    /**
+     * Whether loose_prediction_adaptation carries Yang robust settings.
+     */
+    bool has_loose_prediction_adaptation;
+    /**
+     * Yang predicted-covariance adaptive factor for loose updates.
+     */
+    struct SidereonFusionYangPredictionAdaptiveFactor loose_prediction_adaptation;
     /**
      * Tight-coupling body-frame lever arm from IMU origin to GNSS antenna, meters.
      */
@@ -7238,6 +7303,28 @@ typedef struct SidereonFusionTightEpoch {
      */
     size_t observation_count;
 } SidereonFusionTightEpoch;
+
+/**
+ * Summary of a recorded fusion RTS history epoch.
+ */
+typedef struct SidereonFusionRtsEpoch {
+    /**
+     * Epoch in seconds since J2000.
+     */
+    double t_j2000_s;
+    /**
+     * INS error-state covariance dimension.
+     */
+    size_t covariance_dimension;
+    /**
+     * Full augmented smoothing dimension, including tight clock states.
+     */
+    size_t augmented_dimension;
+    /**
+     * Whether transition_from_previous is present for this epoch.
+     */
+    bool has_transition_from_previous;
+} SidereonFusionRtsEpoch;
 
 /**
  * Geodesic direct solution on WGS84.
@@ -13904,6 +13991,28 @@ typedef struct SidereonIonoFreeSmoothResult {
 } SidereonIonoFreeSmoothResult;
 
 /**
+ * Summary of one smoothed fusion trajectory epoch.
+ */
+typedef struct SidereonSmoothedFusionEpoch {
+    /**
+     * Epoch in seconds since J2000.
+     */
+    double t_j2000_s;
+    /**
+     * Full smoothed covariance dimension.
+     */
+    size_t covariance_dimension;
+    /**
+     * Error-state correction vector length.
+     */
+    size_t correction_len;
+    /**
+     * Whether an RTS gain to the next epoch is present.
+     */
+    bool has_rts_gain_to_next;
+} SidereonSmoothedFusionEpoch;
+
+/**
  * Track state metadata. Position, velocity, state-vector, and covariance arrays
  * are copied with the corresponding state reader functions.
  */
@@ -19613,6 +19722,16 @@ enum SidereonStatus sidereon_fusion_filter_propagate(struct SidereonFusionFilter
                                                      const struct SidereonFusionImuSample *sample);
 
 /**
+ * Propagate a fusion filter and record the transition for RTS smoothing.
+ *
+ * Safety: filter and history must be live handles; sample must point to a
+ * readable SidereonFusionImuSample.
+ */
+enum SidereonStatus sidereon_fusion_filter_propagate_recorded(struct SidereonFusionFilter *filter,
+                                                              const struct SidereonFusionImuSample *sample,
+                                                              struct SidereonFusionRtsHistoryBuilder *history);
+
+/**
  * Restore a fusion filter from bytes produced by
  * sidereon_fusion_filter_encode_state.
  *
@@ -19653,6 +19772,18 @@ enum SidereonStatus sidereon_fusion_filter_update_loose(struct SidereonFusionFil
                                                         struct SidereonFusionUpdate *out_update);
 
 /**
+ * Apply a loose GNSS update and record before/after checkpoints for RTS smoothing.
+ *
+ * Safety: filter and history must be live handles; measurement must point to a
+ * readable SidereonFusionLooseMeasurement; out_update must point to a
+ * SidereonFusionUpdate.
+ */
+enum SidereonStatus sidereon_fusion_filter_update_loose_recorded(struct SidereonFusionFilter *filter,
+                                                                 const struct SidereonFusionLooseMeasurement *measurement,
+                                                                 struct SidereonFusionRtsHistoryBuilder *history,
+                                                                 struct SidereonFusionUpdate *out_update);
+
+/**
  * Apply a time-synchronized loose GNSS update, replaying retained IMU samples
  * when the measurement is late.
  *
@@ -19675,6 +19806,19 @@ enum SidereonStatus sidereon_fusion_filter_update_tight_broadcast(struct Sidereo
                                                                   const struct SidereonBroadcastEphemeris *broadcast,
                                                                   const struct SidereonFusionTightEpoch *epoch,
                                                                   struct SidereonFusionUpdate *out_update);
+
+/**
+ * Apply and record a tight raw GNSS update using a broadcast ephemeris source.
+ *
+ * Safety: filter, broadcast, and history must be live handles; epoch must
+ * point to a readable SidereonFusionTightEpoch; out_update must point to a
+ * SidereonFusionUpdate.
+ */
+enum SidereonStatus sidereon_fusion_filter_update_tight_broadcast_recorded(struct SidereonFusionFilter *filter,
+                                                                           const struct SidereonBroadcastEphemeris *broadcast,
+                                                                           const struct SidereonFusionTightEpoch *epoch,
+                                                                           struct SidereonFusionRtsHistoryBuilder *history,
+                                                                           struct SidereonFusionUpdate *out_update);
 
 /**
  * Apply a time-synchronized tight raw GNSS update using a broadcast ephemeris
@@ -19701,6 +19845,19 @@ enum SidereonStatus sidereon_fusion_filter_update_tight_sp3(struct SidereonFusio
                                                             struct SidereonFusionUpdate *out_update);
 
 /**
+ * Apply and record a tight raw GNSS update using an SP3 ephemeris source.
+ *
+ * Safety: filter, sp3, and history must be live handles; epoch must point to a
+ * readable SidereonFusionTightEpoch; out_update must point to a
+ * SidereonFusionUpdate.
+ */
+enum SidereonStatus sidereon_fusion_filter_update_tight_sp3_recorded(struct SidereonFusionFilter *filter,
+                                                                     const struct SidereonSp3 *sp3,
+                                                                     const struct SidereonFusionTightEpoch *epoch,
+                                                                     struct SidereonFusionRtsHistoryBuilder *history,
+                                                                     struct SidereonFusionUpdate *out_update);
+
+/**
  * Apply a time-synchronized tight raw GNSS update using an SP3 ephemeris source.
  *
  * Safety: filter and sp3 must be live handles; epoch must point to a readable
@@ -19719,6 +19876,105 @@ enum SidereonStatus sidereon_fusion_filter_update_tight_sp3_time_sync(struct Sid
  */
 enum SidereonStatus sidereon_fusion_imu_spec_preset(uint32_t grade,
                                                     struct SidereonFusionImuSpec *out);
+
+/**
+ * Validate and clone a recorded fusion history out of a builder.
+ *
+ * Safety: history must be a live builder handle and out_history must point to
+ * storage for a SidereonFusionRtsHistory*.
+ */
+enum SidereonStatus sidereon_fusion_rts_history_builder_finish(const struct SidereonFusionRtsHistoryBuilder *history,
+                                                               struct SidereonFusionRtsHistory **out_history);
+
+/**
+ * Release a recorded fusion history builder. Passing NULL is a no-op.
+ *
+ * Safety: history must be NULL or a live SidereonFusionRtsHistoryBuilder
+ * handle that has not already been freed.
+ */
+void sidereon_fusion_rts_history_builder_free(struct SidereonFusionRtsHistoryBuilder *history);
+
+/**
+ * Create a recorded fusion history builder from the filter's current checkpoint.
+ *
+ * Safety: filter must be a live handle and out_history must point to storage
+ * for a SidereonFusionRtsHistoryBuilder*.
+ */
+enum SidereonStatus sidereon_fusion_rts_history_builder_from_filter(const struct SidereonFusionFilter *filter,
+                                                                    struct SidereonFusionRtsHistoryBuilder **out_history);
+
+/**
+ * Create an empty recorded fusion history builder.
+ *
+ * Safety: out_history must point to storage for a
+ * SidereonFusionRtsHistoryBuilder*.
+ */
+enum SidereonStatus sidereon_fusion_rts_history_builder_new(struct SidereonFusionRtsHistoryBuilder **out_history);
+
+/**
+ * Copy a recorded fusion RTS epoch summary.
+ *
+ * Safety: history must be a live handle and out_epoch must point to a
+ * SidereonFusionRtsEpoch.
+ */
+enum SidereonStatus sidereon_fusion_rts_history_epoch(const struct SidereonFusionRtsHistory *history,
+                                                      size_t index,
+                                                      struct SidereonFusionRtsEpoch *out_epoch);
+
+/**
+ * Return the number of epochs in a recorded fusion RTS history.
+ *
+ * Safety: history must be a live handle and out_count must point to size_t.
+ */
+enum SidereonStatus sidereon_fusion_rts_history_epoch_count(const struct SidereonFusionRtsHistory *history,
+                                                            size_t *out_count);
+
+/**
+ * Copy a recorded epoch's predicted ECEF position in meters.
+ *
+ * Safety: history must be a live handle; out must point to len doubles or
+ * NULL when len is 0; out_written and out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_fusion_rts_history_epoch_predicted_position_ecef_m(const struct SidereonFusionRtsHistory *history,
+                                                                                size_t index,
+                                                                                double *out,
+                                                                                size_t len,
+                                                                                size_t *out_written,
+                                                                                size_t *out_required);
+
+/**
+ * Copy a recorded epoch transition matrix in row-major order.
+ *
+ * Safety: history must be a live handle; out must point to len doubles or
+ * NULL when len is 0; out_written and out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_fusion_rts_history_epoch_transition_from_previous(const struct SidereonFusionRtsHistory *history,
+                                                                               size_t index,
+                                                                               double *out,
+                                                                               size_t len,
+                                                                               size_t *out_written,
+                                                                               size_t *out_required);
+
+/**
+ * Copy a recorded epoch's updated ECEF position in meters.
+ *
+ * Safety: history must be a live handle; out must point to len doubles or
+ * NULL when len is 0; out_written and out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_fusion_rts_history_epoch_updated_position_ecef_m(const struct SidereonFusionRtsHistory *history,
+                                                                              size_t index,
+                                                                              double *out,
+                                                                              size_t len,
+                                                                              size_t *out_written,
+                                                                              size_t *out_required);
+
+/**
+ * Release a recorded fusion RTS history. Passing NULL is a no-op.
+ *
+ * Safety: history must be NULL or a live SidereonFusionRtsHistory handle that
+ * has not already been freed.
+ */
+void sidereon_fusion_rts_history_free(struct SidereonFusionRtsHistory *history);
 
 /**
  * Galileo coefficient-driven single-frequency ionospheric group delay in the
@@ -26398,6 +26654,15 @@ enum SidereonStatus sidereon_smooth_code(const struct SidereonArcEpoch *arc,
                                          size_t *out_required);
 
 /**
+ * Apply fixed-interval RTS smoothing to a recorded fusion history.
+ *
+ * Safety: history must be a live handle and out_smoothed must point to storage
+ * for a SidereonSmoothedFusionTrajectory*.
+ */
+enum SidereonStatus sidereon_smooth_fusion_rts(const struct SidereonFusionRtsHistory *history,
+                                               struct SidereonSmoothedFusionTrajectory **out_smoothed);
+
+/**
  * Hatch-smooth ionosphere-free code over a dual-frequency arc. One result per
  * input epoch. Variable-length output contract. Delegates to
  * sidereon_core::carrier_phase::smooth_iono_free_code.
@@ -26422,6 +26687,84 @@ enum SidereonStatus sidereon_smooth_iono_free_code(const struct SidereonArcEpoch
  */
 enum SidereonStatus sidereon_smooth_track_rts(const struct SidereonTrackRtsHistory *history,
                                               struct SidereonSmoothedTrack **out_smoothed);
+
+/**
+ * Copy a smoothed fusion epoch summary.
+ *
+ * Safety: smoothed must be a live handle and out_epoch must point to a
+ * SidereonSmoothedFusionEpoch.
+ */
+enum SidereonStatus sidereon_smoothed_fusion_trajectory_epoch(const struct SidereonSmoothedFusionTrajectory *smoothed,
+                                                              size_t index,
+                                                              struct SidereonSmoothedFusionEpoch *out_epoch);
+
+/**
+ * Return the number of epochs in a smoothed fusion trajectory.
+ *
+ * Safety: smoothed must be a live handle and out_count must point to size_t.
+ */
+enum SidereonStatus sidereon_smoothed_fusion_trajectory_epoch_count(const struct SidereonSmoothedFusionTrajectory *smoothed,
+                                                                    size_t *out_count);
+
+/**
+ * Copy a smoothed epoch covariance matrix in row-major order.
+ *
+ * Safety: smoothed must be a live handle; out must point to len doubles or
+ * NULL when len is 0; out_written and out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_smoothed_fusion_trajectory_epoch_covariance(const struct SidereonSmoothedFusionTrajectory *smoothed,
+                                                                         size_t index,
+                                                                         double *out,
+                                                                         size_t len,
+                                                                         size_t *out_written,
+                                                                         size_t *out_required);
+
+/**
+ * Copy a smoothed epoch correction vector.
+ *
+ * Safety: smoothed must be a live handle; out must point to len doubles or
+ * NULL when len is 0; out_written and out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_smoothed_fusion_trajectory_epoch_error_state_correction(const struct SidereonSmoothedFusionTrajectory *smoothed,
+                                                                                     size_t index,
+                                                                                     double *out,
+                                                                                     size_t len,
+                                                                                     size_t *out_written,
+                                                                                     size_t *out_required);
+
+/**
+ * Copy a smoothed epoch's ECEF position in meters.
+ *
+ * Safety: smoothed must be a live handle; out must point to len doubles or
+ * NULL when len is 0; out_written and out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_smoothed_fusion_trajectory_epoch_position_ecef_m(const struct SidereonSmoothedFusionTrajectory *smoothed,
+                                                                              size_t index,
+                                                                              double *out,
+                                                                              size_t len,
+                                                                              size_t *out_written,
+                                                                              size_t *out_required);
+
+/**
+ * Copy a smoothed epoch RTS gain to the next epoch in row-major order.
+ *
+ * Safety: smoothed must be a live handle; out must point to len doubles or
+ * NULL when len is 0; out_written and out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_smoothed_fusion_trajectory_epoch_rts_gain_to_next(const struct SidereonSmoothedFusionTrajectory *smoothed,
+                                                                               size_t index,
+                                                                               double *out,
+                                                                               size_t len,
+                                                                               size_t *out_written,
+                                                                               size_t *out_required);
+
+/**
+ * Release a smoothed fusion trajectory. Passing NULL is a no-op.
+ *
+ * Safety: smoothed must be NULL or a live SidereonSmoothedFusionTrajectory
+ * handle that has not already been freed.
+ */
+void sidereon_smoothed_fusion_trajectory_free(struct SidereonSmoothedFusionTrajectory *smoothed);
 
 /**
  * Copy one smoothed track epoch summary.
