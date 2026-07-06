@@ -5862,6 +5862,20 @@ typedef struct SidereonKinematicSolutionMetricsInput {
 } SidereonKinematicSolutionMetricsInput;
 
 /**
+ * Position covariance in ECEF and local ENU coordinates.
+ */
+typedef struct SidereonPositionCovariance {
+    /**
+     * Row-major ECEF position covariance, square meters.
+     */
+    double ecef_m2[9];
+    /**
+     * Row-major local ENU position covariance, square meters.
+     */
+    double enu_m2[9];
+} SidereonPositionCovariance;
+
+/**
  * Result of a drag-decay estimate.
  */
 typedef struct SidereonDecayEstimate {
@@ -18993,6 +19007,16 @@ enum SidereonStatus sidereon_error_ellipse_2x2(const double *covariance,
                                                struct SidereonErrorEllipse2 *out_ellipse);
 
 /**
+ * Horizontal one-sigma ellipse from an ENU covariance in square meters.
+ *
+ * Safety: covariance_enu_m2 points to 9 row-major doubles; out_ellipse and
+ * out_error must point to writable structs.
+ */
+enum SidereonStatus sidereon_error_metrics_error_ellipse_from_enu_m2(const double *covariance_enu_m2,
+                                                                     struct SidereonErrorEllipse *out_ellipse,
+                                                                     enum SidereonErrorMetricsErrorKind *out_error);
+
+/**
  * Rotate an ECEF covariance to ENU at receiver and compute standard metrics.
  *
  * Safety: covariance_ecef_m2 points to 9 row-major doubles; out_metrics and
@@ -19021,6 +19045,47 @@ enum SidereonStatus sidereon_error_metrics_from_enu_covariance_m2(const double *
 enum SidereonStatus sidereon_error_metrics_from_kinematic_solution(const struct SidereonKinematicSolutionMetricsInput *solution,
                                                                    struct SidereonPositionErrorMetrics *out_metrics,
                                                                    enum SidereonErrorMetricsErrorKind *out_error);
+
+/**
+ * Compute standard metrics from a position covariance value.
+ *
+ * Safety: covariance, out_metrics, and out_error must point to valid structs.
+ */
+enum SidereonStatus sidereon_error_metrics_from_position_covariance(const struct SidereonPositionCovariance *covariance,
+                                                                    struct SidereonPositionErrorMetrics *out_metrics,
+                                                                    enum SidereonErrorMetricsErrorKind *out_error);
+
+/**
+ * Horizontal percentile circle radius from an ENU covariance.
+ *
+ * Safety: covariance_enu_m2 points to 9 row-major doubles; out_radius and
+ * out_error must point to writable structs.
+ */
+enum SidereonStatus sidereon_error_metrics_horizontal_radius_at(const double *covariance_enu_m2,
+                                                                double probability,
+                                                                struct SidereonPercentileRadius *out_radius,
+                                                                enum SidereonErrorMetricsErrorKind *out_error);
+
+/**
+ * Three-dimensional percentile sphere radius from an ENU covariance.
+ *
+ * Safety: covariance_enu_m2 points to 9 row-major doubles; out_radius and
+ * out_error must point to writable structs.
+ */
+enum SidereonStatus sidereon_error_metrics_spherical_radius_at(const double *covariance_enu_m2,
+                                                               double probability,
+                                                               struct SidereonPercentileRadius *out_radius,
+                                                               enum SidereonErrorMetricsErrorKind *out_error);
+
+/**
+ * Vertical one-dimensional percentile radius from an up variance.
+ *
+ * Safety: out_radius_m and out_error must point to writable values.
+ */
+enum SidereonStatus sidereon_error_metrics_vertical_radius_at(double sigma_u_m2,
+                                                              double probability,
+                                                              double *out_radius_m,
+                                                              enum SidereonErrorMetricsErrorKind *out_error);
 
 /**
  * Estimate time to reentry using drag-perturbed numerical propagation.
