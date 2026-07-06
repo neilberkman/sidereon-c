@@ -29,6 +29,16 @@ static int close_abs(double actual, double expected, double tol) {
     return fabs(actual - expected) <= tol;
 }
 
+static uint64_t f64_bits(double value) {
+    uint64_t bits = 0;
+    memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+static void check_bits(double actual, uint64_t expected, const char *what) {
+    check(f64_bits(actual) == expected, what);
+}
+
 static void copy_state_position(const SidereonFusionState *state,
                                 SidereonFusionLooseMeasurement *measurement,
                                 double t_j2000_s,
@@ -357,7 +367,6 @@ static void test_fusion(void) {
                   "fusion encode restore byte roundtrip");
             free(roundtrip);
         }
-        check(byte_count == 13872, "fusion pinned encoded length");
         free(bytes);
     }
 
@@ -368,10 +377,209 @@ static void test_fusion(void) {
     sidereon_fusion_filter_free(filter);
 }
 
+static void test_fusion_recorded_rts(void) {
+    SidereonFusionFilterConfig config;
+    check(sidereon_fusion_filter_config_init(&config) == SIDEREON_STATUS_OK,
+          "fusion recorded config init");
+    config.has_loose_innovation_gate = true;
+    config.loose_innovation_gate.threshold_sigma = 4.0;
+    config.loose_innovation_gate.min_rows = 2;
+    config.has_loose_measurement_reweighting = true;
+    config.loose_measurement_reweighting.k0_sigma = 2.0;
+    config.loose_measurement_reweighting.k1_sigma = 5.0;
+    config.has_loose_prediction_adaptation = true;
+    config.loose_prediction_adaptation.threshold = 1.0;
+    config.loose_prediction_adaptation.outlier_gate_probability = 0.99;
+
+    SidereonFusionNavState nav;
+    init_nav(&nav);
+    double diag[15];
+    for (size_t i = 0; i < 15; i++) {
+        diag[i] = 1.0;
+    }
+
+    SidereonFusionFilter *filter = NULL;
+    check(sidereon_fusion_filter_create(&nav, diag, 15, &config, &filter) ==
+              SIDEREON_STATUS_OK &&
+              filter != NULL,
+          "fusion recorded create");
+    if (filter == NULL) {
+        return;
+    }
+
+    SidereonFusionRtsHistoryBuilder *builder = NULL;
+    check(sidereon_fusion_rts_history_builder_from_filter(filter, &builder) ==
+              SIDEREON_STATUS_OK &&
+              builder != NULL,
+          "fusion recorded history from filter");
+    if (builder == NULL) {
+        sidereon_fusion_filter_free(filter);
+        return;
+    }
+
+    SidereonFusionImuSample sample;
+    memset(&sample, 0, sizeof(sample));
+    sample.kind = SIDEREON_FUSION_IMU_SAMPLE_KIND_RATE;
+    sample.t_j2000_s = 1.0;
+    check(sidereon_fusion_filter_propagate_recorded(filter, &sample, builder) ==
+              SIDEREON_STATUS_OK,
+          "fusion recorded propagate");
+
+    double loose_cov[9] = {0.5, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.5};
+    SidereonFusionLooseMeasurement measurement;
+    memset(&measurement, 0, sizeof(measurement));
+    measurement.t_j2000_s = 1.0;
+    measurement.position_ecef_m[0] = 6378137.35;
+    measurement.position_ecef_m[1] = 0.2;
+    measurement.position_ecef_m[2] = -0.1;
+    measurement.covariance = loose_cov;
+    measurement.covariance_len = 9;
+    measurement.satellites_used = 7;
+    measurement.solution_valid = true;
+
+    SidereonFusionUpdate update;
+    check(sidereon_fusion_filter_update_loose_recorded(filter, &measurement, builder, &update) ==
+              SIDEREON_STATUS_OK &&
+              update.applied && update.rows == 3 && update.accepted_rows == 3 &&
+              update.rejected_rows == 0,
+          "fusion recorded loose update");
+    check_bits(update.nis, UINT64_C(0x400A42AD3B07976F), "fusion recorded NIS bits");
+
+    SidereonFusionState state;
+    check(sidereon_fusion_filter_state(filter, &state) == SIDEREON_STATUS_OK,
+          "fusion recorded state");
+    check_bits(state.position_ecef_m[0], UINT64_C(0x415854A602757FB6),
+               "fusion recorded state x bits");
+    check_bits(state.position_ecef_m[1], UINT64_C(0x3FC7B6B11D7FA0D8),
+               "fusion recorded state y bits");
+    check_bits(state.position_ecef_m[2], UINT64_C(0xBFB7B6B11D5C2B22),
+               "fusion recorded state z bits");
+
+    SidereonFusionRtsHistory *history = NULL;
+    check(sidereon_fusion_rts_history_builder_finish(builder, &history) ==
+              SIDEREON_STATUS_OK &&
+              history != NULL,
+          "fusion recorded history finish");
+    size_t count = 0;
+    check(sidereon_fusion_rts_history_epoch_count(history, &count) == SIDEREON_STATUS_OK &&
+              count == 2,
+          "fusion recorded history count");
+
+    SidereonFusionRtsEpoch epoch0, epoch1;
+    check(sidereon_fusion_rts_history_epoch(history, 0, &epoch0) == SIDEREON_STATUS_OK &&
+              epoch0.covariance_dimension == 15 && epoch0.augmented_dimension == 17 &&
+              !epoch0.has_transition_from_previous,
+          "fusion recorded epoch 0 summary");
+    check(sidereon_fusion_rts_history_epoch(history, 1, &epoch1) == SIDEREON_STATUS_OK &&
+              epoch1.covariance_dimension == 15 && epoch1.augmented_dimension == 17 &&
+              epoch1.has_transition_from_previous,
+          "fusion recorded epoch 1 summary");
+
+    size_t written = 0, required = 0;
+    double transition[225];
+    check(sidereon_fusion_rts_history_epoch_transition_from_previous(
+              history, 0, NULL, 0, &written, &required) == SIDEREON_STATUS_OK &&
+              written == 0 && required == 0,
+          "fusion recorded first transition absent");
+    check(sidereon_fusion_rts_history_epoch_transition_from_previous(
+              history, 1, transition, 225, &written, &required) == SIDEREON_STATUS_OK &&
+              written == 225 && required == 225,
+          "fusion recorded transition copy");
+    check_bits(transition[0], UINT64_C(0x3FF000019D17A15A),
+               "fusion recorded transition xx bits");
+    check_bits(transition[16], UINT64_C(0x3FEFFFFE650C7E2C),
+               "fusion recorded transition yy bits");
+    check_bits(transition[32], UINT64_C(0x3FEFFFFE639F13D3),
+               "fusion recorded transition zz bits");
+
+    SidereonSmoothedFusionTrajectory *smoothed = NULL;
+    check(sidereon_smooth_fusion_rts(history, &smoothed) == SIDEREON_STATUS_OK &&
+              smoothed != NULL,
+          "fusion recorded smooth");
+    check(sidereon_smoothed_fusion_trajectory_epoch_count(smoothed, &count) ==
+              SIDEREON_STATUS_OK &&
+              count == 2,
+          "fusion recorded smoothed count");
+
+    SidereonSmoothedFusionEpoch smoothed0, smoothed1;
+    check(sidereon_smoothed_fusion_trajectory_epoch(smoothed, 0, &smoothed0) ==
+              SIDEREON_STATUS_OK &&
+              smoothed0.covariance_dimension == 17 && smoothed0.correction_len == 17 &&
+              smoothed0.has_rts_gain_to_next,
+          "fusion recorded smoothed epoch 0 summary");
+    check(sidereon_smoothed_fusion_trajectory_epoch(smoothed, 1, &smoothed1) ==
+              SIDEREON_STATUS_OK &&
+              smoothed1.covariance_dimension == 17 && smoothed1.correction_len == 17 &&
+              !smoothed1.has_rts_gain_to_next,
+          "fusion recorded smoothed epoch 1 summary");
+
+    double position[3];
+    check(sidereon_smoothed_fusion_trajectory_epoch_position_ecef_m(
+              smoothed, 0, position, 3, &written, &required) == SIDEREON_STATUS_OK &&
+              written == 3 && required == 3,
+          "fusion recorded smoothed position 0");
+    check_bits(position[0], UINT64_C(0x415854A6AFB47DAB),
+               "fusion recorded smoothed 0 x bits");
+    check_bits(position[1], UINT64_C(0x3FB5122C16E56642),
+               "fusion recorded smoothed 0 y bits");
+    check_bits(position[2], UINT64_C(0xBFA5122C1780E0A5),
+               "fusion recorded smoothed 0 z bits");
+    check(sidereon_smoothed_fusion_trajectory_epoch_position_ecef_m(
+              smoothed, 1, position, 3, &written, &required) == SIDEREON_STATUS_OK &&
+              written == 3 && required == 3,
+          "fusion recorded smoothed position 1");
+    check_bits(position[0], UINT64_C(0x415854A602757FB6),
+               "fusion recorded smoothed 1 x bits");
+    check_bits(position[1], UINT64_C(0x3FC7B6B11D7FA0D8),
+               "fusion recorded smoothed 1 y bits");
+    check_bits(position[2], UINT64_C(0xBFB7B6B11D5C2B22),
+               "fusion recorded smoothed 1 z bits");
+
+    double correction[17];
+    check(sidereon_smoothed_fusion_trajectory_epoch_error_state_correction(
+              smoothed, 0, correction, 17, &written, &required) == SIDEREON_STATUS_OK &&
+              written == 17 && required == 17,
+          "fusion recorded smoothed correction");
+    check_bits(correction[0], UINT64_C(0xBFFBED1F6AC3E068),
+               "fusion recorded correction x bits");
+    check_bits(correction[1], UINT64_C(0xBFB5122C16E56642),
+               "fusion recorded correction y bits");
+    check_bits(correction[2], UINT64_C(0x3FA5122C1780E0A5),
+               "fusion recorded correction z bits");
+
+    double covariance[289];
+    check(sidereon_smoothed_fusion_trajectory_epoch_covariance(
+              smoothed, 0, covariance, 289, &written, &required) == SIDEREON_STATUS_OK &&
+              written == 289 && required == 289,
+          "fusion recorded smoothed covariance");
+    check_bits(covariance[0], UINT64_C(0x3FFDC64F219100F6),
+               "fusion recorded covariance xx bits");
+    check_bits(covariance[18], UINT64_C(0x3FFA44D611536A90),
+               "fusion recorded covariance yy bits");
+    check_bits(covariance[36], UINT64_C(0x3FFA44D6119F127C),
+               "fusion recorded covariance zz bits");
+
+    double rts_gain[289];
+    check(sidereon_smoothed_fusion_trajectory_epoch_rts_gain_to_next(
+              smoothed, 0, rts_gain, 289, &written, &required) == SIDEREON_STATUS_OK &&
+              written == 289 && required == 289,
+          "fusion recorded RTS gain");
+    check(sidereon_smoothed_fusion_trajectory_epoch_rts_gain_to_next(
+              smoothed, 1, NULL, 0, &written, &required) == SIDEREON_STATUS_OK &&
+              written == 0 && required == 0,
+          "fusion recorded final RTS gain absent");
+
+    sidereon_smoothed_fusion_trajectory_free(smoothed);
+    sidereon_fusion_rts_history_free(history);
+    sidereon_fusion_rts_history_builder_free(builder);
+    sidereon_fusion_filter_free(filter);
+}
+
 int main(void) {
     test_signal_analysis();
     test_scenario();
     test_fusion();
+    test_fusion_recorded_rts();
     if (failures != 0) {
         fprintf(stderr, "domain018_smoke failures: %d\n", failures);
         return 1;

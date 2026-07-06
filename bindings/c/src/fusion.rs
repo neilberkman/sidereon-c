@@ -57,6 +57,27 @@ pub struct SidereonFusionFilter {
     pub(crate) inner: sidereon_core::fusion::InertialFilter,
 }
 
+/// Opaque builder for recorded fusion RTS histories. Create with
+/// sidereon_fusion_rts_history_builder_new or
+/// sidereon_fusion_rts_history_builder_from_filter and release with
+/// sidereon_fusion_rts_history_builder_free.
+pub struct SidereonFusionRtsHistoryBuilder {
+    pub(crate) inner: sidereon_core::fusion::FusionRtsHistoryBuilder,
+}
+
+/// Opaque recorded fusion RTS history. Create with
+/// sidereon_fusion_rts_history_builder_finish and release with
+/// sidereon_fusion_rts_history_free.
+pub struct SidereonFusionRtsHistory {
+    pub(crate) inner: sidereon_core::fusion::FusionRtsHistory,
+}
+
+/// Opaque smoothed fusion trajectory. Create with sidereon_smooth_fusion_rts
+/// and release with sidereon_smoothed_fusion_trajectory_free.
+pub struct SidereonSmoothedFusionTrajectory {
+    pub(crate) inner: sidereon_core::fusion::SmoothedFusionTrajectory,
+}
+
 /// Datasheet-level IMU stochastic parameters for fusion filter prediction.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -99,6 +120,26 @@ pub struct SidereonFusionInnovationGate {
     pub threshold_sigma: f64,
     /// Minimum accepted rows required to apply an update after screening.
     pub min_rows: usize,
+}
+
+/// IGG-III measurement variance inflation break points for loose GNSS updates.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonFusionIggIiiMeasurementReweighting {
+    /// Lower standardized-innovation break point in sigma.
+    pub k0_sigma: f64,
+    /// Upper standardized-innovation break point in sigma.
+    pub k1_sigma: f64,
+}
+
+/// Yang predicted-covariance adaptive factor for loose GNSS updates.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonFusionYangPredictionAdaptiveFactor {
+    /// Two-segment threshold for the predicted-residual statistic.
+    pub threshold: f64,
+    /// Chi-square probability used for the Mahalanobis outlier gate.
+    pub outlier_gate_probability: f64,
 }
 
 /// Initial nominal navigation state for a fusion filter.
@@ -150,6 +191,14 @@ pub struct SidereonFusionFilterConfig {
     pub has_loose_innovation_gate: bool,
     /// EKF loose-update innovation screen.
     pub loose_innovation_gate: SidereonFusionInnovationGate,
+    /// Whether loose_measurement_reweighting carries IGG-III robust settings.
+    pub has_loose_measurement_reweighting: bool,
+    /// IGG-III measurement variance inflation settings for loose updates.
+    pub loose_measurement_reweighting: SidereonFusionIggIiiMeasurementReweighting,
+    /// Whether loose_prediction_adaptation carries Yang robust settings.
+    pub has_loose_prediction_adaptation: bool,
+    /// Yang predicted-covariance adaptive factor for loose updates.
+    pub loose_prediction_adaptation: SidereonFusionYangPredictionAdaptiveFactor,
     /// Tight-coupling body-frame lever arm from IMU origin to GNSS antenna, meters.
     pub tight_lever_arm_body_m: [f64; 3],
     /// Whether tight raw GNSS updates apply light-time correction.
@@ -380,6 +429,34 @@ pub struct SidereonFusionState {
     pub tight_clock_covariance: [f64; 4],
 }
 
+/// Summary of a recorded fusion RTS history epoch.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonFusionRtsEpoch {
+    /// Epoch in seconds since J2000.
+    pub t_j2000_s: f64,
+    /// INS error-state covariance dimension.
+    pub covariance_dimension: usize,
+    /// Full augmented smoothing dimension, including tight clock states.
+    pub augmented_dimension: usize,
+    /// Whether transition_from_previous is present for this epoch.
+    pub has_transition_from_previous: bool,
+}
+
+/// Summary of one smoothed fusion trajectory epoch.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonSmoothedFusionEpoch {
+    /// Epoch in seconds since J2000.
+    pub t_j2000_s: f64,
+    /// Full smoothed covariance dimension.
+    pub covariance_dimension: usize,
+    /// Error-state correction vector length.
+    pub correction_len: usize,
+    /// Whether an RTS gain to the next epoch is present.
+    pub has_rts_gain_to_next: bool,
+}
+
 /// Fill an IMU spec with one of the core preset grades.
 ///
 /// Safety: out must point to a SidereonFusionImuSpec.
@@ -437,6 +514,14 @@ pub unsafe extern "C" fn sidereon_fusion_filter_config_init(
                 loose_lever_arm_body_m: [0.0; 3],
                 has_loose_innovation_gate: false,
                 loose_innovation_gate: zero_fusion_innovation_gate(),
+                has_loose_measurement_reweighting: false,
+                loose_measurement_reweighting: fusion_igg_iii_measurement_reweighting_to_c(
+                    sidereon_core::fusion::IggIiiMeasurementReweighting::standard(),
+                ),
+                has_loose_prediction_adaptation: false,
+                loose_prediction_adaptation: fusion_yang_prediction_adaptive_factor_to_c(
+                    sidereon_core::fusion::YangPredictionAdaptiveFactor::standard(),
+                ),
                 tight_lever_arm_body_m: tight.lever_arm_body_m,
                 tight_light_time: tight.light_time,
                 tight_sagnac: tight.sagnac,
@@ -655,6 +740,47 @@ pub unsafe extern "C" fn sidereon_fusion_filter_propagate(
     )
 }
 
+/// Propagate a fusion filter and record the transition for RTS smoothing.
+///
+/// Safety: filter and history must be live handles; sample must point to a
+/// readable SidereonFusionImuSample.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_fusion_filter_propagate_recorded(
+    filter: *mut SidereonFusionFilter,
+    sample: *const SidereonFusionImuSample,
+    history: *mut SidereonFusionRtsHistoryBuilder,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_fusion_filter_propagate_recorded",
+        SidereonStatus::Panic,
+        || {
+            let filter = c_try!(require_mut(
+                filter,
+                "sidereon_fusion_filter_propagate_recorded",
+                "filter"
+            ));
+            let history = c_try!(require_mut(
+                history,
+                "sidereon_fusion_filter_propagate_recorded",
+                "history"
+            ));
+            let sample = c_try!(require_ref(
+                sample,
+                "sidereon_fusion_filter_propagate_recorded",
+                "sample"
+            ));
+            let sample = c_try!(imu_sample_from_c(
+                "sidereon_fusion_filter_propagate_recorded",
+                sample
+            ));
+            match filter.inner.propagate_recorded(sample, &mut history.inner) {
+                Ok(_) => SidereonStatus::Ok,
+                Err(err) => map_fusion_error("sidereon_fusion_filter_propagate_recorded", err),
+            }
+        },
+    )
+}
+
 /// Apply a loose GNSS position or position-velocity update.
 ///
 /// Safety: filter must be a live handle; measurement must point to a readable
@@ -691,6 +817,56 @@ pub unsafe extern "C" fn sidereon_fusion_filter_update_loose(
                     SidereonStatus::Ok
                 }
                 Err(err) => map_fusion_error("sidereon_fusion_filter_update_loose", err),
+            }
+        },
+    )
+}
+
+/// Apply a loose GNSS update and record before/after checkpoints for RTS smoothing.
+///
+/// Safety: filter and history must be live handles; measurement must point to a
+/// readable SidereonFusionLooseMeasurement; out_update must point to a
+/// SidereonFusionUpdate.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_fusion_filter_update_loose_recorded(
+    filter: *mut SidereonFusionFilter,
+    measurement: *const SidereonFusionLooseMeasurement,
+    history: *mut SidereonFusionRtsHistoryBuilder,
+    out_update: *mut SidereonFusionUpdate,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_fusion_filter_update_loose_recorded",
+        SidereonStatus::Panic,
+        || {
+            let filter = c_try!(require_mut(
+                filter,
+                "sidereon_fusion_filter_update_loose_recorded",
+                "filter"
+            ));
+            let history = c_try!(require_mut(
+                history,
+                "sidereon_fusion_filter_update_loose_recorded",
+                "history"
+            ));
+            let out_update = c_try!(require_out(
+                out_update,
+                "sidereon_fusion_filter_update_loose_recorded",
+                "out_update"
+            ));
+            *out_update = zero_fusion_update();
+            let measurement = c_try!(loose_measurement_from_c(
+                "sidereon_fusion_filter_update_loose_recorded",
+                measurement
+            ));
+            match filter
+                .inner
+                .update_loose_recorded(&measurement, &mut history.inner)
+            {
+                Ok(update) => {
+                    *out_update = fusion_update_to_c(&update);
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_fusion_error("sidereon_fusion_filter_update_loose_recorded", err),
             }
         },
     )
@@ -826,6 +1002,123 @@ pub unsafe extern "C" fn sidereon_fusion_filter_update_tight_broadcast(
                     SidereonStatus::Ok
                 }
                 Err(err) => map_fusion_error("sidereon_fusion_filter_update_tight_broadcast", err),
+            }
+        },
+    )
+}
+
+/// Apply and record a tight raw GNSS update using an SP3 ephemeris source.
+///
+/// Safety: filter, sp3, and history must be live handles; epoch must point to a
+/// readable SidereonFusionTightEpoch; out_update must point to a
+/// SidereonFusionUpdate.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_fusion_filter_update_tight_sp3_recorded(
+    filter: *mut SidereonFusionFilter,
+    sp3: *const SidereonSp3,
+    epoch: *const SidereonFusionTightEpoch,
+    history: *mut SidereonFusionRtsHistoryBuilder,
+    out_update: *mut SidereonFusionUpdate,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_fusion_filter_update_tight_sp3_recorded",
+        SidereonStatus::Panic,
+        || {
+            let filter = c_try!(require_mut(
+                filter,
+                "sidereon_fusion_filter_update_tight_sp3_recorded",
+                "filter"
+            ));
+            let sp3 = c_try!(require_ref(
+                sp3,
+                "sidereon_fusion_filter_update_tight_sp3_recorded",
+                "sp3"
+            ));
+            let history = c_try!(require_mut(
+                history,
+                "sidereon_fusion_filter_update_tight_sp3_recorded",
+                "history"
+            ));
+            let out_update = c_try!(require_out(
+                out_update,
+                "sidereon_fusion_filter_update_tight_sp3_recorded",
+                "out_update"
+            ));
+            *out_update = zero_fusion_update();
+            let epoch = c_try!(tight_epoch_from_c(
+                "sidereon_fusion_filter_update_tight_sp3_recorded",
+                epoch
+            ));
+            match filter
+                .inner
+                .update_tight_recorded(&sp3.inner, &epoch, &mut history.inner)
+            {
+                Ok(update) => {
+                    *out_update = fusion_update_to_c(&update);
+                    SidereonStatus::Ok
+                }
+                Err(err) => {
+                    map_fusion_error("sidereon_fusion_filter_update_tight_sp3_recorded", err)
+                }
+            }
+        },
+    )
+}
+
+/// Apply and record a tight raw GNSS update using a broadcast ephemeris source.
+///
+/// Safety: filter, broadcast, and history must be live handles; epoch must
+/// point to a readable SidereonFusionTightEpoch; out_update must point to a
+/// SidereonFusionUpdate.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_fusion_filter_update_tight_broadcast_recorded(
+    filter: *mut SidereonFusionFilter,
+    broadcast: *const SidereonBroadcastEphemeris,
+    epoch: *const SidereonFusionTightEpoch,
+    history: *mut SidereonFusionRtsHistoryBuilder,
+    out_update: *mut SidereonFusionUpdate,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_fusion_filter_update_tight_broadcast_recorded",
+        SidereonStatus::Panic,
+        || {
+            let filter = c_try!(require_mut(
+                filter,
+                "sidereon_fusion_filter_update_tight_broadcast_recorded",
+                "filter"
+            ));
+            let broadcast = c_try!(require_ref(
+                broadcast,
+                "sidereon_fusion_filter_update_tight_broadcast_recorded",
+                "broadcast"
+            ));
+            let history = c_try!(require_mut(
+                history,
+                "sidereon_fusion_filter_update_tight_broadcast_recorded",
+                "history"
+            ));
+            let out_update = c_try!(require_out(
+                out_update,
+                "sidereon_fusion_filter_update_tight_broadcast_recorded",
+                "out_update"
+            ));
+            *out_update = zero_fusion_update();
+            let epoch = c_try!(tight_epoch_from_c(
+                "sidereon_fusion_filter_update_tight_broadcast_recorded",
+                epoch
+            ));
+            match filter
+                .inner
+                .update_tight_recorded(&broadcast.inner, &epoch, &mut history.inner)
+            {
+                Ok(update) => {
+                    *out_update = fusion_update_to_c(&update);
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_fusion_error(
+                    "sidereon_fusion_filter_update_tight_broadcast_recorded",
+                    err,
+                ),
             }
         },
     )
@@ -1074,6 +1367,637 @@ pub unsafe extern "C" fn sidereon_fusion_filter_restore_state(
     )
 }
 
+/// Create an empty recorded fusion history builder.
+///
+/// Safety: out_history must point to storage for a
+/// SidereonFusionRtsHistoryBuilder*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_fusion_rts_history_builder_new(
+    out_history: *mut *mut SidereonFusionRtsHistoryBuilder,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_fusion_rts_history_builder_new",
+        SidereonStatus::Panic,
+        || {
+            let out_history = c_try!(require_out(
+                out_history,
+                "sidereon_fusion_rts_history_builder_new",
+                "out_history"
+            ));
+            *out_history = ptr::null_mut();
+            write_boxed_handle(
+                out_history,
+                SidereonFusionRtsHistoryBuilder {
+                    inner: sidereon_core::fusion::FusionRtsHistoryBuilder::empty(),
+                },
+            );
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Create a recorded fusion history builder from the filter's current checkpoint.
+///
+/// Safety: filter must be a live handle and out_history must point to storage
+/// for a SidereonFusionRtsHistoryBuilder*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_fusion_rts_history_builder_from_filter(
+    filter: *const SidereonFusionFilter,
+    out_history: *mut *mut SidereonFusionRtsHistoryBuilder,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_fusion_rts_history_builder_from_filter",
+        SidereonStatus::Panic,
+        || {
+            let out_history = c_try!(require_out(
+                out_history,
+                "sidereon_fusion_rts_history_builder_from_filter",
+                "out_history"
+            ));
+            *out_history = ptr::null_mut();
+            let filter = c_try!(require_ref(
+                filter,
+                "sidereon_fusion_rts_history_builder_from_filter",
+                "filter"
+            ));
+            let inner =
+                match sidereon_core::fusion::FusionRtsHistoryBuilder::from_filter(&filter.inner) {
+                    Ok(inner) => inner,
+                    Err(err) => {
+                        return map_fusion_error(
+                            "sidereon_fusion_rts_history_builder_from_filter",
+                            err,
+                        )
+                    }
+                };
+            write_boxed_handle(out_history, SidereonFusionRtsHistoryBuilder { inner });
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Validate and clone a recorded fusion history out of a builder.
+///
+/// Safety: history must be a live builder handle and out_history must point to
+/// storage for a SidereonFusionRtsHistory*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_fusion_rts_history_builder_finish(
+    history: *const SidereonFusionRtsHistoryBuilder,
+    out_history: *mut *mut SidereonFusionRtsHistory,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_fusion_rts_history_builder_finish",
+        SidereonStatus::Panic,
+        || {
+            let out_history = c_try!(require_out(
+                out_history,
+                "sidereon_fusion_rts_history_builder_finish",
+                "out_history"
+            ));
+            *out_history = ptr::null_mut();
+            let history = c_try!(require_ref(
+                history,
+                "sidereon_fusion_rts_history_builder_finish",
+                "history"
+            ));
+            let inner = match history.inner.clone().finish() {
+                Ok(inner) => inner,
+                Err(err) => {
+                    return map_fusion_error("sidereon_fusion_rts_history_builder_finish", err)
+                }
+            };
+            write_boxed_handle(out_history, SidereonFusionRtsHistory { inner });
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Release a recorded fusion history builder. Passing NULL is a no-op.
+///
+/// Safety: history must be NULL or a live SidereonFusionRtsHistoryBuilder
+/// handle that has not already been freed.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_fusion_rts_history_builder_free(
+    history: *mut SidereonFusionRtsHistoryBuilder,
+) {
+    ffi_boundary("sidereon_fusion_rts_history_builder_free", (), || {
+        free_boxed(history);
+    });
+}
+
+/// Return the number of epochs in a recorded fusion RTS history.
+///
+/// Safety: history must be a live handle and out_count must point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_fusion_rts_history_epoch_count(
+    history: *const SidereonFusionRtsHistory,
+    out_count: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_fusion_rts_history_epoch_count",
+        SidereonStatus::Panic,
+        || {
+            let history = c_try!(require_ref(
+                history,
+                "sidereon_fusion_rts_history_epoch_count",
+                "history"
+            ));
+            let out_count = c_try!(require_out(
+                out_count,
+                "sidereon_fusion_rts_history_epoch_count",
+                "out_count"
+            ));
+            *out_count = history.inner.epochs.len();
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy a recorded fusion RTS epoch summary.
+///
+/// Safety: history must be a live handle and out_epoch must point to a
+/// SidereonFusionRtsEpoch.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_fusion_rts_history_epoch(
+    history: *const SidereonFusionRtsHistory,
+    index: usize,
+    out_epoch: *mut SidereonFusionRtsEpoch,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_fusion_rts_history_epoch",
+        SidereonStatus::Panic,
+        || {
+            let history = c_try!(require_ref(
+                history,
+                "sidereon_fusion_rts_history_epoch",
+                "history"
+            ));
+            let out_epoch = c_try!(require_out(
+                out_epoch,
+                "sidereon_fusion_rts_history_epoch",
+                "out_epoch"
+            ));
+            *out_epoch = empty_fusion_rts_epoch();
+            let epoch = c_try!(fusion_history_epoch(
+                "sidereon_fusion_rts_history_epoch",
+                history,
+                index
+            ));
+            *out_epoch = fusion_rts_epoch_to_c(epoch);
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy a recorded epoch's predicted ECEF position in meters.
+///
+/// Safety: history must be a live handle; out must point to len doubles or
+/// NULL when len is 0; out_written and out_required must point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_fusion_rts_history_epoch_predicted_position_ecef_m(
+    history: *const SidereonFusionRtsHistory,
+    index: usize,
+    out: *mut f64,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_fusion_rts_history_epoch_predicted_position_ecef_m",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_fusion_rts_history_epoch_predicted_position_ecef_m",
+                out_written,
+                out_required
+            ));
+            let history = c_try!(require_ref(
+                history,
+                "sidereon_fusion_rts_history_epoch_predicted_position_ecef_m",
+                "history"
+            ));
+            let epoch = c_try!(fusion_history_epoch(
+                "sidereon_fusion_rts_history_epoch_predicted_position_ecef_m",
+                history,
+                index
+            ));
+            c_try!(copy_prefix_to_c(
+                "sidereon_fusion_rts_history_epoch_predicted_position_ecef_m",
+                "out",
+                &epoch.predicted.state.nominal.position_ecef_m,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy a recorded epoch's updated ECEF position in meters.
+///
+/// Safety: history must be a live handle; out must point to len doubles or
+/// NULL when len is 0; out_written and out_required must point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_fusion_rts_history_epoch_updated_position_ecef_m(
+    history: *const SidereonFusionRtsHistory,
+    index: usize,
+    out: *mut f64,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_fusion_rts_history_epoch_updated_position_ecef_m",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_fusion_rts_history_epoch_updated_position_ecef_m",
+                out_written,
+                out_required
+            ));
+            let history = c_try!(require_ref(
+                history,
+                "sidereon_fusion_rts_history_epoch_updated_position_ecef_m",
+                "history"
+            ));
+            let epoch = c_try!(fusion_history_epoch(
+                "sidereon_fusion_rts_history_epoch_updated_position_ecef_m",
+                history,
+                index
+            ));
+            c_try!(copy_prefix_to_c(
+                "sidereon_fusion_rts_history_epoch_updated_position_ecef_m",
+                "out",
+                &epoch.updated.state.nominal.position_ecef_m,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy a recorded epoch transition matrix in row-major order.
+///
+/// Safety: history must be a live handle; out must point to len doubles or
+/// NULL when len is 0; out_written and out_required must point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_fusion_rts_history_epoch_transition_from_previous(
+    history: *const SidereonFusionRtsHistory,
+    index: usize,
+    out: *mut f64,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_fusion_rts_history_epoch_transition_from_previous",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_fusion_rts_history_epoch_transition_from_previous",
+                out_written,
+                out_required
+            ));
+            let history = c_try!(require_ref(
+                history,
+                "sidereon_fusion_rts_history_epoch_transition_from_previous",
+                "history"
+            ));
+            let epoch = c_try!(fusion_history_epoch(
+                "sidereon_fusion_rts_history_epoch_transition_from_previous",
+                history,
+                index
+            ));
+            let values = epoch
+                .transition_from_previous
+                .as_ref()
+                .map_or_else(Vec::new, |transition| flatten_matrix(transition));
+            c_try!(copy_prefix_to_c(
+                "sidereon_fusion_rts_history_epoch_transition_from_previous",
+                "out",
+                &values,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Release a recorded fusion RTS history. Passing NULL is a no-op.
+///
+/// Safety: history must be NULL or a live SidereonFusionRtsHistory handle that
+/// has not already been freed.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_fusion_rts_history_free(history: *mut SidereonFusionRtsHistory) {
+    ffi_boundary("sidereon_fusion_rts_history_free", (), || {
+        free_boxed(history);
+    });
+}
+
+/// Apply fixed-interval RTS smoothing to a recorded fusion history.
+///
+/// Safety: history must be a live handle and out_smoothed must point to storage
+/// for a SidereonSmoothedFusionTrajectory*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_smooth_fusion_rts(
+    history: *const SidereonFusionRtsHistory,
+    out_smoothed: *mut *mut SidereonSmoothedFusionTrajectory,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_smooth_fusion_rts", SidereonStatus::Panic, || {
+        let out_smoothed = c_try!(require_out(
+            out_smoothed,
+            "sidereon_smooth_fusion_rts",
+            "out_smoothed"
+        ));
+        *out_smoothed = ptr::null_mut();
+        let history = c_try!(require_ref(
+            history,
+            "sidereon_smooth_fusion_rts",
+            "history"
+        ));
+        let inner = match sidereon_core::fusion::smooth_fusion_rts(&history.inner) {
+            Ok(inner) => inner,
+            Err(err) => return map_fusion_error("sidereon_smooth_fusion_rts", err),
+        };
+        write_boxed_handle(out_smoothed, SidereonSmoothedFusionTrajectory { inner });
+        SidereonStatus::Ok
+    })
+}
+
+/// Return the number of epochs in a smoothed fusion trajectory.
+///
+/// Safety: smoothed must be a live handle and out_count must point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_smoothed_fusion_trajectory_epoch_count(
+    smoothed: *const SidereonSmoothedFusionTrajectory,
+    out_count: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_smoothed_fusion_trajectory_epoch_count",
+        SidereonStatus::Panic,
+        || {
+            let smoothed = c_try!(require_ref(
+                smoothed,
+                "sidereon_smoothed_fusion_trajectory_epoch_count",
+                "smoothed"
+            ));
+            let out_count = c_try!(require_out(
+                out_count,
+                "sidereon_smoothed_fusion_trajectory_epoch_count",
+                "out_count"
+            ));
+            *out_count = smoothed.inner.epochs.len();
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy a smoothed fusion epoch summary.
+///
+/// Safety: smoothed must be a live handle and out_epoch must point to a
+/// SidereonSmoothedFusionEpoch.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_smoothed_fusion_trajectory_epoch(
+    smoothed: *const SidereonSmoothedFusionTrajectory,
+    index: usize,
+    out_epoch: *mut SidereonSmoothedFusionEpoch,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_smoothed_fusion_trajectory_epoch",
+        SidereonStatus::Panic,
+        || {
+            let smoothed = c_try!(require_ref(
+                smoothed,
+                "sidereon_smoothed_fusion_trajectory_epoch",
+                "smoothed"
+            ));
+            let out_epoch = c_try!(require_out(
+                out_epoch,
+                "sidereon_smoothed_fusion_trajectory_epoch",
+                "out_epoch"
+            ));
+            *out_epoch = empty_smoothed_fusion_epoch();
+            let epoch = c_try!(smoothed_fusion_epoch(
+                "sidereon_smoothed_fusion_trajectory_epoch",
+                smoothed,
+                index
+            ));
+            *out_epoch = smoothed_fusion_epoch_to_c(epoch);
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy a smoothed epoch's ECEF position in meters.
+///
+/// Safety: smoothed must be a live handle; out must point to len doubles or
+/// NULL when len is 0; out_written and out_required must point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_smoothed_fusion_trajectory_epoch_position_ecef_m(
+    smoothed: *const SidereonSmoothedFusionTrajectory,
+    index: usize,
+    out: *mut f64,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_smoothed_fusion_trajectory_epoch_position_ecef_m",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_smoothed_fusion_trajectory_epoch_position_ecef_m",
+                out_written,
+                out_required
+            ));
+            let smoothed = c_try!(require_ref(
+                smoothed,
+                "sidereon_smoothed_fusion_trajectory_epoch_position_ecef_m",
+                "smoothed"
+            ));
+            let epoch = c_try!(smoothed_fusion_epoch(
+                "sidereon_smoothed_fusion_trajectory_epoch_position_ecef_m",
+                smoothed,
+                index
+            ));
+            c_try!(copy_prefix_to_c(
+                "sidereon_smoothed_fusion_trajectory_epoch_position_ecef_m",
+                "out",
+                &epoch.snapshot.state.nominal.position_ecef_m,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy a smoothed epoch correction vector.
+///
+/// Safety: smoothed must be a live handle; out must point to len doubles or
+/// NULL when len is 0; out_written and out_required must point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_smoothed_fusion_trajectory_epoch_error_state_correction(
+    smoothed: *const SidereonSmoothedFusionTrajectory,
+    index: usize,
+    out: *mut f64,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_smoothed_fusion_trajectory_epoch_error_state_correction",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_smoothed_fusion_trajectory_epoch_error_state_correction",
+                out_written,
+                out_required
+            ));
+            let smoothed = c_try!(require_ref(
+                smoothed,
+                "sidereon_smoothed_fusion_trajectory_epoch_error_state_correction",
+                "smoothed"
+            ));
+            let epoch = c_try!(smoothed_fusion_epoch(
+                "sidereon_smoothed_fusion_trajectory_epoch_error_state_correction",
+                smoothed,
+                index
+            ));
+            c_try!(copy_prefix_to_c(
+                "sidereon_smoothed_fusion_trajectory_epoch_error_state_correction",
+                "out",
+                &epoch.error_state_correction,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy a smoothed epoch covariance matrix in row-major order.
+///
+/// Safety: smoothed must be a live handle; out must point to len doubles or
+/// NULL when len is 0; out_written and out_required must point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_smoothed_fusion_trajectory_epoch_covariance(
+    smoothed: *const SidereonSmoothedFusionTrajectory,
+    index: usize,
+    out: *mut f64,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_smoothed_fusion_trajectory_epoch_covariance",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_smoothed_fusion_trajectory_epoch_covariance",
+                out_written,
+                out_required
+            ));
+            let smoothed = c_try!(require_ref(
+                smoothed,
+                "sidereon_smoothed_fusion_trajectory_epoch_covariance",
+                "smoothed"
+            ));
+            let epoch = c_try!(smoothed_fusion_epoch(
+                "sidereon_smoothed_fusion_trajectory_epoch_covariance",
+                smoothed,
+                index
+            ));
+            let values = flatten_matrix(&epoch.covariance);
+            c_try!(copy_prefix_to_c(
+                "sidereon_smoothed_fusion_trajectory_epoch_covariance",
+                "out",
+                &values,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy a smoothed epoch RTS gain to the next epoch in row-major order.
+///
+/// Safety: smoothed must be a live handle; out must point to len doubles or
+/// NULL when len is 0; out_written and out_required must point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_smoothed_fusion_trajectory_epoch_rts_gain_to_next(
+    smoothed: *const SidereonSmoothedFusionTrajectory,
+    index: usize,
+    out: *mut f64,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_smoothed_fusion_trajectory_epoch_rts_gain_to_next",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_smoothed_fusion_trajectory_epoch_rts_gain_to_next",
+                out_written,
+                out_required
+            ));
+            let smoothed = c_try!(require_ref(
+                smoothed,
+                "sidereon_smoothed_fusion_trajectory_epoch_rts_gain_to_next",
+                "smoothed"
+            ));
+            let epoch = c_try!(smoothed_fusion_epoch(
+                "sidereon_smoothed_fusion_trajectory_epoch_rts_gain_to_next",
+                smoothed,
+                index
+            ));
+            let values = epoch
+                .rts_gain_to_next
+                .as_ref()
+                .map_or_else(Vec::new, |gain| flatten_matrix(gain));
+            c_try!(copy_prefix_to_c(
+                "sidereon_smoothed_fusion_trajectory_epoch_rts_gain_to_next",
+                "out",
+                &values,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Release a smoothed fusion trajectory. Passing NULL is a no-op.
+///
+/// Safety: smoothed must be NULL or a live SidereonSmoothedFusionTrajectory
+/// handle that has not already been freed.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_smoothed_fusion_trajectory_free(
+    smoothed: *mut SidereonSmoothedFusionTrajectory,
+) {
+    ffi_boundary("sidereon_smoothed_fusion_trajectory_free", (), || {
+        free_boxed(smoothed);
+    });
+}
+
 fn fusion_imu_grade_from_c(
     fn_name: &str,
     grade: u32,
@@ -1183,6 +2107,24 @@ fn zero_fusion_innovation_gate() -> SidereonFusionInnovationGate {
     }
 }
 
+fn fusion_igg_iii_measurement_reweighting_to_c(
+    value: sidereon_core::fusion::IggIiiMeasurementReweighting,
+) -> SidereonFusionIggIiiMeasurementReweighting {
+    SidereonFusionIggIiiMeasurementReweighting {
+        k0_sigma: value.k0_sigma,
+        k1_sigma: value.k1_sigma,
+    }
+}
+
+fn fusion_yang_prediction_adaptive_factor_to_c(
+    value: sidereon_core::fusion::YangPredictionAdaptiveFactor,
+) -> SidereonFusionYangPredictionAdaptiveFactor {
+    SidereonFusionYangPredictionAdaptiveFactor {
+        threshold: value.threshold,
+        outlier_gate_probability: value.outlier_gate_probability,
+    }
+}
+
 fn flat9_from_c(values: [f64; 9]) -> [[f64; 3]; 3] {
     [
         [values[0], values[1], values[2]],
@@ -1227,6 +2169,18 @@ fn fusion_filter_config_from_c(
     config.loose.lever_arm_body_m = raw.loose_lever_arm_body_m;
     config.loose.update_options.innovation_gate =
         fusion_innovation_gate_from_c(raw.has_loose_innovation_gate, raw.loose_innovation_gate);
+    config.loose.measurement_reweighting = raw.has_loose_measurement_reweighting.then_some(
+        sidereon_core::fusion::IggIiiMeasurementReweighting {
+            k0_sigma: raw.loose_measurement_reweighting.k0_sigma,
+            k1_sigma: raw.loose_measurement_reweighting.k1_sigma,
+        },
+    );
+    config.loose.prediction_adaptation = raw.has_loose_prediction_adaptation.then_some(
+        sidereon_core::fusion::YangPredictionAdaptiveFactor {
+            threshold: raw.loose_prediction_adaptation.threshold,
+            outlier_gate_probability: raw.loose_prediction_adaptation.outlier_gate_probability,
+        },
+    );
     config.tight.lever_arm_body_m = raw.tight_lever_arm_body_m;
     config.tight.light_time = raw.tight_light_time;
     config.tight.sagnac = raw.tight_sagnac;
@@ -1500,6 +2454,66 @@ fn flatten_matrix(matrix: &[Vec<f64>]) -> Vec<f64> {
         values.extend_from_slice(row);
     }
     values
+}
+
+fn fusion_rts_epoch_to_c(epoch: &sidereon_core::fusion::FusionRtsEpoch) -> SidereonFusionRtsEpoch {
+    SidereonFusionRtsEpoch {
+        t_j2000_s: epoch.t_j2000_s,
+        covariance_dimension: epoch.updated.state.dimension(),
+        augmented_dimension: epoch.updated.tight.augmented_covariance.len(),
+        has_transition_from_previous: epoch.transition_from_previous.is_some(),
+    }
+}
+
+fn empty_fusion_rts_epoch() -> SidereonFusionRtsEpoch {
+    SidereonFusionRtsEpoch {
+        t_j2000_s: 0.0,
+        covariance_dimension: 0,
+        augmented_dimension: 0,
+        has_transition_from_previous: false,
+    }
+}
+
+fn smoothed_fusion_epoch_to_c(
+    epoch: &sidereon_core::fusion::SmoothedFusionEpoch,
+) -> SidereonSmoothedFusionEpoch {
+    SidereonSmoothedFusionEpoch {
+        t_j2000_s: epoch.t_j2000_s,
+        covariance_dimension: epoch.covariance.len(),
+        correction_len: epoch.error_state_correction.len(),
+        has_rts_gain_to_next: epoch.rts_gain_to_next.is_some(),
+    }
+}
+
+fn empty_smoothed_fusion_epoch() -> SidereonSmoothedFusionEpoch {
+    SidereonSmoothedFusionEpoch {
+        t_j2000_s: 0.0,
+        covariance_dimension: 0,
+        correction_len: 0,
+        has_rts_gain_to_next: false,
+    }
+}
+
+fn fusion_history_epoch<'a>(
+    fn_name: &str,
+    history: &'a SidereonFusionRtsHistory,
+    index: usize,
+) -> Result<&'a sidereon_core::fusion::FusionRtsEpoch, SidereonStatus> {
+    history.inner.epochs.get(index).ok_or_else(|| {
+        set_last_error(format!("{fn_name}: history epoch index out of range"));
+        SidereonStatus::InvalidArgument
+    })
+}
+
+fn smoothed_fusion_epoch<'a>(
+    fn_name: &str,
+    smoothed: &'a SidereonSmoothedFusionTrajectory,
+    index: usize,
+) -> Result<&'a sidereon_core::fusion::SmoothedFusionEpoch, SidereonStatus> {
+    smoothed.inner.epochs.get(index).ok_or_else(|| {
+        set_last_error(format!("{fn_name}: smoothed epoch index out of range"));
+        SidereonStatus::InvalidArgument
+    })
 }
 
 fn map_fusion_error(fn_name: &str, err: sidereon_core::fusion::FusionError) -> SidereonStatus {
