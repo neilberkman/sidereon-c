@@ -70,6 +70,152 @@ static int test_error_metrics(void) {
                 expected_cep);
         return 1;
     }
+    const double expected_r95 = sqrt(-2.0 * log(1.0 - 0.95)) * sigma;
+    if (!close_rel(metrics.r95_m.radius_m, expected_r95, 1.0e-12)) {
+        return fail("isotropic R95");
+    }
+    if (!close_rel(metrics.drms_m, sqrt(2.0) * sigma, 1.0e-12)) {
+        return fail("isotropic DRMS");
+    }
+
+    SidereonErrorEllipse ellipse;
+    err = SIDEREON_ERROR_METRICS_ERROR_KIND_NONE;
+    if (require_ok(sidereon_error_metrics_error_ellipse_from_enu_m2(cov, &ellipse, &err),
+                   "error metrics ellipse from ENU") != 0) {
+        return 1;
+    }
+    if (!close_rel(ellipse.semi_major_m, sigma, 1.0e-12) ||
+        !close_rel(ellipse.semi_minor_m, sigma, 1.0e-12) ||
+        !close_abs(ellipse.orientation_rad, 0.0, 1.0e-12)) {
+        return fail("isotropic ellipse");
+    }
+
+    SidereonPercentileRadius radius;
+    err = SIDEREON_ERROR_METRICS_ERROR_KIND_NONE;
+    if (require_ok(sidereon_error_metrics_horizontal_radius_at(cov, 0.95, &radius, &err),
+                   "error metrics horizontal radius") != 0) {
+        return 1;
+    }
+    if (!close_rel(radius.radius_m, metrics.r95_m.radius_m, 1.0e-12) ||
+        radius.approx_valid != metrics.r95_m.approx_valid) {
+        return fail("horizontal radius helper");
+    }
+    err = SIDEREON_ERROR_METRICS_ERROR_KIND_NONE;
+    if (require_ok(sidereon_error_metrics_spherical_radius_at(cov, 0.5, &radius, &err),
+                   "error metrics spherical radius") != 0) {
+        return 1;
+    }
+    if (!close_rel(radius.radius_m, metrics.sep_m.radius_m, 1.0e-12)) {
+        return fail("spherical radius helper");
+    }
+    double vertical_radius = 0.0;
+    err = SIDEREON_ERROR_METRICS_ERROR_KIND_NONE;
+    if (require_ok(sidereon_error_metrics_vertical_radius_at(sigma * sigma, 0.5,
+                                                             &vertical_radius, &err),
+                   "error metrics vertical radius") != 0) {
+        return 1;
+    }
+    if (!close_rel(vertical_radius, 0.6744897501960817 * sigma, 1.0e-12)) {
+        return fail("vertical radius helper");
+    }
+
+    SidereonPositionCovariance position_covariance = {
+        .ecef_m2 = {
+            2.0 * sigma * sigma, 0.0, 0.0,
+            0.0, 2.0 * sigma * sigma, 0.0,
+            0.0, 0.0, 2.0 * sigma * sigma,
+        },
+        .enu_m2 = {
+            sigma * sigma, 0.0, 0.0,
+            0.0, sigma * sigma, 0.0,
+            0.0, 0.0, sigma * sigma,
+        },
+    };
+    SidereonPositionErrorMetrics position_metrics;
+    err = SIDEREON_ERROR_METRICS_ERROR_KIND_NONE;
+    if (require_ok(sidereon_error_metrics_from_position_covariance(
+                       &position_covariance, &position_metrics, &err),
+                   "error metrics position covariance") != 0) {
+        return 1;
+    }
+    if (!close_rel(position_metrics.cep_m.radius_m, metrics.cep_m.radius_m, 1.0e-12) ||
+        !close_rel(position_metrics.drms_m, metrics.drms_m, 1.0e-12)) {
+        return fail("position covariance metrics");
+    }
+
+    const double elongated[9] = {
+        9.0, 2.0, 0.0,
+        2.0, 4.0, 0.0,
+        0.0, 0.0, 1.44,
+    };
+    err = SIDEREON_ERROR_METRICS_ERROR_KIND_NONE;
+    if (require_ok(sidereon_error_metrics_error_ellipse_from_enu_m2(elongated, &ellipse, &err),
+                   "error metrics elongated ellipse") != 0) {
+        return 1;
+    }
+    const double trace = 13.0;
+    const double delta = sqrt((9.0 - 4.0) * (9.0 - 4.0) + 4.0 * 2.0 * 2.0);
+    const double major_lambda = 0.5 * (trace + delta);
+    const double minor_lambda = 0.5 * (trace - delta);
+    if (!close_rel(ellipse.semi_major_m, sqrt(major_lambda), 1.0e-12) ||
+        !close_rel(ellipse.semi_minor_m, sqrt(minor_lambda), 1.0e-12) ||
+        !close_abs(ellipse.orientation_rad, 0.5 * atan2(4.0, 5.0), 1.0e-12)) {
+        return fail("elongated ellipse oracle");
+    }
+
+    const double enu2[9] = {
+        5.0, 0.25, 0.1,
+        0.25, 2.0, -0.2,
+        0.1, -0.2, 1.25,
+    };
+    const double ecef2[9] = {
+        1.25, 0.1, -0.2,
+        0.1, 5.0, 0.25,
+        -0.2, 0.25, 2.0,
+    };
+    SidereonPositionErrorMetrics from_enu;
+    SidereonPositionErrorMetrics from_ecef;
+    const SidereonGeodetic receiver = {
+        .lat_rad = 0.0,
+        .lon_rad = 0.0,
+        .height_m = 0.0,
+    };
+    err = SIDEREON_ERROR_METRICS_ERROR_KIND_NONE;
+    if (require_ok(sidereon_error_metrics_from_enu_covariance_m2(enu2, &from_enu, &err),
+                   "error metrics rotated ENU") != 0) {
+        return 1;
+    }
+    err = SIDEREON_ERROR_METRICS_ERROR_KIND_NONE;
+    if (require_ok(sidereon_error_metrics_from_ecef_covariance_m2(ecef2, receiver, &from_ecef,
+                                                                  &err),
+                   "error metrics rotated ECEF") != 0) {
+        return 1;
+    }
+    if (!close_rel(from_ecef.cep_m.radius_m, from_enu.cep_m.radius_m, 1.0e-12) ||
+        !close_rel(from_ecef.r95_m.radius_m, from_enu.r95_m.radius_m, 1.0e-12) ||
+        !close_rel(from_ecef.drms_m, from_enu.drms_m, 1.0e-12)) {
+        return fail("rotated ECEF agreement");
+    }
+    SidereonKinematicSolutionMetricsInput kinematic = {
+        .position_m = {6378137.0, 0.0, 0.0},
+        .position_covariance_m2 = {
+            1.25, 0.1, -0.2,
+            0.1, 5.0, 0.25,
+            -0.2, 0.25, 2.0,
+        },
+    };
+    SidereonPositionErrorMetrics from_kinematic;
+    err = SIDEREON_ERROR_METRICS_ERROR_KIND_NONE;
+    if (require_ok(sidereon_error_metrics_from_kinematic_solution(&kinematic, &from_kinematic,
+                                                                  &err),
+                   "error metrics kinematic") != 0) {
+        return 1;
+    }
+    if (!close_rel(from_kinematic.cep_m.radius_m, from_enu.cep_m.radius_m, 1.0e-12) ||
+        !close_rel(from_kinematic.r95_m.radius_m, from_enu.r95_m.radius_m, 1.0e-12) ||
+        !close_rel(from_kinematic.drms_m, from_enu.drms_m, 1.0e-12)) {
+        return fail("kinematic metrics agreement");
+    }
 
     const double non_psd[9] = {
         1.0, 0.0, 0.0,

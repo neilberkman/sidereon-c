@@ -82,6 +82,16 @@ pub struct SidereonKinematicSolutionMetricsInput {
     pub position_covariance_m2: [f64; 9],
 }
 
+/// Position covariance in ECEF and local ENU coordinates.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonPositionCovariance {
+    /// Row-major ECEF position covariance, square meters.
+    pub ecef_m2: [f64; 9],
+    /// Row-major local ENU position covariance, square meters.
+    pub enu_m2: [f64; 9],
+}
+
 /// Compute standard metrics from an ENU covariance in square meters.
 ///
 /// Safety: covariance_enu_m2 points to 9 row-major doubles; out_metrics and
@@ -168,6 +178,48 @@ pub unsafe extern "C" fn sidereon_error_metrics_from_ecef_covariance_m2(
     )
 }
 
+/// Compute standard metrics from a position covariance value.
+///
+/// Safety: covariance, out_metrics, and out_error must point to valid structs.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_error_metrics_from_position_covariance(
+    covariance: *const SidereonPositionCovariance,
+    out_metrics: *mut SidereonPositionErrorMetrics,
+    out_error: *mut SidereonErrorMetricsErrorKind,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_error_metrics_from_position_covariance",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(init_error_metrics_out(
+                "sidereon_error_metrics_from_position_covariance",
+                out_metrics,
+                out_error,
+            ));
+            let covariance = c_try!(require_ref(
+                covariance,
+                "sidereon_error_metrics_from_position_covariance",
+                "covariance"
+            ));
+            let core_covariance = sidereon_core::geometry::PositionCovariance {
+                ecef_m2: mat3_from_row_major(covariance.ecef_m2),
+                enu_m2: mat3_from_row_major(covariance.enu_m2),
+            };
+            match sidereon_core::error_metrics::metrics_from_position_covariance(&core_covariance) {
+                Ok(metrics) => {
+                    *out.0 = position_error_metrics_to_c(metrics);
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_error_metrics_error(
+                    "sidereon_error_metrics_from_position_covariance",
+                    err,
+                    out.1,
+                ),
+            }
+        },
+    )
+}
+
 /// Compute standard metrics from a kinematic PPP epoch solution shape.
 ///
 /// Safety: solution, out_metrics, and out_error must point to valid structs.
@@ -216,6 +268,159 @@ pub unsafe extern "C" fn sidereon_error_metrics_from_kinematic_solution(
     )
 }
 
+/// Horizontal one-sigma ellipse from an ENU covariance in square meters.
+///
+/// Safety: covariance_enu_m2 points to 9 row-major doubles; out_ellipse and
+/// out_error must point to writable structs.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_error_metrics_error_ellipse_from_enu_m2(
+    covariance_enu_m2: *const f64,
+    out_ellipse: *mut SidereonErrorEllipse,
+    out_error: *mut SidereonErrorMetricsErrorKind,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_error_metrics_error_ellipse_from_enu_m2",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(init_error_ellipse_out(
+                "sidereon_error_metrics_error_ellipse_from_enu_m2",
+                out_ellipse,
+                out_error,
+            ));
+            let covariance = c_try!(read_mat3(
+                "sidereon_error_metrics_error_ellipse_from_enu_m2",
+                "covariance_enu_m2",
+                covariance_enu_m2,
+            ));
+            match sidereon_core::error_metrics::error_ellipse_from_enu_m2(covariance) {
+                Ok(ellipse) => {
+                    *out.0 = error_ellipse_to_c(ellipse);
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_error_metrics_error(
+                    "sidereon_error_metrics_error_ellipse_from_enu_m2",
+                    err,
+                    out.1,
+                ),
+            }
+        },
+    )
+}
+
+/// Horizontal percentile circle radius from an ENU covariance.
+///
+/// Safety: covariance_enu_m2 points to 9 row-major doubles; out_radius and
+/// out_error must point to writable structs.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_error_metrics_horizontal_radius_at(
+    covariance_enu_m2: *const f64,
+    probability: f64,
+    out_radius: *mut SidereonPercentileRadius,
+    out_error: *mut SidereonErrorMetricsErrorKind,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_error_metrics_horizontal_radius_at",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(init_percentile_radius_out(
+                "sidereon_error_metrics_horizontal_radius_at",
+                out_radius,
+                out_error,
+                probability,
+            ));
+            let covariance = c_try!(read_mat3(
+                "sidereon_error_metrics_horizontal_radius_at",
+                "covariance_enu_m2",
+                covariance_enu_m2,
+            ));
+            match sidereon_core::error_metrics::horizontal_radius_at(covariance, probability) {
+                Ok(radius) => {
+                    *out.0 = percentile_radius_to_c(radius);
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_error_metrics_error(
+                    "sidereon_error_metrics_horizontal_radius_at",
+                    err,
+                    out.1,
+                ),
+            }
+        },
+    )
+}
+
+/// Three-dimensional percentile sphere radius from an ENU covariance.
+///
+/// Safety: covariance_enu_m2 points to 9 row-major doubles; out_radius and
+/// out_error must point to writable structs.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_error_metrics_spherical_radius_at(
+    covariance_enu_m2: *const f64,
+    probability: f64,
+    out_radius: *mut SidereonPercentileRadius,
+    out_error: *mut SidereonErrorMetricsErrorKind,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_error_metrics_spherical_radius_at",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(init_percentile_radius_out(
+                "sidereon_error_metrics_spherical_radius_at",
+                out_radius,
+                out_error,
+                probability,
+            ));
+            let covariance = c_try!(read_mat3(
+                "sidereon_error_metrics_spherical_radius_at",
+                "covariance_enu_m2",
+                covariance_enu_m2,
+            ));
+            match sidereon_core::error_metrics::spherical_radius_at(covariance, probability) {
+                Ok(radius) => {
+                    *out.0 = percentile_radius_to_c(radius);
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_error_metrics_error(
+                    "sidereon_error_metrics_spherical_radius_at",
+                    err,
+                    out.1,
+                ),
+            }
+        },
+    )
+}
+
+/// Vertical one-dimensional percentile radius from an up variance.
+///
+/// Safety: out_radius_m and out_error must point to writable values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_error_metrics_vertical_radius_at(
+    sigma_u_m2: f64,
+    probability: f64,
+    out_radius_m: *mut f64,
+    out_error: *mut SidereonErrorMetricsErrorKind,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_error_metrics_vertical_radius_at",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(init_vertical_radius_out(
+                "sidereon_error_metrics_vertical_radius_at",
+                out_radius_m,
+                out_error,
+            ));
+            match sidereon_core::error_metrics::vertical_radius_at(sigma_u_m2, probability) {
+                Ok(radius) => {
+                    *out.0 = radius;
+                    SidereonStatus::Ok
+                }
+                Err(err) => {
+                    map_error_metrics_error("sidereon_error_metrics_vertical_radius_at", err, out.1)
+                }
+            }
+        },
+    )
+}
+
 unsafe fn init_error_metrics_out<'a>(
     fn_name: &str,
     out_metrics: *mut SidereonPositionErrorMetrics,
@@ -232,6 +437,59 @@ unsafe fn init_error_metrics_out<'a>(
     let out_error = require_out(out_error, fn_name, "out_error")?;
     *out_error = SidereonErrorMetricsErrorKind::None;
     Ok((out_metrics, out_error))
+}
+
+unsafe fn init_error_ellipse_out<'a>(
+    fn_name: &str,
+    out_ellipse: *mut SidereonErrorEllipse,
+    out_error: *mut SidereonErrorMetricsErrorKind,
+) -> Result<
+    (
+        &'a mut SidereonErrorEllipse,
+        &'a mut SidereonErrorMetricsErrorKind,
+    ),
+    SidereonStatus,
+> {
+    let out_ellipse = require_out(out_ellipse, fn_name, "out_ellipse")?;
+    *out_ellipse = SidereonErrorEllipse {
+        semi_major_m: 0.0,
+        semi_minor_m: 0.0,
+        orientation_rad: 0.0,
+    };
+    let out_error = require_out(out_error, fn_name, "out_error")?;
+    *out_error = SidereonErrorMetricsErrorKind::None;
+    Ok((out_ellipse, out_error))
+}
+
+unsafe fn init_percentile_radius_out<'a>(
+    fn_name: &str,
+    out_radius: *mut SidereonPercentileRadius,
+    out_error: *mut SidereonErrorMetricsErrorKind,
+    probability: f64,
+) -> Result<
+    (
+        &'a mut SidereonPercentileRadius,
+        &'a mut SidereonErrorMetricsErrorKind,
+    ),
+    SidereonStatus,
+> {
+    let out_radius = require_out(out_radius, fn_name, "out_radius")?;
+    *out_radius = empty_percentile_radius(probability);
+    let out_error = require_out(out_error, fn_name, "out_error")?;
+    *out_error = SidereonErrorMetricsErrorKind::None;
+    Ok((out_radius, out_error))
+}
+
+unsafe fn init_vertical_radius_out<'a>(
+    fn_name: &str,
+    out_radius_m: *mut f64,
+    out_error: *mut SidereonErrorMetricsErrorKind,
+) -> Result<(&'a mut f64, &'a mut SidereonErrorMetricsErrorKind), SidereonStatus> {
+    let out_radius_m = require_out(out_radius_m, fn_name, "out_radius_m")?;
+    *out_radius_m = 0.0;
+    let out_error = require_out(out_error, fn_name, "out_error")?;
+    *out_error = SidereonErrorMetricsErrorKind::None;
+    Ok((out_radius_m, out_error))
 }
 
 fn empty_position_error_metrics() -> SidereonPositionErrorMetrics {
