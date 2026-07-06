@@ -99,8 +99,9 @@ use sidereon_core::astro::time::{
 };
 use sidereon_core::astro::{Spk, SpkError, SpkState};
 use sidereon_core::atmosphere::ionosphere::{
-    galileo_nequick_g_native, ionex_slant_delay, klobuchar_native, nequick_g_delay_m,
-    nequick_g_stec_tecu, GalileoNequickCoeffs, GalileoNequickEval, Ionex, KlobucharParams,
+    galileo_nequick_g_native, ionex_slant_delay_with_policy, klobuchar_native, nequick_g_delay_m,
+    nequick_g_stec_tecu, GalileoNequickCoeffs, GalileoNequickEval, Ionex, IonexCoverageError,
+    IonexCoveragePolicy, IonexSlantDelayEvaluation, IonexSlantDelayStatus, KlobucharParams,
     NequickGRayEval, TecGridSamples as CoreTecGridSamples, TecSample as CoreTecSample,
     TecSamplesError,
 };
@@ -496,6 +497,7 @@ mod fde;
 mod force;
 mod frame;
 mod frame_catalog;
+mod fusion;
 mod geodesic;
 mod geodetic_time_series;
 mod geofence;
@@ -530,6 +532,7 @@ mod rtk;
 mod satellite;
 mod sbas;
 mod sbas_pl;
+mod scenario;
 mod sgp4;
 mod sidereal;
 mod signal;
@@ -577,6 +580,7 @@ pub use fde::*;
 pub use force::*;
 pub use frame::*;
 pub use frame_catalog::*;
+pub use fusion::*;
 pub use geodesic::*;
 pub use geodetic_time_series::*;
 pub use geofence::*;
@@ -611,6 +615,7 @@ pub use rtk::*;
 pub use satellite::*;
 pub use sbas::*;
 pub use sbas_pl::*;
+pub use scenario::*;
 pub use sgp4::*;
 pub use sidereal::*;
 pub use signal::*;

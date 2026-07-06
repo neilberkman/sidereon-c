@@ -411,6 +411,23 @@ cc -std=c11 -Wall -Wextra -Werror \
 echo "== running cap015_smoke program =="
 "${cap015_out}"
 
+# 0.18 domain exposure: GNSS/INS fusion handle, deterministic scenario
+# simulator, and signal-analysis closed forms. Self-contained.
+echo "== compiling domain018_smoke program =="
+domain018_out="${target_dir}/domain018_smoke"
+cc -std=c11 -Wall -Wextra -Werror \
+    -I"${binding_root}/include" \
+    -I"${here}" \
+    "${here}/domain018_smoke.c" \
+    -L"${lib_dir}" \
+    -lsidereon \
+    -Wl,-rpath,"${lib_dir}" \
+    -lm \
+    -o "${domain018_out}"
+
+echo "== running domain018_smoke program =="
+"${domain018_out}"
+
 # Wave-2 local-core additions: geodesics, terrestrial frame catalog, EGM2008,
 # spherical-harmonic propagation selection, CCSDS TDM, ECEF SP3 orbit fit, SGP4
 # decay latch, typed low-elevation troposphere error, oblate eclipse, and
