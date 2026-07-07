@@ -45,9 +45,9 @@
 #include <stdlib.h>
 
 #define SIDEREON_VERSION_MAJOR 0
-#define SIDEREON_VERSION_MINOR 20
+#define SIDEREON_VERSION_MINOR 21
 #define SIDEREON_VERSION_PATCH 0
-#define SIDEREON_VERSION_STRING "0.20.0"
+#define SIDEREON_VERSION_STRING "0.21.0"
 
 #define BIAS_OBS_C_BYTES (MAX_BIAS_OBS_BYTES + 1)
 
@@ -1387,6 +1387,24 @@ typedef enum SidereonFusionImuSampleKind {
 } SidereonFusionImuSampleKind;
 
 /**
+ * GNSS fix status used to scale loose-fix covariance in field mode.
+ */
+typedef enum SidereonFusionGnssFixStatus {
+    /**
+     * Code-only or otherwise autonomous fix.
+     */
+    SIDEREON_FUSION_GNSS_FIX_STATUS_SINGLE = 0,
+    /**
+     * Carrier float fix.
+     */
+    SIDEREON_FUSION_GNSS_FIX_STATUS_FLOAT = 1,
+    /**
+     * Carrier integer-fixed fix.
+     */
+    SIDEREON_FUSION_GNSS_FIX_STATUS_FIXED = 2,
+} SidereonFusionGnssFixStatus;
+
+/**
  * Policy applied when an IONEX slant-delay request is outside product coverage.
  */
 typedef enum SidereonIonexCoveragePolicy {
@@ -2182,6 +2200,56 @@ typedef enum SidereonGeofenceCrossingKind {
      */
     SIDEREON_GEOFENCE_CROSSING_KIND_LEFT = 1,
 } SidereonGeofenceCrossingKind;
+
+/**
+ * Selected solve mode for a static reference-station coordinate.
+ */
+typedef enum SidereonStaticReferenceStationMode {
+    /**
+     * Code-DGNSS corrected pseudoranges stacked in a static solve.
+     */
+    SIDEREON_STATIC_REFERENCE_STATION_MODE_CODE_DGNSS = 0,
+    /**
+     * Carrier RTK float baseline added to the reference coordinate.
+     */
+    SIDEREON_STATIC_REFERENCE_STATION_MODE_CARRIER_FLOAT = 1,
+    /**
+     * Carrier RTK fixed baseline added to the reference coordinate.
+     */
+    SIDEREON_STATIC_REFERENCE_STATION_MODE_CARRIER_FIXED = 2,
+} SidereonStaticReferenceStationMode;
+
+/**
+ * Fix status label for a static reference-station coordinate.
+ */
+typedef enum SidereonStaticReferenceFixStatus {
+    /**
+     * Code-DGNSS solution.
+     */
+    SIDEREON_STATIC_REFERENCE_FIX_STATUS_CODE_DGNSS = 0,
+    /**
+     * Carrier RTK float solution.
+     */
+    SIDEREON_STATIC_REFERENCE_FIX_STATUS_CARRIER_FLOAT = 1,
+    /**
+     * Carrier RTK fixed solution.
+     */
+    SIDEREON_STATIC_REFERENCE_FIX_STATUS_CARRIER_FIXED = 2,
+} SidereonStaticReferenceFixStatus;
+
+/**
+ * Status for one enabled static reference-station mode.
+ */
+typedef enum SidereonStaticReferenceModeStatus {
+    /**
+     * The mode solved.
+     */
+    SIDEREON_STATIC_REFERENCE_MODE_STATUS_SOLVED = 0,
+    /**
+     * The mode failed.
+     */
+    SIDEREON_STATIC_REFERENCE_MODE_STATUS_FAILED = 1,
+} SidereonStaticReferenceModeStatus;
 
 /**
  * Cartesian frame for no-IMU track filtering.
@@ -3146,6 +3214,14 @@ typedef struct SidereonSsrCorrectionStore SidereonSsrCorrectionStore;
  * and release with sidereon_static_position_solution_free.
  */
 typedef struct SidereonStaticPositionSolution SidereonStaticPositionSolution;
+
+/**
+ * A solved static reference-station coordinate. Create with
+ * sidereon_solve_static_reference_station_rinex; read with
+ * sidereon_static_reference_station_solution_* accessors; release with
+ * sidereon_static_reference_station_solution_free.
+ */
+typedef struct SidereonStaticReferenceStationSolution SidereonStaticReferenceStationSolution;
 
 /**
  * A parsed CCSDS Tracking Data Message. Opaque to C. Create with
@@ -6784,6 +6860,24 @@ typedef struct SidereonFusionMechanizationConfig {
 } SidereonFusionMechanizationConfig;
 
 /**
+ * Per-fix-status one-sigma multipliers for loose GNSS measurements.
+ */
+typedef struct SidereonFusionFixStatusWeighting {
+    /**
+     * Sigma multiplier for SidereonFusionGnssFixStatus_Single.
+     */
+    double single_sigma_multiplier;
+    /**
+     * Sigma multiplier for SidereonFusionGnssFixStatus_Float.
+     */
+    double float_sigma_multiplier;
+    /**
+     * Sigma multiplier for SidereonFusionGnssFixStatus_Fixed.
+     */
+    double fixed_sigma_multiplier;
+} SidereonFusionFixStatusWeighting;
+
+/**
  * Optional normalized-innovation screen for fusion measurement updates.
  */
 typedef struct SidereonFusionInnovationGate {
@@ -6826,6 +6920,64 @@ typedef struct SidereonFusionYangPredictionAdaptiveFactor {
 } SidereonFusionYangPredictionAdaptiveFactor;
 
 /**
+ * Stationary detector thresholds used before applying ZUPT/ZARU updates.
+ */
+typedef struct SidereonFusionStationaryDetectorConfig {
+    /**
+     * Number of most-recent IMU samples considered.
+     */
+    size_t window_len;
+    /**
+     * Maximum specific-force norm error from local gravity, m/s^2.
+     */
+    double max_specific_force_norm_error_mps2;
+    /**
+     * Maximum body-rate norm relative to ECEF, rad/s.
+     */
+    double max_body_rate_wrt_ecef_norm_rps;
+} SidereonFusionStationaryDetectorConfig;
+
+/**
+ * Zero-velocity and zero-angular-rate update configuration.
+ */
+typedef struct SidereonFusionStationaryUpdateConfig {
+    /**
+     * Stationary detector thresholds.
+     */
+    struct SidereonFusionStationaryDetectorConfig detector;
+    /**
+     * One-sigma zero-velocity update uncertainty in m/s.
+     */
+    double zero_velocity_sigma_mps;
+    /**
+     * One-sigma zero-angular-rate update uncertainty in rad/s.
+     */
+    double zero_angular_rate_sigma_rps;
+} SidereonFusionStationaryUpdateConfig;
+
+/**
+ * Wheeled-vehicle non-holonomic constraint configuration.
+ */
+typedef struct SidereonFusionNonHolonomicConstraintConfig {
+    /**
+     * One-sigma lateral body-frame velocity uncertainty in m/s.
+     */
+    double lateral_velocity_sigma_mps;
+    /**
+     * One-sigma vertical body-frame velocity uncertainty in m/s.
+     */
+    double vertical_velocity_sigma_mps;
+    /**
+     * Minimum speed required before applying the constraint, m/s.
+     */
+    double min_speed_mps;
+    /**
+     * Maximum body-rate norm relative to ECEF, rad/s.
+     */
+    double max_body_rate_wrt_ecef_norm_rps;
+} SidereonFusionNonHolonomicConstraintConfig;
+
+/**
  * Fusion filter configuration. Initialize with
  * sidereon_fusion_filter_config_init before overriding fields.
  */
@@ -6859,6 +7011,10 @@ typedef struct SidereonFusionFilterConfig {
      */
     double imu_gyro_scale_misalignment[9];
     /**
+     * Row-major IMU-frame to body-frame direction cosine matrix.
+     */
+    double imu_to_body_dcm[9];
+    /**
      * Strapdown mechanization options.
      */
     struct SidereonFusionMechanizationConfig mechanization;
@@ -6866,6 +7022,10 @@ typedef struct SidereonFusionFilterConfig {
      * Loose-coupling body-frame lever arm from IMU origin to GNSS antenna, meters.
      */
     double loose_lever_arm_body_m[3];
+    /**
+     * Per-fix-status one-sigma multipliers for loose GNSS covariance.
+     */
+    struct SidereonFusionFixStatusWeighting loose_fix_status_weighting;
     /**
      * Whether loose_innovation_gate carries a loose-update screen.
      */
@@ -6890,6 +7050,22 @@ typedef struct SidereonFusionFilterConfig {
      * Yang predicted-covariance adaptive factor for loose updates.
      */
     struct SidereonFusionYangPredictionAdaptiveFactor loose_prediction_adaptation;
+    /**
+     * Whether loose_stationary_updates carries ZUPT/ZARU settings.
+     */
+    bool has_loose_stationary_updates;
+    /**
+     * Zero-velocity and zero-angular-rate field-mode settings.
+     */
+    struct SidereonFusionStationaryUpdateConfig loose_stationary_updates;
+    /**
+     * Whether loose_non_holonomic carries wheeled-vehicle constraint settings.
+     */
+    bool has_loose_non_holonomic;
+    /**
+     * Non-holonomic constraint settings.
+     */
+    struct SidereonFusionNonHolonomicConstraintConfig loose_non_holonomic;
     /**
      * Tight-coupling body-frame lever arm from IMU origin to GNSS antenna, meters.
      */
@@ -7176,6 +7352,10 @@ typedef struct SidereonFusionLooseMeasurement {
      * Whether the upstream GNSS fix is valid.
      */
     bool solution_valid;
+    /**
+     * One of SidereonFusionGnssFixStatus_*.
+     */
+    uint32_t fix_status;
 } SidereonFusionLooseMeasurement;
 
 /**
@@ -7347,6 +7527,52 @@ typedef struct SidereonFusionRtsEpoch {
      */
     bool has_transition_from_previous;
 } SidereonFusionRtsEpoch;
+
+/**
+ * One state row accepted and returned by velocity matching.
+ */
+typedef struct SidereonFusionVelocityMatchState {
+    /**
+     * State epoch, seconds since J2000.
+     */
+    double t_j2000_s;
+    /**
+     * ECEF position in meters.
+     */
+    double position_ecef_m[3];
+    /**
+     * ECEF velocity in meters per second.
+     */
+    double velocity_ecef_mps[3];
+} SidereonFusionVelocityMatchState;
+
+/**
+ * Velocity matching outage repair configuration.
+ */
+typedef struct SidereonFusionVelocityMatchingConfig {
+    /**
+     * Maximum outage duration eligible for matching, seconds.
+     */
+    double max_outage_duration_s;
+} SidereonFusionVelocityMatchingConfig;
+
+/**
+ * Metadata for a velocity-matched outage trajectory.
+ */
+typedef struct SidereonFusionVelocityMatchedTrajectory {
+    /**
+     * Number of states in the matched trajectory.
+     */
+    size_t state_count;
+    /**
+     * Endpoint ECEF position correction in meters.
+     */
+    double endpoint_position_correction_ecef_m[3];
+    /**
+     * Endpoint ECEF velocity correction in meters per second.
+     */
+    double endpoint_velocity_correction_ecef_mps[3];
+} SidereonFusionVelocityMatchedTrajectory;
 
 /**
  * Geodesic direct solution on WGS84.
@@ -15149,6 +15375,35 @@ typedef struct SidereonStaticPositionOptions {
 } SidereonStaticPositionOptions;
 
 /**
+ * Static reference-station RINEX solve config. Initialize with
+ * sidereon_static_reference_station_rinex_config_init. The carrier field uses
+ * the same options as sidereon_solve_static_rinex_rtk_baseline; its base_m is
+ * ignored and reference_position_m is used as the known reference coordinate.
+ */
+typedef struct SidereonStaticReferenceStationRinexConfig {
+    /**
+     * Known reference-station ECEF coordinate in metres.
+     */
+    double reference_position_m[3];
+    /**
+     * Enable the code-DGNSS static mode.
+     */
+    bool enable_code_dgnss;
+    /**
+     * Enable the carrier RTK static mode.
+     */
+    bool enable_carrier_rtk;
+    /**
+     * Include geodetic coordinates in the selected result.
+     */
+    bool with_geodetic;
+    /**
+     * Carrier RTK options, used only when enable_carrier_rtk is true.
+     */
+    struct SidereonRtkRinexStaticBaselineConfig carrier;
+} SidereonStaticReferenceStationRinexConfig;
+
+/**
  * Static RTK arc driver configuration, mirroring
  * sidereon_core::rtk_filter::RtkStaticArcConfig. The arc field carries the raw
  * arc setup; the option fields carry the float, fixed, and residual-validation
@@ -16110,6 +16365,144 @@ typedef struct SidereonStaticPositionSatelliteInfluence {
      */
     double robust_weight_ratio;
 } SidereonStaticPositionSatelliteInfluence;
+
+/**
+ * Per-epoch diagnostic row from a static reference-station solve.
+ */
+typedef struct SidereonStaticReferenceEpochDiagnostic {
+    /**
+     * Mode that produced this diagnostic row.
+     */
+    uint32_t mode;
+    /**
+     * Epoch index in the assembled mode input.
+     */
+    size_t epoch_index;
+    /**
+     * Number of used satellites.
+     */
+    size_t used_satellite_count;
+    /**
+     * Number of rejected satellites.
+     */
+    size_t rejected_satellite_count;
+    /**
+     * Whether code_residual_rms_m carries a value.
+     */
+    bool has_code_residual_rms_m;
+    /**
+     * Code residual RMS in metres.
+     */
+    double code_residual_rms_m;
+    /**
+     * Whether phase_residual_rms_m carries a value.
+     */
+    bool has_phase_residual_rms_m;
+    /**
+     * Carrier residual RMS in metres.
+     */
+    double phase_residual_rms_m;
+    /**
+     * Whether residual_rms_m carries a value.
+     */
+    bool has_residual_rms_m;
+    /**
+     * Total unweighted residual RMS in metres.
+     */
+    double residual_rms_m;
+} SidereonStaticReferenceEpochDiagnostic;
+
+/**
+ * Static reference-station solve metadata.
+ */
+typedef struct SidereonStaticReferenceStationMetadata {
+    /**
+     * Selected solve mode, a SidereonStaticReferenceStationMode value.
+     */
+    uint32_t mode;
+    /**
+     * Reported fix status, a SidereonStaticReferenceFixStatus value.
+     */
+    uint32_t fix_status;
+    /**
+     * Whether geodetic carries a value.
+     */
+    bool has_geodetic;
+    /**
+     * Geodetic coordinate when requested.
+     */
+    struct SidereonGeodetic geodetic;
+    /**
+     * Baseline length, rover minus reference, metres.
+     */
+    double baseline_m;
+    /**
+     * Whether a code-DGNSS nested solution is present.
+     */
+    bool has_code_solution;
+    /**
+     * Whether a carrier RTK nested solution is present.
+     */
+    bool has_carrier_solution;
+    /**
+     * Number of selected-mode diagnostic rows.
+     */
+    size_t diagnostic_count;
+    /**
+     * Number of per-mode attempt reports.
+     */
+    size_t mode_report_count;
+    /**
+     * Carrier integer status when a carrier solution is present.
+     */
+    enum SidereonRtkIntegerStatus carrier_integer_status;
+    /**
+     * Whether carrier_integer_ratio carries a value.
+     */
+    bool has_carrier_integer_ratio;
+    /**
+     * Carrier integer ratio when present.
+     */
+    double carrier_integer_ratio;
+    /**
+     * Number of code-DGNSS diagnostic rows when present.
+     */
+    size_t code_diagnostic_count;
+    /**
+     * Number of carrier diagnostic rows when present.
+     */
+    size_t carrier_diagnostic_count;
+} SidereonStaticReferenceStationMetadata;
+
+/**
+ * Per-mode attempt report from a static reference-station solve.
+ */
+typedef struct SidereonStaticReferenceModeReport {
+    /**
+     * Attempted mode.
+     */
+    uint32_t mode;
+    /**
+     * Attempt status, a SidereonStaticReferenceModeStatus value.
+     */
+    uint32_t status;
+    /**
+     * Number of solved epochs.
+     */
+    size_t used_epochs;
+    /**
+     * Number of skipped raw RINEX epochs.
+     */
+    size_t skipped_epochs;
+    /**
+     * Number of measurements used by the final solve.
+     */
+    size_t used_measurements;
+    /**
+     * Whether a failure string exists for this mode.
+     */
+    bool has_error;
+} SidereonStaticReferenceModeReport;
 
 /**
  * A surface point as geocentric latitude/longitude (degrees), mirroring
@@ -20131,6 +20524,53 @@ enum SidereonStatus sidereon_fusion_filter_update_loose_time_sync(struct Sidereo
                                                                   struct SidereonFusionTimeSyncUpdate *out_update);
 
 /**
+ * Apply a gated wheeled-vehicle non-holonomic constraint update. When no
+ * update is applied, out_present is false and out_update is zeroed.
+ *
+ * Safety: filter must be a live handle; out_update must point to a
+ * SidereonFusionUpdate; out_present must point to a bool.
+ */
+enum SidereonStatus sidereon_fusion_filter_update_non_holonomic(struct SidereonFusionFilter *filter,
+                                                                struct SidereonFusionUpdate *out_update,
+                                                                bool *out_present);
+
+/**
+ * Apply a non-holonomic constraint and record checkpoints when an update
+ * applies. When no update is applied, out_present is false and out_update is
+ * zeroed.
+ *
+ * Safety: filter and history must be live handles; out_update must point to a
+ * SidereonFusionUpdate; out_present must point to a bool.
+ */
+enum SidereonStatus sidereon_fusion_filter_update_non_holonomic_recorded(struct SidereonFusionFilter *filter,
+                                                                         struct SidereonFusionRtsHistoryBuilder *history,
+                                                                         struct SidereonFusionUpdate *out_update,
+                                                                         bool *out_present);
+
+/**
+ * Apply a gated zero-velocity and zero-angular-rate update. When no update is
+ * applied, out_present is false and out_update is zeroed.
+ *
+ * Safety: filter must be a live handle; out_update must point to a
+ * SidereonFusionUpdate; out_present must point to a bool.
+ */
+enum SidereonStatus sidereon_fusion_filter_update_stationary(struct SidereonFusionFilter *filter,
+                                                             struct SidereonFusionUpdate *out_update,
+                                                             bool *out_present);
+
+/**
+ * Apply a stationary update and record checkpoints when an update applies.
+ * When no update is applied, out_present is false and out_update is zeroed.
+ *
+ * Safety: filter and history must be live handles; out_update must point to a
+ * SidereonFusionUpdate; out_present must point to a bool.
+ */
+enum SidereonStatus sidereon_fusion_filter_update_stationary_recorded(struct SidereonFusionFilter *filter,
+                                                                      struct SidereonFusionRtsHistoryBuilder *history,
+                                                                      struct SidereonFusionUpdate *out_update,
+                                                                      bool *out_present);
+
+/**
  * Apply a tight raw GNSS update using a broadcast ephemeris source.
  *
  * Safety: filter and broadcast must be live handles; epoch must point to a
@@ -20310,6 +20750,26 @@ enum SidereonStatus sidereon_fusion_rts_history_epoch_updated_position_ecef_m(co
  * has not already been freed.
  */
 void sidereon_fusion_rts_history_free(struct SidereonFusionRtsHistory *history);
+
+/**
+ * Blend a first good post-outage fix back over an outage span. The matched
+ * states use the same count as the input states and follow the variable-length
+ * output contract.
+ *
+ * Safety: states must point to state_count rows or NULL when state_count is 0;
+ * first_good_fix and config must point to readable structs; out_states must
+ * point to out_state_len writable rows or be NULL when out_state_len is 0;
+ * out_written, out_required, and out_trajectory must point to writable values.
+ */
+enum SidereonStatus sidereon_fusion_velocity_match_outage(const struct SidereonFusionVelocityMatchState *states,
+                                                          size_t state_count,
+                                                          const struct SidereonFusionLooseMeasurement *first_good_fix,
+                                                          const struct SidereonFusionVelocityMatchingConfig *config,
+                                                          struct SidereonFusionVelocityMatchState *out_states,
+                                                          size_t out_state_len,
+                                                          size_t *out_written,
+                                                          size_t *out_required,
+                                                          struct SidereonFusionVelocityMatchedTrajectory *out_trajectory);
 
 /**
  * Galileo coefficient-driven single-frequency ionospheric group delay in the
@@ -27577,6 +28037,21 @@ enum SidereonStatus sidereon_solve_static_position_sp3(const struct SidereonSp3 
                                                        struct SidereonStaticPositionSolution **out_solution);
 
 /**
+ * Solve a multi-epoch static reference-station coordinate from parsed RINEX
+ * OBS plus SP3. Release the result with
+ * sidereon_static_reference_station_solution_free.
+ *
+ * Safety: sp3, reference_obs, rover_obs, and config must be live
+ * handles/pointers; out_solution must point to storage for a
+ * SidereonStaticReferenceStationSolution*.
+ */
+enum SidereonStatus sidereon_solve_static_reference_station_rinex(const struct SidereonSp3 *sp3,
+                                                                  const struct SidereonRinexObs *reference_obs,
+                                                                  const struct SidereonRinexObs *rover_obs,
+                                                                  const struct SidereonStaticReferenceStationRinexConfig *config,
+                                                                  struct SidereonStaticReferenceStationSolution **out_solution);
+
+/**
  * Solve one static RTK baseline directly from parsed RINEX OBS plus SP3. On
  * success writes a static-arc solution handle to *out_solution. Release it with
  * sidereon_rtk_static_arc_solution_free.
@@ -29007,6 +29482,95 @@ enum SidereonStatus sidereon_static_position_solution_state_covariance_m2(const 
                                                                           size_t len,
                                                                           size_t *out_written,
                                                                           size_t *out_required);
+
+/**
+ * Initialize static reference-station RINEX config with engine defaults.
+ *
+ * Safety: config must point to a writable
+ * SidereonStaticReferenceStationRinexConfig.
+ */
+enum SidereonStatus sidereon_static_reference_station_rinex_config_init(struct SidereonStaticReferenceStationRinexConfig *config);
+
+/**
+ * Copy the selected rover-minus-reference ECEF baseline into out_xyz.
+ *
+ * Safety: solution is a live handle; out_xyz points to at least len doubles.
+ */
+enum SidereonStatus sidereon_static_reference_station_solution_baseline_ecef(const struct SidereonStaticReferenceStationSolution *solution,
+                                                                             double *out_xyz,
+                                                                             size_t len);
+
+/**
+ * Copy the selected ECEF covariance into out_cov in row-major order.
+ *
+ * Safety: solution is a live handle; out_cov points to at least len doubles.
+ */
+enum SidereonStatus sidereon_static_reference_station_solution_covariance_ecef(const struct SidereonStaticReferenceStationSolution *solution,
+                                                                               double *out_cov,
+                                                                               size_t len);
+
+/**
+ * Copy the selected ENU covariance into out_cov in row-major order.
+ *
+ * Safety: solution is a live handle; out_cov points to at least len doubles.
+ */
+enum SidereonStatus sidereon_static_reference_station_solution_covariance_enu(const struct SidereonStaticReferenceStationSolution *solution,
+                                                                              double *out_cov,
+                                                                              size_t len);
+
+/**
+ * Copy selected-mode static reference-station diagnostic rows. Variable-length
+ * output contract.
+ *
+ * Safety: solution is a live handle; out points to len
+ * SidereonStaticReferenceEpochDiagnostic or NULL when 0; out_written and
+ * out_required point to size_t.
+ */
+enum SidereonStatus sidereon_static_reference_station_solution_diagnostics(const struct SidereonStaticReferenceStationSolution *solution,
+                                                                           struct SidereonStaticReferenceEpochDiagnostic *out,
+                                                                           size_t len,
+                                                                           size_t *out_written,
+                                                                           size_t *out_required);
+
+/**
+ * Release a static reference-station solution handle. Passing NULL is a no-op.
+ *
+ * Safety: solution is a handle from
+ * sidereon_solve_static_reference_station_rinex or NULL.
+ */
+void sidereon_static_reference_station_solution_free(struct SidereonStaticReferenceStationSolution *solution);
+
+/**
+ * Copy static reference-station metadata into *out_metadata.
+ *
+ * Safety: solution is a live handle; out_metadata points to
+ * SidereonStaticReferenceStationMetadata.
+ */
+enum SidereonStatus sidereon_static_reference_station_solution_metadata(const struct SidereonStaticReferenceStationSolution *solution,
+                                                                        struct SidereonStaticReferenceStationMetadata *out_metadata);
+
+/**
+ * Copy static reference-station per-mode reports. Variable-length output
+ * contract.
+ *
+ * Safety: solution is a live handle; out points to len
+ * SidereonStaticReferenceModeReport or NULL when 0; out_written and
+ * out_required point to size_t.
+ */
+enum SidereonStatus sidereon_static_reference_station_solution_mode_reports(const struct SidereonStaticReferenceStationSolution *solution,
+                                                                            struct SidereonStaticReferenceModeReport *out,
+                                                                            size_t len,
+                                                                            size_t *out_written,
+                                                                            size_t *out_required);
+
+/**
+ * Copy the selected static reference-station ECEF coordinate into out_xyz.
+ *
+ * Safety: solution is a live handle; out_xyz points to at least len doubles.
+ */
+enum SidereonStatus sidereon_static_reference_station_solution_position_ecef(const struct SidereonStaticReferenceStationSolution *solution,
+                                                                             double *out_xyz,
+                                                                             size_t len);
 
 /**
  * Return a static, null-terminated, human-readable name for a status code.

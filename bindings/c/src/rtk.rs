@@ -1,4 +1,10 @@
 use super::*;
+use sidereon_core::positioning::{
+    solve_static_reference_station_rinex, RinexSppOptions, StaticReferenceCarrierRinexOptions,
+    StaticReferenceEpochDiagnostic, StaticReferenceFixStatus, StaticReferenceModeReport,
+    StaticReferenceModeStatus, StaticReferenceStationError, StaticReferenceStationMode,
+    StaticReferenceStationRinexOptions, StaticReferenceStationSolution,
+};
 
 /// The result of an RTK float solve. Opaque to C. Create with
 /// sidereon_solve_rtk_float and release with sidereon_rtk_float_solution_free.
@@ -1695,6 +1701,145 @@ pub struct SidereonRtkWideLaneFixedRinexMetadata {
     pub split_cycle_slip_arc_count: usize,
 }
 
+/// Selected solve mode for a static reference-station coordinate.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonStaticReferenceStationMode {
+    /// Code-DGNSS corrected pseudoranges stacked in a static solve.
+    CodeDgnss = 0,
+    /// Carrier RTK float baseline added to the reference coordinate.
+    CarrierFloat = 1,
+    /// Carrier RTK fixed baseline added to the reference coordinate.
+    CarrierFixed = 2,
+}
+
+/// Fix status label for a static reference-station coordinate.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonStaticReferenceFixStatus {
+    /// Code-DGNSS solution.
+    CodeDgnss = 0,
+    /// Carrier RTK float solution.
+    CarrierFloat = 1,
+    /// Carrier RTK fixed solution.
+    CarrierFixed = 2,
+}
+
+/// Status for one enabled static reference-station mode.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonStaticReferenceModeStatus {
+    /// The mode solved.
+    Solved = 0,
+    /// The mode failed.
+    Failed = 1,
+}
+
+/// Static reference-station RINEX solve config. Initialize with
+/// sidereon_static_reference_station_rinex_config_init. The carrier field uses
+/// the same options as sidereon_solve_static_rinex_rtk_baseline; its base_m is
+/// ignored and reference_position_m is used as the known reference coordinate.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonStaticReferenceStationRinexConfig {
+    /// Known reference-station ECEF coordinate in metres.
+    pub reference_position_m: [f64; 3],
+    /// Enable the code-DGNSS static mode.
+    pub enable_code_dgnss: bool,
+    /// Enable the carrier RTK static mode.
+    pub enable_carrier_rtk: bool,
+    /// Include geodetic coordinates in the selected result.
+    pub with_geodetic: bool,
+    /// Carrier RTK options, used only when enable_carrier_rtk is true.
+    pub carrier: SidereonRtkRinexStaticBaselineConfig,
+}
+
+/// Static reference-station solve metadata.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonStaticReferenceStationMetadata {
+    /// Selected solve mode, a SidereonStaticReferenceStationMode value.
+    pub mode: u32,
+    /// Reported fix status, a SidereonStaticReferenceFixStatus value.
+    pub fix_status: u32,
+    /// Whether geodetic carries a value.
+    pub has_geodetic: bool,
+    /// Geodetic coordinate when requested.
+    pub geodetic: SidereonGeodetic,
+    /// Baseline length, rover minus reference, metres.
+    pub baseline_m: f64,
+    /// Whether a code-DGNSS nested solution is present.
+    pub has_code_solution: bool,
+    /// Whether a carrier RTK nested solution is present.
+    pub has_carrier_solution: bool,
+    /// Number of selected-mode diagnostic rows.
+    pub diagnostic_count: usize,
+    /// Number of per-mode attempt reports.
+    pub mode_report_count: usize,
+    /// Carrier integer status when a carrier solution is present.
+    pub carrier_integer_status: SidereonRtkIntegerStatus,
+    /// Whether carrier_integer_ratio carries a value.
+    pub has_carrier_integer_ratio: bool,
+    /// Carrier integer ratio when present.
+    pub carrier_integer_ratio: f64,
+    /// Number of code-DGNSS diagnostic rows when present.
+    pub code_diagnostic_count: usize,
+    /// Number of carrier diagnostic rows when present.
+    pub carrier_diagnostic_count: usize,
+}
+
+/// Per-epoch diagnostic row from a static reference-station solve.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonStaticReferenceEpochDiagnostic {
+    /// Mode that produced this diagnostic row.
+    pub mode: u32,
+    /// Epoch index in the assembled mode input.
+    pub epoch_index: usize,
+    /// Number of used satellites.
+    pub used_satellite_count: usize,
+    /// Number of rejected satellites.
+    pub rejected_satellite_count: usize,
+    /// Whether code_residual_rms_m carries a value.
+    pub has_code_residual_rms_m: bool,
+    /// Code residual RMS in metres.
+    pub code_residual_rms_m: f64,
+    /// Whether phase_residual_rms_m carries a value.
+    pub has_phase_residual_rms_m: bool,
+    /// Carrier residual RMS in metres.
+    pub phase_residual_rms_m: f64,
+    /// Whether residual_rms_m carries a value.
+    pub has_residual_rms_m: bool,
+    /// Total unweighted residual RMS in metres.
+    pub residual_rms_m: f64,
+}
+
+/// Per-mode attempt report from a static reference-station solve.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonStaticReferenceModeReport {
+    /// Attempted mode.
+    pub mode: u32,
+    /// Attempt status, a SidereonStaticReferenceModeStatus value.
+    pub status: u32,
+    /// Number of solved epochs.
+    pub used_epochs: usize,
+    /// Number of skipped raw RINEX epochs.
+    pub skipped_epochs: usize,
+    /// Number of measurements used by the final solve.
+    pub used_measurements: usize,
+    /// Whether a failure string exists for this mode.
+    pub has_error: bool,
+}
+
+/// A solved static reference-station coordinate. Create with
+/// sidereon_solve_static_reference_station_rinex; read with
+/// sidereon_static_reference_station_solution_* accessors; release with
+/// sidereon_static_reference_station_solution_free.
+pub struct SidereonStaticReferenceStationSolution {
+    pub(crate) inner: StaticReferenceStationSolution,
+}
+
 /// Initialize SidereonRtkArcUpdateOptions with the engine RTK defaults.
 ///
 /// Safety: options must point to a writable SidereonRtkArcUpdateOptions.
@@ -1817,6 +1962,29 @@ pub unsafe extern "C" fn sidereon_rtk_rinex_wide_lane_fixed_config_init(
                 "config"
             ));
             *config = default_rtk_rinex_wide_lane_fixed_config();
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Initialize static reference-station RINEX config with engine defaults.
+///
+/// Safety: config must point to a writable
+/// SidereonStaticReferenceStationRinexConfig.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_static_reference_station_rinex_config_init(
+    config: *mut SidereonStaticReferenceStationRinexConfig,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_static_reference_station_rinex_config_init",
+        SidereonStatus::Panic,
+        || {
+            let config = c_try!(require_out(
+                config,
+                "sidereon_static_reference_station_rinex_config_init",
+                "config"
+            ));
+            *config = default_static_reference_station_rinex_config();
             SidereonStatus::Ok
         },
     )
@@ -3199,6 +3367,254 @@ pub unsafe extern "C" fn sidereon_rtk_wide_lane_fixed_rinex_solution_wide_lane_c
     )
 }
 
+/// Copy static reference-station metadata into *out_metadata.
+///
+/// Safety: solution is a live handle; out_metadata points to
+/// SidereonStaticReferenceStationMetadata.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_static_reference_station_solution_metadata(
+    solution: *const SidereonStaticReferenceStationSolution,
+    out_metadata: *mut SidereonStaticReferenceStationMetadata,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_static_reference_station_solution_metadata",
+        SidereonStatus::Panic,
+        || {
+            let out_metadata = c_try!(require_out(
+                out_metadata,
+                "sidereon_static_reference_station_solution_metadata",
+                "out_metadata"
+            ));
+            *out_metadata = empty_static_reference_metadata();
+            let solution = c_try!(require_ref(
+                solution,
+                "sidereon_static_reference_station_solution_metadata",
+                "solution"
+            ));
+            *out_metadata = static_reference_metadata(&solution.inner);
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy the selected static reference-station ECEF coordinate into out_xyz.
+///
+/// Safety: solution is a live handle; out_xyz points to at least len doubles.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_static_reference_station_solution_position_ecef(
+    solution: *const SidereonStaticReferenceStationSolution,
+    out_xyz: *mut f64,
+    len: usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_static_reference_station_solution_position_ecef",
+        SidereonStatus::Panic,
+        || {
+            let solution = c_try!(require_ref(
+                solution,
+                "sidereon_static_reference_station_solution_position_ecef",
+                "solution"
+            ));
+            c_try!(copy_exact_f64s(
+                "sidereon_static_reference_station_solution_position_ecef",
+                "out_xyz",
+                out_xyz,
+                len,
+                &solution.inner.position.as_array(),
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy the selected rover-minus-reference ECEF baseline into out_xyz.
+///
+/// Safety: solution is a live handle; out_xyz points to at least len doubles.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_static_reference_station_solution_baseline_ecef(
+    solution: *const SidereonStaticReferenceStationSolution,
+    out_xyz: *mut f64,
+    len: usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_static_reference_station_solution_baseline_ecef",
+        SidereonStatus::Panic,
+        || {
+            let solution = c_try!(require_ref(
+                solution,
+                "sidereon_static_reference_station_solution_baseline_ecef",
+                "solution"
+            ));
+            c_try!(copy_exact_f64s(
+                "sidereon_static_reference_station_solution_baseline_ecef",
+                "out_xyz",
+                out_xyz,
+                len,
+                &solution.inner.baseline_vector_m,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy the selected ECEF covariance into out_cov in row-major order.
+///
+/// Safety: solution is a live handle; out_cov points to at least len doubles.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_static_reference_station_solution_covariance_ecef(
+    solution: *const SidereonStaticReferenceStationSolution,
+    out_cov: *mut f64,
+    len: usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_static_reference_station_solution_covariance_ecef",
+        SidereonStatus::Panic,
+        || {
+            let solution = c_try!(require_ref(
+                solution,
+                "sidereon_static_reference_station_solution_covariance_ecef",
+                "solution"
+            ));
+            let values = flatten_mat3(solution.inner.covariance.position_ecef_m2);
+            c_try!(copy_exact_f64s(
+                "sidereon_static_reference_station_solution_covariance_ecef",
+                "out_cov",
+                out_cov,
+                len,
+                &values,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy the selected ENU covariance into out_cov in row-major order.
+///
+/// Safety: solution is a live handle; out_cov points to at least len doubles.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_static_reference_station_solution_covariance_enu(
+    solution: *const SidereonStaticReferenceStationSolution,
+    out_cov: *mut f64,
+    len: usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_static_reference_station_solution_covariance_enu",
+        SidereonStatus::Panic,
+        || {
+            let solution = c_try!(require_ref(
+                solution,
+                "sidereon_static_reference_station_solution_covariance_enu",
+                "solution"
+            ));
+            let values = flatten_mat3(solution.inner.covariance.position_enu_m2);
+            c_try!(copy_exact_f64s(
+                "sidereon_static_reference_station_solution_covariance_enu",
+                "out_cov",
+                out_cov,
+                len,
+                &values,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy selected-mode static reference-station diagnostic rows. Variable-length
+/// output contract.
+///
+/// Safety: solution is a live handle; out points to len
+/// SidereonStaticReferenceEpochDiagnostic or NULL when 0; out_written and
+/// out_required point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_static_reference_station_solution_diagnostics(
+    solution: *const SidereonStaticReferenceStationSolution,
+    out: *mut SidereonStaticReferenceEpochDiagnostic,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_static_reference_station_solution_diagnostics",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_static_reference_station_solution_diagnostics",
+                out_written,
+                out_required
+            ));
+            let solution = c_try!(require_ref(
+                solution,
+                "sidereon_static_reference_station_solution_diagnostics",
+                "solution"
+            ));
+            let rows: Vec<SidereonStaticReferenceEpochDiagnostic> = solution
+                .inner
+                .diagnostics
+                .iter()
+                .map(static_reference_diagnostic_to_c)
+                .collect();
+            c_try!(copy_prefix_to_c(
+                "sidereon_static_reference_station_solution_diagnostics",
+                "out",
+                &rows,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy static reference-station per-mode reports. Variable-length output
+/// contract.
+///
+/// Safety: solution is a live handle; out points to len
+/// SidereonStaticReferenceModeReport or NULL when 0; out_written and
+/// out_required point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_static_reference_station_solution_mode_reports(
+    solution: *const SidereonStaticReferenceStationSolution,
+    out: *mut SidereonStaticReferenceModeReport,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_static_reference_station_solution_mode_reports",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_static_reference_station_solution_mode_reports",
+                out_written,
+                out_required
+            ));
+            let solution = c_try!(require_ref(
+                solution,
+                "sidereon_static_reference_station_solution_mode_reports",
+                "solution"
+            ));
+            let rows: Vec<SidereonStaticReferenceModeReport> = solution
+                .inner
+                .mode_reports
+                .iter()
+                .map(static_reference_mode_report_to_c)
+                .collect();
+            c_try!(copy_prefix_to_c(
+                "sidereon_static_reference_station_solution_mode_reports",
+                "out",
+                &rows,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
 /// Release a static RTK arc solution handle. Passing NULL is a no-op.
 ///
 /// Safety: solution is a handle from sidereon_solve_static_rtk_arc or NULL.
@@ -3238,6 +3654,17 @@ pub unsafe extern "C" fn sidereon_rtk_ionosphere_free_arc_solution_free(
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_rtk_wide_lane_fixed_rinex_solution_free(
     solution: *mut SidereonRtkWideLaneFixedRinexSolution,
+) {
+    free_boxed(solution);
+}
+
+/// Release a static reference-station solution handle. Passing NULL is a no-op.
+///
+/// Safety: solution is a handle from
+/// sidereon_solve_static_reference_station_rinex or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_static_reference_station_solution_free(
+    solution: *mut SidereonStaticReferenceStationSolution,
 ) {
     free_boxed(solution);
 }
@@ -3936,6 +4363,100 @@ pub unsafe extern "C" fn sidereon_solve_static_rinex_rtk_baseline(
     )
 }
 
+/// Solve a multi-epoch static reference-station coordinate from parsed RINEX
+/// OBS plus SP3. Release the result with
+/// sidereon_static_reference_station_solution_free.
+///
+/// Safety: sp3, reference_obs, rover_obs, and config must be live
+/// handles/pointers; out_solution must point to storage for a
+/// SidereonStaticReferenceStationSolution*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_solve_static_reference_station_rinex(
+    sp3: *const SidereonSp3,
+    reference_obs: *const SidereonRinexObs,
+    rover_obs: *const SidereonRinexObs,
+    config: *const SidereonStaticReferenceStationRinexConfig,
+    out_solution: *mut *mut SidereonStaticReferenceStationSolution,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_solve_static_reference_station_rinex",
+        SidereonStatus::Panic,
+        || {
+            let out_solution = c_try!(require_out(
+                out_solution,
+                "sidereon_solve_static_reference_station_rinex",
+                "out_solution"
+            ));
+            *out_solution = ptr::null_mut();
+            let sp3 = c_try!(require_ref(
+                sp3,
+                "sidereon_solve_static_reference_station_rinex",
+                "sp3"
+            ));
+            let reference_obs = c_try!(require_ref(
+                reference_obs,
+                "sidereon_solve_static_reference_station_rinex",
+                "reference_obs"
+            ));
+            let rover_obs = c_try!(require_ref(
+                rover_obs,
+                "sidereon_solve_static_reference_station_rinex",
+                "rover_obs"
+            ));
+            let config = c_try!(require_ref(
+                config,
+                "sidereon_solve_static_reference_station_rinex",
+                "config"
+            ));
+            let code_options = if config.enable_code_dgnss {
+                match RinexSppOptions::default_for(&rover_obs.inner) {
+                    Ok(options) => Some(options),
+                    Err(err) => {
+                        set_last_error(format!(
+                            "sidereon_solve_static_reference_station_rinex: {err}"
+                        ));
+                        return SidereonStatus::InvalidArgument;
+                    }
+                }
+            } else {
+                None
+            };
+            let carrier_options = if config.enable_carrier_rtk {
+                Some(c_try!(static_reference_carrier_options_from_c(
+                    "sidereon_solve_static_reference_station_rinex",
+                    config,
+                )))
+            } else {
+                None
+            };
+            let options = StaticReferenceStationRinexOptions {
+                code_options,
+                carrier_options,
+                with_geodetic: config.with_geodetic,
+            };
+            match solve_static_reference_station_rinex(
+                &sp3.inner,
+                &reference_obs.inner,
+                &rover_obs.inner,
+                config.reference_position_m,
+                &options,
+            ) {
+                Ok(inner) => {
+                    write_boxed_handle(
+                        out_solution,
+                        SidereonStaticReferenceStationSolution { inner },
+                    );
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_static_reference_error(
+                    "sidereon_solve_static_reference_station_rinex",
+                    &err,
+                ),
+            }
+        },
+    )
+}
+
 /// Solve one static dual-frequency wide-lane fixed RTK baseline directly from
 /// parsed RINEX OBS plus SP3. Release the result with
 /// sidereon_rtk_wide_lane_fixed_rinex_solution_free.
@@ -4314,6 +4835,16 @@ fn default_rtk_rinex_wide_lane_fixed_config() -> SidereonRtkRinexWideLaneFixedCo
     }
 }
 
+fn default_static_reference_station_rinex_config() -> SidereonStaticReferenceStationRinexConfig {
+    SidereonStaticReferenceStationRinexConfig {
+        reference_position_m: [0.0; 3],
+        enable_code_dgnss: true,
+        enable_carrier_rtk: true,
+        with_geodetic: true,
+        carrier: default_rtk_rinex_static_baseline_config(),
+    }
+}
+
 fn rtk_float_options_from_c(options: &SidereonRtkFloatOptions) -> FloatSolveOpts {
     FloatSolveOpts {
         position_tol_m: options.position_tol_m,
@@ -4492,6 +5023,23 @@ unsafe fn rtk_rinex_static_config_from_c(
             preprocessing: rtk_arc_preprocessing_from_c(fn_name, &config.preprocessing)?,
         },
         opts: rtk_validated_fixed_options_from_c(config),
+    })
+}
+
+unsafe fn static_reference_carrier_options_from_c(
+    fn_name: &str,
+    config: &SidereonStaticReferenceStationRinexConfig,
+) -> Result<StaticReferenceCarrierRinexOptions, SidereonStatus> {
+    let mut carrier = config.carrier;
+    carrier.base_m = config.reference_position_m;
+    Ok(StaticReferenceCarrierRinexOptions {
+        arc_options: rtk_rinex_arc_options_from_c(fn_name, &carrier.arc_options)?,
+        static_config: rtk_rinex_static_config_from_c(
+            fn_name,
+            &carrier,
+            BTreeMap::new(),
+            BTreeMap::new(),
+        )?,
     })
 }
 
@@ -4700,6 +5248,128 @@ fn rtk_ambiguity_satellites_to_c(
             sat_id: satellite_token_from_text(sat_id),
         })
         .collect()
+}
+
+fn static_reference_mode_to_c(
+    mode: StaticReferenceStationMode,
+) -> SidereonStaticReferenceStationMode {
+    match mode {
+        StaticReferenceStationMode::CodeDgnss => SidereonStaticReferenceStationMode::CodeDgnss,
+        StaticReferenceStationMode::CarrierFloat => {
+            SidereonStaticReferenceStationMode::CarrierFloat
+        }
+        StaticReferenceStationMode::CarrierFixed => {
+            SidereonStaticReferenceStationMode::CarrierFixed
+        }
+    }
+}
+
+fn static_reference_fix_status_to_c(
+    status: StaticReferenceFixStatus,
+) -> SidereonStaticReferenceFixStatus {
+    match status {
+        StaticReferenceFixStatus::CodeDgnss => SidereonStaticReferenceFixStatus::CodeDgnss,
+        StaticReferenceFixStatus::CarrierFloat => SidereonStaticReferenceFixStatus::CarrierFloat,
+        StaticReferenceFixStatus::CarrierFixed => SidereonStaticReferenceFixStatus::CarrierFixed,
+    }
+}
+
+fn static_reference_mode_status_to_c(
+    status: StaticReferenceModeStatus,
+) -> SidereonStaticReferenceModeStatus {
+    match status {
+        StaticReferenceModeStatus::Solved => SidereonStaticReferenceModeStatus::Solved,
+        StaticReferenceModeStatus::Failed => SidereonStaticReferenceModeStatus::Failed,
+    }
+}
+
+fn empty_static_reference_metadata() -> SidereonStaticReferenceStationMetadata {
+    SidereonStaticReferenceStationMetadata {
+        mode: SidereonStaticReferenceStationMode::CodeDgnss as u32,
+        fix_status: SidereonStaticReferenceFixStatus::CodeDgnss as u32,
+        has_geodetic: false,
+        geodetic: empty_geodetic(),
+        baseline_m: 0.0,
+        has_code_solution: false,
+        has_carrier_solution: false,
+        diagnostic_count: 0,
+        mode_report_count: 0,
+        carrier_integer_status: SidereonRtkIntegerStatus::NotFixed,
+        has_carrier_integer_ratio: false,
+        carrier_integer_ratio: f64::NAN,
+        code_diagnostic_count: 0,
+        carrier_diagnostic_count: 0,
+    }
+}
+
+fn static_reference_metadata(
+    solution: &StaticReferenceStationSolution,
+) -> SidereonStaticReferenceStationMetadata {
+    let carrier = solution.carrier_solution.as_ref();
+    SidereonStaticReferenceStationMetadata {
+        mode: static_reference_mode_to_c(solution.mode) as u32,
+        fix_status: static_reference_fix_status_to_c(solution.fix_status) as u32,
+        has_geodetic: solution.geodetic.is_some(),
+        geodetic: solution
+            .geodetic
+            .as_ref()
+            .map(geodetic_to_c)
+            .unwrap_or_else(empty_geodetic),
+        baseline_m: solution.baseline_m,
+        has_code_solution: solution.code_solution.is_some(),
+        has_carrier_solution: carrier.is_some(),
+        diagnostic_count: solution.diagnostics.len(),
+        mode_report_count: solution.mode_reports.len(),
+        carrier_integer_status: carrier
+            .map(|inner| rtk_integer_status_to_c(inner.integer_status))
+            .unwrap_or(SidereonRtkIntegerStatus::NotFixed),
+        has_carrier_integer_ratio: carrier.and_then(|inner| inner.integer_ratio).is_some(),
+        carrier_integer_ratio: none_to_nan(carrier.and_then(|inner| inner.integer_ratio)),
+        code_diagnostic_count: solution
+            .code_solution
+            .as_ref()
+            .map_or(0, |inner| inner.diagnostics.len()),
+        carrier_diagnostic_count: carrier.map_or(0, |inner| inner.diagnostics.len()),
+    }
+}
+
+fn static_reference_diagnostic_to_c(
+    diagnostic: &StaticReferenceEpochDiagnostic,
+) -> SidereonStaticReferenceEpochDiagnostic {
+    SidereonStaticReferenceEpochDiagnostic {
+        mode: static_reference_mode_to_c(diagnostic.mode) as u32,
+        epoch_index: diagnostic.epoch_index,
+        used_satellite_count: diagnostic.used_satellites.len(),
+        rejected_satellite_count: diagnostic.rejected_satellite_count,
+        has_code_residual_rms_m: diagnostic.code_residual_rms_m.is_some(),
+        code_residual_rms_m: none_to_nan(diagnostic.code_residual_rms_m),
+        has_phase_residual_rms_m: diagnostic.phase_residual_rms_m.is_some(),
+        phase_residual_rms_m: none_to_nan(diagnostic.phase_residual_rms_m),
+        has_residual_rms_m: diagnostic.residual_rms_m.is_some(),
+        residual_rms_m: none_to_nan(diagnostic.residual_rms_m),
+    }
+}
+
+fn static_reference_mode_report_to_c(
+    report: &StaticReferenceModeReport,
+) -> SidereonStaticReferenceModeReport {
+    SidereonStaticReferenceModeReport {
+        mode: static_reference_mode_to_c(report.mode) as u32,
+        status: static_reference_mode_status_to_c(report.status) as u32,
+        used_epochs: report.used_epochs,
+        skipped_epochs: report.skipped_epochs,
+        used_measurements: report.used_measurements,
+        has_error: report.error.is_some(),
+    }
+}
+
+fn map_static_reference_error(fn_name: &str, err: &StaticReferenceStationError) -> SidereonStatus {
+    set_last_error(format!("{fn_name}: {err}"));
+    match err {
+        StaticReferenceStationError::InvalidInput { .. }
+        | StaticReferenceStationError::NoEnabledModes => SidereonStatus::InvalidArgument,
+        StaticReferenceStationError::AllModesFailed { .. } => SidereonStatus::Solve,
+    }
 }
 
 fn map_rtk_wide_lane_arc_error(fn_name: &str, err: &RtkWideLaneArcError) -> SidereonStatus {

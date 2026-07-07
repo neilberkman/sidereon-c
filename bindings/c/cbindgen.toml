@@ -57,9 +57,9 @@ usize_is_size_t = true
 after_includes = """
 
 #define SIDEREON_VERSION_MAJOR 0
-#define SIDEREON_VERSION_MINOR 20
+#define SIDEREON_VERSION_MINOR 21
 #define SIDEREON_VERSION_PATCH 0
-#define SIDEREON_VERSION_STRING "0.20.0\""""
+#define SIDEREON_VERSION_STRING "0.21.0\""""
 
 [enum]
 # Idiomatic C enum constants: SidereonStatus::Ok -> SIDEREON_STATUS_OK.
@@ -223,19 +223,27 @@ include = [
     "SidereonFusionImuGrade",
     "SidereonFusionConingCorrection",
     "SidereonFusionImuSampleKind",
+    "SidereonFusionGnssFixStatus",
     "SidereonFusionFilter",
     "SidereonFusionRtsHistoryBuilder",
     "SidereonFusionRtsHistory",
     "SidereonSmoothedFusionTrajectory",
     "SidereonFusionImuSpec",
     "SidereonFusionMechanizationConfig",
+    "SidereonFusionFixStatusWeighting",
     "SidereonFusionInnovationGate",
     "SidereonFusionIggIiiMeasurementReweighting",
     "SidereonFusionYangPredictionAdaptiveFactor",
+    "SidereonFusionStationaryDetectorConfig",
+    "SidereonFusionStationaryUpdateConfig",
+    "SidereonFusionNonHolonomicConstraintConfig",
+    "SidereonFusionVelocityMatchingConfig",
     "SidereonFusionNavState",
     "SidereonFusionFilterConfig",
     "SidereonFusionImuSample",
     "SidereonFusionLooseMeasurement",
+    "SidereonFusionVelocityMatchState",
+    "SidereonFusionVelocityMatchedTrajectory",
     "SidereonFusionTightRangeRate",
     "SidereonFusionTightCarrierPhase",
     "SidereonFusionTightObservation",
@@ -510,6 +518,14 @@ include = [
     "SidereonStaticPositionSatelliteInfluence",
     "SidereonStaticPositionSatelliteBatchInfluence",
     "SidereonStaticPositionSolution",
+    "SidereonStaticReferenceStationMode",
+    "SidereonStaticReferenceFixStatus",
+    "SidereonStaticReferenceModeStatus",
+    "SidereonStaticReferenceStationRinexConfig",
+    "SidereonStaticReferenceStationMetadata",
+    "SidereonStaticReferenceEpochDiagnostic",
+    "SidereonStaticReferenceModeReport",
+    "SidereonStaticReferenceStationSolution",
     "SidereonAlphaBetaState",
     "SidereonAlphaBetaGains",
     "SidereonAlphaBetaStep",
