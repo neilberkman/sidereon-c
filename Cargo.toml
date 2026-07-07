@@ -13,7 +13,3 @@ members = ["bindings/c"]
 # the same canonical engine over git.
 exclude = ["bindings/python"]
 
-[patch.crates-io]
-# Pre-release core API override for the RTK RINEX arc builders.
-# Remove this once the core crate release includes build/rtk-arc-api.
-sidereon-core = { git = "file:///Users/neil/xuku/sidereon", branch = "build/rtk-arc-api" }
