@@ -1272,6 +1272,146 @@ pub struct SidereonRtkStaticArcConfig {
     pub residual_options: SidereonRtkResidualValidationOptions,
 }
 
+/// One RINEX code/carrier pair used to build a single-frequency RTK arc.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonRtkRinexSignalPair {
+    /// GNSS system as SidereonGnssSystem.
+    pub system: u32,
+    /// Null-terminated RINEX code observable, e.g. C1C.
+    pub code_observable: [c_char; RINEX_OBS_CODE_C_BYTES],
+    /// Null-terminated RINEX carrier observable, e.g. L1C.
+    pub phase_observable: [c_char; RINEX_OBS_CODE_C_BYTES],
+}
+
+/// Options for building single-frequency RTK arcs from paired RINEX OBS files.
+/// Initialize with sidereon_rtk_rinex_arc_options_init.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonRtkRinexArcOptions {
+    /// Optional array of signal pairs. A zero count uses the GPS C1C/L1C default.
+    pub signal_pairs: *const SidereonRtkRinexSignalPair,
+    /// Number of signal pairs.
+    pub signal_pair_count: usize,
+    /// Whether max_epochs carries a value.
+    pub has_max_epochs: bool,
+    /// Optional cap on base epochs considered, in file order.
+    pub max_epochs: usize,
+    /// Minimum common satellites with observations and ephemeris in an epoch.
+    pub min_common_satellites: usize,
+    /// Fill prediction_time_s in generated arc epochs.
+    pub include_prediction_time: bool,
+}
+
+/// One RINEX dual-frequency code/carrier selection.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonRtkRinexDualSignalPair {
+    /// GNSS system as SidereonGnssSystem.
+    pub system: u32,
+    /// Null-terminated band-1 code observable, e.g. C1C.
+    pub code1_observable: [c_char; RINEX_OBS_CODE_C_BYTES],
+    /// Null-terminated band-1 carrier observable, e.g. L1C.
+    pub phase1_observable: [c_char; RINEX_OBS_CODE_C_BYTES],
+    /// Null-terminated band-2 code observable, e.g. C2W.
+    pub code2_observable: [c_char; RINEX_OBS_CODE_C_BYTES],
+    /// Null-terminated band-2 carrier observable, e.g. L2W.
+    pub phase2_observable: [c_char; RINEX_OBS_CODE_C_BYTES],
+}
+
+/// Options for building dual-frequency RTK arcs from paired RINEX OBS files.
+/// Initialize with sidereon_rtk_rinex_dual_arc_options_init.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonRtkRinexDualArcOptions {
+    /// Optional array of signal pairs. A zero count uses GPS C1C/L1C + C2W/L2W.
+    pub signal_pairs: *const SidereonRtkRinexDualSignalPair,
+    /// Number of signal pairs.
+    pub signal_pair_count: usize,
+    /// Whether max_epochs carries a value.
+    pub has_max_epochs: bool,
+    /// Optional cap on base epochs considered, in file order.
+    pub max_epochs: usize,
+    /// Minimum common satellites with observations and ephemeris in an epoch.
+    pub min_common_satellites: usize,
+    /// Fill prediction_time_s in generated arc epochs.
+    pub include_prediction_time: bool,
+}
+
+/// Static RTK solve config for paired raw RINEX OBS plus SP3. Initialize with
+/// sidereon_rtk_rinex_static_baseline_config_init.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonRtkRinexStaticBaselineConfig {
+    /// Base-station ECEF position (metres).
+    pub base_m: [f64; 3],
+    /// RINEX arc-build options.
+    pub arc_options: SidereonRtkRinexArcOptions,
+    /// Reference-selection mode, a SidereonRtkArcReferenceMode value.
+    pub reference_mode: u32,
+    /// Fixed reference satellite id token for the Satellite mode (NULL otherwise).
+    pub reference_satellite: *const c_char,
+    /// Per-constellation references for the PerSystem mode.
+    pub reference_per_system: *const SidereonRtkArcReferenceEntry,
+    /// Number of per-system references.
+    pub reference_per_system_count: usize,
+    /// Measurement model.
+    pub model: SidereonRtkMeasurementModel,
+    /// Baseline prior sigma (metres).
+    pub baseline_prior_sigma_m: f64,
+    /// Ambiguity prior sigma (metres).
+    pub ambiguity_prior_sigma_m: f64,
+    /// Initial rover-minus-base ECEF baseline (metres).
+    pub initial_baseline_m: [f64; 3],
+    /// Sequential-update controls used by the static driver.
+    pub update_options: SidereonRtkArcUpdateOptions,
+    /// Optional preprocessing chained before the static solve.
+    pub preprocessing: SidereonRtkArcPreprocessing,
+    /// Float solve options.
+    pub float_options: SidereonRtkFloatOptions,
+    /// Fixed solve options.
+    pub fixed_options: SidereonRtkFixedOptions,
+    /// Residual validation options.
+    pub residual_options: SidereonRtkResidualValidationOptions,
+}
+
+/// Static dual-frequency wide-lane fixed RTK solve config for paired raw RINEX
+/// OBS plus SP3. Initialize with sidereon_rtk_rinex_wide_lane_fixed_config_init.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonRtkRinexWideLaneFixedConfig {
+    /// Base-station ECEF position (metres).
+    pub base_m: [f64; 3],
+    /// RINEX dual-frequency arc-build options.
+    pub arc_options: SidereonRtkRinexDualArcOptions,
+    /// Reference-selection mode, a SidereonRtkArcReferenceMode value.
+    pub reference_mode: u32,
+    /// Fixed reference satellite id token for the Satellite mode (NULL otherwise).
+    pub reference_satellite: *const c_char,
+    /// Per-constellation references for the PerSystem mode.
+    pub reference_per_system: *const SidereonRtkArcReferenceEntry,
+    /// Number of per-system references.
+    pub reference_per_system_count: usize,
+    /// Measurement model for the final narrow-lane solve.
+    pub model: SidereonRtkMeasurementModel,
+    /// Baseline prior sigma (metres).
+    pub baseline_prior_sigma_m: f64,
+    /// Ambiguity prior sigma (metres).
+    pub ambiguity_prior_sigma_m: f64,
+    /// Initial rover-minus-base ECEF baseline (metres).
+    pub initial_baseline_m: [f64; 3],
+    /// Sequential-update controls used by the static driver.
+    pub update_options: SidereonRtkArcUpdateOptions,
+    /// Float solve options.
+    pub float_options: SidereonRtkFloatOptions,
+    /// Fixed solve options.
+    pub fixed_options: SidereonRtkFixedOptions,
+    /// Residual validation options.
+    pub residual_options: SidereonRtkResidualValidationOptions,
+    /// Apply the core troposphere setup before the ionosphere-free combination.
+    pub apply_troposphere: bool,
+}
+
 /// One receiver's dual-frequency code/carrier observation for RTK wide-lane and
 /// ionosphere-free arc setup.
 #[repr(C)]
@@ -1533,6 +1673,28 @@ pub struct SidereonRtkIonosphereFreeArcSolution {
     pub(crate) inner: RtkIonosphereFreeArcSolution,
 }
 
+/// A static dual-frequency wide-lane fixed RTK solution built from RINEX OBS.
+/// Create with sidereon_solve_wide_lane_fixed_rinex_rtk_baseline; read with the
+/// sidereon_rtk_wide_lane_fixed_rinex_solution_* accessors; release with
+/// sidereon_rtk_wide_lane_fixed_rinex_solution_free.
+pub struct SidereonRtkWideLaneFixedRinexSolution {
+    pub(crate) inner: RtkWideLaneFixedStaticArcSolution,
+}
+
+/// Metadata for the combined wide-lane fixed RINEX RTK solution.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonRtkWideLaneFixedRinexMetadata {
+    /// True when at least one wide-lane ambiguity was fixed and used downstream.
+    pub wide_lane_fixed: bool,
+    /// Number of fixed wide-lane ambiguity rows.
+    pub wide_lane_ambiguity_count: usize,
+    /// Number of satellites dropped by dual-frequency cycle-slip preprocessing.
+    pub dropped_cycle_slip_sat_count: usize,
+    /// Number of split cycle-slip arcs.
+    pub split_cycle_slip_arc_count: usize,
+}
+
 /// Initialize SidereonRtkArcUpdateOptions with the engine RTK defaults.
 ///
 /// Safety: options must point to a writable SidereonRtkArcUpdateOptions.
@@ -1567,6 +1729,94 @@ pub unsafe extern "C" fn sidereon_rtk_arc_update_options_init(
                 ratio_threshold: RTK_RATIO_THRESHOLD,
                 receiver_antenna: ptr::null(),
             };
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Initialize RINEX single-frequency RTK arc options with GPS C1C/L1C defaults.
+///
+/// Safety: options must point to a writable SidereonRtkRinexArcOptions.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtk_rinex_arc_options_init(
+    options: *mut SidereonRtkRinexArcOptions,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtk_rinex_arc_options_init",
+        SidereonStatus::Panic,
+        || {
+            let options = c_try!(require_out(
+                options,
+                "sidereon_rtk_rinex_arc_options_init",
+                "options"
+            ));
+            *options = default_rtk_rinex_arc_options();
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Initialize RINEX dual-frequency RTK arc options with GPS L1/L2 defaults.
+///
+/// Safety: options must point to a writable SidereonRtkRinexDualArcOptions.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtk_rinex_dual_arc_options_init(
+    options: *mut SidereonRtkRinexDualArcOptions,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtk_rinex_dual_arc_options_init",
+        SidereonStatus::Panic,
+        || {
+            let options = c_try!(require_out(
+                options,
+                "sidereon_rtk_rinex_dual_arc_options_init",
+                "options"
+            ));
+            *options = default_rtk_rinex_dual_arc_options();
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Initialize static RINEX RTK baseline config with engine defaults.
+///
+/// Safety: config must point to a writable SidereonRtkRinexStaticBaselineConfig.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtk_rinex_static_baseline_config_init(
+    config: *mut SidereonRtkRinexStaticBaselineConfig,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtk_rinex_static_baseline_config_init",
+        SidereonStatus::Panic,
+        || {
+            let config = c_try!(require_out(
+                config,
+                "sidereon_rtk_rinex_static_baseline_config_init",
+                "config"
+            ));
+            *config = default_rtk_rinex_static_baseline_config();
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Initialize dual-frequency wide-lane fixed RINEX RTK config with defaults.
+///
+/// Safety: config must point to a writable SidereonRtkRinexWideLaneFixedConfig.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtk_rinex_wide_lane_fixed_config_init(
+    config: *mut SidereonRtkRinexWideLaneFixedConfig,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtk_rinex_wide_lane_fixed_config_init",
+        SidereonStatus::Panic,
+        || {
+            let config = c_try!(require_out(
+                config,
+                "sidereon_rtk_rinex_wide_lane_fixed_config_init",
+                "config"
+            ));
+            *config = default_rtk_rinex_wide_lane_fixed_config();
             SidereonStatus::Ok
         },
     )
@@ -2754,6 +3004,201 @@ pub unsafe extern "C" fn sidereon_rtk_ionosphere_free_arc_solution_epoch_rover_s
     )
 }
 
+/// Copy the combined wide-lane fixed RINEX RTK float baseline into out_xyz.
+///
+/// Safety: solution is a live handle; out_xyz points to at least len doubles.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtk_wide_lane_fixed_rinex_solution_float_baseline_ecef(
+    solution: *const SidereonRtkWideLaneFixedRinexSolution,
+    out_xyz: *mut f64,
+    len: usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtk_wide_lane_fixed_rinex_solution_float_baseline_ecef",
+        SidereonStatus::Panic,
+        || {
+            let solution = c_try!(require_ref(
+                solution,
+                "sidereon_rtk_wide_lane_fixed_rinex_solution_float_baseline_ecef",
+                "solution"
+            ));
+            c_try!(copy_exact_f64s(
+                "sidereon_rtk_wide_lane_fixed_rinex_solution_float_baseline_ecef",
+                "out_xyz",
+                out_xyz,
+                len,
+                &solution.inner.solution.float_solution.baseline_m,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy the combined wide-lane fixed RINEX RTK fixed baseline into out_xyz.
+///
+/// Safety: solution is a live handle; out_xyz points to at least len doubles.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtk_wide_lane_fixed_rinex_solution_fixed_baseline_ecef(
+    solution: *const SidereonRtkWideLaneFixedRinexSolution,
+    out_xyz: *mut f64,
+    len: usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtk_wide_lane_fixed_rinex_solution_fixed_baseline_ecef",
+        SidereonStatus::Panic,
+        || {
+            let solution = c_try!(require_ref(
+                solution,
+                "sidereon_rtk_wide_lane_fixed_rinex_solution_fixed_baseline_ecef",
+                "solution"
+            ));
+            c_try!(copy_exact_f64s(
+                "sidereon_rtk_wide_lane_fixed_rinex_solution_fixed_baseline_ecef",
+                "out_xyz",
+                out_xyz,
+                len,
+                &solution
+                    .inner
+                    .solution
+                    .fixed_solution
+                    .fixed_solution
+                    .baseline_m,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy combined wide-lane fixed RINEX RTK float metadata into *out_metadata.
+///
+/// Safety: solution is a live handle; out_metadata points to a
+/// SidereonRtkFloatMetadata.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtk_wide_lane_fixed_rinex_solution_float_metadata(
+    solution: *const SidereonRtkWideLaneFixedRinexSolution,
+    out_metadata: *mut SidereonRtkFloatMetadata,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtk_wide_lane_fixed_rinex_solution_float_metadata",
+        SidereonStatus::Panic,
+        || {
+            let out_metadata = c_try!(require_out(
+                out_metadata,
+                "sidereon_rtk_wide_lane_fixed_rinex_solution_float_metadata",
+                "out_metadata"
+            ));
+            let solution = c_try!(require_ref(
+                solution,
+                "sidereon_rtk_wide_lane_fixed_rinex_solution_float_metadata",
+                "solution"
+            ));
+            *out_metadata = rtk_float_metadata(&solution.inner.solution.float_solution);
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy combined wide-lane fixed RINEX RTK fixed metadata into *out_metadata.
+///
+/// Safety: solution is a live handle; out_metadata points to a
+/// SidereonRtkFixedMetadata.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtk_wide_lane_fixed_rinex_solution_fixed_metadata(
+    solution: *const SidereonRtkWideLaneFixedRinexSolution,
+    out_metadata: *mut SidereonRtkFixedMetadata,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtk_wide_lane_fixed_rinex_solution_fixed_metadata",
+        SidereonStatus::Panic,
+        || {
+            let out_metadata = c_try!(require_out(
+                out_metadata,
+                "sidereon_rtk_wide_lane_fixed_rinex_solution_fixed_metadata",
+                "out_metadata"
+            ));
+            let solution = c_try!(require_ref(
+                solution,
+                "sidereon_rtk_wide_lane_fixed_rinex_solution_fixed_metadata",
+                "solution"
+            ));
+            *out_metadata = rtk_fixed_metadata(&solution.inner.solution.fixed_solution);
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy combined wide-lane fixed RINEX RTK metadata into *out_metadata.
+///
+/// Safety: solution is a live handle; out_metadata points to
+/// SidereonRtkWideLaneFixedRinexMetadata.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtk_wide_lane_fixed_rinex_solution_metadata(
+    solution: *const SidereonRtkWideLaneFixedRinexSolution,
+    out_metadata: *mut SidereonRtkWideLaneFixedRinexMetadata,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtk_wide_lane_fixed_rinex_solution_metadata",
+        SidereonStatus::Panic,
+        || {
+            let out_metadata = c_try!(require_out(
+                out_metadata,
+                "sidereon_rtk_wide_lane_fixed_rinex_solution_metadata",
+                "out_metadata"
+            ));
+            let solution = c_try!(require_ref(
+                solution,
+                "sidereon_rtk_wide_lane_fixed_rinex_solution_metadata",
+                "solution"
+            ));
+            *out_metadata = rtk_wide_lane_fixed_rinex_metadata(&solution.inner.metadata);
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy wide-lane fixed ambiguity cycles from the combined RINEX RTK solution.
+/// Variable-length output contract.
+///
+/// Safety: solution is a live handle; out points to len SidereonRtkWideLaneCycle
+/// or NULL when 0; out_written and out_required point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtk_wide_lane_fixed_rinex_solution_wide_lane_cycles(
+    solution: *const SidereonRtkWideLaneFixedRinexSolution,
+    out: *mut SidereonRtkWideLaneCycle,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtk_wide_lane_fixed_rinex_solution_wide_lane_cycles",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_rtk_wide_lane_fixed_rinex_solution_wide_lane_cycles",
+                out_written,
+                out_required
+            ));
+            let solution = c_try!(require_ref(
+                solution,
+                "sidereon_rtk_wide_lane_fixed_rinex_solution_wide_lane_cycles",
+                "solution"
+            ));
+            let rows =
+                rtk_wide_lane_cycles_to_c(&solution.inner.metadata.wide_lane_ambiguities_cycles);
+            c_try!(copy_prefix_to_c(
+                "sidereon_rtk_wide_lane_fixed_rinex_solution_wide_lane_cycles",
+                "out",
+                &rows,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
 /// Release a static RTK arc solution handle. Passing NULL is a no-op.
 ///
 /// Safety: solution is a handle from sidereon_solve_static_rtk_arc or NULL.
@@ -2781,6 +3226,18 @@ pub unsafe extern "C" fn sidereon_rtk_wide_lane_arc_solution_free(
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_rtk_ionosphere_free_arc_solution_free(
     solution: *mut SidereonRtkIonosphereFreeArcSolution,
+) {
+    free_boxed(solution);
+}
+
+/// Release a combined wide-lane fixed RINEX RTK solution handle. Passing NULL is
+/// a no-op.
+///
+/// Safety: solution is a handle from
+/// sidereon_solve_wide_lane_fixed_rinex_rtk_baseline or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtk_wide_lane_fixed_rinex_solution_free(
+    solution: *mut SidereonRtkWideLaneFixedRinexSolution,
 ) {
     free_boxed(solution);
 }
@@ -3398,6 +3855,177 @@ pub unsafe extern "C" fn sidereon_rtk_arc_solution_epoch_innovation_screen(
     )
 }
 
+/// Solve one static RTK baseline directly from parsed RINEX OBS plus SP3. On
+/// success writes a static-arc solution handle to *out_solution. Release it with
+/// sidereon_rtk_static_arc_solution_free.
+///
+/// Safety: sp3, base_obs, rover_obs, and config must be live handles/pointers;
+/// out_solution must point to storage for a SidereonRtkStaticArcSolution*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_solve_static_rinex_rtk_baseline(
+    sp3: *const SidereonSp3,
+    base_obs: *const SidereonRinexObs,
+    rover_obs: *const SidereonRinexObs,
+    config: *const SidereonRtkRinexStaticBaselineConfig,
+    out_solution: *mut *mut SidereonRtkStaticArcSolution,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_solve_static_rinex_rtk_baseline",
+        SidereonStatus::Panic,
+        || {
+            let out_solution = c_try!(require_out(
+                out_solution,
+                "sidereon_solve_static_rinex_rtk_baseline",
+                "out_solution"
+            ));
+            *out_solution = ptr::null_mut();
+            let sp3 = c_try!(require_ref(
+                sp3,
+                "sidereon_solve_static_rinex_rtk_baseline",
+                "sp3"
+            ));
+            let base_obs = c_try!(require_ref(
+                base_obs,
+                "sidereon_solve_static_rinex_rtk_baseline",
+                "base_obs"
+            ));
+            let rover_obs = c_try!(require_ref(
+                rover_obs,
+                "sidereon_solve_static_rinex_rtk_baseline",
+                "rover_obs"
+            ));
+            let config = c_try!(require_ref(
+                config,
+                "sidereon_solve_static_rinex_rtk_baseline",
+                "config"
+            ));
+            let options = c_try!(rtk_rinex_arc_options_from_c(
+                "sidereon_solve_static_rinex_rtk_baseline",
+                &config.arc_options,
+            ));
+            let arc = match build_rinex_rtk_arc(
+                &sp3.inner,
+                &base_obs.inner,
+                &rover_obs.inner,
+                &options,
+            ) {
+                Ok(arc) => arc,
+                Err(err) => {
+                    return map_rtk_rinex_arc_error(
+                        "sidereon_solve_static_rinex_rtk_baseline",
+                        &err,
+                    )
+                }
+            };
+            let core_config = c_try!(rtk_rinex_static_config_from_c(
+                "sidereon_solve_static_rinex_rtk_baseline",
+                config,
+                arc.wavelengths_m.clone(),
+                arc.offsets_m.clone(),
+            ));
+            match solve_static_rtk_arc(&arc.epochs, &core_config) {
+                Ok(inner) => {
+                    write_boxed_handle(out_solution, SidereonRtkStaticArcSolution { inner });
+                    SidereonStatus::Ok
+                }
+                Err(err) => {
+                    map_rtk_static_arc_error("sidereon_solve_static_rinex_rtk_baseline", &err)
+                }
+            }
+        },
+    )
+}
+
+/// Solve one static dual-frequency wide-lane fixed RTK baseline directly from
+/// parsed RINEX OBS plus SP3. Release the result with
+/// sidereon_rtk_wide_lane_fixed_rinex_solution_free.
+///
+/// Safety: sp3, base_obs, rover_obs, and config must be live handles/pointers;
+/// out_solution must point to storage for a SidereonRtkWideLaneFixedRinexSolution*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_solve_wide_lane_fixed_rinex_rtk_baseline(
+    sp3: *const SidereonSp3,
+    base_obs: *const SidereonRinexObs,
+    rover_obs: *const SidereonRinexObs,
+    config: *const SidereonRtkRinexWideLaneFixedConfig,
+    out_solution: *mut *mut SidereonRtkWideLaneFixedRinexSolution,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_solve_wide_lane_fixed_rinex_rtk_baseline",
+        SidereonStatus::Panic,
+        || {
+            let out_solution = c_try!(require_out(
+                out_solution,
+                "sidereon_solve_wide_lane_fixed_rinex_rtk_baseline",
+                "out_solution"
+            ));
+            *out_solution = ptr::null_mut();
+            let sp3 = c_try!(require_ref(
+                sp3,
+                "sidereon_solve_wide_lane_fixed_rinex_rtk_baseline",
+                "sp3"
+            ));
+            let base_obs = c_try!(require_ref(
+                base_obs,
+                "sidereon_solve_wide_lane_fixed_rinex_rtk_baseline",
+                "base_obs"
+            ));
+            let rover_obs = c_try!(require_ref(
+                rover_obs,
+                "sidereon_solve_wide_lane_fixed_rinex_rtk_baseline",
+                "rover_obs"
+            ));
+            let config = c_try!(require_ref(
+                config,
+                "sidereon_solve_wide_lane_fixed_rinex_rtk_baseline",
+                "config"
+            ));
+            let options = c_try!(rtk_rinex_dual_arc_options_from_c(
+                "sidereon_solve_wide_lane_fixed_rinex_rtk_baseline",
+                &config.arc_options,
+            ));
+            let arc = match build_dual_frequency_rinex_rtk_arc(
+                &sp3.inner,
+                &base_obs.inner,
+                &rover_obs.inner,
+                &options,
+            ) {
+                Ok(arc) => arc,
+                Err(err) => {
+                    return map_rtk_rinex_arc_error(
+                        "sidereon_solve_wide_lane_fixed_rinex_rtk_baseline",
+                        &err,
+                    )
+                }
+            };
+            let core_config = c_try!(rtk_rinex_wide_lane_fixed_config_from_c(
+                "sidereon_solve_wide_lane_fixed_rinex_rtk_baseline",
+                config,
+            ));
+            match solve_wide_lane_fixed_rtk_arc(&arc.epochs, &core_config) {
+                Ok(RtkWideLaneFixedArcSolution::Static(inner)) => {
+                    write_boxed_handle(
+                        out_solution,
+                        SidereonRtkWideLaneFixedRinexSolution { inner },
+                    );
+                    SidereonStatus::Ok
+                }
+                Ok(RtkWideLaneFixedArcSolution::Sequential(_)) => {
+                    set_last_error(
+                        "sidereon_solve_wide_lane_fixed_rinex_rtk_baseline: expected static solution"
+                            .to_string(),
+                    );
+                    SidereonStatus::InvalidArgument
+                }
+                Err(err) => map_rtk_wide_lane_fixed_arc_error(
+                    "sidereon_solve_wide_lane_fixed_rinex_rtk_baseline",
+                    &err,
+                ),
+            }
+        },
+    )
+}
+
 /// Fix Melbourne-Wubbena wide-lane ambiguities over a dual-frequency RTK arc. On
 /// success writes a newly owned solution handle to *out_solution. Release it
 /// with sidereon_rtk_wide_lane_arc_solution_free. Delegates to
@@ -3592,6 +4220,340 @@ fn default_rtk_residual_options() -> SidereonRtkResidualValidationOptions {
     }
 }
 
+fn default_rtk_rinex_arc_options() -> SidereonRtkRinexArcOptions {
+    SidereonRtkRinexArcOptions {
+        signal_pairs: ptr::null(),
+        signal_pair_count: 0,
+        has_max_epochs: false,
+        max_epochs: 0,
+        min_common_satellites: 4,
+        include_prediction_time: true,
+    }
+}
+
+fn default_rtk_rinex_dual_arc_options() -> SidereonRtkRinexDualArcOptions {
+    SidereonRtkRinexDualArcOptions {
+        signal_pairs: ptr::null(),
+        signal_pair_count: 0,
+        has_max_epochs: false,
+        max_epochs: 0,
+        min_common_satellites: 4,
+        include_prediction_time: true,
+    }
+}
+
+fn default_rtk_arc_update_options_value() -> SidereonRtkArcUpdateOptions {
+    SidereonRtkArcUpdateOptions {
+        hold_sigma_m: RTK_AMBIGUITY_TOL_M,
+        position_tol_m: RTK_POSITION_TOL_M,
+        ambiguity_tol_m: RTK_AMBIGUITY_TOL_M,
+        max_iterations: RTK_MAX_ITERATIONS,
+        process_noise_baseline_sigma_m: 0.0,
+        dynamics_velocity_propagated: false,
+        float_only_systems: ptr::null(),
+        float_only_system_count: 0,
+        has_innovation_screen: false,
+        innovation_threshold_sigma: 0.0,
+        innovation_min_rows: 0,
+        report_residuals: false,
+        has_ar_arming_sigma_m: false,
+        ar_arming_sigma_m: 0.0,
+        ratio_threshold: RTK_RATIO_THRESHOLD,
+        receiver_antenna: ptr::null(),
+    }
+}
+
+fn default_rtk_arc_preprocessing() -> SidereonRtkArcPreprocessing {
+    SidereonRtkArcPreprocessing {
+        has_cycle_slip: false,
+        cycle_slip: SidereonRtkCycleSlipPolicy::Error as u32,
+        has_hatch_window_cap: false,
+        hatch_window_cap: 0,
+        has_elevation_mask_deg: false,
+        elevation_mask_deg: 0.0,
+    }
+}
+
+fn default_rtk_rinex_static_baseline_config() -> SidereonRtkRinexStaticBaselineConfig {
+    SidereonRtkRinexStaticBaselineConfig {
+        base_m: [0.0; 3],
+        arc_options: default_rtk_rinex_arc_options(),
+        reference_mode: SidereonRtkArcReferenceMode::Auto as u32,
+        reference_satellite: ptr::null(),
+        reference_per_system: ptr::null(),
+        reference_per_system_count: 0,
+        model: default_rtk_measurement_model(),
+        baseline_prior_sigma_m: 30.0,
+        ambiguity_prior_sigma_m: 30.0,
+        initial_baseline_m: [0.0; 3],
+        update_options: default_rtk_arc_update_options_value(),
+        preprocessing: default_rtk_arc_preprocessing(),
+        float_options: default_rtk_float_options(),
+        fixed_options: default_rtk_fixed_options(),
+        residual_options: default_rtk_residual_options(),
+    }
+}
+
+fn default_rtk_rinex_wide_lane_fixed_config() -> SidereonRtkRinexWideLaneFixedConfig {
+    SidereonRtkRinexWideLaneFixedConfig {
+        base_m: [0.0; 3],
+        arc_options: default_rtk_rinex_dual_arc_options(),
+        reference_mode: SidereonRtkArcReferenceMode::Auto as u32,
+        reference_satellite: ptr::null(),
+        reference_per_system: ptr::null(),
+        reference_per_system_count: 0,
+        model: default_rtk_measurement_model(),
+        baseline_prior_sigma_m: 30.0,
+        ambiguity_prior_sigma_m: 30.0,
+        initial_baseline_m: [0.0; 3],
+        update_options: default_rtk_arc_update_options_value(),
+        float_options: default_rtk_float_options(),
+        fixed_options: default_rtk_fixed_options(),
+        residual_options: default_rtk_residual_options(),
+        apply_troposphere: true,
+    }
+}
+
+fn rtk_float_options_from_c(options: &SidereonRtkFloatOptions) -> FloatSolveOpts {
+    FloatSolveOpts {
+        position_tol_m: options.position_tol_m,
+        ambiguity_tol_m: options.ambiguity_tol_m,
+        max_iterations: options.max_iterations,
+    }
+}
+
+fn rtk_fixed_options_from_c(options: &SidereonRtkFixedOptions) -> FixedSolveOpts {
+    FixedSolveOpts {
+        position_tol_m: options.position_tol_m,
+        ambiguity_tol_m: options.ambiguity_tol_m,
+        max_iterations: options.max_iterations,
+        ratio_threshold: options.ratio_threshold,
+        partial_ambiguity_resolution: options.partial_ambiguity_resolution,
+        partial_min_ambiguities: options.partial_min_ambiguities,
+    }
+}
+
+fn rtk_residual_options_from_c(
+    options: &SidereonRtkResidualValidationOptions,
+) -> ResidualValidationOpts {
+    ResidualValidationOpts {
+        threshold_sigma: options
+            .threshold_sigma_enabled
+            .then_some(options.threshold_sigma),
+        max_exclusions: options.max_exclusions,
+    }
+}
+
+fn rtk_validated_fixed_options_from_c(
+    config: &SidereonRtkRinexStaticBaselineConfig,
+) -> ValidatedFixedSolveOpts {
+    ValidatedFixedSolveOpts {
+        float: rtk_float_options_from_c(&config.float_options),
+        fixed: rtk_fixed_options_from_c(&config.fixed_options),
+        residual: rtk_residual_options_from_c(&config.residual_options),
+    }
+}
+
+fn rtk_validated_fixed_options_from_wide_lane_c(
+    config: &SidereonRtkRinexWideLaneFixedConfig,
+) -> ValidatedFixedSolveOpts {
+    ValidatedFixedSolveOpts {
+        float: rtk_float_options_from_c(&config.float_options),
+        fixed: rtk_fixed_options_from_c(&config.fixed_options),
+        residual: rtk_residual_options_from_c(&config.residual_options),
+    }
+}
+
+unsafe fn rtk_rinex_arc_options_from_c(
+    fn_name: &str,
+    options: &SidereonRtkRinexArcOptions,
+) -> Result<RtkRinexArcOptions, SidereonStatus> {
+    let mut out = if options.signal_pair_count == 0 {
+        RtkRinexArcOptions::gps_l1_c()
+    } else {
+        let raw = require_slice(
+            options.signal_pairs,
+            options.signal_pair_count,
+            fn_name,
+            "arc_options.signal_pairs",
+        )?;
+        let mut pairs = Vec::with_capacity(raw.len());
+        for (idx, pair) in raw.iter().enumerate() {
+            pairs.push(RtkRinexSignalPair {
+                system: gnss_system_from_c_code(
+                    fn_name,
+                    &format!("arc_options.signal_pairs[{idx}].system"),
+                    pair.system,
+                )?,
+                code_observable: fixed_c_token_to_string(
+                    fn_name,
+                    &format!("arc_options.signal_pairs[{idx}].code_observable"),
+                    &pair.code_observable,
+                )?,
+                phase_observable: fixed_c_token_to_string(
+                    fn_name,
+                    &format!("arc_options.signal_pairs[{idx}].phase_observable"),
+                    &pair.phase_observable,
+                )?,
+            });
+        }
+        RtkRinexArcOptions {
+            signal_pairs: pairs,
+            max_epochs: None,
+            min_common_satellites: options.min_common_satellites,
+            include_prediction_time: options.include_prediction_time,
+        }
+    };
+    out.max_epochs = options.has_max_epochs.then_some(options.max_epochs);
+    out.min_common_satellites = options.min_common_satellites;
+    out.include_prediction_time = options.include_prediction_time;
+    Ok(out)
+}
+
+unsafe fn rtk_rinex_dual_arc_options_from_c(
+    fn_name: &str,
+    options: &SidereonRtkRinexDualArcOptions,
+) -> Result<RtkRinexDualArcOptions, SidereonStatus> {
+    let mut out = if options.signal_pair_count == 0 {
+        RtkRinexDualArcOptions::gps_l1_l2_cw()
+    } else {
+        let raw = require_slice(
+            options.signal_pairs,
+            options.signal_pair_count,
+            fn_name,
+            "arc_options.signal_pairs",
+        )?;
+        let mut pairs = Vec::with_capacity(raw.len());
+        for (idx, pair) in raw.iter().enumerate() {
+            pairs.push(RtkRinexDualSignalPair {
+                system: gnss_system_from_c_code(
+                    fn_name,
+                    &format!("arc_options.signal_pairs[{idx}].system"),
+                    pair.system,
+                )?,
+                code1_observable: fixed_c_token_to_string(
+                    fn_name,
+                    &format!("arc_options.signal_pairs[{idx}].code1_observable"),
+                    &pair.code1_observable,
+                )?,
+                phase1_observable: fixed_c_token_to_string(
+                    fn_name,
+                    &format!("arc_options.signal_pairs[{idx}].phase1_observable"),
+                    &pair.phase1_observable,
+                )?,
+                code2_observable: fixed_c_token_to_string(
+                    fn_name,
+                    &format!("arc_options.signal_pairs[{idx}].code2_observable"),
+                    &pair.code2_observable,
+                )?,
+                phase2_observable: fixed_c_token_to_string(
+                    fn_name,
+                    &format!("arc_options.signal_pairs[{idx}].phase2_observable"),
+                    &pair.phase2_observable,
+                )?,
+            });
+        }
+        RtkRinexDualArcOptions {
+            signal_pairs: pairs,
+            max_epochs: None,
+            min_common_satellites: options.min_common_satellites,
+            include_prediction_time: options.include_prediction_time,
+        }
+    };
+    out.max_epochs = options.has_max_epochs.then_some(options.max_epochs);
+    out.min_common_satellites = options.min_common_satellites;
+    out.include_prediction_time = options.include_prediction_time;
+    Ok(out)
+}
+
+unsafe fn rtk_rinex_static_config_from_c(
+    fn_name: &str,
+    config: &SidereonRtkRinexStaticBaselineConfig,
+    wavelengths_m: BTreeMap<String, f64>,
+    offsets_m: BTreeMap<String, f64>,
+) -> Result<RtkStaticArcConfig, SidereonStatus> {
+    Ok(RtkStaticArcConfig {
+        arc: RtkArcConfig {
+            base_m: config.base_m,
+            reference: rtk_reference_selection_from_c(
+                fn_name,
+                config.reference_mode,
+                config.reference_satellite,
+                config.reference_per_system,
+                config.reference_per_system_count,
+            )?,
+            model: rtk_model_from_c(fn_name, &config.model)?,
+            baseline_prior_sigma_m: config.baseline_prior_sigma_m,
+            ambiguity_prior_sigma_m: config.ambiguity_prior_sigma_m,
+            initial_baseline_m: config.initial_baseline_m,
+            wavelengths_m,
+            offsets_m,
+            update_opts: rtk_arc_update_opts_from_c(fn_name, &config.update_options)?,
+            preprocessing: rtk_arc_preprocessing_from_c(fn_name, &config.preprocessing)?,
+        },
+        opts: rtk_validated_fixed_options_from_c(config),
+    })
+}
+
+unsafe fn rtk_rinex_wide_lane_static_config_from_c(
+    fn_name: &str,
+    config: &SidereonRtkRinexWideLaneFixedConfig,
+    reference: BaselineReferenceSelection,
+) -> Result<RtkStaticArcConfig, SidereonStatus> {
+    Ok(RtkStaticArcConfig {
+        arc: RtkArcConfig {
+            base_m: config.base_m,
+            reference,
+            model: rtk_model_from_c(fn_name, &config.model)?,
+            baseline_prior_sigma_m: config.baseline_prior_sigma_m,
+            ambiguity_prior_sigma_m: config.ambiguity_prior_sigma_m,
+            initial_baseline_m: config.initial_baseline_m,
+            wavelengths_m: BTreeMap::new(),
+            offsets_m: BTreeMap::new(),
+            update_opts: rtk_arc_update_opts_from_c(fn_name, &config.update_options)?,
+            preprocessing: RtkArcPreprocessing::default(),
+        },
+        opts: rtk_validated_fixed_options_from_wide_lane_c(config),
+    })
+}
+
+unsafe fn rtk_rinex_wide_lane_fixed_config_from_c(
+    fn_name: &str,
+    config: &SidereonRtkRinexWideLaneFixedConfig,
+) -> Result<RtkWideLaneFixedArcConfig, SidereonStatus> {
+    let reference = rtk_reference_selection_from_c(
+        fn_name,
+        config.reference_mode,
+        config.reference_satellite,
+        config.reference_per_system,
+        config.reference_per_system_count,
+    )?;
+    Ok(RtkWideLaneFixedArcConfig {
+        wide_lane: RtkWideLaneArcConfig {
+            base_m: config.base_m,
+            reference: reference.clone(),
+            options: WideLaneOptions {
+                min_epochs: 2,
+                tolerance_cycles: 0.5,
+                skip_short_fragments: false,
+            },
+            cycle_slip: Some(RtkDualCycleSlipConfig {
+                policy: CycleSlipPolicy::DropSatellite,
+                options: sidereon_core::carrier_phase::CycleSlipOptions::default(),
+            }),
+        },
+        ionosphere_free: RtkIonosphereFreeArcConfig {
+            base_m: config.base_m,
+            initial_baseline_m: config.initial_baseline_m,
+            reference: reference.clone(),
+            apply_troposphere: config.apply_troposphere,
+        },
+        solve: RtkWideLaneFixedArcSolveConfig::Static(rtk_rinex_wide_lane_static_config_from_c(
+            fn_name, config, reference,
+        )?),
+    })
+}
+
 unsafe fn rtk_dual_frequency_arc_epochs_from_c(
     fn_name: &str,
     epochs: *const SidereonRtkDualFrequencyArcEpoch,
@@ -3751,6 +4713,45 @@ fn map_rtk_wide_lane_arc_error(fn_name: &str, err: &RtkWideLaneArcError) -> Side
     }
 }
 
+fn map_rtk_rinex_arc_error(
+    fn_name: &str,
+    err: &sidereon_core::rtk_filter::RtkRinexArcError,
+) -> SidereonStatus {
+    set_last_error(format!("{fn_name}: {err}"));
+    match err {
+        sidereon_core::rtk_filter::RtkRinexArcError::InvalidInput { .. }
+        | sidereon_core::rtk_filter::RtkRinexArcError::NoSignalPairs
+        | sidereon_core::rtk_filter::RtkRinexArcError::NoUsableEpochs
+        | sidereon_core::rtk_filter::RtkRinexArcError::MissingFrequency { .. } => {
+            SidereonStatus::InvalidArgument
+        }
+        sidereon_core::rtk_filter::RtkRinexArcError::Observation(_) => {
+            SidereonStatus::InvalidArgument
+        }
+        sidereon_core::rtk_filter::RtkRinexArcError::Ephemeris { .. } => SidereonStatus::Solve,
+    }
+}
+
+fn map_rtk_static_arc_error(fn_name: &str, err: &RtkStaticArcError) -> SidereonStatus {
+    set_last_error(format!("{fn_name}: {err}"));
+    SidereonStatus::Solve
+}
+
+fn map_rtk_wide_lane_fixed_arc_error(
+    fn_name: &str,
+    err: &RtkWideLaneFixedArcError,
+) -> SidereonStatus {
+    set_last_error(format!("{fn_name}: {err}"));
+    match err {
+        RtkWideLaneFixedArcError::UnsupportedMultiGnss => SidereonStatus::InvalidArgument,
+        RtkWideLaneFixedArcError::WideLane(inner) => map_rtk_wide_lane_arc_error(fn_name, inner),
+        RtkWideLaneFixedArcError::IonosphereFree(inner) => {
+            map_rtk_ionosphere_free_arc_error(fn_name, inner)
+        }
+        _ => SidereonStatus::Solve,
+    }
+}
+
 fn map_rtk_ionosphere_free_arc_error(
     fn_name: &str,
     err: &RtkIonosphereFreeArcError,
@@ -3764,6 +4765,17 @@ fn map_rtk_ionosphere_free_arc_error(
             | IonosphereFreeBaselineError::NoEpochs,
         ) => SidereonStatus::InvalidArgument,
         _ => SidereonStatus::Solve,
+    }
+}
+
+fn rtk_wide_lane_fixed_rinex_metadata(
+    metadata: &RtkWideLaneFixedArcMetadata,
+) -> SidereonRtkWideLaneFixedRinexMetadata {
+    SidereonRtkWideLaneFixedRinexMetadata {
+        wide_lane_fixed: metadata.wide_lane_fixed,
+        wide_lane_ambiguity_count: metadata.wide_lane_ambiguities_cycles.len(),
+        dropped_cycle_slip_sat_count: metadata.dropped_cycle_slip_sats.len(),
+        split_cycle_slip_arc_count: metadata.split_cycle_slip_arcs.len(),
     }
 }
 

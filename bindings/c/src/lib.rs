@@ -273,10 +273,11 @@ use sidereon_core::rtk_filter::defaults::{
     RATIO_THRESHOLD as RTK_RATIO_THRESHOLD,
 };
 use sidereon_core::rtk_filter::{
-    fix_wide_lane_rtk_arc, prepare_ionosphere_free_rtk_arc, solve_moving_baseline, solve_rtk_arc,
-    solve_static_rtk_arc, AmbiguityScale, AmbiguitySet, CycleSlipPolicy, CycleSlipSplitArc,
-    DynamicsModel, Epoch as RtkEpoch, FixedBaselineSolution, FixedSolveOpts, FloatBaselineSolution,
-    FloatResidual, FloatSolveOpts, FloatSolveStatus, InnovationScreenOpts,
+    build_dual_frequency_rinex_rtk_arc, build_rinex_rtk_arc, fix_wide_lane_rtk_arc,
+    prepare_ionosphere_free_rtk_arc, solve_moving_baseline, solve_rtk_arc, solve_static_rtk_arc,
+    solve_wide_lane_fixed_rtk_arc, AmbiguityScale, AmbiguitySet, CycleSlipPolicy,
+    CycleSlipSplitArc, DynamicsModel, Epoch as RtkEpoch, FixedBaselineSolution, FixedSolveOpts,
+    FloatBaselineSolution, FloatResidual, FloatSolveOpts, FloatSolveStatus, InnovationScreenOpts,
     IntegerStatus as RtkIntegerStatus, MeasModel, MovingBaselineEpoch, MovingBaselineEpochSolution,
     MovingBaselineOpts, MovingBaselineStatus,
     ReceiverAntennaCalibration as RtkReceiverAntennaCalibrationInner,
@@ -284,10 +285,13 @@ use sidereon_core::rtk_filter::{
     RtkArcConfig, RtkArcEpoch, RtkArcEpochSolution, RtkArcError, RtkArcObservation,
     RtkArcPreprocessing, RtkArcSolution, RtkDualCycleSlipConfig, RtkDualFrequencyArcEpoch,
     RtkDualFrequencyObservation, RtkDualFrequencySatelliteObservation, RtkIonosphereFreeArcConfig,
-    RtkIonosphereFreeArcError, RtkIonosphereFreeArcSolution, RtkStaticArcConfig, RtkStaticArcError,
-    RtkStaticArcSolution, RtkWideLaneArcConfig, RtkWideLaneArcError, RtkWideLaneArcSolution,
-    SatMeas, SearchOpts, StochasticModel, UpdateOpts, ValidatedFixedBaselineSolution,
-    ValidatedFixedSolveOpts, WideLaneError, WideLaneOptions,
+    RtkIonosphereFreeArcError, RtkIonosphereFreeArcSolution, RtkRinexArcOptions,
+    RtkRinexDualArcOptions, RtkRinexDualSignalPair, RtkRinexSignalPair, RtkStaticArcConfig,
+    RtkStaticArcError, RtkStaticArcSolution, RtkWideLaneArcConfig, RtkWideLaneArcError,
+    RtkWideLaneArcSolution, RtkWideLaneFixedArcConfig, RtkWideLaneFixedArcError,
+    RtkWideLaneFixedArcMetadata, RtkWideLaneFixedArcSolution, RtkWideLaneFixedArcSolveConfig,
+    RtkWideLaneFixedStaticArcSolution, SatMeas, SearchOpts, StochasticModel, UpdateOpts,
+    ValidatedFixedBaselineSolution, ValidatedFixedSolveOpts, WideLaneError, WideLaneOptions,
 };
 use sidereon_core::sbas::{
     SbasBlock, SbasCorrectedEphemeris, SbasCorrectionStore, SbasFastCorrection,

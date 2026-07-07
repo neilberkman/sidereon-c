@@ -61,6 +61,9 @@ dted_root_path="${local_core_fixtures}/dted/tiles"
 dted_tile_path="${dted_root_path}/n36_w107_1arc_v3.dt2"
 dcb_path="${local_core_fixtures}/bias/P1C1_RINEX.DCB"
 bias_gz_path="${local_core_fixtures}/bias/COD0OPSFIN_20261330000_01D_01D_OSB.BIA.gz"
+rtk_sp3_path="${local_core_fixtures}/sp3/GBM0MGXRAP_20201770000_01D_05M_ORB_120epoch.sp3"
+wtzr_obs_path="${local_core_fixtures}/obs/WTZR00DEU_R_20201770000_01D_30S_MO_120epoch.rnx"
+wtzz_obs_path="${local_core_fixtures}/obs/WTZZ00DEU_R_20201770000_01D_30S_MO_120epoch.rnx"
 
 echo "== building cdylib =="
 cargo build --release
@@ -518,3 +521,20 @@ cc -std=c11 -Wall -Wextra -Werror \
 echo "== running phaseb_smoke program =="
 "${phaseb_out}" "${sp3_path}" "${observe_spk_path}" "${dted_root_path}" "${dted_tile_path}" \
     "${dcb_path}" "${bias_gz_path}"
+
+# Real-data raw RINEX to RTK baseline: paired WTZR/WTZZ OBS plus SP3 through the
+# C convenience functions.
+echo "== compiling rtk_rinex_smoke program =="
+rtk_rinex_out="${target_dir}/rtk_rinex_smoke"
+cc -std=c11 -Wall -Wextra -Werror \
+    -I"${binding_root}/include" \
+    -I"${here}" \
+    "${here}/rtk_rinex_smoke.c" \
+    -L"${lib_dir}" \
+    -lsidereon \
+    -Wl,-rpath,"${lib_dir}" \
+    -lm \
+    -o "${rtk_rinex_out}"
+
+echo "== running rtk_rinex_smoke program =="
+"${rtk_rinex_out}" "${rtk_sp3_path}" "${wtzr_obs_path}" "${wtzz_obs_path}"
