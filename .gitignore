@@ -1,4 +1,5 @@
 /target
+.cargo/
 # Cargo build output of the out-of-workspace fixture-generator crates.
 bindings/**/target
 **/*.rs.bk

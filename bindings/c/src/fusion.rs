@@ -51,6 +51,18 @@ pub enum SidereonFusionImuSampleKind {
     Increment = 1,
 }
 
+/// GNSS fix status used to scale loose-fix covariance in field mode.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonFusionGnssFixStatus {
+    /// Code-only or otherwise autonomous fix.
+    Single = 0,
+    /// Carrier float fix.
+    Float = 1,
+    /// Carrier integer-fixed fix.
+    Fixed = 2,
+}
+
 /// Opaque GNSS/INS fusion filter. Create with sidereon_fusion_filter_create and
 /// release with sidereon_fusion_filter_free.
 pub struct SidereonFusionFilter {
@@ -142,6 +154,64 @@ pub struct SidereonFusionYangPredictionAdaptiveFactor {
     pub outlier_gate_probability: f64,
 }
 
+/// Per-fix-status one-sigma multipliers for loose GNSS measurements.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonFusionFixStatusWeighting {
+    /// Sigma multiplier for SidereonFusionGnssFixStatus_Single.
+    pub single_sigma_multiplier: f64,
+    /// Sigma multiplier for SidereonFusionGnssFixStatus_Float.
+    pub float_sigma_multiplier: f64,
+    /// Sigma multiplier for SidereonFusionGnssFixStatus_Fixed.
+    pub fixed_sigma_multiplier: f64,
+}
+
+/// Stationary detector thresholds used before applying ZUPT/ZARU updates.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonFusionStationaryDetectorConfig {
+    /// Number of most-recent IMU samples considered.
+    pub window_len: usize,
+    /// Maximum specific-force norm error from local gravity, m/s^2.
+    pub max_specific_force_norm_error_mps2: f64,
+    /// Maximum body-rate norm relative to ECEF, rad/s.
+    pub max_body_rate_wrt_ecef_norm_rps: f64,
+}
+
+/// Zero-velocity and zero-angular-rate update configuration.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonFusionStationaryUpdateConfig {
+    /// Stationary detector thresholds.
+    pub detector: SidereonFusionStationaryDetectorConfig,
+    /// One-sigma zero-velocity update uncertainty in m/s.
+    pub zero_velocity_sigma_mps: f64,
+    /// One-sigma zero-angular-rate update uncertainty in rad/s.
+    pub zero_angular_rate_sigma_rps: f64,
+}
+
+/// Wheeled-vehicle non-holonomic constraint configuration.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonFusionNonHolonomicConstraintConfig {
+    /// One-sigma lateral body-frame velocity uncertainty in m/s.
+    pub lateral_velocity_sigma_mps: f64,
+    /// One-sigma vertical body-frame velocity uncertainty in m/s.
+    pub vertical_velocity_sigma_mps: f64,
+    /// Minimum speed required before applying the constraint, m/s.
+    pub min_speed_mps: f64,
+    /// Maximum body-rate norm relative to ECEF, rad/s.
+    pub max_body_rate_wrt_ecef_norm_rps: f64,
+}
+
+/// Velocity matching outage repair configuration.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonFusionVelocityMatchingConfig {
+    /// Maximum outage duration eligible for matching, seconds.
+    pub max_outage_duration_s: f64,
+}
+
 /// Initial nominal navigation state for a fusion filter.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -183,10 +253,14 @@ pub struct SidereonFusionFilterConfig {
     pub imu_accel_scale_misalignment: [f64; 9],
     /// Row-major gyroscope scale and misalignment matrix.
     pub imu_gyro_scale_misalignment: [f64; 9],
+    /// Row-major IMU-frame to body-frame direction cosine matrix.
+    pub imu_to_body_dcm: [f64; 9],
     /// Strapdown mechanization options.
     pub mechanization: SidereonFusionMechanizationConfig,
     /// Loose-coupling body-frame lever arm from IMU origin to GNSS antenna, meters.
     pub loose_lever_arm_body_m: [f64; 3],
+    /// Per-fix-status one-sigma multipliers for loose GNSS covariance.
+    pub loose_fix_status_weighting: SidereonFusionFixStatusWeighting,
     /// Whether loose_innovation_gate carries a loose-update screen.
     pub has_loose_innovation_gate: bool,
     /// EKF loose-update innovation screen.
@@ -199,6 +273,14 @@ pub struct SidereonFusionFilterConfig {
     pub has_loose_prediction_adaptation: bool,
     /// Yang predicted-covariance adaptive factor for loose updates.
     pub loose_prediction_adaptation: SidereonFusionYangPredictionAdaptiveFactor,
+    /// Whether loose_stationary_updates carries ZUPT/ZARU settings.
+    pub has_loose_stationary_updates: bool,
+    /// Zero-velocity and zero-angular-rate field-mode settings.
+    pub loose_stationary_updates: SidereonFusionStationaryUpdateConfig,
+    /// Whether loose_non_holonomic carries wheeled-vehicle constraint settings.
+    pub has_loose_non_holonomic: bool,
+    /// Non-holonomic constraint settings.
+    pub loose_non_holonomic: SidereonFusionNonHolonomicConstraintConfig,
     /// Tight-coupling body-frame lever arm from IMU origin to GNSS antenna, meters.
     pub tight_lever_arm_body_m: [f64; 3],
     /// Whether tight raw GNSS updates apply light-time correction.
@@ -273,6 +355,32 @@ pub struct SidereonFusionLooseMeasurement {
     pub satellites_used: usize,
     /// Whether the upstream GNSS fix is valid.
     pub solution_valid: bool,
+    /// One of SidereonFusionGnssFixStatus_*.
+    pub fix_status: u32,
+}
+
+/// One state row accepted and returned by velocity matching.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonFusionVelocityMatchState {
+    /// State epoch, seconds since J2000.
+    pub t_j2000_s: f64,
+    /// ECEF position in meters.
+    pub position_ecef_m: [f64; 3],
+    /// ECEF velocity in meters per second.
+    pub velocity_ecef_mps: [f64; 3],
+}
+
+/// Metadata for a velocity-matched outage trajectory.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonFusionVelocityMatchedTrajectory {
+    /// Number of states in the matched trajectory.
+    pub state_count: usize,
+    /// Endpoint ECEF position correction in meters.
+    pub endpoint_position_correction_ecef_m: [f64; 3],
+    /// Endpoint ECEF velocity correction in meters per second.
+    pub endpoint_velocity_correction_ecef_mps: [f64; 3],
 }
 
 /// Doppler-derived range-rate row for a tight GNSS observation.
@@ -497,6 +605,7 @@ pub unsafe extern "C" fn sidereon_fusion_filter_config_init(
                 "out"
             ));
             let tight = sidereon_core::fusion::TightCouplingConfig::default();
+            let loose = sidereon_core::fusion::LooseCouplingConfig::default();
             let ukf = sidereon_core::fusion::UkfUpdateOptions::default();
             *out = SidereonFusionFilterConfig {
                 filter_kind: SidereonFusionFilterKind::Ekf as u32,
@@ -508,10 +617,14 @@ pub unsafe extern "C" fn sidereon_fusion_filter_config_init(
                 imu_bias_gyro_rps: [0.0; 3],
                 imu_accel_scale_misalignment: [0.0; 9],
                 imu_gyro_scale_misalignment: [0.0; 9],
+                imu_to_body_dcm: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
                 mechanization: SidereonFusionMechanizationConfig {
                     coning_correction: SidereonFusionConingCorrection::Off as u32,
                 },
                 loose_lever_arm_body_m: [0.0; 3],
+                loose_fix_status_weighting: fusion_fix_status_weighting_to_c(
+                    loose.fix_status_weighting,
+                ),
                 has_loose_innovation_gate: false,
                 loose_innovation_gate: zero_fusion_innovation_gate(),
                 has_loose_measurement_reweighting: false,
@@ -522,6 +635,10 @@ pub unsafe extern "C" fn sidereon_fusion_filter_config_init(
                 loose_prediction_adaptation: fusion_yang_prediction_adaptive_factor_to_c(
                     sidereon_core::fusion::YangPredictionAdaptiveFactor::standard(),
                 ),
+                has_loose_stationary_updates: false,
+                loose_stationary_updates: zero_stationary_update_config(),
+                has_loose_non_holonomic: false,
+                loose_non_holonomic: zero_non_holonomic_config(),
                 tight_lever_arm_body_m: tight.lever_arm_body_m,
                 tight_light_time: tight.light_time,
                 tight_sagnac: tight.sagnac,
@@ -909,6 +1026,206 @@ pub unsafe extern "C" fn sidereon_fusion_filter_update_loose_time_sync(
                     SidereonStatus::Ok
                 }
                 Err(err) => map_fusion_error("sidereon_fusion_filter_update_loose_time_sync", err),
+            }
+        },
+    )
+}
+
+/// Apply a gated zero-velocity and zero-angular-rate update. When no update is
+/// applied, out_present is false and out_update is zeroed.
+///
+/// Safety: filter must be a live handle; out_update must point to a
+/// SidereonFusionUpdate; out_present must point to a bool.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_fusion_filter_update_stationary(
+    filter: *mut SidereonFusionFilter,
+    out_update: *mut SidereonFusionUpdate,
+    out_present: *mut bool,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_fusion_filter_update_stationary",
+        SidereonStatus::Panic,
+        || {
+            let filter = c_try!(require_mut(
+                filter,
+                "sidereon_fusion_filter_update_stationary",
+                "filter"
+            ));
+            let out_update = c_try!(require_out(
+                out_update,
+                "sidereon_fusion_filter_update_stationary",
+                "out_update"
+            ));
+            *out_update = zero_fusion_update();
+            let out_present = c_try!(require_out(
+                out_present,
+                "sidereon_fusion_filter_update_stationary",
+                "out_present"
+            ));
+            *out_present = false;
+            match filter.inner.update_stationary() {
+                Ok(Some(update)) => {
+                    *out_update = fusion_update_to_c(&update);
+                    *out_present = true;
+                    SidereonStatus::Ok
+                }
+                Ok(None) => SidereonStatus::Ok,
+                Err(err) => map_fusion_error("sidereon_fusion_filter_update_stationary", err),
+            }
+        },
+    )
+}
+
+/// Apply a stationary update and record checkpoints when an update applies.
+/// When no update is applied, out_present is false and out_update is zeroed.
+///
+/// Safety: filter and history must be live handles; out_update must point to a
+/// SidereonFusionUpdate; out_present must point to a bool.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_fusion_filter_update_stationary_recorded(
+    filter: *mut SidereonFusionFilter,
+    history: *mut SidereonFusionRtsHistoryBuilder,
+    out_update: *mut SidereonFusionUpdate,
+    out_present: *mut bool,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_fusion_filter_update_stationary_recorded",
+        SidereonStatus::Panic,
+        || {
+            let filter = c_try!(require_mut(
+                filter,
+                "sidereon_fusion_filter_update_stationary_recorded",
+                "filter"
+            ));
+            let history = c_try!(require_mut(
+                history,
+                "sidereon_fusion_filter_update_stationary_recorded",
+                "history"
+            ));
+            let out_update = c_try!(require_out(
+                out_update,
+                "sidereon_fusion_filter_update_stationary_recorded",
+                "out_update"
+            ));
+            *out_update = zero_fusion_update();
+            let out_present = c_try!(require_out(
+                out_present,
+                "sidereon_fusion_filter_update_stationary_recorded",
+                "out_present"
+            ));
+            *out_present = false;
+            match filter.inner.update_stationary_recorded(&mut history.inner) {
+                Ok(Some(update)) => {
+                    *out_update = fusion_update_to_c(&update);
+                    *out_present = true;
+                    SidereonStatus::Ok
+                }
+                Ok(None) => SidereonStatus::Ok,
+                Err(err) => {
+                    map_fusion_error("sidereon_fusion_filter_update_stationary_recorded", err)
+                }
+            }
+        },
+    )
+}
+
+/// Apply a gated wheeled-vehicle non-holonomic constraint update. When no
+/// update is applied, out_present is false and out_update is zeroed.
+///
+/// Safety: filter must be a live handle; out_update must point to a
+/// SidereonFusionUpdate; out_present must point to a bool.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_fusion_filter_update_non_holonomic(
+    filter: *mut SidereonFusionFilter,
+    out_update: *mut SidereonFusionUpdate,
+    out_present: *mut bool,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_fusion_filter_update_non_holonomic",
+        SidereonStatus::Panic,
+        || {
+            let filter = c_try!(require_mut(
+                filter,
+                "sidereon_fusion_filter_update_non_holonomic",
+                "filter"
+            ));
+            let out_update = c_try!(require_out(
+                out_update,
+                "sidereon_fusion_filter_update_non_holonomic",
+                "out_update"
+            ));
+            *out_update = zero_fusion_update();
+            let out_present = c_try!(require_out(
+                out_present,
+                "sidereon_fusion_filter_update_non_holonomic",
+                "out_present"
+            ));
+            *out_present = false;
+            match filter.inner.update_non_holonomic() {
+                Ok(Some(update)) => {
+                    *out_update = fusion_update_to_c(&update);
+                    *out_present = true;
+                    SidereonStatus::Ok
+                }
+                Ok(None) => SidereonStatus::Ok,
+                Err(err) => map_fusion_error("sidereon_fusion_filter_update_non_holonomic", err),
+            }
+        },
+    )
+}
+
+/// Apply a non-holonomic constraint and record checkpoints when an update
+/// applies. When no update is applied, out_present is false and out_update is
+/// zeroed.
+///
+/// Safety: filter and history must be live handles; out_update must point to a
+/// SidereonFusionUpdate; out_present must point to a bool.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_fusion_filter_update_non_holonomic_recorded(
+    filter: *mut SidereonFusionFilter,
+    history: *mut SidereonFusionRtsHistoryBuilder,
+    out_update: *mut SidereonFusionUpdate,
+    out_present: *mut bool,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_fusion_filter_update_non_holonomic_recorded",
+        SidereonStatus::Panic,
+        || {
+            let filter = c_try!(require_mut(
+                filter,
+                "sidereon_fusion_filter_update_non_holonomic_recorded",
+                "filter"
+            ));
+            let history = c_try!(require_mut(
+                history,
+                "sidereon_fusion_filter_update_non_holonomic_recorded",
+                "history"
+            ));
+            let out_update = c_try!(require_out(
+                out_update,
+                "sidereon_fusion_filter_update_non_holonomic_recorded",
+                "out_update"
+            ));
+            *out_update = zero_fusion_update();
+            let out_present = c_try!(require_out(
+                out_present,
+                "sidereon_fusion_filter_update_non_holonomic_recorded",
+                "out_present"
+            ));
+            *out_present = false;
+            match filter
+                .inner
+                .update_non_holonomic_recorded(&mut history.inner)
+            {
+                Ok(Some(update)) => {
+                    *out_update = fusion_update_to_c(&update);
+                    *out_present = true;
+                    SidereonStatus::Ok
+                }
+                Ok(None) => SidereonStatus::Ok,
+                Err(err) => {
+                    map_fusion_error("sidereon_fusion_filter_update_non_holonomic_recorded", err)
+                }
             }
         },
     )
@@ -1732,6 +2049,107 @@ pub unsafe extern "C" fn sidereon_smooth_fusion_rts(
     })
 }
 
+/// Blend a first good post-outage fix back over an outage span. The matched
+/// states use the same count as the input states and follow the variable-length
+/// output contract.
+///
+/// Safety: states must point to state_count rows or NULL when state_count is 0;
+/// first_good_fix and config must point to readable structs; out_states must
+/// point to out_state_len writable rows or be NULL when out_state_len is 0;
+/// out_written, out_required, and out_trajectory must point to writable values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_fusion_velocity_match_outage(
+    states: *const SidereonFusionVelocityMatchState,
+    state_count: usize,
+    first_good_fix: *const SidereonFusionLooseMeasurement,
+    config: *const SidereonFusionVelocityMatchingConfig,
+    out_states: *mut SidereonFusionVelocityMatchState,
+    out_state_len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+    out_trajectory: *mut SidereonFusionVelocityMatchedTrajectory,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_fusion_velocity_match_outage",
+        SidereonStatus::Panic,
+        || {
+            let out_trajectory = c_try!(require_out(
+                out_trajectory,
+                "sidereon_fusion_velocity_match_outage",
+                "out_trajectory"
+            ));
+            *out_trajectory = SidereonFusionVelocityMatchedTrajectory {
+                state_count: 0,
+                endpoint_position_correction_ecef_m: [0.0; 3],
+                endpoint_velocity_correction_ecef_mps: [0.0; 3],
+            };
+            let raw_states = c_try!(require_slice(
+                states,
+                state_count,
+                "sidereon_fusion_velocity_match_outage",
+                "states"
+            ));
+            let mut core_states = Vec::with_capacity(raw_states.len());
+            for state in raw_states {
+                match sidereon_core::fusion::VelocityMatchState::new(
+                    state.t_j2000_s,
+                    state.position_ecef_m,
+                    state.velocity_ecef_mps,
+                ) {
+                    Ok(state) => core_states.push(state),
+                    Err(err) => {
+                        return map_fusion_error("sidereon_fusion_velocity_match_outage", err)
+                    }
+                }
+            }
+            let first_good_fix = c_try!(loose_measurement_from_c(
+                "sidereon_fusion_velocity_match_outage",
+                first_good_fix
+            ));
+            let config = c_try!(require_ref(
+                config,
+                "sidereon_fusion_velocity_match_outage",
+                "config"
+            ));
+            let matched = match sidereon_core::fusion::velocity_match_outage(
+                &core_states,
+                &first_good_fix,
+                sidereon_core::fusion::VelocityMatchingConfig {
+                    max_outage_duration_s: config.max_outage_duration_s,
+                },
+            ) {
+                Ok(matched) => matched,
+                Err(err) => return map_fusion_error("sidereon_fusion_velocity_match_outage", err),
+            };
+            let rows: Vec<SidereonFusionVelocityMatchState> = matched
+                .states
+                .iter()
+                .map(|state| SidereonFusionVelocityMatchState {
+                    t_j2000_s: state.t_j2000_s,
+                    position_ecef_m: state.position_ecef_m,
+                    velocity_ecef_mps: state.velocity_ecef_mps,
+                })
+                .collect();
+            *out_trajectory = SidereonFusionVelocityMatchedTrajectory {
+                state_count: rows.len(),
+                endpoint_position_correction_ecef_m: matched.endpoint_position_correction_ecef_m,
+                endpoint_velocity_correction_ecef_mps: matched
+                    .endpoint_velocity_correction_ecef_mps,
+            };
+            c_try!(copy_prefix_to_c(
+                "sidereon_fusion_velocity_match_outage",
+                "out_states",
+                &rows,
+                out_states,
+                out_state_len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
 /// Return the number of epochs in a smoothed fusion trajectory.
 ///
 /// Safety: smoothed must be a live handle and out_count must point to size_t.
@@ -2055,6 +2473,27 @@ fn fusion_layout_from_c(
     }
 }
 
+fn fusion_fix_status_from_c(
+    fn_name: &str,
+    status: u32,
+) -> Result<sidereon_core::fusion::GnssFixStatus, SidereonStatus> {
+    match status {
+        value if value == SidereonFusionGnssFixStatus::Single as u32 => {
+            Ok(sidereon_core::fusion::GnssFixStatus::Single)
+        }
+        value if value == SidereonFusionGnssFixStatus::Float as u32 => {
+            Ok(sidereon_core::fusion::GnssFixStatus::Float)
+        }
+        value if value == SidereonFusionGnssFixStatus::Fixed as u32 => {
+            Ok(sidereon_core::fusion::GnssFixStatus::Fixed)
+        }
+        _ => {
+            set_last_error(format!("{fn_name}: invalid GNSS fix status"));
+            Err(SidereonStatus::InvalidArgument)
+        }
+    }
+}
+
 fn coning_correction_from_c(
     fn_name: &str,
     value: u32,
@@ -2125,6 +2564,37 @@ fn fusion_yang_prediction_adaptive_factor_to_c(
     }
 }
 
+fn fusion_fix_status_weighting_to_c(
+    value: sidereon_core::fusion::GnssFixStatusWeighting,
+) -> SidereonFusionFixStatusWeighting {
+    SidereonFusionFixStatusWeighting {
+        single_sigma_multiplier: value.single_sigma_multiplier,
+        float_sigma_multiplier: value.float_sigma_multiplier,
+        fixed_sigma_multiplier: value.fixed_sigma_multiplier,
+    }
+}
+
+fn zero_stationary_update_config() -> SidereonFusionStationaryUpdateConfig {
+    SidereonFusionStationaryUpdateConfig {
+        detector: SidereonFusionStationaryDetectorConfig {
+            window_len: 0,
+            max_specific_force_norm_error_mps2: 0.0,
+            max_body_rate_wrt_ecef_norm_rps: 0.0,
+        },
+        zero_velocity_sigma_mps: 0.0,
+        zero_angular_rate_sigma_rps: 0.0,
+    }
+}
+
+fn zero_non_holonomic_config() -> SidereonFusionNonHolonomicConstraintConfig {
+    SidereonFusionNonHolonomicConstraintConfig {
+        lateral_velocity_sigma_mps: 0.0,
+        vertical_velocity_sigma_mps: 0.0,
+        min_speed_mps: 0.0,
+        max_body_rate_wrt_ecef_norm_rps: 0.0,
+    }
+}
+
 fn flat9_from_c(values: [f64; 9]) -> [[f64; 3]; 3] {
     [
         [values[0], values[1], values[2]],
@@ -2163,10 +2633,16 @@ fn fusion_filter_config_from_c(
             gyro_scale_misalignment: flat9_from_c(raw.imu_gyro_scale_misalignment),
         },
     };
+    config.imu_to_body_dcm = flat9_from_c(raw.imu_to_body_dcm);
     config.mechanization = sidereon_core::fusion::MechanizationConfig {
         coning_correction: coning_correction_from_c(fn_name, raw.mechanization.coning_correction)?,
     };
     config.loose.lever_arm_body_m = raw.loose_lever_arm_body_m;
+    config.loose.fix_status_weighting = sidereon_core::fusion::GnssFixStatusWeighting {
+        single_sigma_multiplier: raw.loose_fix_status_weighting.single_sigma_multiplier,
+        float_sigma_multiplier: raw.loose_fix_status_weighting.float_sigma_multiplier,
+        fixed_sigma_multiplier: raw.loose_fix_status_weighting.fixed_sigma_multiplier,
+    };
     config.loose.update_options.innovation_gate =
         fusion_innovation_gate_from_c(raw.has_loose_innovation_gate, raw.loose_innovation_gate);
     config.loose.measurement_reweighting = raw.has_loose_measurement_reweighting.then_some(
@@ -2179,6 +2655,35 @@ fn fusion_filter_config_from_c(
         sidereon_core::fusion::YangPredictionAdaptiveFactor {
             threshold: raw.loose_prediction_adaptation.threshold,
             outlier_gate_probability: raw.loose_prediction_adaptation.outlier_gate_probability,
+        },
+    );
+    config.loose.stationary_updates =
+        raw.has_loose_stationary_updates
+            .then_some(sidereon_core::fusion::StationaryUpdateConfig {
+                detector: sidereon_core::fusion::StationaryDetectorConfig {
+                    window_len: raw.loose_stationary_updates.detector.window_len,
+                    max_specific_force_norm_error_mps2: raw
+                        .loose_stationary_updates
+                        .detector
+                        .max_specific_force_norm_error_mps2,
+                    max_body_rate_wrt_ecef_norm_rps: raw
+                        .loose_stationary_updates
+                        .detector
+                        .max_body_rate_wrt_ecef_norm_rps,
+                },
+                zero_velocity_sigma_mps: raw.loose_stationary_updates.zero_velocity_sigma_mps,
+                zero_angular_rate_sigma_rps: raw
+                    .loose_stationary_updates
+                    .zero_angular_rate_sigma_rps,
+            });
+    config.loose.non_holonomic = raw.has_loose_non_holonomic.then_some(
+        sidereon_core::fusion::NonHolonomicConstraintConfig {
+            lateral_velocity_sigma_mps: raw.loose_non_holonomic.lateral_velocity_sigma_mps,
+            vertical_velocity_sigma_mps: raw.loose_non_holonomic.vertical_velocity_sigma_mps,
+            min_speed_mps: raw.loose_non_holonomic.min_speed_mps,
+            max_body_rate_wrt_ecef_norm_rps: raw
+                .loose_non_holonomic
+                .max_body_rate_wrt_ecef_norm_rps,
         },
     );
     config.tight.lever_arm_body_m = raw.tight_lever_arm_body_m;
@@ -2272,6 +2777,7 @@ unsafe fn loose_measurement_from_c(
         covariance,
         satellites_used: raw.satellites_used,
         solution_valid: raw.solution_valid,
+        fix_status: fusion_fix_status_from_c(fn_name, raw.fix_status)?,
     };
     match measurement.validate() {
         Ok(()) => Ok(measurement),

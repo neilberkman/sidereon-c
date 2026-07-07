@@ -39,6 +39,17 @@ static void check_bits(double actual, uint64_t expected, const char *what) {
     check(f64_bits(actual) == expected, what);
 }
 
+static void check_vec_bits(const double *actual,
+                           const uint64_t *expected,
+                           size_t count,
+                           const char *label) {
+    char what[160];
+    for (size_t i = 0; i < count; i++) {
+        snprintf(what, sizeof(what), "%s[%zu] bits", label, i);
+        check_bits(actual[i], expected[i], what);
+    }
+}
+
 static void copy_state_position(const SidereonFusionState *state,
                                 SidereonFusionLooseMeasurement *measurement,
                                 double t_j2000_s,
@@ -54,6 +65,92 @@ static void copy_state_position(const SidereonFusionState *state,
     measurement->covariance_len = covariance_len;
     measurement->satellites_used = 4;
     measurement->solution_valid = true;
+    measurement->fix_status = SIDEREON_FUSION_GNSS_FIX_STATUS_SINGLE;
+}
+
+static void identity_matrix(double *matrix, size_t dimension) {
+    memset(matrix, 0, dimension * dimension * sizeof(double));
+    for (size_t i = 0; i < dimension; i++) {
+        matrix[i * dimension + i] = 1.0;
+    }
+}
+
+static void set_zero_imu_spec(SidereonFusionFilterConfig *config) {
+    config->imu_spec.accel_vrw_mps_sqrt_s = 0.0;
+    config->imu_spec.gyro_arw_rad_sqrt_s = 0.0;
+    config->imu_spec.accel_bias_instab_mps2 = 0.0;
+    config->imu_spec.gyro_bias_instab_rps = 0.0;
+    config->imu_spec.accel_bias_tau_s = INFINITY;
+    config->imu_spec.gyro_bias_tau_s = INFINITY;
+    config->imu_spec.has_accel_scale_instab_ppm = false;
+    config->imu_spec.accel_scale_instab_ppm = 0.0;
+    config->imu_spec.has_gyro_scale_instab_ppm = false;
+    config->imu_spec.gyro_scale_instab_ppm = 0.0;
+}
+
+static void init_field_config(SidereonFusionFilterConfig *config) {
+    check(sidereon_fusion_filter_config_init(config) == SIDEREON_STATUS_OK,
+          "fusion field config init");
+    set_zero_imu_spec(config);
+}
+
+static SidereonFusionFilter *create_field_filter(const SidereonFusionFilterConfig *config,
+                                                 const SidereonFusionNavState *nav,
+                                                 const char *label) {
+    double diag[15];
+    for (size_t i = 0; i < 15; i++) {
+        diag[i] = 1.0;
+    }
+    SidereonFusionFilter *filter = NULL;
+    check(sidereon_fusion_filter_create(nav, diag, 15, config, &filter) == SIDEREON_STATUS_OK &&
+              filter != NULL,
+          label);
+    return filter;
+}
+
+static void init_position_velocity_fix(SidereonFusionLooseMeasurement *measurement,
+                                       double t_j2000_s,
+                                       const double position[3],
+                                       const double velocity[3],
+                                       const double *covariance,
+                                       uint32_t fix_status) {
+    memset(measurement, 0, sizeof(*measurement));
+    measurement->t_j2000_s = t_j2000_s;
+    memcpy(measurement->position_ecef_m, position, sizeof(measurement->position_ecef_m));
+    measurement->has_velocity = true;
+    memcpy(measurement->velocity_ecef_mps, velocity, sizeof(measurement->velocity_ecef_mps));
+    measurement->covariance = covariance;
+    measurement->covariance_len = 36;
+    measurement->satellites_used = 8;
+    measurement->solution_valid = true;
+    measurement->fix_status = fix_status;
+}
+
+static void init_default_position_velocity_fix(SidereonFusionLooseMeasurement *measurement,
+                                               const double *covariance,
+                                               uint32_t fix_status) {
+    const double position[3] = {6378138.0, 2.0, -3.0};
+    const double velocity[3] = {0.4, -0.2, 0.1};
+    init_position_velocity_fix(measurement, 0.0, position, velocity, covariance, fix_status);
+}
+
+static void check_filter_cov_diag_bits(SidereonFusionFilter *filter,
+                                       size_t offset,
+                                       const uint64_t *expected,
+                                       size_t count,
+                                       const char *label) {
+    double covariance[225];
+    size_t written = 0, required = 0;
+    check(sidereon_fusion_filter_covariance(filter, covariance, 225, &written, &required) ==
+              SIDEREON_STATUS_OK &&
+              written == 225 && required == 225,
+          label);
+    char what[160];
+    for (size_t i = 0; i < count; i++) {
+        const size_t index = (offset + i) * 15 + (offset + i);
+        snprintf(what, sizeof(what), "%s diag[%zu] bits", label, offset + i);
+        check_bits(covariance[index], expected[i], what);
+    }
 }
 
 static void test_signal_analysis(void) {
@@ -377,6 +474,274 @@ static void test_fusion(void) {
     sidereon_fusion_filter_free(filter);
 }
 
+static void test_fusion_field_mode(void) {
+    double cov6[36];
+    identity_matrix(cov6, 6);
+
+    SidereonFusionNavState nav;
+    init_nav(&nav);
+
+    SidereonFusionFilterConfig config;
+    init_field_config(&config);
+    check(config.loose_fix_status_weighting.single_sigma_multiplier == 1.0 &&
+              config.loose_fix_status_weighting.float_sigma_multiplier == 1.0 &&
+              config.loose_fix_status_weighting.fixed_sigma_multiplier == 1.0 &&
+              !config.has_loose_stationary_updates && !config.has_loose_non_holonomic &&
+              config.time_sync_imu_capacity > 0,
+          "fusion field defaults omitted");
+    const uint64_t imu_to_body_bits[9] = {
+        UINT64_C(0x3FF0000000000000), UINT64_C(0x0000000000000000),
+        UINT64_C(0x0000000000000000), UINT64_C(0x0000000000000000),
+        UINT64_C(0x3FF0000000000000), UINT64_C(0x0000000000000000),
+        UINT64_C(0x0000000000000000), UINT64_C(0x0000000000000000),
+        UINT64_C(0x3FF0000000000000),
+    };
+    check_vec_bits(config.imu_to_body_dcm, imu_to_body_bits, 9, "fusion field imu_to_body");
+
+    SidereonFusionFilter *filter = create_field_filter(&config, &nav, "fusion field create");
+    if (filter != NULL) {
+        SidereonFusionLooseMeasurement fix;
+        init_default_position_velocity_fix(&fix, cov6, SIDEREON_FUSION_GNSS_FIX_STATUS_SINGLE);
+        SidereonFusionUpdate update;
+        check(sidereon_fusion_filter_update_loose(filter, &fix, &update) ==
+                  SIDEREON_STATUS_OK &&
+                  update.applied && update.rows == 6 && update.accepted_rows == 6 &&
+                  update.rejected_rows == 0,
+              "fusion field default loose update");
+        check_bits(update.nis, UINT64_C(0x401C6B851EB851E9),
+                   "fusion field default NIS bits");
+
+        SidereonFusionState state;
+        check(sidereon_fusion_filter_state(filter, &state) == SIDEREON_STATUS_OK,
+              "fusion field default state");
+        const uint64_t position_bits[3] = {
+            UINT64_C(0x415854A660000000),
+            UINT64_C(0x3FEFFFFFFFFFFFFF),
+            UINT64_C(0xBFF7FFFFFFFFFFFF),
+        };
+        const uint64_t velocity_bits[3] = {
+            UINT64_C(0x3FC9999999999999),
+            UINT64_C(0xBFB9999999999999),
+            UINT64_C(0x3FA9999999999999),
+        };
+        const uint64_t cov_bits[6] = {
+            UINT64_C(0x3FDFFFFFFFFFFFFF), UINT64_C(0x3FDFFFFFFFFFFFFF),
+            UINT64_C(0x3FDFFFFFFFFFFFFF), UINT64_C(0x3FDFFFFFFFFFFFFF),
+            UINT64_C(0x3FDFFFFFFFFFFFFF), UINT64_C(0x3FDFFFFFFFFFFFFF),
+        };
+        check_vec_bits(state.position_ecef_m, position_bits, 3, "fusion field position");
+        check_vec_bits(state.velocity_ecef_mps, velocity_bits, 3, "fusion field velocity");
+        check_filter_cov_diag_bits(filter, 0, cov_bits, 6, "fusion field covariance");
+    }
+    sidereon_fusion_filter_free(filter);
+
+    init_field_config(&config);
+    config.has_loose_stationary_updates = true;
+    config.loose_stationary_updates.detector.window_len = 1;
+    config.loose_stationary_updates.detector.max_specific_force_norm_error_mps2 = 100.0;
+    config.loose_stationary_updates.detector.max_body_rate_wrt_ecef_norm_rps = 1.0;
+    config.loose_stationary_updates.zero_velocity_sigma_mps = 0.5;
+    config.loose_stationary_updates.zero_angular_rate_sigma_rps = 0.05;
+    filter = create_field_filter(&config, &nav, "fusion stationary create");
+    if (filter != NULL) {
+        SidereonFusionImuSample sample;
+        memset(&sample, 0, sizeof(sample));
+        sample.kind = SIDEREON_FUSION_IMU_SAMPLE_KIND_INCREMENT;
+        sample.t_j2000_s = 1.0;
+        sample.dt_s = 1.0;
+        check(sidereon_fusion_filter_propagate(filter, &sample) == SIDEREON_STATUS_OK,
+              "fusion stationary propagate");
+        SidereonFusionUpdate update;
+        bool present = false;
+        check(sidereon_fusion_filter_update_stationary(filter, &update, &present) ==
+                  SIDEREON_STATUS_OK &&
+                  present && update.applied && update.rows == 6 && update.accepted_rows == 6 &&
+                  update.rejected_rows == 0,
+              "fusion stationary update");
+        check_bits(update.nis, UINT64_C(0x404541AF8E65B9FC),
+                   "fusion stationary NIS bits");
+        SidereonFusionState state;
+        check(sidereon_fusion_filter_state(filter, &state) == SIDEREON_STATUS_OK,
+              "fusion stationary state");
+        const uint64_t station_velocity_bits[3] = {
+            UINT64_C(0xBFF16320EDFCD4C0),
+            UINT64_C(0xBDE64EF6EFBB7204),
+            UINT64_C(0x0000000000000000),
+        };
+        const uint64_t gyro_bias_bits[3] = {
+            UINT64_C(0x0000000000000000),
+            UINT64_C(0x0000000000000000),
+            UINT64_C(0xBF131173B6B2C903),
+        };
+        const uint64_t stationary_cov_bits[6] = {
+            UINT64_C(0x3FCC71C76E2F216E), UINT64_C(0x3FCC71C6F3FF694D),
+            UINT64_C(0x3FCC71C6F3B73AFD), UINT64_C(0x3FF00A36E71A6702),
+            UINT64_C(0x3FF00A36E71A6702), UINT64_C(0x3FF00A36E71A2CB0),
+        };
+        check_vec_bits(state.velocity_ecef_mps, station_velocity_bits, 3,
+                       "fusion stationary velocity");
+        check_vec_bits(state.gyro_bias_rps, gyro_bias_bits, 3,
+                       "fusion stationary gyro bias");
+        check_filter_cov_diag_bits(filter, 3, stationary_cov_bits, 6,
+                                   "fusion stationary covariance");
+    }
+    sidereon_fusion_filter_free(filter);
+
+    init_field_config(&config);
+    SidereonFusionFilter *plain = create_field_filter(&config, &nav, "fusion no stationary create");
+    if (plain != NULL) {
+        SidereonFusionUpdate update;
+        bool present = true;
+        check(sidereon_fusion_filter_update_stationary(plain, &update, &present) ==
+                  SIDEREON_STATUS_OK &&
+                  !present,
+              "fusion stationary absent without config");
+    }
+    sidereon_fusion_filter_free(plain);
+
+    init_field_config(&config);
+    config.loose_fix_status_weighting.single_sigma_multiplier = 3.0;
+    config.loose_fix_status_weighting.float_sigma_multiplier = 2.0;
+    config.loose_fix_status_weighting.fixed_sigma_multiplier = 1.0;
+    const uint32_t statuses[3] = {
+        SIDEREON_FUSION_GNSS_FIX_STATUS_SINGLE,
+        SIDEREON_FUSION_GNSS_FIX_STATUS_FLOAT,
+        SIDEREON_FUSION_GNSS_FIX_STATUS_FIXED,
+    };
+    const uint64_t nis_bits[3] = {
+        UINT64_C(0x3FF6BC6A7EF9DB22),
+        UINT64_C(0x4006BC6A7EF9DB22),
+        UINT64_C(0x401C6B851EB851E9),
+    };
+    const uint64_t diag_bits[3][6] = {
+        {UINT64_C(0x3FECCCCCCCCCCCCD), UINT64_C(0x3FECCCCCCCCCCCCD),
+         UINT64_C(0x3FECCCCCCCCCCCCD), UINT64_C(0x3FECCCCCCCCCCCCD),
+         UINT64_C(0x3FECCCCCCCCCCCCD), UINT64_C(0x3FECCCCCCCCCCCCD)},
+        {UINT64_C(0x3FE999999999999A), UINT64_C(0x3FE999999999999A),
+         UINT64_C(0x3FE999999999999A), UINT64_C(0x3FE999999999999A),
+         UINT64_C(0x3FE999999999999A), UINT64_C(0x3FE999999999999A)},
+        {UINT64_C(0x3FDFFFFFFFFFFFFF), UINT64_C(0x3FDFFFFFFFFFFFFF),
+         UINT64_C(0x3FDFFFFFFFFFFFFF), UINT64_C(0x3FDFFFFFFFFFFFFF),
+         UINT64_C(0x3FDFFFFFFFFFFFFF), UINT64_C(0x3FDFFFFFFFFFFFFF)},
+    };
+    double cov_x[3] = {0.0, 0.0, 0.0};
+    for (size_t i = 0; i < 3; i++) {
+        filter = create_field_filter(&config, &nav, "fusion fix weighting create");
+        if (filter == NULL) {
+            continue;
+        }
+        SidereonFusionLooseMeasurement fix;
+        init_default_position_velocity_fix(&fix, cov6, statuses[i]);
+        SidereonFusionUpdate update;
+        check(sidereon_fusion_filter_update_loose(filter, &fix, &update) ==
+                  SIDEREON_STATUS_OK &&
+                  update.applied && update.rows == 6,
+              "fusion fix weighting update");
+        check_bits(update.nis, nis_bits[i], "fusion fix weighting NIS bits");
+        double covariance[225];
+        size_t written = 0, required = 0;
+        check(sidereon_fusion_filter_covariance(filter, covariance, 225, &written, &required) ==
+                  SIDEREON_STATUS_OK &&
+                  written == 225 && required == 225,
+              "fusion fix weighting covariance");
+        cov_x[i] = covariance[0];
+        check_filter_cov_diag_bits(filter, 0, diag_bits[i], 6, "fusion fix weighting diag");
+        sidereon_fusion_filter_free(filter);
+    }
+    check(cov_x[2] < cov_x[1] && cov_x[1] < cov_x[0],
+          "fusion fix weighting covariance order");
+
+    SidereonFusionVelocityMatchState states[3] = {
+        {0.0, {0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}},
+        {1.0, {1.0, 0.0, 0.0}, {1.0, 0.0, 0.0}},
+        {2.0, {2.0, 0.0, 0.0}, {1.0, 0.0, 0.0}},
+    };
+    const double first_good_position[3] = {4.0, 1.0, 0.0};
+    const double first_good_velocity[3] = {2.0, 0.0, 0.0};
+    SidereonFusionLooseMeasurement first_good;
+    init_position_velocity_fix(&first_good, 2.0, first_good_position, first_good_velocity, cov6,
+                               SIDEREON_FUSION_GNSS_FIX_STATUS_SINGLE);
+    SidereonFusionVelocityMatchingConfig vm_config = {5.0};
+    SidereonFusionVelocityMatchState matched[3];
+    SidereonFusionVelocityMatchedTrajectory trajectory;
+    size_t written = 0, required = 0;
+    check(sidereon_fusion_velocity_match_outage(states, 3, &first_good, &vm_config, matched, 3,
+                                                &written, &required, &trajectory) ==
+                  SIDEREON_STATUS_OK &&
+              written == 3 && required == 3 && trajectory.state_count == 3,
+          "fusion velocity matching outage");
+    const uint64_t endpoint_position_bits[3] = {
+        UINT64_C(0x4000000000000000),
+        UINT64_C(0x3FF0000000000000),
+        UINT64_C(0x0000000000000000),
+    };
+    const uint64_t endpoint_velocity_bits[3] = {
+        UINT64_C(0x3FF0000000000000),
+        UINT64_C(0x0000000000000000),
+        UINT64_C(0x0000000000000000),
+    };
+    const uint64_t middle_position_bits[3] = {
+        UINT64_C(0x3FFC000000000000),
+        UINT64_C(0x3FE0000000000000),
+        UINT64_C(0x0000000000000000),
+    };
+    const uint64_t middle_velocity_bits[3] = {
+        UINT64_C(0x4002000000000000),
+        UINT64_C(0x3FE8000000000000),
+        UINT64_C(0x0000000000000000),
+    };
+    check_vec_bits(trajectory.endpoint_position_correction_ecef_m, endpoint_position_bits, 3,
+                   "fusion velocity matching endpoint position");
+    check_vec_bits(trajectory.endpoint_velocity_correction_ecef_mps, endpoint_velocity_bits, 3,
+                   "fusion velocity matching endpoint velocity");
+    check_vec_bits(matched[1].position_ecef_m, middle_position_bits, 3,
+                   "fusion velocity matching middle position");
+    check_vec_bits(matched[1].velocity_ecef_mps, middle_velocity_bits, 3,
+                   "fusion velocity matching middle velocity");
+
+    init_field_config(&config);
+    config.imu_to_body_dcm[0] = 0.0;
+    config.imu_to_body_dcm[1] = -1.0;
+    config.imu_to_body_dcm[2] = 0.0;
+    config.imu_to_body_dcm[3] = 1.0;
+    config.imu_to_body_dcm[4] = 0.0;
+    config.imu_to_body_dcm[5] = 0.0;
+    config.imu_to_body_dcm[6] = 0.0;
+    config.imu_to_body_dcm[7] = 0.0;
+    config.imu_to_body_dcm[8] = 1.0;
+    config.has_loose_non_holonomic = true;
+    config.loose_non_holonomic.lateral_velocity_sigma_mps = 0.5;
+    config.loose_non_holonomic.vertical_velocity_sigma_mps = 0.5;
+    config.loose_non_holonomic.min_speed_mps = 0.1;
+    config.loose_non_holonomic.max_body_rate_wrt_ecef_norm_rps = 1.0;
+    nav.velocity_ecef_mps[0] = 2.0;
+    nav.velocity_ecef_mps[1] = 0.4;
+    nav.velocity_ecef_mps[2] = -0.2;
+    filter = create_field_filter(&config, &nav, "fusion non-holonomic create");
+    if (filter != NULL) {
+        SidereonFusionUpdate update;
+        bool present = false;
+        check(sidereon_fusion_filter_update_non_holonomic(filter, &update, &present) ==
+                  SIDEREON_STATUS_OK &&
+                  present && update.applied && update.rows == 2 && update.accepted_rows == 2 &&
+                  update.rejected_rows == 0,
+              "fusion non-holonomic update");
+        check_bits(update.nis, UINT64_C(0x3FA3813813813814),
+                   "fusion non-holonomic NIS bits");
+        SidereonFusionState state;
+        check(sidereon_fusion_filter_state(filter, &state) == SIDEREON_STATUS_OK,
+              "fusion non-holonomic state");
+        const uint64_t nhc_velocity_bits[3] = {
+            UINT64_C(0x4000000000000000),
+            UINT64_C(0x3FD4B94B94B94B95),
+            UINT64_C(0xBFC4B94B94B94B95),
+        };
+        check_vec_bits(state.velocity_ecef_mps, nhc_velocity_bits, 3,
+                       "fusion non-holonomic velocity");
+    }
+    sidereon_fusion_filter_free(filter);
+}
+
 static void test_fusion_recorded_rts(void) {
     SidereonFusionFilterConfig config;
     check(sidereon_fusion_filter_config_init(&config) == SIDEREON_STATUS_OK,
@@ -436,6 +801,7 @@ static void test_fusion_recorded_rts(void) {
     measurement.covariance_len = 9;
     measurement.satellites_used = 7;
     measurement.solution_valid = true;
+    measurement.fix_status = SIDEREON_FUSION_GNSS_FIX_STATUS_SINGLE;
 
     SidereonFusionUpdate update;
     check(sidereon_fusion_filter_update_loose_recorded(filter, &measurement, builder, &update) ==
@@ -579,6 +945,7 @@ int main(void) {
     test_signal_analysis();
     test_scenario();
     test_fusion();
+    test_fusion_field_mode();
     test_fusion_recorded_rts();
     if (failures != 0) {
         fprintf(stderr, "domain018_smoke failures: %d\n", failures);

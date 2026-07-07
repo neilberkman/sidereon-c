@@ -26,6 +26,27 @@ static void check(int ok, const char *what) {
     }
 }
 
+static uint64_t f64_bits(double value) {
+    uint64_t bits = 0;
+    memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+static void check_bits(double actual, uint64_t expected, const char *what) {
+    check(f64_bits(actual) == expected, what);
+}
+
+static void check_vec_bits(const double *actual,
+                           const uint64_t *expected,
+                           size_t count,
+                           const char *label) {
+    char what[160];
+    for (size_t i = 0; i < count; i++) {
+        snprintf(what, sizeof(what), "%s[%zu] bits", label, i);
+        check_bits(actual[i], expected[i], what);
+    }
+}
+
 static uint8_t *read_file(const char *path, size_t *out_len) {
     FILE *f = fopen(path, "rb");
     if (!f) {
@@ -230,6 +251,123 @@ static void test_static_rinex_rtk(const SidereonSp3 *sp3, const SidereonRinexObs
     sidereon_rtk_static_arc_solution_free(solution);
 }
 
+static void test_static_reference_station(const SidereonSp3 *sp3,
+                                          const SidereonRinexObs *base_obs,
+                                          const SidereonRinexObs *rover_obs,
+                                          const double base_arp[3],
+                                          const double truth[3]) {
+    SidereonStaticReferenceStationRinexConfig config;
+    check(sidereon_static_reference_station_rinex_config_init(&config) == SIDEREON_STATUS_OK,
+          "static reference config init");
+    memcpy(config.reference_position_m, base_arp, sizeof(config.reference_position_m));
+    config.enable_code_dgnss = false;
+    config.enable_carrier_rtk = true;
+    config.with_geodetic = true;
+    set_wtzr_single_frequency_config(&config.carrier, base_arp);
+    config.carrier.arc_options.max_epochs = 24;
+    config.carrier.float_options.position_tol_m = 1.0e-4;
+    config.carrier.float_options.ambiguity_tol_m = 1.0e-4;
+    config.carrier.float_options.max_iterations = 10;
+    config.carrier.fixed_options.position_tol_m = 1.0e-4;
+    config.carrier.fixed_options.ambiguity_tol_m = 1.0e-4;
+    config.carrier.fixed_options.max_iterations = 10;
+    config.carrier.fixed_options.ratio_threshold = 3.0;
+    config.carrier.fixed_options.partial_ambiguity_resolution = true;
+    config.carrier.fixed_options.partial_min_ambiguities = 4;
+
+    SidereonStaticReferenceStationSolution *solution = NULL;
+    check(sidereon_solve_static_reference_station_rinex(sp3, base_obs, rover_obs, &config,
+                                                        &solution) == SIDEREON_STATUS_OK &&
+              solution != NULL,
+          "solve static reference station rinex");
+    if (!solution) {
+        return;
+    }
+
+    SidereonStaticReferenceStationMetadata meta;
+    check(sidereon_static_reference_station_solution_metadata(solution, &meta) ==
+              SIDEREON_STATUS_OK,
+          "static reference metadata");
+    check(meta.mode == SIDEREON_STATIC_REFERENCE_STATION_MODE_CARRIER_FIXED &&
+              meta.fix_status == SIDEREON_STATIC_REFERENCE_FIX_STATUS_CARRIER_FIXED &&
+              meta.has_carrier_solution && !meta.has_code_solution && meta.has_geodetic &&
+              meta.diagnostic_count == 24 && meta.carrier_diagnostic_count == 24 &&
+              meta.mode_report_count == 1,
+          "static reference metadata values");
+    check(meta.carrier_integer_status == SIDEREON_RTK_INTEGER_STATUS_FIXED &&
+              meta.has_carrier_integer_ratio && meta.carrier_integer_ratio > 3.0,
+          "static reference carrier fixed metadata");
+    check_bits(meta.carrier_integer_ratio, UINT64_C(0x40552D1856B255BA),
+               "static reference ratio bits");
+
+    double position[3] = {0.0, 0.0, 0.0};
+    double baseline[3] = {0.0, 0.0, 0.0};
+    double covariance[9] = {0.0};
+    check(sidereon_static_reference_station_solution_position_ecef(solution, position, 3) ==
+              SIDEREON_STATUS_OK,
+          "static reference position");
+    check(sidereon_static_reference_station_solution_baseline_ecef(solution, baseline, 3) ==
+              SIDEREON_STATUS_OK,
+          "static reference baseline");
+    check(sidereon_static_reference_station_solution_covariance_ecef(solution, covariance, 9) ==
+              SIDEREON_STATUS_OK,
+          "static reference covariance");
+
+    printf("static reference position = %.9f %.9f %.9f m\n", position[0], position[1],
+           position[2]);
+    printf("static reference baseline = %.9f %.9f %.9f m, error = %.9f m\n", baseline[0],
+           baseline[1], baseline[2], vector_error(baseline, truth));
+    check(vector_error(baseline, truth) < 0.005, "static reference baseline within 5 mm");
+
+    const uint64_t position_bits[3] = {
+        UINT64_C(0x414F181DAF5EFC9B),
+        UINT64_C(0x412C701AD358462B),
+        UINT64_C(0x4152510859BC4562),
+    };
+    const uint64_t baseline_bits[3] = {
+        UINT64_C(0xBFEF911D96FBE6B2),
+        UINT64_C(0xBFE4DC7080D098F8),
+        UINT64_C(0x3FF11595629A56D4),
+    };
+    const uint64_t covariance_bits[9] = {
+        UINT64_C(0x3F04ACAF48E915F6), UINT64_C(0x3EDF5DA71E914413),
+        UINT64_C(0x3EF32E401D0C7CB0), UINT64_C(0x3EDF5DA71E914413),
+        UINT64_C(0x3EEC4A84FC5F278A), UINT64_C(0x3ED882C671817361),
+        UINT64_C(0x3EF32E401D0C7CAF), UINT64_C(0x3ED882C671817360),
+        UINT64_C(0x3F08FCE97D368DEE),
+    };
+    check_vec_bits(position, position_bits, 3, "static reference position");
+    check_vec_bits(baseline, baseline_bits, 3, "static reference baseline");
+    check_vec_bits(covariance, covariance_bits, 9, "static reference covariance");
+
+    size_t written = 0;
+    size_t required = 0;
+    SidereonStaticReferenceEpochDiagnostic diagnostics[24];
+    check(sidereon_static_reference_station_solution_diagnostics(
+              solution, diagnostics, 24, &written, &required) == SIDEREON_STATUS_OK &&
+              written == 24 && required == 24,
+          "static reference diagnostics");
+    check(diagnostics[0].mode == SIDEREON_STATIC_REFERENCE_STATION_MODE_CARRIER_FIXED &&
+              diagnostics[0].used_satellite_count > 0 &&
+              diagnostics[0].has_code_residual_rms_m &&
+              diagnostics[0].has_phase_residual_rms_m,
+          "static reference diagnostic row");
+
+    SidereonStaticReferenceModeReport reports[1];
+    check(sidereon_static_reference_station_solution_mode_reports(solution, reports, 1, &written,
+                                                                  &required) ==
+                  SIDEREON_STATUS_OK &&
+              written == 1 && required == 1,
+          "static reference mode reports");
+    check(reports[0].mode == SIDEREON_STATIC_REFERENCE_STATION_MODE_CARRIER_FIXED &&
+              reports[0].status == SIDEREON_STATIC_REFERENCE_MODE_STATUS_SOLVED &&
+              reports[0].used_epochs == 24 && reports[0].skipped_epochs == 0 &&
+              reports[0].used_measurements == 432 && !reports[0].has_error,
+          "static reference mode report values");
+
+    sidereon_static_reference_station_solution_free(solution);
+}
+
 static void test_wide_lane_rinex_rtk(const SidereonSp3 *sp3, const SidereonRinexObs *base_obs,
                                      const SidereonRinexObs *rover_obs,
                                      const double base_arp[3], const double truth[3]) {
@@ -329,6 +467,7 @@ int main(int argc, char **argv) {
             printf("truth arp baseline = %.9f %.9f %.9f m\n", truth[0], truth[1], truth[2]);
 
             test_static_rinex_rtk(sp3, base_obs, rover_obs, base_arp, truth);
+            test_static_reference_station(sp3, base_obs, rover_obs, base_arp, truth);
             test_wide_lane_rinex_rtk(sp3, base_obs, rover_obs, base_arp, truth);
         }
     }
