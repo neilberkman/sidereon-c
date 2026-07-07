@@ -893,6 +893,20 @@ typedef enum SidereonFixSourceKind {
 } SidereonFixSourceKind;
 
 /**
+ * Method used to reconcile one SP3 source coordinate label.
+ */
+typedef enum SidereonSp3FrameReconciliationMethod {
+    /**
+     * Caller asserted the labels are equivalent; no math was applied.
+     */
+    SIDEREON_SP3_FRAME_RECONCILIATION_METHOD_ASSERTED_EQUIVALENCE = 0,
+    /**
+     * Catalog Helmert reconciliation, or exact identity for the same realization.
+     */
+    SIDEREON_SP3_FRAME_RECONCILIATION_METHOD_HELMERT = 1,
+} SidereonSp3FrameReconciliationMethod;
+
+/**
  * SPP Doppler velocity solve error category.
  */
 typedef enum SidereonSppDopplerVelocityErrorKind {
@@ -15728,6 +15742,20 @@ typedef struct SidereonGeometryVisible {
 } SidereonGeometryVisible;
 
 /**
+ * One caller-asserted set of SP3 coordinate labels.
+ */
+typedef struct SidereonSp3FrameLabelSet {
+    /**
+     * UTF-8 label pointers.
+     */
+    const char *const *labels;
+    /**
+     * Number of labels. Must be at least two.
+     */
+    size_t label_count;
+} SidereonSp3FrameLabelSet;
+
+/**
  * Controls for merging SP3 products. Initialize with
  * sidereon_sp3_merge_options_init before overriding fields.
  */
@@ -15768,6 +15796,18 @@ typedef struct SidereonSp3MergeOptions {
      * Number of entries in systems. Zero means no system filter.
      */
     size_t system_count;
+    /**
+     * Optional array of asserted coordinate-label sets.
+     */
+    const struct SidereonSp3FrameLabelSet *asserted_frame_label_sets;
+    /**
+     * Number of entries in asserted_frame_label_sets.
+     */
+    size_t asserted_frame_label_set_count;
+    /**
+     * Enable catalog Helmert reconciliation between known ITRF/IGS labels.
+     */
+    bool helmert_frame_reconciliation;
 } SidereonSp3MergeOptions;
 
 /**
@@ -15893,6 +15933,128 @@ typedef struct SidereonSp3MergeFlag {
      */
     size_t source_count;
 } SidereonSp3MergeFlag;
+
+/**
+ * One SP3 coordinate-label reconciliation report row.
+ */
+typedef struct SidereonSp3FrameReconciliation {
+    /**
+     * Source index in the sidereon_sp3_merge input array.
+     */
+    size_t source_index;
+    /**
+     * Source label byte length, copied separately.
+     */
+    size_t source_label_len;
+    /**
+     * Target label byte length, copied separately.
+     */
+    size_t target_label_len;
+    /**
+     * Reconciliation method.
+     */
+    enum SidereonSp3FrameReconciliationMethod method;
+    /**
+     * Number of labels in the caller assertion set.
+     */
+    size_t asserted_label_count;
+    /**
+     * Whether source_frame is present.
+     */
+    bool source_frame_present;
+    /**
+     * Resolved source frame as SidereonTerrestrialFrame.
+     */
+    uint32_t source_frame;
+    /**
+     * Whether target_frame is present.
+     */
+    bool target_frame_present;
+    /**
+     * Resolved target frame as SidereonTerrestrialFrame.
+     */
+    uint32_t target_frame;
+    /**
+     * Whether catalog_source_frame and catalog_target_frame are present.
+     */
+    bool catalog_frame_present;
+    /**
+     * Published catalog row source as SidereonTerrestrialFrame.
+     */
+    uint32_t catalog_source_frame;
+    /**
+     * Published catalog row target as SidereonTerrestrialFrame.
+     */
+    uint32_t catalog_target_frame;
+    /**
+     * Whether the published catalog row was applied in reverse.
+     */
+    bool catalog_inverse;
+    /**
+     * Whether reference_epoch_year is present.
+     */
+    bool reference_epoch_year_present;
+    /**
+     * Published transform reference epoch.
+     */
+    double reference_epoch_year;
+    /**
+     * Whether parameters are present.
+     */
+    bool parameters_present;
+    /**
+     * Published translation parameters in millimetres.
+     */
+    double translation_mm[3];
+    /**
+     * Published scale parameter in parts per billion.
+     */
+    double scale_ppb;
+    /**
+     * Published rotation parameters in milliarcseconds.
+     */
+    double rotation_mas[3];
+    /**
+     * Whether rates are present.
+     */
+    bool rates_present;
+    /**
+     * Published translation rates in millimetres per year.
+     */
+    double translation_mm_per_year[3];
+    /**
+     * Published scale rate in parts per billion per year.
+     */
+    double scale_ppb_per_year;
+    /**
+     * Published rotation rates in milliarcseconds per year.
+     */
+    double rotation_mas_per_year[3];
+    /**
+     * Provenance byte length, copied separately.
+     */
+    size_t provenance_len;
+    /**
+     * Whether epoch_year_start and epoch_year_end are present.
+     */
+    bool epoch_year_span_present;
+    /**
+     * First affected decimal year.
+     */
+    double epoch_year_start;
+    /**
+     * Last affected decimal year.
+     */
+    double epoch_year_end;
+    /**
+     * Number of satellite position records covered by the reconciliation.
+     */
+    size_t records_affected;
+    /**
+     * True when both labels resolved to the same terrestrial realization.
+     */
+    bool identity;
+} SidereonSp3FrameReconciliation;
 
 typedef struct SidereonSpaceWeatherCoverage {
     double first_j2000_s;
@@ -28625,6 +28787,78 @@ enum SidereonStatus sidereon_sp3_merge_report_flag_sources(const struct Sidereon
                                                            size_t len,
                                                            size_t *out_written,
                                                            size_t *out_required);
+
+/**
+ * Copy one coordinate-label reconciliation row by index.
+ *
+ * Safety: report must be a live merge report handle; out_reconciliation must
+ * point to a SidereonSp3FrameReconciliation.
+ */
+enum SidereonStatus sidereon_sp3_merge_report_frame_reconciliation(const struct SidereonSp3MergeReport *report,
+                                                                   size_t index,
+                                                                   struct SidereonSp3FrameReconciliation *out_reconciliation);
+
+/**
+ * Copy one asserted-label-set item as UTF-8 bytes.
+ *
+ * Safety: report must be a live merge report handle; out may be NULL only when
+ * len is zero; out_written and out_required must point to size_t values.
+ */
+enum SidereonStatus sidereon_sp3_merge_report_frame_reconciliation_asserted_label(const struct SidereonSp3MergeReport *report,
+                                                                                  size_t index,
+                                                                                  size_t label_index,
+                                                                                  uint8_t *out,
+                                                                                  size_t len,
+                                                                                  size_t *out_written,
+                                                                                  size_t *out_required);
+
+/**
+ * Write the number of coordinate-label reconciliation rows in a merge report.
+ *
+ * Safety: report must be a live merge report handle; out_count must point to a
+ * size_t.
+ */
+enum SidereonStatus sidereon_sp3_merge_report_frame_reconciliation_count(const struct SidereonSp3MergeReport *report,
+                                                                         size_t *out_count);
+
+/**
+ * Copy the published-table provenance as UTF-8 bytes.
+ *
+ * Safety: report must be a live merge report handle; out may be NULL only when
+ * len is zero; out_written and out_required must point to size_t values.
+ */
+enum SidereonStatus sidereon_sp3_merge_report_frame_reconciliation_provenance(const struct SidereonSp3MergeReport *report,
+                                                                              size_t index,
+                                                                              uint8_t *out,
+                                                                              size_t len,
+                                                                              size_t *out_written,
+                                                                              size_t *out_required);
+
+/**
+ * Copy a reconciliation source label as UTF-8 bytes.
+ *
+ * Safety: report must be a live merge report handle; out may be NULL only when
+ * len is zero; out_written and out_required must point to size_t values.
+ */
+enum SidereonStatus sidereon_sp3_merge_report_frame_reconciliation_source_label(const struct SidereonSp3MergeReport *report,
+                                                                                size_t index,
+                                                                                uint8_t *out,
+                                                                                size_t len,
+                                                                                size_t *out_written,
+                                                                                size_t *out_required);
+
+/**
+ * Copy a reconciliation target label as UTF-8 bytes.
+ *
+ * Safety: report must be a live merge report handle; out may be NULL only when
+ * len is zero; out_written and out_required must point to size_t values.
+ */
+enum SidereonStatus sidereon_sp3_merge_report_frame_reconciliation_target_label(const struct SidereonSp3MergeReport *report,
+                                                                                size_t index,
+                                                                                uint8_t *out,
+                                                                                size_t len,
+                                                                                size_t *out_written,
+                                                                                size_t *out_required);
 
 /**
  * Release an SP3 merge report handle. Null is a no-op. A non-null handle must

@@ -1,5 +1,7 @@
 use super::*;
 
+const SP3_FRAME_LABEL_MAX_BYTES: usize = 64;
+
 /// A parsed SP3 precise-ephemeris product. Opaque to C. Create with
 /// sidereon_sp3_load or sidereon_sp3_merge and release with sidereon_sp3_free.
 pub struct SidereonSp3 {
@@ -78,6 +80,96 @@ pub struct SidereonSp3MergeOptions {
     pub systems: *const u32,
     /// Number of entries in systems. Zero means no system filter.
     pub system_count: usize,
+    /// Optional array of asserted coordinate-label sets.
+    pub asserted_frame_label_sets: *const SidereonSp3FrameLabelSet,
+    /// Number of entries in asserted_frame_label_sets.
+    pub asserted_frame_label_set_count: usize,
+    /// Enable catalog Helmert reconciliation between known ITRF/IGS labels.
+    pub helmert_frame_reconciliation: bool,
+}
+
+/// One caller-asserted set of SP3 coordinate labels.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonSp3FrameLabelSet {
+    /// UTF-8 label pointers.
+    pub labels: *const *const c_char,
+    /// Number of labels. Must be at least two.
+    pub label_count: usize,
+}
+
+/// Method used to reconcile one SP3 source coordinate label.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonSp3FrameReconciliationMethod {
+    /// Caller asserted the labels are equivalent; no math was applied.
+    AssertedEquivalence = 0,
+    /// Catalog Helmert reconciliation, or exact identity for the same realization.
+    Helmert = 1,
+}
+
+/// One SP3 coordinate-label reconciliation report row.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonSp3FrameReconciliation {
+    /// Source index in the sidereon_sp3_merge input array.
+    pub source_index: usize,
+    /// Source label byte length, copied separately.
+    pub source_label_len: usize,
+    /// Target label byte length, copied separately.
+    pub target_label_len: usize,
+    /// Reconciliation method.
+    pub method: SidereonSp3FrameReconciliationMethod,
+    /// Number of labels in the caller assertion set.
+    pub asserted_label_count: usize,
+    /// Whether source_frame is present.
+    pub source_frame_present: bool,
+    /// Resolved source frame as SidereonTerrestrialFrame.
+    pub source_frame: u32,
+    /// Whether target_frame is present.
+    pub target_frame_present: bool,
+    /// Resolved target frame as SidereonTerrestrialFrame.
+    pub target_frame: u32,
+    /// Whether catalog_source_frame and catalog_target_frame are present.
+    pub catalog_frame_present: bool,
+    /// Published catalog row source as SidereonTerrestrialFrame.
+    pub catalog_source_frame: u32,
+    /// Published catalog row target as SidereonTerrestrialFrame.
+    pub catalog_target_frame: u32,
+    /// Whether the published catalog row was applied in reverse.
+    pub catalog_inverse: bool,
+    /// Whether reference_epoch_year is present.
+    pub reference_epoch_year_present: bool,
+    /// Published transform reference epoch.
+    pub reference_epoch_year: f64,
+    /// Whether parameters are present.
+    pub parameters_present: bool,
+    /// Published translation parameters in millimetres.
+    pub translation_mm: [f64; 3],
+    /// Published scale parameter in parts per billion.
+    pub scale_ppb: f64,
+    /// Published rotation parameters in milliarcseconds.
+    pub rotation_mas: [f64; 3],
+    /// Whether rates are present.
+    pub rates_present: bool,
+    /// Published translation rates in millimetres per year.
+    pub translation_mm_per_year: [f64; 3],
+    /// Published scale rate in parts per billion per year.
+    pub scale_ppb_per_year: f64,
+    /// Published rotation rates in milliarcseconds per year.
+    pub rotation_mas_per_year: [f64; 3],
+    /// Provenance byte length, copied separately.
+    pub provenance_len: usize,
+    /// Whether epoch_year_start and epoch_year_end are present.
+    pub epoch_year_span_present: bool,
+    /// First affected decimal year.
+    pub epoch_year_start: f64,
+    /// Last affected decimal year.
+    pub epoch_year_end: f64,
+    /// Number of satellite position records covered by the reconciliation.
+    pub records_affected: usize,
+    /// True when both labels resolved to the same terrestrial realization.
+    pub identity: bool,
 }
 
 /// Which merge report flag list to query.
@@ -653,6 +745,180 @@ pub unsafe extern "C" fn sidereon_sp3_merge(
         *out_report = Box::into_raw(report_handle);
         SidereonStatus::Ok
     })
+}
+
+/// Write the number of coordinate-label reconciliation rows in a merge report.
+///
+/// Safety: report must be a live merge report handle; out_count must point to a
+/// size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sp3_merge_report_frame_reconciliation_count(
+    report: *const SidereonSp3MergeReport,
+    out_count: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_sp3_merge_report_frame_reconciliation_count",
+        SidereonStatus::Panic,
+        || {
+            let out_count = c_try!(require_out(
+                out_count,
+                "sidereon_sp3_merge_report_frame_reconciliation_count",
+                "out_count"
+            ));
+            *out_count = 0;
+            let report = c_try!(require_ref(
+                report,
+                "sidereon_sp3_merge_report_frame_reconciliation_count",
+                "report"
+            ));
+            *out_count = report.inner.frame_reconciliations.len();
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy one coordinate-label reconciliation row by index.
+///
+/// Safety: report must be a live merge report handle; out_reconciliation must
+/// point to a SidereonSp3FrameReconciliation.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sp3_merge_report_frame_reconciliation(
+    report: *const SidereonSp3MergeReport,
+    index: usize,
+    out_reconciliation: *mut SidereonSp3FrameReconciliation,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_sp3_merge_report_frame_reconciliation",
+        SidereonStatus::Panic,
+        || {
+            let out_reconciliation = c_try!(require_out(
+                out_reconciliation,
+                "sidereon_sp3_merge_report_frame_reconciliation",
+                "out_reconciliation"
+            ));
+            *out_reconciliation = zero_sp3_frame_reconciliation();
+            let report = c_try!(require_ref(
+                report,
+                "sidereon_sp3_merge_report_frame_reconciliation",
+                "report"
+            ));
+            let Some(reconciliation) = report.inner.frame_reconciliations.get(index) else {
+                set_last_error(format!(
+                    "sidereon_sp3_merge_report_frame_reconciliation: index {index} out of range"
+                ));
+                return SidereonStatus::InvalidArgument;
+            };
+            *out_reconciliation = sp3_frame_reconciliation_to_c(reconciliation);
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy a reconciliation source label as UTF-8 bytes.
+///
+/// Safety: report must be a live merge report handle; out may be NULL only when
+/// len is zero; out_written and out_required must point to size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sp3_merge_report_frame_reconciliation_source_label(
+    report: *const SidereonSp3MergeReport,
+    index: usize,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    sp3_merge_report_reconciliation_bytes(
+        "sidereon_sp3_merge_report_frame_reconciliation_source_label",
+        report,
+        index,
+        |row| row.source_label.as_bytes(),
+        out,
+        len,
+        out_written,
+        out_required,
+    )
+}
+
+/// Copy a reconciliation target label as UTF-8 bytes.
+///
+/// Safety: report must be a live merge report handle; out may be NULL only when
+/// len is zero; out_written and out_required must point to size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sp3_merge_report_frame_reconciliation_target_label(
+    report: *const SidereonSp3MergeReport,
+    index: usize,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    sp3_merge_report_reconciliation_bytes(
+        "sidereon_sp3_merge_report_frame_reconciliation_target_label",
+        report,
+        index,
+        |row| row.target_label.as_bytes(),
+        out,
+        len,
+        out_written,
+        out_required,
+    )
+}
+
+/// Copy one asserted-label-set item as UTF-8 bytes.
+///
+/// Safety: report must be a live merge report handle; out may be NULL only when
+/// len is zero; out_written and out_required must point to size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sp3_merge_report_frame_reconciliation_asserted_label(
+    report: *const SidereonSp3MergeReport,
+    index: usize,
+    label_index: usize,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    sp3_merge_report_reconciliation_bytes(
+        "sidereon_sp3_merge_report_frame_reconciliation_asserted_label",
+        report,
+        index,
+        |row| {
+            row.asserted_label_set
+                .as_ref()
+                .and_then(|labels| labels.get(label_index))
+                .map(String::as_bytes)
+                .unwrap_or(&[])
+        },
+        out,
+        len,
+        out_written,
+        out_required,
+    )
+}
+
+/// Copy the published-table provenance as UTF-8 bytes.
+///
+/// Safety: report must be a live merge report handle; out may be NULL only when
+/// len is zero; out_written and out_required must point to size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sp3_merge_report_frame_reconciliation_provenance(
+    report: *const SidereonSp3MergeReport,
+    index: usize,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    sp3_merge_report_reconciliation_bytes(
+        "sidereon_sp3_merge_report_frame_reconciliation_provenance",
+        report,
+        index,
+        |row| row.provenance.as_deref().unwrap_or("").as_bytes(),
+        out,
+        len,
+        out_written,
+        out_required,
+    )
 }
 
 /// Write the number of flags in a merge report flag list to *out_count. kind is
@@ -1603,6 +1869,9 @@ fn default_sp3_merge_options() -> SidereonSp3MergeOptions {
         target_epoch_interval_s: options.target_epoch_interval_s.unwrap_or(0.0),
         systems: ptr::null(),
         system_count: 0,
+        asserted_frame_label_sets: ptr::null(),
+        asserted_frame_label_set_count: 0,
+        helmert_frame_reconciliation: false,
     }
 }
 
@@ -1660,6 +1929,15 @@ unsafe fn sp3_merge_options_from_c(
         }
         Some(systems)
     };
+    let asserted_equivalent_label_sets = if options.asserted_frame_label_set_count == 0 {
+        Vec::new()
+    } else {
+        parse_sp3_asserted_frame_label_sets(
+            fn_name,
+            options.asserted_frame_label_sets,
+            options.asserted_frame_label_set_count,
+        )?
+    };
 
     Ok(MergeOptions {
         position_tolerance_m: options.position_tolerance_m,
@@ -1669,7 +1947,58 @@ unsafe fn sp3_merge_options_from_c(
         combine,
         target_epoch_interval_s,
         systems,
+        frame_reconciliation: Sp3FrameReconciliationOptions {
+            asserted_equivalent_label_sets,
+            helmert: options.helmert_frame_reconciliation,
+        },
     })
+}
+
+unsafe fn parse_sp3_asserted_frame_label_sets(
+    fn_name: &str,
+    label_sets: *const SidereonSp3FrameLabelSet,
+    label_set_count: usize,
+) -> Result<Vec<Sp3FrameLabelSet>, SidereonStatus> {
+    let raw_sets = require_slice(
+        label_sets,
+        label_set_count,
+        fn_name,
+        "asserted_frame_label_sets",
+    )?;
+    let mut parsed = Vec::with_capacity(raw_sets.len());
+    for (set_idx, set) in raw_sets.iter().copied().enumerate() {
+        if set.label_count < 2 {
+            set_last_error(format!(
+                "{fn_name}: asserted_frame_label_sets[{set_idx}] must contain at least two labels"
+            ));
+            return Err(SidereonStatus::InvalidArgument);
+        }
+        let raw_labels = require_slice(
+            set.labels,
+            set.label_count,
+            fn_name,
+            &format!("asserted_frame_label_sets[{set_idx}].labels"),
+        )?;
+        let mut labels = Vec::with_capacity(raw_labels.len());
+        for (label_idx, label) in raw_labels.iter().copied().enumerate() {
+            let label = parse_bounded_c_string(
+                fn_name,
+                &format!("asserted_frame_label_sets[{set_idx}].labels[{label_idx}]"),
+                label,
+                SP3_FRAME_LABEL_MAX_BYTES,
+            )?;
+            let label = label.trim().to_string();
+            if label.is_empty() {
+                set_last_error(format!(
+                    "{fn_name}: asserted_frame_label_sets[{set_idx}].labels[{label_idx}] is empty"
+                ));
+                return Err(SidereonStatus::InvalidArgument);
+            }
+            labels.push(label);
+        }
+        parsed.push(Sp3FrameLabelSet::new(labels));
+    }
+    Ok(parsed)
 }
 
 fn sp3_merge_flag_to_c(flag: &MergeFlag) -> SidereonSp3MergeFlag {
@@ -1678,6 +2007,157 @@ fn sp3_merge_flag_to_c(flag: &MergeFlag) -> SidereonSp3MergeFlag {
         sat_id: satellite_token(flag.satellite),
         source_count: flag.sources.len(),
     }
+}
+
+fn sp3_frame_reconciliation_to_c(
+    value: &sidereon_core::ephemeris::Sp3FrameReconciliation,
+) -> SidereonSp3FrameReconciliation {
+    let parameters = value.parameters;
+    let rates = value.rates;
+    let epoch_year_span = value.epoch_year_span;
+    SidereonSp3FrameReconciliation {
+        source_index: value.source_index,
+        source_label_len: value.source_label.len(),
+        target_label_len: value.target_label.len(),
+        method: match value.method {
+            Sp3FrameReconciliationMethod::AssertedEquivalence => {
+                SidereonSp3FrameReconciliationMethod::AssertedEquivalence
+            }
+            Sp3FrameReconciliationMethod::Helmert => SidereonSp3FrameReconciliationMethod::Helmert,
+        },
+        asserted_label_count: value.asserted_label_set.as_ref().map(Vec::len).unwrap_or(0),
+        source_frame_present: value.source_frame.is_some(),
+        source_frame: value
+            .source_frame
+            .map(sp3_terrestrial_frame_to_c)
+            .unwrap_or(0),
+        target_frame_present: value.target_frame.is_some(),
+        target_frame: value
+            .target_frame
+            .map(sp3_terrestrial_frame_to_c)
+            .unwrap_or(0),
+        catalog_frame_present: value.catalog_source_frame.is_some()
+            && value.catalog_target_frame.is_some(),
+        catalog_source_frame: value
+            .catalog_source_frame
+            .map(sp3_terrestrial_frame_to_c)
+            .unwrap_or(0),
+        catalog_target_frame: value
+            .catalog_target_frame
+            .map(sp3_terrestrial_frame_to_c)
+            .unwrap_or(0),
+        catalog_inverse: value.catalog_inverse,
+        reference_epoch_year_present: value.reference_epoch_year.is_some(),
+        reference_epoch_year: value.reference_epoch_year.unwrap_or(0.0),
+        parameters_present: parameters.is_some(),
+        translation_mm: parameters
+            .map(|parameters| parameters.translation_mm)
+            .unwrap_or([0.0; 3]),
+        scale_ppb: parameters
+            .map(|parameters| parameters.scale_ppb)
+            .unwrap_or(0.0),
+        rotation_mas: parameters
+            .map(|parameters| parameters.rotation_mas)
+            .unwrap_or([0.0; 3]),
+        rates_present: rates.is_some(),
+        translation_mm_per_year: rates
+            .map(|rates| rates.translation_mm_per_year)
+            .unwrap_or([0.0; 3]),
+        scale_ppb_per_year: rates.map(|rates| rates.scale_ppb_per_year).unwrap_or(0.0),
+        rotation_mas_per_year: rates
+            .map(|rates| rates.rotation_mas_per_year)
+            .unwrap_or([0.0; 3]),
+        provenance_len: value.provenance.as_ref().map(String::len).unwrap_or(0),
+        epoch_year_span_present: epoch_year_span.is_some(),
+        epoch_year_start: epoch_year_span.map(|span| span[0]).unwrap_or(0.0),
+        epoch_year_end: epoch_year_span.map(|span| span[1]).unwrap_or(0.0),
+        records_affected: value.records_affected,
+        identity: value.identity,
+    }
+}
+
+fn zero_sp3_frame_reconciliation() -> SidereonSp3FrameReconciliation {
+    SidereonSp3FrameReconciliation {
+        source_index: 0,
+        source_label_len: 0,
+        target_label_len: 0,
+        method: SidereonSp3FrameReconciliationMethod::AssertedEquivalence,
+        asserted_label_count: 0,
+        source_frame_present: false,
+        source_frame: 0,
+        target_frame_present: false,
+        target_frame: 0,
+        catalog_frame_present: false,
+        catalog_source_frame: 0,
+        catalog_target_frame: 0,
+        catalog_inverse: false,
+        reference_epoch_year_present: false,
+        reference_epoch_year: 0.0,
+        parameters_present: false,
+        translation_mm: [0.0; 3],
+        scale_ppb: 0.0,
+        rotation_mas: [0.0; 3],
+        rates_present: false,
+        translation_mm_per_year: [0.0; 3],
+        scale_ppb_per_year: 0.0,
+        rotation_mas_per_year: [0.0; 3],
+        provenance_len: 0,
+        epoch_year_span_present: false,
+        epoch_year_start: 0.0,
+        epoch_year_end: 0.0,
+        records_affected: 0,
+        identity: false,
+    }
+}
+
+fn sp3_terrestrial_frame_to_c(value: sidereon_core::frame_catalog::TerrestrialFrame) -> u32 {
+    match value {
+        sidereon_core::frame_catalog::TerrestrialFrame::Itrf2020 => {
+            SidereonTerrestrialFrame::Itrf2020 as u32
+        }
+        sidereon_core::frame_catalog::TerrestrialFrame::Itrf2014 => {
+            SidereonTerrestrialFrame::Itrf2014 as u32
+        }
+        sidereon_core::frame_catalog::TerrestrialFrame::Itrf2008 => {
+            SidereonTerrestrialFrame::Itrf2008 as u32
+        }
+        sidereon_core::frame_catalog::TerrestrialFrame::Etrf2020 => {
+            SidereonTerrestrialFrame::Etrf2020 as u32
+        }
+    }
+}
+
+unsafe fn sp3_merge_report_reconciliation_bytes<'a, F>(
+    fn_name: &str,
+    report: *const SidereonSp3MergeReport,
+    index: usize,
+    select: F,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus
+where
+    F: FnOnce(&'a sidereon_core::ephemeris::Sp3FrameReconciliation) -> &'a [u8],
+{
+    ffi_boundary(fn_name, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(fn_name, out_written, out_required));
+        let report = c_try!(require_ref(report, fn_name, "report"));
+        let Some(reconciliation) = report.inner.frame_reconciliations.get(index) else {
+            set_last_error(format!("{fn_name}: index {index} out of range"));
+            return SidereonStatus::InvalidArgument;
+        };
+        c_try!(copy_prefix_to_c(
+            fn_name,
+            "out",
+            select(reconciliation),
+            out,
+            len,
+            out_written,
+            out_required,
+        ));
+        SidereonStatus::Ok
+    })
 }
 
 fn sp3_epoch_agreement_to_c(agg: &EpochAgreement) -> SidereonSp3EpochAgreement {

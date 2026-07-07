@@ -142,7 +142,8 @@ use sidereon_core::ephemeris::{
     EpochAgreement, MergeCombine, MergeFlag, MergeOptions, MergeReport,
     MmapPreciseEphemerisInterpolant, PreciseEphemerisInterpolant, PreciseEphemerisSample,
     PreciseEphemerisSamples, PreciseInterpolantError, PreciseInterpolantStoreError,
-    PreciseSamplesError, Sp3, Sp3State,
+    PreciseSamplesError, Sp3, Sp3FrameLabelSet, Sp3FrameReconciliationMethod,
+    Sp3FrameReconciliationOptions, Sp3State,
 };
 use sidereon_core::ephemeris::{
     sample as ephemeris_sample, BroadcastEphemeris, EphemerisSampleRow, EphemerisSampleStatus,
