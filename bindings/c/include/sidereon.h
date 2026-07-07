@@ -2992,6 +2992,14 @@ typedef struct SidereonRtkStaticArcSolution SidereonRtkStaticArcSolution;
 typedef struct SidereonRtkWideLaneArcSolution SidereonRtkWideLaneArcSolution;
 
 /**
+ * A static dual-frequency wide-lane fixed RTK solution built from RINEX OBS.
+ * Create with sidereon_solve_wide_lane_fixed_rinex_rtk_baseline; read with the
+ * sidereon_rtk_wide_lane_fixed_rinex_solution_* accessors; release with
+ * sidereon_rtk_wide_lane_fixed_rinex_solution_free.
+ */
+typedef struct SidereonRtkWideLaneFixedRinexSolution SidereonRtkWideLaneFixedRinexSolution;
+
+/**
  * A built-once fleet of already-initialized SGP4 satellites for repeated batch
  * operations. Opaque to C. Build it once with
  * sidereon_satellite_constellation_build from parsed TLE handles, then call
@@ -12622,6 +12630,278 @@ typedef struct SidereonRtkResidualValidationOptions {
 } SidereonRtkResidualValidationOptions;
 
 /**
+ * One RINEX code/carrier pair used to build a single-frequency RTK arc.
+ */
+typedef struct SidereonRtkRinexSignalPair {
+    /**
+     * GNSS system as SidereonGnssSystem.
+     */
+    uint32_t system;
+    /**
+     * Null-terminated RINEX code observable, e.g. C1C.
+     */
+    char code_observable[RINEX_OBS_CODE_C_BYTES];
+    /**
+     * Null-terminated RINEX carrier observable, e.g. L1C.
+     */
+    char phase_observable[RINEX_OBS_CODE_C_BYTES];
+} SidereonRtkRinexSignalPair;
+
+/**
+ * Options for building single-frequency RTK arcs from paired RINEX OBS files.
+ * Initialize with sidereon_rtk_rinex_arc_options_init.
+ */
+typedef struct SidereonRtkRinexArcOptions {
+    /**
+     * Optional array of signal pairs. A zero count uses the GPS C1C/L1C default.
+     */
+    const struct SidereonRtkRinexSignalPair *signal_pairs;
+    /**
+     * Number of signal pairs.
+     */
+    size_t signal_pair_count;
+    /**
+     * Whether max_epochs carries a value.
+     */
+    bool has_max_epochs;
+    /**
+     * Optional cap on base epochs considered, in file order.
+     */
+    size_t max_epochs;
+    /**
+     * Minimum common satellites with observations and ephemeris in an epoch.
+     */
+    size_t min_common_satellites;
+    /**
+     * Fill prediction_time_s in generated arc epochs.
+     */
+    bool include_prediction_time;
+} SidereonRtkRinexArcOptions;
+
+/**
+ * One RINEX dual-frequency code/carrier selection.
+ */
+typedef struct SidereonRtkRinexDualSignalPair {
+    /**
+     * GNSS system as SidereonGnssSystem.
+     */
+    uint32_t system;
+    /**
+     * Null-terminated band-1 code observable, e.g. C1C.
+     */
+    char code1_observable[RINEX_OBS_CODE_C_BYTES];
+    /**
+     * Null-terminated band-1 carrier observable, e.g. L1C.
+     */
+    char phase1_observable[RINEX_OBS_CODE_C_BYTES];
+    /**
+     * Null-terminated band-2 code observable, e.g. C2W.
+     */
+    char code2_observable[RINEX_OBS_CODE_C_BYTES];
+    /**
+     * Null-terminated band-2 carrier observable, e.g. L2W.
+     */
+    char phase2_observable[RINEX_OBS_CODE_C_BYTES];
+} SidereonRtkRinexDualSignalPair;
+
+/**
+ * Options for building dual-frequency RTK arcs from paired RINEX OBS files.
+ * Initialize with sidereon_rtk_rinex_dual_arc_options_init.
+ */
+typedef struct SidereonRtkRinexDualArcOptions {
+    /**
+     * Optional array of signal pairs. A zero count uses GPS C1C/L1C + C2W/L2W.
+     */
+    const struct SidereonRtkRinexDualSignalPair *signal_pairs;
+    /**
+     * Number of signal pairs.
+     */
+    size_t signal_pair_count;
+    /**
+     * Whether max_epochs carries a value.
+     */
+    bool has_max_epochs;
+    /**
+     * Optional cap on base epochs considered, in file order.
+     */
+    size_t max_epochs;
+    /**
+     * Minimum common satellites with observations and ephemeris in an epoch.
+     */
+    size_t min_common_satellites;
+    /**
+     * Fill prediction_time_s in generated arc epochs.
+     */
+    bool include_prediction_time;
+} SidereonRtkRinexDualArcOptions;
+
+/**
+ * Optional preprocessing for an RTK arc, mirroring
+ * sidereon_core::rtk_filter::RtkArcPreprocessing. Zeroed fields disable every
+ * stage.
+ */
+typedef struct SidereonRtkArcPreprocessing {
+    /**
+     * Whether cycle-slip preprocessing is enabled.
+     */
+    bool has_cycle_slip;
+    /**
+     * Cycle-slip policy, a SidereonRtkCycleSlipPolicy value.
+     */
+    uint32_t cycle_slip;
+    /**
+     * Whether Hatch code smoothing is enabled.
+     */
+    bool has_hatch_window_cap;
+    /**
+     * Hatch code-smoothing window cap when enabled.
+     */
+    size_t hatch_window_cap;
+    /**
+     * Whether elevation masking is enabled.
+     */
+    bool has_elevation_mask_deg;
+    /**
+     * Elevation mask in degrees when enabled.
+     */
+    double elevation_mask_deg;
+} SidereonRtkArcPreprocessing;
+
+/**
+ * Static RTK solve config for paired raw RINEX OBS plus SP3. Initialize with
+ * sidereon_rtk_rinex_static_baseline_config_init.
+ */
+typedef struct SidereonRtkRinexStaticBaselineConfig {
+    /**
+     * Base-station ECEF position (metres).
+     */
+    double base_m[3];
+    /**
+     * RINEX arc-build options.
+     */
+    struct SidereonRtkRinexArcOptions arc_options;
+    /**
+     * Reference-selection mode, a SidereonRtkArcReferenceMode value.
+     */
+    uint32_t reference_mode;
+    /**
+     * Fixed reference satellite id token for the Satellite mode (NULL otherwise).
+     */
+    const char *reference_satellite;
+    /**
+     * Per-constellation references for the PerSystem mode.
+     */
+    const struct SidereonRtkArcReferenceEntry *reference_per_system;
+    /**
+     * Number of per-system references.
+     */
+    size_t reference_per_system_count;
+    /**
+     * Measurement model.
+     */
+    struct SidereonRtkMeasurementModel model;
+    /**
+     * Baseline prior sigma (metres).
+     */
+    double baseline_prior_sigma_m;
+    /**
+     * Ambiguity prior sigma (metres).
+     */
+    double ambiguity_prior_sigma_m;
+    /**
+     * Initial rover-minus-base ECEF baseline (metres).
+     */
+    double initial_baseline_m[3];
+    /**
+     * Sequential-update controls used by the static driver.
+     */
+    struct SidereonRtkArcUpdateOptions update_options;
+    /**
+     * Optional preprocessing chained before the static solve.
+     */
+    struct SidereonRtkArcPreprocessing preprocessing;
+    /**
+     * Float solve options.
+     */
+    struct SidereonRtkFloatOptions float_options;
+    /**
+     * Fixed solve options.
+     */
+    struct SidereonRtkFixedOptions fixed_options;
+    /**
+     * Residual validation options.
+     */
+    struct SidereonRtkResidualValidationOptions residual_options;
+} SidereonRtkRinexStaticBaselineConfig;
+
+/**
+ * Static dual-frequency wide-lane fixed RTK solve config for paired raw RINEX
+ * OBS plus SP3. Initialize with sidereon_rtk_rinex_wide_lane_fixed_config_init.
+ */
+typedef struct SidereonRtkRinexWideLaneFixedConfig {
+    /**
+     * Base-station ECEF position (metres).
+     */
+    double base_m[3];
+    /**
+     * RINEX dual-frequency arc-build options.
+     */
+    struct SidereonRtkRinexDualArcOptions arc_options;
+    /**
+     * Reference-selection mode, a SidereonRtkArcReferenceMode value.
+     */
+    uint32_t reference_mode;
+    /**
+     * Fixed reference satellite id token for the Satellite mode (NULL otherwise).
+     */
+    const char *reference_satellite;
+    /**
+     * Per-constellation references for the PerSystem mode.
+     */
+    const struct SidereonRtkArcReferenceEntry *reference_per_system;
+    /**
+     * Number of per-system references.
+     */
+    size_t reference_per_system_count;
+    /**
+     * Measurement model for the final narrow-lane solve.
+     */
+    struct SidereonRtkMeasurementModel model;
+    /**
+     * Baseline prior sigma (metres).
+     */
+    double baseline_prior_sigma_m;
+    /**
+     * Ambiguity prior sigma (metres).
+     */
+    double ambiguity_prior_sigma_m;
+    /**
+     * Initial rover-minus-base ECEF baseline (metres).
+     */
+    double initial_baseline_m[3];
+    /**
+     * Sequential-update controls used by the static driver.
+     */
+    struct SidereonRtkArcUpdateOptions update_options;
+    /**
+     * Float solve options.
+     */
+    struct SidereonRtkFloatOptions float_options;
+    /**
+     * Fixed solve options.
+     */
+    struct SidereonRtkFixedOptions fixed_options;
+    /**
+     * Residual validation options.
+     */
+    struct SidereonRtkResidualValidationOptions residual_options;
+    /**
+     * Apply the core troposphere setup before the ionosphere-free combination.
+     */
+    bool apply_troposphere;
+} SidereonRtkRinexWideLaneFixedConfig;
+
+/**
  * One ambiguity-id to satellite-token output row.
  */
 typedef struct SidereonRtkAmbiguitySatelliteOut {
@@ -12634,6 +12914,28 @@ typedef struct SidereonRtkAmbiguitySatelliteOut {
      */
     struct SidereonSatelliteToken sat_id;
 } SidereonRtkAmbiguitySatelliteOut;
+
+/**
+ * Metadata for the combined wide-lane fixed RINEX RTK solution.
+ */
+typedef struct SidereonRtkWideLaneFixedRinexMetadata {
+    /**
+     * True when at least one wide-lane ambiguity was fixed and used downstream.
+     */
+    bool wide_lane_fixed;
+    /**
+     * Number of fixed wide-lane ambiguity rows.
+     */
+    size_t wide_lane_ambiguity_count;
+    /**
+     * Number of satellites dropped by dual-frequency cycle-slip preprocessing.
+     */
+    size_t dropped_cycle_slip_sat_count;
+    /**
+     * Number of split cycle-slip arcs.
+     */
+    size_t split_cycle_slip_arc_count;
+} SidereonRtkWideLaneFixedRinexMetadata;
 
 /**
  * One pass in a sidereon_satellite_constellation_passes result: the pass
@@ -14609,38 +14911,6 @@ typedef struct SidereonRtkArcEpoch {
      */
     double prediction_time_s;
 } SidereonRtkArcEpoch;
-
-/**
- * Optional preprocessing for an RTK arc, mirroring
- * sidereon_core::rtk_filter::RtkArcPreprocessing. Zeroed fields disable every
- * stage.
- */
-typedef struct SidereonRtkArcPreprocessing {
-    /**
-     * Whether cycle-slip preprocessing is enabled.
-     */
-    bool has_cycle_slip;
-    /**
-     * Cycle-slip policy, a SidereonRtkCycleSlipPolicy value.
-     */
-    uint32_t cycle_slip;
-    /**
-     * Whether Hatch code smoothing is enabled.
-     */
-    bool has_hatch_window_cap;
-    /**
-     * Hatch code-smoothing window cap when enabled.
-     */
-    size_t hatch_window_cap;
-    /**
-     * Whether elevation masking is enabled.
-     */
-    bool has_elevation_mask_deg;
-    /**
-     * Elevation mask in degrees when enabled.
-     */
-    double elevation_mask_deg;
-} SidereonRtkArcPreprocessing;
 
 /**
  * Sequential RTK arc driver configuration, mirroring
@@ -25140,6 +25410,34 @@ enum SidereonStatus sidereon_rtk_measurement_model_init(struct SidereonRtkMeasur
 enum SidereonStatus sidereon_rtk_residual_validation_options_init(struct SidereonRtkResidualValidationOptions *out_options);
 
 /**
+ * Initialize RINEX single-frequency RTK arc options with GPS C1C/L1C defaults.
+ *
+ * Safety: options must point to a writable SidereonRtkRinexArcOptions.
+ */
+enum SidereonStatus sidereon_rtk_rinex_arc_options_init(struct SidereonRtkRinexArcOptions *options);
+
+/**
+ * Initialize RINEX dual-frequency RTK arc options with GPS L1/L2 defaults.
+ *
+ * Safety: options must point to a writable SidereonRtkRinexDualArcOptions.
+ */
+enum SidereonStatus sidereon_rtk_rinex_dual_arc_options_init(struct SidereonRtkRinexDualArcOptions *options);
+
+/**
+ * Initialize static RINEX RTK baseline config with engine defaults.
+ *
+ * Safety: config must point to a writable SidereonRtkRinexStaticBaselineConfig.
+ */
+enum SidereonStatus sidereon_rtk_rinex_static_baseline_config_init(struct SidereonRtkRinexStaticBaselineConfig *config);
+
+/**
+ * Initialize dual-frequency wide-lane fixed RINEX RTK config with defaults.
+ *
+ * Safety: config must point to a writable SidereonRtkRinexWideLaneFixedConfig.
+ */
+enum SidereonStatus sidereon_rtk_rinex_wide_lane_fixed_config_init(struct SidereonRtkRinexWideLaneFixedConfig *config);
+
+/**
  * Copy static-arc ambiguity ids. Variable-length output contract.
  *
  * Safety: solution is a live handle; out points to len SidereonRtkId or NULL
@@ -25383,6 +25681,73 @@ enum SidereonStatus sidereon_rtk_wide_lane_arc_solution_wide_lane_cycles(const s
                                                                          size_t len,
                                                                          size_t *out_written,
                                                                          size_t *out_required);
+
+/**
+ * Copy the combined wide-lane fixed RINEX RTK fixed baseline into out_xyz.
+ *
+ * Safety: solution is a live handle; out_xyz points to at least len doubles.
+ */
+enum SidereonStatus sidereon_rtk_wide_lane_fixed_rinex_solution_fixed_baseline_ecef(const struct SidereonRtkWideLaneFixedRinexSolution *solution,
+                                                                                    double *out_xyz,
+                                                                                    size_t len);
+
+/**
+ * Copy combined wide-lane fixed RINEX RTK fixed metadata into *out_metadata.
+ *
+ * Safety: solution is a live handle; out_metadata points to a
+ * SidereonRtkFixedMetadata.
+ */
+enum SidereonStatus sidereon_rtk_wide_lane_fixed_rinex_solution_fixed_metadata(const struct SidereonRtkWideLaneFixedRinexSolution *solution,
+                                                                               struct SidereonRtkFixedMetadata *out_metadata);
+
+/**
+ * Copy the combined wide-lane fixed RINEX RTK float baseline into out_xyz.
+ *
+ * Safety: solution is a live handle; out_xyz points to at least len doubles.
+ */
+enum SidereonStatus sidereon_rtk_wide_lane_fixed_rinex_solution_float_baseline_ecef(const struct SidereonRtkWideLaneFixedRinexSolution *solution,
+                                                                                    double *out_xyz,
+                                                                                    size_t len);
+
+/**
+ * Copy combined wide-lane fixed RINEX RTK float metadata into *out_metadata.
+ *
+ * Safety: solution is a live handle; out_metadata points to a
+ * SidereonRtkFloatMetadata.
+ */
+enum SidereonStatus sidereon_rtk_wide_lane_fixed_rinex_solution_float_metadata(const struct SidereonRtkWideLaneFixedRinexSolution *solution,
+                                                                               struct SidereonRtkFloatMetadata *out_metadata);
+
+/**
+ * Release a combined wide-lane fixed RINEX RTK solution handle. Passing NULL is
+ * a no-op.
+ *
+ * Safety: solution is a handle from
+ * sidereon_solve_wide_lane_fixed_rinex_rtk_baseline or NULL.
+ */
+void sidereon_rtk_wide_lane_fixed_rinex_solution_free(struct SidereonRtkWideLaneFixedRinexSolution *solution);
+
+/**
+ * Copy combined wide-lane fixed RINEX RTK metadata into *out_metadata.
+ *
+ * Safety: solution is a live handle; out_metadata points to
+ * SidereonRtkWideLaneFixedRinexMetadata.
+ */
+enum SidereonStatus sidereon_rtk_wide_lane_fixed_rinex_solution_metadata(const struct SidereonRtkWideLaneFixedRinexSolution *solution,
+                                                                         struct SidereonRtkWideLaneFixedRinexMetadata *out_metadata);
+
+/**
+ * Copy wide-lane fixed ambiguity cycles from the combined RINEX RTK solution.
+ * Variable-length output contract.
+ *
+ * Safety: solution is a live handle; out points to len SidereonRtkWideLaneCycle
+ * or NULL when 0; out_written and out_required point to size_t.
+ */
+enum SidereonStatus sidereon_rtk_wide_lane_fixed_rinex_solution_wide_lane_cycles(const struct SidereonRtkWideLaneFixedRinexSolution *solution,
+                                                                                 struct SidereonRtkWideLaneCycle *out,
+                                                                                 size_t len,
+                                                                                 size_t *out_written,
+                                                                                 size_t *out_required);
 
 /**
  * Convert a 3x3 RTN covariance matrix to ECI. Delegates to
@@ -27212,6 +27577,20 @@ enum SidereonStatus sidereon_solve_static_position_sp3(const struct SidereonSp3 
                                                        struct SidereonStaticPositionSolution **out_solution);
 
 /**
+ * Solve one static RTK baseline directly from parsed RINEX OBS plus SP3. On
+ * success writes a static-arc solution handle to *out_solution. Release it with
+ * sidereon_rtk_static_arc_solution_free.
+ *
+ * Safety: sp3, base_obs, rover_obs, and config must be live handles/pointers;
+ * out_solution must point to storage for a SidereonRtkStaticArcSolution*.
+ */
+enum SidereonStatus sidereon_solve_static_rinex_rtk_baseline(const struct SidereonSp3 *sp3,
+                                                             const struct SidereonRinexObs *base_obs,
+                                                             const struct SidereonRinexObs *rover_obs,
+                                                             const struct SidereonRtkRinexStaticBaselineConfig *config,
+                                                             struct SidereonRtkStaticArcSolution **out_solution);
+
+/**
  * Solve one static float+fixed RTK baseline over a raw rover+base arc. On
  * success writes a newly owned solution handle to *out_solution. Release it
  * with sidereon_rtk_static_arc_solution_free. Delegates to
@@ -27271,6 +27650,20 @@ enum SidereonStatus sidereon_solve_velocity_broadcast(const struct SidereonBroad
                                                       double t_rx_j2000_s,
                                                       const struct SidereonVelocityOptions *options,
                                                       struct SidereonVelocitySolution **out_solution);
+
+/**
+ * Solve one static dual-frequency wide-lane fixed RTK baseline directly from
+ * parsed RINEX OBS plus SP3. Release the result with
+ * sidereon_rtk_wide_lane_fixed_rinex_solution_free.
+ *
+ * Safety: sp3, base_obs, rover_obs, and config must be live handles/pointers;
+ * out_solution must point to storage for a SidereonRtkWideLaneFixedRinexSolution*.
+ */
+enum SidereonStatus sidereon_solve_wide_lane_fixed_rinex_rtk_baseline(const struct SidereonSp3 *sp3,
+                                                                      const struct SidereonRinexObs *base_obs,
+                                                                      const struct SidereonRinexObs *rover_obs,
+                                                                      const struct SidereonRtkRinexWideLaneFixedConfig *config,
+                                                                      struct SidereonRtkWideLaneFixedRinexSolution **out_solution);
 
 /**
  * Solve a receiver position, preferring precise SP3 products and falling back to
