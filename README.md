@@ -340,7 +340,11 @@ code, and per-function ownership note) lives in `bindings/c/include/sidereon.h`.
 - **RF.** Link-budget computation.
 - **GNSS/INS fusion.** Strapdown mechanization with an error-state EKF (UKF
   option), loose and tight coupling, robust loose updates, an RTS smoother,
-  and a serializable filter state.
+  a serializable filter state, and field mode (zero-velocity and
+  zero-angular-rate updates, non-holonomic constraints, per-fix-status
+  weighting, IMU-to-body mounting matrix), all off by default.
+- **Reference-station static solve.** Rover and reference observations in, one
+  station coordinate with covariance and typed per-mode errors out.
 - **Scenario simulation.** Deterministic synthetic observables and a
   ground-truth error ledger from a versioned scenario; identical bytes for the
   same scenario and seed.
