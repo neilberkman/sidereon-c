@@ -119,6 +119,10 @@ pub struct SidereonPppFloatState {
     pub ambiguity_count: usize,
     /// Initial zenith troposphere residual in meters.
     pub ztd_m: f64,
+    /// Initial north horizontal troposphere gradient state in meters.
+    pub tropo_gradient_north_m: f64,
+    /// Initial east horizontal troposphere gradient state in meters.
+    pub tropo_gradient_east_m: f64,
 }
 
 /// PPP measurement weights. Values are inverse sigmas matching the engine.
@@ -172,6 +176,8 @@ pub struct SidereonPppTroposphereOptions {
     pub enabled: bool,
     /// Estimate zenith troposphere residual as a state component.
     pub estimate_ztd: bool,
+    /// Estimate north/east horizontal troposphere gradient states.
+    pub estimate_tropo_gradients: bool,
     /// Surface pressure in hPa.
     pub pressure_hpa: f64,
     /// Surface temperature in kelvin.
@@ -277,6 +283,10 @@ pub struct SidereonPppFloatConfig {
     pub corrections: SidereonPppRangeCorrections,
     /// Float solve options.
     pub options: SidereonPppFloatOptions,
+    /// Whether elevation_cutoff_deg is present.
+    pub has_elevation_cutoff_deg: bool,
+    /// Optional PPP observation elevation cutoff in degrees.
+    pub elevation_cutoff_deg: f64,
     /// Enable residual screening.
     pub residual_screen: bool,
 }
@@ -311,8 +321,70 @@ pub struct SidereonPppFixedConfig {
     pub corrections: SidereonPppRangeCorrections,
     /// Fixed re-solve options.
     pub options: SidereonPppFloatOptions,
+    /// Whether elevation_cutoff_deg is present.
+    pub has_elevation_cutoff_deg: bool,
+    /// Optional PPP observation elevation cutoff in degrees.
+    pub elevation_cutoff_deg: f64,
     /// Integer ambiguity controls.
     pub ambiguity: SidereonPppFixedAmbiguityOptions,
+}
+
+/// PPP position covariance outputs for static PPP solutions.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonPppPositionCovariances {
+    /// Posterior position covariance, scaled by the residual variance factor.
+    pub posterior: SidereonPositionCovariance,
+    /// Unit-variance formal position covariance.
+    pub formal: SidereonPositionCovariance,
+    /// Conservative covariance with temporal-correlation inflation applied.
+    pub temporal: SidereonPositionCovariance,
+    /// Posterior scale factor.
+    pub posterior_scale_factor: f64,
+    /// Temporal covariance scale factor.
+    pub temporal_scale_factor: f64,
+}
+
+/// Residual temporal-correlation summary used by PPP covariance inflation.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonPppTemporalCorrelation {
+    /// Whether lag1_autocorrelation is present.
+    pub has_lag1_autocorrelation: bool,
+    /// Lag-1 residual autocorrelation when present.
+    pub lag1_autocorrelation: f64,
+    /// Whether decorrelation_time_s is present.
+    pub has_decorrelation_time_s: bool,
+    /// Estimated residual decorrelation time in seconds when present.
+    pub decorrelation_time_s: f64,
+    /// Number of residual samples in the estimate.
+    pub nominal_sample_count: usize,
+    /// Effective independent sample count after AR(1) deflation.
+    pub effective_sample_count: f64,
+    /// Multiplier applied to covariance for temporal correlation.
+    pub variance_inflation_factor: f64,
+    /// Number of satellite and observable arcs used in the pooled estimate.
+    pub arcs_used: usize,
+}
+
+/// PPP north/east troposphere gradient output.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonPppTropoGradientEstimate {
+    /// Whether north_m/east_m are present.
+    pub has_gradient: bool,
+    /// North horizontal gradient in meters.
+    pub north_m: f64,
+    /// East horizontal gradient in meters.
+    pub east_m: f64,
+    /// Whether covariance_m2 is present.
+    pub has_covariance_m2: bool,
+    /// Posterior north/east covariance in row-major order, square meters.
+    pub covariance_m2: [f64; 4],
+    /// Whether formal_covariance_m2 is present.
+    pub has_formal_covariance_m2: bool,
+    /// Unit-variance north/east covariance in row-major order, square meters.
+    pub formal_covariance_m2: [f64; 4],
 }
 
 /// One PPP float ambiguity estimate in meters.
@@ -552,6 +624,101 @@ pub unsafe extern "C" fn sidereon_ppp_float_solution_position(
     )
 }
 
+/// Copy PPP float position covariance outputs into *out.
+///
+/// Safety: sol must be a live solution handle; out must point to a
+/// SidereonPppPositionCovariances.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_float_solution_position_covariances(
+    sol: *const SidereonPppFloatSolution,
+    out: *mut SidereonPppPositionCovariances,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_ppp_float_solution_position_covariances",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out,
+                "sidereon_ppp_float_solution_position_covariances",
+                "out"
+            ));
+            *out = empty_ppp_position_covariances();
+            let sol = c_try!(require_ref(
+                sol,
+                "sidereon_ppp_float_solution_position_covariances",
+                "solution"
+            ));
+            *out = ppp_float_position_covariances(&sol.inner);
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy PPP float temporal-correlation covariance metadata into *out.
+///
+/// Safety: sol must be a live solution handle; out must point to a
+/// SidereonPppTemporalCorrelation.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_float_solution_temporal_correlation(
+    sol: *const SidereonPppFloatSolution,
+    out: *mut SidereonPppTemporalCorrelation,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_ppp_float_solution_temporal_correlation",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out,
+                "sidereon_ppp_float_solution_temporal_correlation",
+                "out"
+            ));
+            *out = empty_ppp_temporal_correlation();
+            let sol = c_try!(require_ref(
+                sol,
+                "sidereon_ppp_float_solution_temporal_correlation",
+                "solution"
+            ));
+            *out = ppp_temporal_correlation_to_c(&sol.inner.temporal_correlation);
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy PPP float north/east troposphere gradient output into *out.
+///
+/// Safety: sol must be a live solution handle; out must point to a
+/// SidereonPppTropoGradientEstimate.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_float_solution_tropo_gradient(
+    sol: *const SidereonPppFloatSolution,
+    out: *mut SidereonPppTropoGradientEstimate,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_ppp_float_solution_tropo_gradient",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out,
+                "sidereon_ppp_float_solution_tropo_gradient",
+                "out"
+            ));
+            *out = empty_ppp_tropo_gradient();
+            let sol = c_try!(require_ref(
+                sol,
+                "sidereon_ppp_float_solution_tropo_gradient",
+                "solution"
+            ));
+            *out = ppp_tropo_gradient_to_c(
+                sol.inner.tropo_gradient_north_m,
+                sol.inner.tropo_gradient_east_m,
+                sol.inner.tropo_gradient_covariance_m2,
+                sol.inner.formal_tropo_gradient_covariance_m2,
+            );
+            SidereonStatus::Ok
+        },
+    )
+}
+
 /// Copy PPP float metadata into *out_metadata.
 ///
 /// Safety: sol must be a live solution handle; out_metadata must point to a
@@ -765,6 +932,101 @@ pub unsafe extern "C" fn sidereon_ppp_fixed_solution_position(
                 len,
                 &sol.inner.position_m,
             ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy PPP fixed position covariance outputs into *out.
+///
+/// Safety: sol must be a live solution handle; out must point to a
+/// SidereonPppPositionCovariances.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_fixed_solution_position_covariances(
+    sol: *const SidereonPppFixedSolution,
+    out: *mut SidereonPppPositionCovariances,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_ppp_fixed_solution_position_covariances",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out,
+                "sidereon_ppp_fixed_solution_position_covariances",
+                "out"
+            ));
+            *out = empty_ppp_position_covariances();
+            let sol = c_try!(require_ref(
+                sol,
+                "sidereon_ppp_fixed_solution_position_covariances",
+                "solution"
+            ));
+            *out = ppp_fixed_position_covariances(&sol.inner);
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy PPP fixed temporal-correlation covariance metadata into *out.
+///
+/// Safety: sol must be a live solution handle; out must point to a
+/// SidereonPppTemporalCorrelation.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_fixed_solution_temporal_correlation(
+    sol: *const SidereonPppFixedSolution,
+    out: *mut SidereonPppTemporalCorrelation,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_ppp_fixed_solution_temporal_correlation",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out,
+                "sidereon_ppp_fixed_solution_temporal_correlation",
+                "out"
+            ));
+            *out = empty_ppp_temporal_correlation();
+            let sol = c_try!(require_ref(
+                sol,
+                "sidereon_ppp_fixed_solution_temporal_correlation",
+                "solution"
+            ));
+            *out = ppp_temporal_correlation_to_c(&sol.inner.temporal_correlation);
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy PPP fixed north/east troposphere gradient output into *out.
+///
+/// Safety: sol must be a live solution handle; out must point to a
+/// SidereonPppTropoGradientEstimate.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_fixed_solution_tropo_gradient(
+    sol: *const SidereonPppFixedSolution,
+    out: *mut SidereonPppTropoGradientEstimate,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_ppp_fixed_solution_tropo_gradient",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out,
+                "sidereon_ppp_fixed_solution_tropo_gradient",
+                "out"
+            ));
+            *out = empty_ppp_tropo_gradient();
+            let sol = c_try!(require_ref(
+                sol,
+                "sidereon_ppp_fixed_solution_tropo_gradient",
+                "solution"
+            ));
+            *out = ppp_tropo_gradient_to_c(
+                sol.inner.tropo_gradient_north_m,
+                sol.inner.tropo_gradient_east_m,
+                sol.inner.tropo_gradient_covariance_m2,
+                sol.inner.formal_tropo_gradient_covariance_m2,
+            );
             SidereonStatus::Ok
         },
     )
@@ -1636,6 +1898,117 @@ fn ppp_float_metadata(solution: &PppFloatSolutionInner) -> SidereonPppFloatMetad
     }
 }
 
+fn empty_position_covariance() -> SidereonPositionCovariance {
+    SidereonPositionCovariance {
+        ecef_m2: [0.0; 9],
+        enu_m2: [0.0; 9],
+    }
+}
+
+fn position_covariance_to_c(
+    covariance: &sidereon_core::geometry::PositionCovariance,
+) -> SidereonPositionCovariance {
+    SidereonPositionCovariance {
+        ecef_m2: flatten_mat3(covariance.ecef_m2),
+        enu_m2: flatten_mat3(covariance.enu_m2),
+    }
+}
+
+fn empty_ppp_position_covariances() -> SidereonPppPositionCovariances {
+    SidereonPppPositionCovariances {
+        posterior: empty_position_covariance(),
+        formal: empty_position_covariance(),
+        temporal: empty_position_covariance(),
+        posterior_scale_factor: 0.0,
+        temporal_scale_factor: 0.0,
+    }
+}
+
+fn ppp_float_position_covariances(
+    solution: &PppFloatSolutionInner,
+) -> SidereonPppPositionCovariances {
+    SidereonPppPositionCovariances {
+        posterior: position_covariance_to_c(&solution.position_covariance),
+        formal: position_covariance_to_c(&solution.formal_position_covariance),
+        temporal: position_covariance_to_c(&solution.temporal_position_covariance),
+        posterior_scale_factor: solution.position_covariance_scale_factor,
+        temporal_scale_factor: solution.temporal_position_covariance_scale_factor,
+    }
+}
+
+fn ppp_fixed_position_covariances(
+    solution: &PppFixedSolutionInner,
+) -> SidereonPppPositionCovariances {
+    SidereonPppPositionCovariances {
+        posterior: position_covariance_to_c(&solution.position_covariance),
+        formal: position_covariance_to_c(&solution.formal_position_covariance),
+        temporal: position_covariance_to_c(&solution.temporal_position_covariance),
+        posterior_scale_factor: solution.position_covariance_scale_factor,
+        temporal_scale_factor: solution.temporal_position_covariance_scale_factor,
+    }
+}
+
+fn empty_ppp_temporal_correlation() -> SidereonPppTemporalCorrelation {
+    SidereonPppTemporalCorrelation {
+        has_lag1_autocorrelation: false,
+        lag1_autocorrelation: 0.0,
+        has_decorrelation_time_s: false,
+        decorrelation_time_s: 0.0,
+        nominal_sample_count: 0,
+        effective_sample_count: 0.0,
+        variance_inflation_factor: 0.0,
+        arcs_used: 0,
+    }
+}
+
+fn ppp_temporal_correlation_to_c(
+    temporal: &sidereon_core::precise_positioning::TemporalCorrelationSummary,
+) -> SidereonPppTemporalCorrelation {
+    SidereonPppTemporalCorrelation {
+        has_lag1_autocorrelation: true,
+        lag1_autocorrelation: temporal.lag1_autocorrelation,
+        has_decorrelation_time_s: temporal.decorrelation_time_s.is_some(),
+        decorrelation_time_s: temporal.decorrelation_time_s.unwrap_or(0.0),
+        nominal_sample_count: temporal.nominal_sample_count,
+        effective_sample_count: temporal.effective_sample_count,
+        variance_inflation_factor: temporal.variance_inflation_factor,
+        arcs_used: temporal.arcs_used,
+    }
+}
+
+fn empty_ppp_tropo_gradient() -> SidereonPppTropoGradientEstimate {
+    SidereonPppTropoGradientEstimate {
+        has_gradient: false,
+        north_m: 0.0,
+        east_m: 0.0,
+        has_covariance_m2: false,
+        covariance_m2: [0.0; 4],
+        has_formal_covariance_m2: false,
+        formal_covariance_m2: [0.0; 4],
+    }
+}
+
+fn flatten_mat2(matrix: [[f64; 2]; 2]) -> [f64; 4] {
+    [matrix[0][0], matrix[0][1], matrix[1][0], matrix[1][1]]
+}
+
+fn ppp_tropo_gradient_to_c(
+    north_m: Option<f64>,
+    east_m: Option<f64>,
+    covariance_m2: Option<[[f64; 2]; 2]>,
+    formal_covariance_m2: Option<[[f64; 2]; 2]>,
+) -> SidereonPppTropoGradientEstimate {
+    SidereonPppTropoGradientEstimate {
+        has_gradient: north_m.is_some() && east_m.is_some(),
+        north_m: north_m.unwrap_or(0.0),
+        east_m: east_m.unwrap_or(0.0),
+        has_covariance_m2: covariance_m2.is_some(),
+        covariance_m2: covariance_m2.map(flatten_mat2).unwrap_or([0.0; 4]),
+        has_formal_covariance_m2: formal_covariance_m2.is_some(),
+        formal_covariance_m2: formal_covariance_m2.map(flatten_mat2).unwrap_or([0.0; 4]),
+    }
+}
+
 fn ppp_fixed_metadata(solution: &PppFixedSolutionInner) -> SidereonPppFixedMetadata {
     SidereonPppFixedMetadata {
         iterations: solution.iterations,
@@ -1729,6 +2102,7 @@ fn default_ppp_troposphere_options() -> SidereonPppTroposphereOptions {
     SidereonPppTroposphereOptions {
         enabled: false,
         estimate_ztd: false,
+        estimate_tropo_gradients: false,
         pressure_hpa: 1013.25,
         temperature_k: 288.15,
         relative_humidity: 0.5,
@@ -2061,4 +2435,127 @@ unsafe fn ppp_code_bias_satellite_pairs_from_c(
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn core_position_covariance(offset: f64) -> sidereon_core::geometry::PositionCovariance {
+        sidereon_core::geometry::PositionCovariance {
+            ecef_m2: [
+                [1.0 + offset, 0.1 + offset, 0.2 + offset],
+                [0.3 + offset, 2.0 + offset, 0.4 + offset],
+                [0.5 + offset, 0.6 + offset, 3.0 + offset],
+            ],
+            enu_m2: [
+                [4.0 + offset, 0.7 + offset, 0.8 + offset],
+                [0.9 + offset, 5.0 + offset, 1.0 + offset],
+                [1.1 + offset, 1.2 + offset, 6.0 + offset],
+            ],
+        }
+    }
+
+    fn core_temporal() -> sidereon_core::precise_positioning::TemporalCorrelationSummary {
+        sidereon_core::precise_positioning::TemporalCorrelationSummary {
+            lag1_autocorrelation: 0.42,
+            decorrelation_time_epochs: 1.5,
+            decorrelation_time_s: Some(45.0),
+            nominal_sample_count: 18,
+            effective_sample_count: 9.5,
+            variance_inflation_factor: 1.9,
+            arcs_used: 6,
+        }
+    }
+
+    fn core_float_solution() -> PppFloatSolutionInner {
+        PppFloatSolutionInner {
+            position_m: [1.0, 2.0, 3.0],
+            position_covariance: core_position_covariance(0.0),
+            formal_position_covariance: core_position_covariance(10.0),
+            posterior_variance_factor: 2.5,
+            position_covariance_scale_factor: 2.5,
+            temporal_position_covariance: core_position_covariance(20.0),
+            temporal_position_covariance_scale_factor: 4.75,
+            temporal_correlation: core_temporal(),
+            epoch_clocks_m: vec![0.0],
+            ambiguities_m: BTreeMap::new(),
+            residual_ionosphere_m: BTreeMap::new(),
+            ztd_residual_m: None,
+            tropo_gradient_north_m: Some(0.012),
+            tropo_gradient_east_m: Some(-0.034),
+            tropo_gradient_covariance_m2: Some([[0.1, 0.02], [0.02, 0.2]]),
+            formal_tropo_gradient_covariance_m2: Some([[0.3, 0.04], [0.04, 0.4]]),
+            residuals_m: Vec::new(),
+            used_sats: Vec::new(),
+            iterations: 3,
+            converged: true,
+            status: PppFloatStatus::StateTolerance,
+            code_rms_m: 0.0,
+            phase_rms_m: 0.0,
+            weighted_rms_m: 0.0,
+        }
+    }
+
+    #[test]
+    fn ppp_covariance_temporal_and_gradient_accessors_match_core_fields() {
+        let inner = core_float_solution();
+        let solution = SidereonPppFloatSolution {
+            inner: inner.clone(),
+        };
+
+        let mut covariances = empty_ppp_position_covariances();
+        let status = unsafe {
+            sidereon_ppp_float_solution_position_covariances(&solution, &mut covariances)
+        };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert_eq!(
+            covariances.posterior.ecef_m2,
+            flatten_mat3(inner.position_covariance.ecef_m2)
+        );
+        assert_eq!(
+            covariances.formal.enu_m2,
+            flatten_mat3(inner.formal_position_covariance.enu_m2)
+        );
+        assert_eq!(
+            covariances.temporal.ecef_m2,
+            flatten_mat3(inner.temporal_position_covariance.ecef_m2)
+        );
+        assert_eq!(
+            covariances.posterior_scale_factor,
+            inner.position_covariance_scale_factor
+        );
+        assert_eq!(
+            covariances.temporal_scale_factor,
+            inner.temporal_position_covariance_scale_factor
+        );
+
+        let mut temporal = empty_ppp_temporal_correlation();
+        let status =
+            unsafe { sidereon_ppp_float_solution_temporal_correlation(&solution, &mut temporal) };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert!(temporal.has_lag1_autocorrelation);
+        assert_eq!(
+            temporal.lag1_autocorrelation,
+            inner.temporal_correlation.lag1_autocorrelation
+        );
+        assert!(temporal.has_decorrelation_time_s);
+        assert_eq!(temporal.decorrelation_time_s, 45.0);
+        assert_eq!(temporal.nominal_sample_count, 18);
+        assert_eq!(temporal.effective_sample_count, 9.5);
+        assert_eq!(temporal.variance_inflation_factor, 1.9);
+        assert_eq!(temporal.arcs_used, 6);
+
+        let mut gradient = empty_ppp_tropo_gradient();
+        let status =
+            unsafe { sidereon_ppp_float_solution_tropo_gradient(&solution, &mut gradient) };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert!(gradient.has_gradient);
+        assert_eq!(gradient.north_m, 0.012);
+        assert_eq!(gradient.east_m, -0.034);
+        assert!(gradient.has_covariance_m2);
+        assert_eq!(gradient.covariance_m2, [0.1, 0.02, 0.02, 0.2]);
+        assert!(gradient.has_formal_covariance_m2);
+        assert_eq!(gradient.formal_covariance_m2, [0.3, 0.04, 0.04, 0.4]);
+    }
 }

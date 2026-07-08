@@ -45,9 +45,9 @@
 #include <stdlib.h>
 
 #define SIDEREON_VERSION_MAJOR 0
-#define SIDEREON_VERSION_MINOR 22
+#define SIDEREON_VERSION_MINOR 23
 #define SIDEREON_VERSION_PATCH 0
-#define SIDEREON_VERSION_STRING "0.22.0"
+#define SIDEREON_VERSION_STRING "0.23.0"
 
 #define BIAS_OBS_C_BYTES (MAX_BIAS_OBS_BYTES + 1)
 
@@ -628,6 +628,22 @@ typedef enum SidereonRtcmMessageKind {
      * A recognized-but-undecoded message, preserved verbatim.
      */
     SIDEREON_RTCM_MESSAGE_KIND_UNSUPPORTED = 6,
+    /**
+     * A 1042 BeiDou broadcast ephemeris.
+     */
+    SIDEREON_RTCM_MESSAGE_KIND_BEIDOU_EPHEMERIS = 7,
+    /**
+     * A 1044 QZSS broadcast ephemeris.
+     */
+    SIDEREON_RTCM_MESSAGE_KIND_QZSS_EPHEMERIS = 8,
+    /**
+     * A 1045 Galileo F/NAV broadcast ephemeris.
+     */
+    SIDEREON_RTCM_MESSAGE_KIND_GALILEO_FNAV_EPHEMERIS = 9,
+    /**
+     * A 1046 Galileo I/NAV broadcast ephemeris.
+     */
+    SIDEREON_RTCM_MESSAGE_KIND_GALILEO_INAV_EPHEMERIS = 10,
 } SidereonRtcmMessageKind;
 
 typedef enum SidereonRtcmSsrKind {
@@ -10262,6 +10278,104 @@ typedef struct SidereonPppFixedMetadata {
 } SidereonPppFixedMetadata;
 
 /**
+ * PPP position covariance outputs for static PPP solutions.
+ */
+typedef struct SidereonPppPositionCovariances {
+    /**
+     * Posterior position covariance, scaled by the residual variance factor.
+     */
+    struct SidereonPositionCovariance posterior;
+    /**
+     * Unit-variance formal position covariance.
+     */
+    struct SidereonPositionCovariance formal;
+    /**
+     * Conservative covariance with temporal-correlation inflation applied.
+     */
+    struct SidereonPositionCovariance temporal;
+    /**
+     * Posterior scale factor.
+     */
+    double posterior_scale_factor;
+    /**
+     * Temporal covariance scale factor.
+     */
+    double temporal_scale_factor;
+} SidereonPppPositionCovariances;
+
+/**
+ * Residual temporal-correlation summary used by PPP covariance inflation.
+ */
+typedef struct SidereonPppTemporalCorrelation {
+    /**
+     * Whether lag1_autocorrelation is present.
+     */
+    bool has_lag1_autocorrelation;
+    /**
+     * Lag-1 residual autocorrelation when present.
+     */
+    double lag1_autocorrelation;
+    /**
+     * Whether decorrelation_time_s is present.
+     */
+    bool has_decorrelation_time_s;
+    /**
+     * Estimated residual decorrelation time in seconds when present.
+     */
+    double decorrelation_time_s;
+    /**
+     * Number of residual samples in the estimate.
+     */
+    size_t nominal_sample_count;
+    /**
+     * Effective independent sample count after AR(1) deflation.
+     */
+    double effective_sample_count;
+    /**
+     * Multiplier applied to covariance for temporal correlation.
+     */
+    double variance_inflation_factor;
+    /**
+     * Number of satellite and observable arcs used in the pooled estimate.
+     */
+    size_t arcs_used;
+} SidereonPppTemporalCorrelation;
+
+/**
+ * PPP north/east troposphere gradient output.
+ */
+typedef struct SidereonPppTropoGradientEstimate {
+    /**
+     * Whether north_m/east_m are present.
+     */
+    bool has_gradient;
+    /**
+     * North horizontal gradient in meters.
+     */
+    double north_m;
+    /**
+     * East horizontal gradient in meters.
+     */
+    double east_m;
+    /**
+     * Whether covariance_m2 is present.
+     */
+    bool has_covariance_m2;
+    /**
+     * Posterior north/east covariance in row-major order, square meters.
+     */
+    double covariance_m2[4];
+    /**
+     * Whether formal_covariance_m2 is present.
+     */
+    bool has_formal_covariance_m2;
+    /**
+     * Unit-variance north/east covariance in row-major order, square meters.
+     */
+    double formal_covariance_m2[4];
+} SidereonPppTropoGradientEstimate;
+
+/**
  * PPP iteration and convergence controls.
  */
 typedef struct SidereonPppFloatOptions {
@@ -10548,6 +10662,10 @@ typedef struct SidereonPppTroposphereOptions {
      * Estimate zenith troposphere residual as a state component.
      */
     bool estimate_ztd;
+    /**
+     * Estimate north/east horizontal troposphere gradient states.
+     */
+    bool estimate_tropo_gradients;
     /**
      * Surface pressure in hPa.
      */
@@ -11745,6 +11863,117 @@ typedef struct SidereonRinexRepairOptions {
 } SidereonRinexRepairOptions;
 
 /**
+ * A decoded 1042 BeiDou broadcast ephemeris, mirroring
+ * sidereon_core::rtcm::BeidouEphemeris. Every field is the raw transmitted
+ * integer.
+ */
+typedef struct SidereonRtcmBeidouEphemeris {
+    uint8_t satellite_id;
+    uint16_t week_number;
+    uint8_t sv_urai;
+    int32_t idot;
+    uint8_t aode;
+    uint32_t t_oc;
+    int16_t a_f2;
+    int32_t a_f1;
+    int32_t a_f0;
+    uint8_t aodc;
+    int32_t c_rs;
+    int32_t delta_n;
+    int64_t m0;
+    int32_t c_uc;
+    uint64_t eccentricity;
+    int32_t c_us;
+    uint64_t sqrt_a;
+    uint32_t t_oe;
+    int32_t c_ic;
+    int64_t omega0;
+    int32_t c_is;
+    int64_t i0;
+    int32_t c_rc;
+    int64_t omega;
+    int32_t omega_dot;
+    int16_t t_gd1;
+    int16_t t_gd2;
+    bool sv_health;
+} SidereonRtcmBeidouEphemeris;
+
+/**
+ * A decoded 1045 Galileo F/NAV broadcast ephemeris, mirroring
+ * sidereon_core::rtcm::GalileoFnavEphemeris. Every field is the raw
+ * transmitted integer.
+ */
+typedef struct SidereonRtcmGalileoFnavEphemeris {
+    uint8_t satellite_id;
+    uint16_t week_number;
+    uint16_t iod_nav;
+    uint8_t sisa;
+    int32_t idot;
+    uint16_t t_oc;
+    int16_t a_f2;
+    int32_t a_f1;
+    int64_t a_f0;
+    int32_t c_rs;
+    int32_t delta_n;
+    int64_t m0;
+    int32_t c_uc;
+    uint64_t eccentricity;
+    int32_t c_us;
+    uint64_t sqrt_a;
+    uint16_t t_oe;
+    int32_t c_ic;
+    int64_t omega0;
+    int32_t c_is;
+    int64_t i0;
+    int32_t c_rc;
+    int64_t omega;
+    int32_t omega_dot;
+    int16_t bgd_e5a_e1;
+    uint8_t e5a_signal_health;
+    bool e5a_data_validity;
+    uint8_t reserved;
+} SidereonRtcmGalileoFnavEphemeris;
+
+/**
+ * A decoded 1046 Galileo I/NAV broadcast ephemeris, mirroring
+ * sidereon_core::rtcm::GalileoInavEphemeris. Every field is the raw
+ * transmitted integer.
+ */
+typedef struct SidereonRtcmGalileoInavEphemeris {
+    uint8_t satellite_id;
+    uint16_t week_number;
+    uint16_t iod_nav;
+    uint8_t sisa_index;
+    int32_t idot;
+    uint16_t t_oc;
+    int16_t a_f2;
+    int32_t a_f1;
+    int64_t a_f0;
+    int32_t c_rs;
+    int32_t delta_n;
+    int64_t m0;
+    int32_t c_uc;
+    uint64_t eccentricity;
+    int32_t c_us;
+    uint64_t sqrt_a;
+    uint16_t t_oe;
+    int32_t c_ic;
+    int64_t omega0;
+    int32_t c_is;
+    int64_t i0;
+    int32_t c_rc;
+    int64_t omega;
+    int32_t omega_dot;
+    int16_t bgd_e5a_e1;
+    int16_t bgd_e5b_e1;
+    uint8_t e5b_signal_health;
+    bool e5b_data_validity;
+    uint8_t e1b_signal_health;
+    bool e1b_data_validity;
+    uint8_t reserved;
+} SidereonRtcmGalileoInavEphemeris;
+
+/**
  * A decoded 1020 GLONASS broadcast ephemeris, mirroring
  * sidereon_core::rtcm::GlonassEphemeris. Every field is the raw transmitted
  * integer.
@@ -12172,6 +12401,43 @@ typedef struct SidereonRtcmMsmSignal {
      */
     int16_t fine_phase_range_rate;
 } SidereonRtcmMsmSignal;
+
+/**
+ * A decoded 1044 QZSS broadcast ephemeris, mirroring
+ * sidereon_core::rtcm::QzssEphemeris. Every field is the raw transmitted
+ * integer.
+ */
+typedef struct SidereonRtcmQzssEphemeris {
+    uint8_t satellite_id;
+    uint16_t t_oc;
+    int16_t a_f2;
+    int32_t a_f1;
+    int32_t a_f0;
+    uint8_t iode;
+    int32_t c_rs;
+    int32_t delta_n;
+    int64_t m0;
+    int32_t c_uc;
+    uint64_t eccentricity;
+    int32_t c_us;
+    uint64_t sqrt_a;
+    uint16_t t_oe;
+    int32_t c_ic;
+    int64_t omega0;
+    int32_t c_is;
+    int64_t i0;
+    int32_t c_rc;
+    int64_t omega;
+    int32_t omega_dot;
+    int32_t idot;
+    uint8_t codes_on_l2;
+    uint16_t week_number;
+    uint8_t ura;
+    uint8_t sv_health;
+    int16_t t_gd;
+    uint16_t iodc;
+    bool fit_interval;
+} SidereonRtcmQzssEphemeris;
 
 /**
  * A decoded 1005 / 1006 station antenna reference point, mirroring
@@ -14981,6 +15247,14 @@ typedef struct SidereonPppFloatState {
      * Initial zenith troposphere residual in meters.
      */
     double ztd_m;
+    /**
+     * Initial north horizontal troposphere gradient state in meters.
+     */
+    double tropo_gradient_north_m;
+    /**
+     * Initial east horizontal troposphere gradient state in meters.
+     */
+    double tropo_gradient_east_m;
 } SidereonPppFloatState;
 
 /**
@@ -15016,6 +15290,14 @@ typedef struct SidereonPppFloatConfig {
      */
     struct SidereonPppFloatOptions options;
     /**
+     * Whether elevation_cutoff_deg is present.
+     */
+    bool has_elevation_cutoff_deg;
+    /**
+     * Optional PPP observation elevation cutoff in degrees.
+     */
+    double elevation_cutoff_deg;
+    /**
      * Enable residual screening.
      */
     bool residual_screen;
@@ -15049,6 +15331,14 @@ typedef struct SidereonPppFixedConfig {
      * Fixed re-solve options.
      */
     struct SidereonPppFloatOptions options;
+    /**
+     * Whether elevation_cutoff_deg is present.
+     */
+    bool has_elevation_cutoff_deg;
+    /**
+     * Optional PPP observation elevation cutoff in degrees.
+     */
+    double elevation_cutoff_deg;
     /**
      * Integer ambiguity controls.
      */
@@ -23566,6 +23856,33 @@ enum SidereonStatus sidereon_ppp_fixed_solution_position(const struct SidereonPp
                                                          size_t len);
 
 /**
+ * Copy PPP fixed position covariance outputs into *out.
+ *
+ * Safety: sol must be a live solution handle; out must point to a
+ * SidereonPppPositionCovariances.
+ */
+enum SidereonStatus sidereon_ppp_fixed_solution_position_covariances(const struct SidereonPppFixedSolution *sol,
+                                                                     struct SidereonPppPositionCovariances *out);
+
+/**
+ * Copy PPP fixed temporal-correlation covariance metadata into *out.
+ *
+ * Safety: sol must be a live solution handle; out must point to a
+ * SidereonPppTemporalCorrelation.
+ */
+enum SidereonStatus sidereon_ppp_fixed_solution_temporal_correlation(const struct SidereonPppFixedSolution *sol,
+                                                                     struct SidereonPppTemporalCorrelation *out);
+
+/**
+ * Copy PPP fixed north/east troposphere gradient output into *out.
+ *
+ * Safety: sol must be a live solution handle; out must point to a
+ * SidereonPppTropoGradientEstimate.
+ */
+enum SidereonStatus sidereon_ppp_fixed_solution_tropo_gradient(const struct SidereonPppFixedSolution *sol,
+                                                               struct SidereonPppTropoGradientEstimate *out);
+
+/**
  * Copy used PPP ids from a PPP fixed solution into 65-byte SidereonPppId
  * tokens. Uses the variable-length output contract documented at the top of
  * the header.
@@ -23646,6 +23963,33 @@ enum SidereonStatus sidereon_ppp_float_solution_metadata(const struct SidereonPp
 enum SidereonStatus sidereon_ppp_float_solution_position(const struct SidereonPppFloatSolution *sol,
                                                          double *out_xyz,
                                                          size_t len);
+
+/**
+ * Copy PPP float position covariance outputs into *out.
+ *
+ * Safety: sol must be a live solution handle; out must point to a
+ * SidereonPppPositionCovariances.
+ */
+enum SidereonStatus sidereon_ppp_float_solution_position_covariances(const struct SidereonPppFloatSolution *sol,
+                                                                     struct SidereonPppPositionCovariances *out);
+
+/**
+ * Copy PPP float temporal-correlation covariance metadata into *out.
+ *
+ * Safety: sol must be a live solution handle; out must point to a
+ * SidereonPppTemporalCorrelation.
+ */
+enum SidereonStatus sidereon_ppp_float_solution_temporal_correlation(const struct SidereonPppFloatSolution *sol,
+                                                                     struct SidereonPppTemporalCorrelation *out);
+
+/**
+ * Copy PPP float north/east troposphere gradient output into *out.
+ *
+ * Safety: sol must be a live solution handle; out must point to a
+ * SidereonPppTropoGradientEstimate.
+ */
+enum SidereonStatus sidereon_ppp_float_solution_tropo_gradient(const struct SidereonPppFloatSolution *sol,
+                                                               struct SidereonPppTropoGradientEstimate *out);
 
 /**
  * Copy used PPP ids from a PPP float solution into 65-byte SidereonPppId
@@ -25046,6 +25390,39 @@ enum SidereonStatus sidereon_rtcm_build_antenna_descriptor(uint16_t message_numb
                                                            struct SidereonRtcmMessages **out_messages);
 
 /**
+ * Build a 1042 BeiDou broadcast ephemeris message from raw transmitted-integer
+ * fields and wrap it in a single-element SidereonRtcmMessages handle. Release
+ * with sidereon_rtcm_messages_free.
+ *
+ * Safety: eph points to a SidereonRtcmBeidouEphemeris; out_messages to a
+ * SidereonRtcmMessages*.
+ */
+enum SidereonStatus sidereon_rtcm_build_beidou_ephemeris(const struct SidereonRtcmBeidouEphemeris *eph,
+                                                         struct SidereonRtcmMessages **out_messages);
+
+/**
+ * Build a 1045 Galileo F/NAV broadcast ephemeris message from raw
+ * transmitted-integer fields and wrap it in a single-element
+ * SidereonRtcmMessages handle. Release with sidereon_rtcm_messages_free.
+ *
+ * Safety: eph points to a SidereonRtcmGalileoFnavEphemeris; out_messages to a
+ * SidereonRtcmMessages*.
+ */
+enum SidereonStatus sidereon_rtcm_build_galileo_fnav_ephemeris(const struct SidereonRtcmGalileoFnavEphemeris *eph,
+                                                               struct SidereonRtcmMessages **out_messages);
+
+/**
+ * Build a 1046 Galileo I/NAV broadcast ephemeris message from raw
+ * transmitted-integer fields and wrap it in a single-element
+ * SidereonRtcmMessages handle. Release with sidereon_rtcm_messages_free.
+ *
+ * Safety: eph points to a SidereonRtcmGalileoInavEphemeris; out_messages to a
+ * SidereonRtcmMessages*.
+ */
+enum SidereonStatus sidereon_rtcm_build_galileo_inav_ephemeris(const struct SidereonRtcmGalileoInavEphemeris *eph,
+                                                               struct SidereonRtcmMessages **out_messages);
+
+/**
  * Build a 1020 GLONASS broadcast ephemeris message from raw transmitted-integer
  * fields and wrap it in a single-element SidereonRtcmMessages handle. Release
  * with sidereon_rtcm_messages_free.
@@ -25084,6 +25461,17 @@ enum SidereonStatus sidereon_rtcm_build_msm(const struct SidereonRtcmMsmInfo *in
                                             const struct SidereonRtcmMsmSignal *signals,
                                             size_t signal_count,
                                             struct SidereonRtcmMessages **out_messages);
+
+/**
+ * Build a 1044 QZSS broadcast ephemeris message from raw transmitted-integer
+ * fields and wrap it in a single-element SidereonRtcmMessages handle. Release
+ * with sidereon_rtcm_messages_free.
+ *
+ * Safety: eph points to a SidereonRtcmQzssEphemeris; out_messages to a
+ * SidereonRtcmMessages*.
+ */
+enum SidereonStatus sidereon_rtcm_build_qzss_ephemeris(const struct SidereonRtcmQzssEphemeris *eph,
+                                                       struct SidereonRtcmMessages **out_messages);
 
 /**
  * Build a 1005 / 1006 station antenna reference point message from fields and
@@ -25285,6 +25673,15 @@ enum SidereonStatus sidereon_rtcm_message_antenna_string(const struct SidereonRt
                                                          size_t *out_required);
 
 /**
+ * Copy a decoded 1042 BeiDou broadcast ephemeris into *out.
+ *
+ * Safety: messages is a live handle; out points to a SidereonRtcmBeidouEphemeris.
+ */
+enum SidereonStatus sidereon_rtcm_message_beidou_ephemeris(const struct SidereonRtcmMessages *messages,
+                                                           size_t index,
+                                                           struct SidereonRtcmBeidouEphemeris *out);
+
+/**
  * Encode one decoded message back into its RTCM body (without the transport
  * frame). Variable-length output contract. Delegates to
  * sidereon_core::rtcm::Message::encode.
@@ -25298,6 +25695,26 @@ enum SidereonStatus sidereon_rtcm_message_encode(const struct SidereonRtcmMessag
                                                  size_t len,
                                                  size_t *out_written,
                                                  size_t *out_required);
+
+/**
+ * Copy a decoded 1045 Galileo F/NAV broadcast ephemeris into *out.
+ *
+ * Safety: messages is a live handle; out points to a
+ * SidereonRtcmGalileoFnavEphemeris.
+ */
+enum SidereonStatus sidereon_rtcm_message_galileo_fnav_ephemeris(const struct SidereonRtcmMessages *messages,
+                                                                 size_t index,
+                                                                 struct SidereonRtcmGalileoFnavEphemeris *out);
+
+/**
+ * Copy a decoded 1046 Galileo I/NAV broadcast ephemeris into *out.
+ *
+ * Safety: messages is a live handle; out points to a
+ * SidereonRtcmGalileoInavEphemeris.
+ */
+enum SidereonStatus sidereon_rtcm_message_galileo_inav_ephemeris(const struct SidereonRtcmMessages *messages,
+                                                                 size_t index,
+                                                                 struct SidereonRtcmGalileoInavEphemeris *out);
 
 /**
  * Copy a decoded 1020 GLONASS broadcast ephemeris into *out.
@@ -25368,6 +25785,15 @@ enum SidereonStatus sidereon_rtcm_message_msm_signals(const struct SidereonRtcmM
                                                       size_t len,
                                                       size_t *out_written,
                                                       size_t *out_required);
+
+/**
+ * Copy a decoded 1044 QZSS broadcast ephemeris into *out.
+ *
+ * Safety: messages is a live handle; out points to a SidereonRtcmQzssEphemeris.
+ */
+enum SidereonStatus sidereon_rtcm_message_qzss_ephemeris(const struct SidereonRtcmMessages *messages,
+                                                         size_t index,
+                                                         struct SidereonRtcmQzssEphemeris *out);
 
 enum SidereonStatus sidereon_rtcm_message_ssr_clocks(const struct SidereonRtcmMessages *messages,
                                                      size_t index,

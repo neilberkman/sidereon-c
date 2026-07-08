@@ -46,6 +46,14 @@ pub enum SidereonRtcmMessageKind {
     Ssr = 5,
     /// A recognized-but-undecoded message, preserved verbatim.
     Unsupported = 6,
+    /// A 1042 BeiDou broadcast ephemeris.
+    BeidouEphemeris = 7,
+    /// A 1044 QZSS broadcast ephemeris.
+    QzssEphemeris = 8,
+    /// A 1045 Galileo F/NAV broadcast ephemeris.
+    GalileoFnavEphemeris = 9,
+    /// A 1046 Galileo I/NAV broadcast ephemeris.
+    GalileoInavEphemeris = 10,
 }
 
 /// Which MSM variant an observation message is, mirroring
@@ -346,6 +354,154 @@ pub struct SidereonRtcmGpsEphemeris {
     /// L2 P-data flag.
     pub l2_p_data_flag: bool,
     /// Fit-interval flag.
+    pub fit_interval: bool,
+}
+
+/// A decoded 1045 Galileo F/NAV broadcast ephemeris, mirroring
+/// sidereon_core::rtcm::GalileoFnavEphemeris. Every field is the raw
+/// transmitted integer.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonRtcmGalileoFnavEphemeris {
+    pub satellite_id: u8,
+    pub week_number: u16,
+    pub iod_nav: u16,
+    pub sisa: u8,
+    pub idot: i32,
+    pub t_oc: u16,
+    pub a_f2: i16,
+    pub a_f1: i32,
+    pub a_f0: i64,
+    pub c_rs: i32,
+    pub delta_n: i32,
+    pub m0: i64,
+    pub c_uc: i32,
+    pub eccentricity: u64,
+    pub c_us: i32,
+    pub sqrt_a: u64,
+    pub t_oe: u16,
+    pub c_ic: i32,
+    pub omega0: i64,
+    pub c_is: i32,
+    pub i0: i64,
+    pub c_rc: i32,
+    pub omega: i64,
+    pub omega_dot: i32,
+    pub bgd_e5a_e1: i16,
+    pub e5a_signal_health: u8,
+    pub e5a_data_validity: bool,
+    pub reserved: u8,
+}
+
+/// A decoded 1046 Galileo I/NAV broadcast ephemeris, mirroring
+/// sidereon_core::rtcm::GalileoInavEphemeris. Every field is the raw
+/// transmitted integer.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonRtcmGalileoInavEphemeris {
+    pub satellite_id: u8,
+    pub week_number: u16,
+    pub iod_nav: u16,
+    pub sisa_index: u8,
+    pub idot: i32,
+    pub t_oc: u16,
+    pub a_f2: i16,
+    pub a_f1: i32,
+    pub a_f0: i64,
+    pub c_rs: i32,
+    pub delta_n: i32,
+    pub m0: i64,
+    pub c_uc: i32,
+    pub eccentricity: u64,
+    pub c_us: i32,
+    pub sqrt_a: u64,
+    pub t_oe: u16,
+    pub c_ic: i32,
+    pub omega0: i64,
+    pub c_is: i32,
+    pub i0: i64,
+    pub c_rc: i32,
+    pub omega: i64,
+    pub omega_dot: i32,
+    pub bgd_e5a_e1: i16,
+    pub bgd_e5b_e1: i16,
+    pub e5b_signal_health: u8,
+    pub e5b_data_validity: bool,
+    pub e1b_signal_health: u8,
+    pub e1b_data_validity: bool,
+    pub reserved: u8,
+}
+
+/// A decoded 1042 BeiDou broadcast ephemeris, mirroring
+/// sidereon_core::rtcm::BeidouEphemeris. Every field is the raw transmitted
+/// integer.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonRtcmBeidouEphemeris {
+    pub satellite_id: u8,
+    pub week_number: u16,
+    pub sv_urai: u8,
+    pub idot: i32,
+    pub aode: u8,
+    pub t_oc: u32,
+    pub a_f2: i16,
+    pub a_f1: i32,
+    pub a_f0: i32,
+    pub aodc: u8,
+    pub c_rs: i32,
+    pub delta_n: i32,
+    pub m0: i64,
+    pub c_uc: i32,
+    pub eccentricity: u64,
+    pub c_us: i32,
+    pub sqrt_a: u64,
+    pub t_oe: u32,
+    pub c_ic: i32,
+    pub omega0: i64,
+    pub c_is: i32,
+    pub i0: i64,
+    pub c_rc: i32,
+    pub omega: i64,
+    pub omega_dot: i32,
+    pub t_gd1: i16,
+    pub t_gd2: i16,
+    pub sv_health: bool,
+}
+
+/// A decoded 1044 QZSS broadcast ephemeris, mirroring
+/// sidereon_core::rtcm::QzssEphemeris. Every field is the raw transmitted
+/// integer.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonRtcmQzssEphemeris {
+    pub satellite_id: u8,
+    pub t_oc: u16,
+    pub a_f2: i16,
+    pub a_f1: i32,
+    pub a_f0: i32,
+    pub iode: u8,
+    pub c_rs: i32,
+    pub delta_n: i32,
+    pub m0: i64,
+    pub c_uc: i32,
+    pub eccentricity: u64,
+    pub c_us: i32,
+    pub sqrt_a: u64,
+    pub t_oe: u16,
+    pub c_ic: i32,
+    pub omega0: i64,
+    pub c_is: i32,
+    pub i0: i64,
+    pub c_rc: i32,
+    pub omega: i64,
+    pub omega_dot: i32,
+    pub idot: i32,
+    pub codes_on_l2: u8,
+    pub week_number: u16,
+    pub ura: u8,
+    pub sv_health: u8,
+    pub t_gd: i16,
+    pub iodc: u16,
     pub fit_interval: bool,
 }
 
@@ -1439,6 +1595,153 @@ pub unsafe extern "C" fn sidereon_rtcm_message_glonass_ephemeris(
     )
 }
 
+/// Copy a decoded 1042 BeiDou broadcast ephemeris into *out.
+///
+/// Safety: messages is a live handle; out points to a SidereonRtcmBeidouEphemeris.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtcm_message_beidou_ephemeris(
+    messages: *const SidereonRtcmMessages,
+    index: usize,
+    out: *mut SidereonRtcmBeidouEphemeris,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtcm_message_beidou_ephemeris",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out,
+                "sidereon_rtcm_message_beidou_ephemeris",
+                "out"
+            ));
+            let message = c_try!(rtcm_message_at(
+                "sidereon_rtcm_message_beidou_ephemeris",
+                messages,
+                index
+            ));
+            match message {
+                RtcmMessage::BeidouEphemeris(eph) => {
+                    *out = rtcm_beidou_ephemeris_to_c(eph);
+                    SidereonStatus::Ok
+                }
+                _ => rtcm_wrong_kind(
+                    "sidereon_rtcm_message_beidou_ephemeris",
+                    "a BeiDou ephemeris",
+                ),
+            }
+        },
+    )
+}
+
+/// Copy a decoded 1044 QZSS broadcast ephemeris into *out.
+///
+/// Safety: messages is a live handle; out points to a SidereonRtcmQzssEphemeris.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtcm_message_qzss_ephemeris(
+    messages: *const SidereonRtcmMessages,
+    index: usize,
+    out: *mut SidereonRtcmQzssEphemeris,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtcm_message_qzss_ephemeris",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out,
+                "sidereon_rtcm_message_qzss_ephemeris",
+                "out"
+            ));
+            let message = c_try!(rtcm_message_at(
+                "sidereon_rtcm_message_qzss_ephemeris",
+                messages,
+                index
+            ));
+            match message {
+                RtcmMessage::QzssEphemeris(eph) => {
+                    *out = rtcm_qzss_ephemeris_to_c(eph);
+                    SidereonStatus::Ok
+                }
+                _ => rtcm_wrong_kind("sidereon_rtcm_message_qzss_ephemeris", "a QZSS ephemeris"),
+            }
+        },
+    )
+}
+
+/// Copy a decoded 1045 Galileo F/NAV broadcast ephemeris into *out.
+///
+/// Safety: messages is a live handle; out points to a
+/// SidereonRtcmGalileoFnavEphemeris.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtcm_message_galileo_fnav_ephemeris(
+    messages: *const SidereonRtcmMessages,
+    index: usize,
+    out: *mut SidereonRtcmGalileoFnavEphemeris,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtcm_message_galileo_fnav_ephemeris",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out,
+                "sidereon_rtcm_message_galileo_fnav_ephemeris",
+                "out"
+            ));
+            let message = c_try!(rtcm_message_at(
+                "sidereon_rtcm_message_galileo_fnav_ephemeris",
+                messages,
+                index
+            ));
+            match message {
+                RtcmMessage::GalileoFnavEphemeris(eph) => {
+                    *out = rtcm_galileo_fnav_ephemeris_to_c(eph);
+                    SidereonStatus::Ok
+                }
+                _ => rtcm_wrong_kind(
+                    "sidereon_rtcm_message_galileo_fnav_ephemeris",
+                    "a Galileo F/NAV ephemeris",
+                ),
+            }
+        },
+    )
+}
+
+/// Copy a decoded 1046 Galileo I/NAV broadcast ephemeris into *out.
+///
+/// Safety: messages is a live handle; out points to a
+/// SidereonRtcmGalileoInavEphemeris.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtcm_message_galileo_inav_ephemeris(
+    messages: *const SidereonRtcmMessages,
+    index: usize,
+    out: *mut SidereonRtcmGalileoInavEphemeris,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtcm_message_galileo_inav_ephemeris",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out,
+                "sidereon_rtcm_message_galileo_inav_ephemeris",
+                "out"
+            ));
+            let message = c_try!(rtcm_message_at(
+                "sidereon_rtcm_message_galileo_inav_ephemeris",
+                messages,
+                index
+            ));
+            match message {
+                RtcmMessage::GalileoInavEphemeris(eph) => {
+                    *out = rtcm_galileo_inav_ephemeris_to_c(eph);
+                    SidereonStatus::Ok
+                }
+                _ => rtcm_wrong_kind(
+                    "sidereon_rtcm_message_galileo_inav_ephemeris",
+                    "a Galileo I/NAV ephemeris",
+                ),
+            }
+        },
+    )
+}
+
 /// Encode one decoded message back into its RTCM body (without the transport
 /// frame). Variable-length output contract. Delegates to
 /// sidereon_core::rtcm::Message::encode.
@@ -2186,6 +2489,146 @@ pub unsafe extern "C" fn sidereon_rtcm_build_glonass_ephemeris(
     )
 }
 
+/// Build a 1042 BeiDou broadcast ephemeris message from raw transmitted-integer
+/// fields and wrap it in a single-element SidereonRtcmMessages handle. Release
+/// with sidereon_rtcm_messages_free.
+///
+/// Safety: eph points to a SidereonRtcmBeidouEphemeris; out_messages to a
+/// SidereonRtcmMessages*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtcm_build_beidou_ephemeris(
+    eph: *const SidereonRtcmBeidouEphemeris,
+    out_messages: *mut *mut SidereonRtcmMessages,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtcm_build_beidou_ephemeris",
+        SidereonStatus::Panic,
+        || {
+            let out_messages = c_try!(require_out(
+                out_messages,
+                "sidereon_rtcm_build_beidou_ephemeris",
+                "out_messages"
+            ));
+            *out_messages = ptr::null_mut();
+            let eph = c_try!(require_ref(
+                eph,
+                "sidereon_rtcm_build_beidou_ephemeris",
+                "eph"
+            ));
+            rtcm_build(
+                out_messages,
+                RtcmMessage::BeidouEphemeris(rtcm_beidou_ephemeris_from_c(eph)),
+            );
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Build a 1044 QZSS broadcast ephemeris message from raw transmitted-integer
+/// fields and wrap it in a single-element SidereonRtcmMessages handle. Release
+/// with sidereon_rtcm_messages_free.
+///
+/// Safety: eph points to a SidereonRtcmQzssEphemeris; out_messages to a
+/// SidereonRtcmMessages*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtcm_build_qzss_ephemeris(
+    eph: *const SidereonRtcmQzssEphemeris,
+    out_messages: *mut *mut SidereonRtcmMessages,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtcm_build_qzss_ephemeris",
+        SidereonStatus::Panic,
+        || {
+            let out_messages = c_try!(require_out(
+                out_messages,
+                "sidereon_rtcm_build_qzss_ephemeris",
+                "out_messages"
+            ));
+            *out_messages = ptr::null_mut();
+            let eph = c_try!(require_ref(
+                eph,
+                "sidereon_rtcm_build_qzss_ephemeris",
+                "eph"
+            ));
+            rtcm_build(
+                out_messages,
+                RtcmMessage::QzssEphemeris(rtcm_qzss_ephemeris_from_c(eph)),
+            );
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Build a 1045 Galileo F/NAV broadcast ephemeris message from raw
+/// transmitted-integer fields and wrap it in a single-element
+/// SidereonRtcmMessages handle. Release with sidereon_rtcm_messages_free.
+///
+/// Safety: eph points to a SidereonRtcmGalileoFnavEphemeris; out_messages to a
+/// SidereonRtcmMessages*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtcm_build_galileo_fnav_ephemeris(
+    eph: *const SidereonRtcmGalileoFnavEphemeris,
+    out_messages: *mut *mut SidereonRtcmMessages,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtcm_build_galileo_fnav_ephemeris",
+        SidereonStatus::Panic,
+        || {
+            let out_messages = c_try!(require_out(
+                out_messages,
+                "sidereon_rtcm_build_galileo_fnav_ephemeris",
+                "out_messages"
+            ));
+            *out_messages = ptr::null_mut();
+            let eph = c_try!(require_ref(
+                eph,
+                "sidereon_rtcm_build_galileo_fnav_ephemeris",
+                "eph"
+            ));
+            rtcm_build(
+                out_messages,
+                RtcmMessage::GalileoFnavEphemeris(rtcm_galileo_fnav_ephemeris_from_c(eph)),
+            );
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Build a 1046 Galileo I/NAV broadcast ephemeris message from raw
+/// transmitted-integer fields and wrap it in a single-element
+/// SidereonRtcmMessages handle. Release with sidereon_rtcm_messages_free.
+///
+/// Safety: eph points to a SidereonRtcmGalileoInavEphemeris; out_messages to a
+/// SidereonRtcmMessages*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtcm_build_galileo_inav_ephemeris(
+    eph: *const SidereonRtcmGalileoInavEphemeris,
+    out_messages: *mut *mut SidereonRtcmMessages,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtcm_build_galileo_inav_ephemeris",
+        SidereonStatus::Panic,
+        || {
+            let out_messages = c_try!(require_out(
+                out_messages,
+                "sidereon_rtcm_build_galileo_inav_ephemeris",
+                "out_messages"
+            ));
+            *out_messages = ptr::null_mut();
+            let eph = c_try!(require_ref(
+                eph,
+                "sidereon_rtcm_build_galileo_inav_ephemeris",
+                "eph"
+            ));
+            rtcm_build(
+                out_messages,
+                RtcmMessage::GalileoInavEphemeris(rtcm_galileo_inav_ephemeris_from_c(eph)),
+            );
+            SidereonStatus::Ok
+        },
+    )
+}
+
 // ============================================================================
 // Universal-parity additions: capabilities the core exposes that this binding
 // had not yet surfaced. Every function below is a thin extern-C wrapper that
@@ -2214,6 +2657,10 @@ fn rtcm_message_kind_of(message: &RtcmMessage) -> SidereonRtcmMessageKind {
         RtcmMessage::AntennaDescriptor(_) => SidereonRtcmMessageKind::AntennaDescriptor,
         RtcmMessage::GpsEphemeris(_) => SidereonRtcmMessageKind::GpsEphemeris,
         RtcmMessage::GlonassEphemeris(_) => SidereonRtcmMessageKind::GlonassEphemeris,
+        RtcmMessage::BeidouEphemeris(_) => SidereonRtcmMessageKind::BeidouEphemeris,
+        RtcmMessage::QzssEphemeris(_) => SidereonRtcmMessageKind::QzssEphemeris,
+        RtcmMessage::GalileoFnavEphemeris(_) => SidereonRtcmMessageKind::GalileoFnavEphemeris,
+        RtcmMessage::GalileoInavEphemeris(_) => SidereonRtcmMessageKind::GalileoInavEphemeris,
         RtcmMessage::Ssr(_) => SidereonRtcmMessageKind::Ssr,
         RtcmMessage::Unsupported(_) => SidereonRtcmMessageKind::Unsupported,
     }
@@ -2364,6 +2811,146 @@ fn rtcm_gps_ephemeris_to_c(eph: &RtcmGpsEphemeris) -> SidereonRtcmGpsEphemeris {
         t_gd: eph.t_gd,
         sv_health: eph.sv_health,
         l2_p_data_flag: eph.l2_p_data_flag,
+        fit_interval: eph.fit_interval,
+    }
+}
+
+fn rtcm_galileo_fnav_ephemeris_to_c(
+    eph: &RtcmGalileoFnavEphemeris,
+) -> SidereonRtcmGalileoFnavEphemeris {
+    SidereonRtcmGalileoFnavEphemeris {
+        satellite_id: eph.satellite_id,
+        week_number: eph.week_number,
+        iod_nav: eph.iod_nav,
+        sisa: eph.sisa,
+        idot: eph.idot,
+        t_oc: eph.t_oc,
+        a_f2: eph.a_f2,
+        a_f1: eph.a_f1,
+        a_f0: eph.a_f0,
+        c_rs: eph.c_rs,
+        delta_n: eph.delta_n,
+        m0: eph.m0,
+        c_uc: eph.c_uc,
+        eccentricity: eph.eccentricity,
+        c_us: eph.c_us,
+        sqrt_a: eph.sqrt_a,
+        t_oe: eph.t_oe,
+        c_ic: eph.c_ic,
+        omega0: eph.omega0,
+        c_is: eph.c_is,
+        i0: eph.i0,
+        c_rc: eph.c_rc,
+        omega: eph.omega,
+        omega_dot: eph.omega_dot,
+        bgd_e5a_e1: eph.bgd_e5a_e1,
+        e5a_signal_health: eph.e5a_signal_health,
+        e5a_data_validity: eph.e5a_data_validity,
+        reserved: eph.reserved,
+    }
+}
+
+fn rtcm_galileo_inav_ephemeris_to_c(
+    eph: &RtcmGalileoInavEphemeris,
+) -> SidereonRtcmGalileoInavEphemeris {
+    SidereonRtcmGalileoInavEphemeris {
+        satellite_id: eph.satellite_id,
+        week_number: eph.week_number,
+        iod_nav: eph.iod_nav,
+        sisa_index: eph.sisa_index,
+        idot: eph.idot,
+        t_oc: eph.t_oc,
+        a_f2: eph.a_f2,
+        a_f1: eph.a_f1,
+        a_f0: eph.a_f0,
+        c_rs: eph.c_rs,
+        delta_n: eph.delta_n,
+        m0: eph.m0,
+        c_uc: eph.c_uc,
+        eccentricity: eph.eccentricity,
+        c_us: eph.c_us,
+        sqrt_a: eph.sqrt_a,
+        t_oe: eph.t_oe,
+        c_ic: eph.c_ic,
+        omega0: eph.omega0,
+        c_is: eph.c_is,
+        i0: eph.i0,
+        c_rc: eph.c_rc,
+        omega: eph.omega,
+        omega_dot: eph.omega_dot,
+        bgd_e5a_e1: eph.bgd_e5a_e1,
+        bgd_e5b_e1: eph.bgd_e5b_e1,
+        e5b_signal_health: eph.e5b_signal_health,
+        e5b_data_validity: eph.e5b_data_validity,
+        e1b_signal_health: eph.e1b_signal_health,
+        e1b_data_validity: eph.e1b_data_validity,
+        reserved: eph.reserved,
+    }
+}
+
+fn rtcm_beidou_ephemeris_to_c(eph: &RtcmBeidouEphemeris) -> SidereonRtcmBeidouEphemeris {
+    SidereonRtcmBeidouEphemeris {
+        satellite_id: eph.satellite_id,
+        week_number: eph.week_number,
+        sv_urai: eph.sv_urai,
+        idot: eph.idot,
+        aode: eph.aode,
+        t_oc: eph.t_oc,
+        a_f2: eph.a_f2,
+        a_f1: eph.a_f1,
+        a_f0: eph.a_f0,
+        aodc: eph.aodc,
+        c_rs: eph.c_rs,
+        delta_n: eph.delta_n,
+        m0: eph.m0,
+        c_uc: eph.c_uc,
+        eccentricity: eph.eccentricity,
+        c_us: eph.c_us,
+        sqrt_a: eph.sqrt_a,
+        t_oe: eph.t_oe,
+        c_ic: eph.c_ic,
+        omega0: eph.omega0,
+        c_is: eph.c_is,
+        i0: eph.i0,
+        c_rc: eph.c_rc,
+        omega: eph.omega,
+        omega_dot: eph.omega_dot,
+        t_gd1: eph.t_gd1,
+        t_gd2: eph.t_gd2,
+        sv_health: eph.sv_health,
+    }
+}
+
+fn rtcm_qzss_ephemeris_to_c(eph: &RtcmQzssEphemeris) -> SidereonRtcmQzssEphemeris {
+    SidereonRtcmQzssEphemeris {
+        satellite_id: eph.satellite_id,
+        t_oc: eph.t_oc,
+        a_f2: eph.a_f2,
+        a_f1: eph.a_f1,
+        a_f0: eph.a_f0,
+        iode: eph.iode,
+        c_rs: eph.c_rs,
+        delta_n: eph.delta_n,
+        m0: eph.m0,
+        c_uc: eph.c_uc,
+        eccentricity: eph.eccentricity,
+        c_us: eph.c_us,
+        sqrt_a: eph.sqrt_a,
+        t_oe: eph.t_oe,
+        c_ic: eph.c_ic,
+        omega0: eph.omega0,
+        c_is: eph.c_is,
+        i0: eph.i0,
+        c_rc: eph.c_rc,
+        omega: eph.omega,
+        omega_dot: eph.omega_dot,
+        idot: eph.idot,
+        codes_on_l2: eph.codes_on_l2,
+        week_number: eph.week_number,
+        ura: eph.ura,
+        sv_health: eph.sv_health,
+        t_gd: eph.t_gd,
+        iodc: eph.iodc,
         fit_interval: eph.fit_interval,
     }
 }
@@ -2538,6 +3125,146 @@ fn rtcm_gps_ephemeris_from_c(eph: &SidereonRtcmGpsEphemeris) -> RtcmGpsEphemeris
         t_gd: eph.t_gd,
         sv_health: eph.sv_health,
         l2_p_data_flag: eph.l2_p_data_flag,
+        fit_interval: eph.fit_interval,
+    }
+}
+
+fn rtcm_galileo_fnav_ephemeris_from_c(
+    eph: &SidereonRtcmGalileoFnavEphemeris,
+) -> RtcmGalileoFnavEphemeris {
+    RtcmGalileoFnavEphemeris {
+        satellite_id: eph.satellite_id,
+        week_number: eph.week_number,
+        iod_nav: eph.iod_nav,
+        sisa: eph.sisa,
+        idot: eph.idot,
+        t_oc: eph.t_oc,
+        a_f2: eph.a_f2,
+        a_f1: eph.a_f1,
+        a_f0: eph.a_f0,
+        c_rs: eph.c_rs,
+        delta_n: eph.delta_n,
+        m0: eph.m0,
+        c_uc: eph.c_uc,
+        eccentricity: eph.eccentricity,
+        c_us: eph.c_us,
+        sqrt_a: eph.sqrt_a,
+        t_oe: eph.t_oe,
+        c_ic: eph.c_ic,
+        omega0: eph.omega0,
+        c_is: eph.c_is,
+        i0: eph.i0,
+        c_rc: eph.c_rc,
+        omega: eph.omega,
+        omega_dot: eph.omega_dot,
+        bgd_e5a_e1: eph.bgd_e5a_e1,
+        e5a_signal_health: eph.e5a_signal_health,
+        e5a_data_validity: eph.e5a_data_validity,
+        reserved: eph.reserved,
+    }
+}
+
+fn rtcm_galileo_inav_ephemeris_from_c(
+    eph: &SidereonRtcmGalileoInavEphemeris,
+) -> RtcmGalileoInavEphemeris {
+    RtcmGalileoInavEphemeris {
+        satellite_id: eph.satellite_id,
+        week_number: eph.week_number,
+        iod_nav: eph.iod_nav,
+        sisa_index: eph.sisa_index,
+        idot: eph.idot,
+        t_oc: eph.t_oc,
+        a_f2: eph.a_f2,
+        a_f1: eph.a_f1,
+        a_f0: eph.a_f0,
+        c_rs: eph.c_rs,
+        delta_n: eph.delta_n,
+        m0: eph.m0,
+        c_uc: eph.c_uc,
+        eccentricity: eph.eccentricity,
+        c_us: eph.c_us,
+        sqrt_a: eph.sqrt_a,
+        t_oe: eph.t_oe,
+        c_ic: eph.c_ic,
+        omega0: eph.omega0,
+        c_is: eph.c_is,
+        i0: eph.i0,
+        c_rc: eph.c_rc,
+        omega: eph.omega,
+        omega_dot: eph.omega_dot,
+        bgd_e5a_e1: eph.bgd_e5a_e1,
+        bgd_e5b_e1: eph.bgd_e5b_e1,
+        e5b_signal_health: eph.e5b_signal_health,
+        e5b_data_validity: eph.e5b_data_validity,
+        e1b_signal_health: eph.e1b_signal_health,
+        e1b_data_validity: eph.e1b_data_validity,
+        reserved: eph.reserved,
+    }
+}
+
+fn rtcm_beidou_ephemeris_from_c(eph: &SidereonRtcmBeidouEphemeris) -> RtcmBeidouEphemeris {
+    RtcmBeidouEphemeris {
+        satellite_id: eph.satellite_id,
+        week_number: eph.week_number,
+        sv_urai: eph.sv_urai,
+        idot: eph.idot,
+        aode: eph.aode,
+        t_oc: eph.t_oc,
+        a_f2: eph.a_f2,
+        a_f1: eph.a_f1,
+        a_f0: eph.a_f0,
+        aodc: eph.aodc,
+        c_rs: eph.c_rs,
+        delta_n: eph.delta_n,
+        m0: eph.m0,
+        c_uc: eph.c_uc,
+        eccentricity: eph.eccentricity,
+        c_us: eph.c_us,
+        sqrt_a: eph.sqrt_a,
+        t_oe: eph.t_oe,
+        c_ic: eph.c_ic,
+        omega0: eph.omega0,
+        c_is: eph.c_is,
+        i0: eph.i0,
+        c_rc: eph.c_rc,
+        omega: eph.omega,
+        omega_dot: eph.omega_dot,
+        t_gd1: eph.t_gd1,
+        t_gd2: eph.t_gd2,
+        sv_health: eph.sv_health,
+    }
+}
+
+fn rtcm_qzss_ephemeris_from_c(eph: &SidereonRtcmQzssEphemeris) -> RtcmQzssEphemeris {
+    RtcmQzssEphemeris {
+        satellite_id: eph.satellite_id,
+        t_oc: eph.t_oc,
+        a_f2: eph.a_f2,
+        a_f1: eph.a_f1,
+        a_f0: eph.a_f0,
+        iode: eph.iode,
+        c_rs: eph.c_rs,
+        delta_n: eph.delta_n,
+        m0: eph.m0,
+        c_uc: eph.c_uc,
+        eccentricity: eph.eccentricity,
+        c_us: eph.c_us,
+        sqrt_a: eph.sqrt_a,
+        t_oe: eph.t_oe,
+        c_ic: eph.c_ic,
+        omega0: eph.omega0,
+        c_is: eph.c_is,
+        i0: eph.i0,
+        c_rc: eph.c_rc,
+        omega: eph.omega,
+        omega_dot: eph.omega_dot,
+        idot: eph.idot,
+        codes_on_l2: eph.codes_on_l2,
+        week_number: eph.week_number,
+        ura: eph.ura,
+        sv_health: eph.sv_health,
+        t_gd: eph.t_gd,
+        iodc: eph.iodc,
         fit_interval: eph.fit_interval,
     }
 }

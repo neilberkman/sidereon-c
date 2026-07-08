@@ -984,6 +984,9 @@ unsafe fn ppp_float_state_from_c(
         clocks_m: clocks.to_vec(),
         ambiguities_m,
         ztd_m: state.ztd_m,
+        tropo_gradient_north_m: state.tropo_gradient_north_m,
+        tropo_gradient_east_m: state.tropo_gradient_east_m,
+        residual_ionosphere_m: BTreeMap::new(),
     })
 }
 
@@ -997,6 +1000,10 @@ unsafe fn ppp_float_config_from_c(
         corrections: ppp_range_corrections_from_c(fn_name, &config.corrections)?,
         opts: ppp_float_options_from_c(&config.options),
         residual_screen: config.residual_screen,
+        elevation_cutoff_deg: config
+            .has_elevation_cutoff_deg
+            .then_some(config.elevation_cutoff_deg),
+        estimate_residual_ionosphere: false,
     })
 }
 
@@ -1026,6 +1033,10 @@ unsafe fn ppp_fixed_config_from_c(
             offsets_m,
             ratio_threshold: config.ambiguity.ratio_threshold,
         },
+        elevation_cutoff_deg: config
+            .has_elevation_cutoff_deg
+            .then_some(config.elevation_cutoff_deg),
+        estimate_residual_ionosphere: false,
     })
 }
 
@@ -1593,6 +1604,7 @@ fn ppp_tropo_from_c(
         Ok(PppTroposphereOptionsInner {
             enabled: true,
             estimate_ztd: tropo.estimate_ztd,
+            estimate_tropo_gradients: tropo.estimate_tropo_gradients,
             met,
             mapping,
         })
@@ -1731,5 +1743,134 @@ fn trls_xscale_from_c(
             set_last_error(format!("{fn_name}: invalid {arg_name} TRLS x_scale mode"));
             Err(SidereonStatus::InvalidArgument)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn c_weights() -> SidereonPppMeasurementWeights {
+        SidereonPppMeasurementWeights {
+            code: 1.0,
+            phase: 100.0,
+            elevation_weighting: false,
+        }
+    }
+
+    fn c_tropo(estimate_tropo_gradients: bool) -> SidereonPppTroposphereOptions {
+        SidereonPppTroposphereOptions {
+            enabled: true,
+            estimate_ztd: true,
+            estimate_tropo_gradients,
+            pressure_hpa: 1013.25,
+            temperature_k: 288.15,
+            relative_humidity: 0.5,
+            mapping: SidereonPppTropoMapping::Niell as u32,
+            vmf_sample_count: 0,
+            vmf_samples: [SidereonPppVmfSiteSample {
+                mjd: 0.0,
+                ah: 0.0,
+                aw: 0.0,
+            }; SIDEREON_PPP_VMF_SITE_MAX_SAMPLES],
+        }
+    }
+
+    fn c_options() -> SidereonPppFloatOptions {
+        SidereonPppFloatOptions {
+            max_iterations: 8,
+            position_tolerance_m: 1.0e-4,
+            clock_tolerance_m: 1.0e-4,
+            ambiguity_tolerance_m: 1.0e-4,
+            ztd_tolerance_m: 1.0e-4,
+        }
+    }
+
+    fn c_corrections() -> SidereonPppRangeCorrections {
+        SidereonPppRangeCorrections {
+            receiver_antenna: ptr::null(),
+            sat_clock_relativity: false,
+            satellite_clock_records: ptr::null(),
+            satellite_clock_record_count: 0,
+            solid_earth_tide: false,
+            phase_windup: false,
+            satellite_antenna: false,
+        }
+    }
+
+    #[test]
+    fn ppp_float_state_marshals_tropo_gradient_initial_state() {
+        let clocks = [0.1, 0.2];
+        let state = SidereonPppFloatState {
+            position_m: [1.0, 2.0, 3.0],
+            clocks_m: clocks.as_ptr(),
+            clock_count: clocks.len(),
+            ambiguities_m: ptr::null(),
+            ambiguity_count: 0,
+            ztd_m: 0.3,
+            tropo_gradient_north_m: 0.04,
+            tropo_gradient_east_m: -0.05,
+        };
+
+        let core_state = unsafe { ppp_float_state_from_c("test_ppp_state", &state, clocks.len()) }
+            .expect("state");
+
+        assert_eq!(core_state.tropo_gradient_north_m, 0.04);
+        assert_eq!(core_state.tropo_gradient_east_m, -0.05);
+        assert!(core_state.residual_ionosphere_m.is_empty());
+    }
+
+    #[test]
+    fn ppp_configs_marshal_elevation_cutoff_and_tropo_gradient_toggle() {
+        let float_config = SidereonPppFloatConfig {
+            epochs: ptr::null(),
+            epoch_count: 0,
+            initial_state: SidereonPppFloatState {
+                position_m: [0.0; 3],
+                clocks_m: ptr::null(),
+                clock_count: 0,
+                ambiguities_m: ptr::null(),
+                ambiguity_count: 0,
+                ztd_m: 0.0,
+                tropo_gradient_north_m: 0.0,
+                tropo_gradient_east_m: 0.0,
+            },
+            weights: c_weights(),
+            tropo: c_tropo(true),
+            corrections: c_corrections(),
+            options: c_options(),
+            has_elevation_cutoff_deg: true,
+            elevation_cutoff_deg: 12.5,
+            residual_screen: true,
+        };
+        let core_float = unsafe { ppp_float_config_from_c("test_ppp_float_config", &float_config) }
+            .expect("float config");
+        assert_eq!(core_float.elevation_cutoff_deg, Some(12.5));
+        assert!(core_float.tropo.estimate_tropo_gradients);
+        assert!(core_float.residual_screen);
+        assert!(!core_float.estimate_residual_ionosphere);
+
+        let fixed_config = SidereonPppFixedConfig {
+            epochs: ptr::null(),
+            epoch_count: 0,
+            weights: c_weights(),
+            tropo: c_tropo(true),
+            corrections: c_corrections(),
+            options: c_options(),
+            has_elevation_cutoff_deg: true,
+            elevation_cutoff_deg: 15.0,
+            ambiguity: SidereonPppFixedAmbiguityOptions {
+                wavelengths_m: ptr::null(),
+                wavelength_count: 0,
+                offsets_m: ptr::null(),
+                offset_count: 0,
+                ratio_threshold: 3.0,
+            },
+        };
+        let core_fixed = unsafe { ppp_fixed_config_from_c("test_ppp_fixed_config", &fixed_config) }
+            .expect("fixed config");
+        assert_eq!(core_fixed.elevation_cutoff_deg, Some(15.0));
+        assert!(core_fixed.tropo.estimate_tropo_gradients);
+        assert!(!core_fixed.estimate_residual_ionosphere);
     }
 }

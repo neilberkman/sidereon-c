@@ -57,9 +57,9 @@ usize_is_size_t = true
 after_includes = """
 
 #define SIDEREON_VERSION_MAJOR 0
-#define SIDEREON_VERSION_MINOR 22
+#define SIDEREON_VERSION_MINOR 23
 #define SIDEREON_VERSION_PATCH 0
-#define SIDEREON_VERSION_STRING "0.22.0\""""
+#define SIDEREON_VERSION_STRING "0.23.0\""""
 
 [enum]
 # Idiomatic C enum constants: SidereonStatus::Ok -> SIDEREON_STATUS_OK.
@@ -164,6 +164,9 @@ include = [
     "SidereonPppFloatConfig",
     "SidereonPppFixedAmbiguityOptions",
     "SidereonPppFixedConfig",
+    "SidereonPppPositionCovariances",
+    "SidereonPppTemporalCorrelation",
+    "SidereonPppTropoGradientEstimate",
     "SidereonPppAmbiguity",
     "SidereonPppFixedAmbiguity",
     "SidereonPppFloatMetadata",
@@ -385,6 +388,10 @@ include = [
     "SidereonRtcmMsmSignal",
     "SidereonRtcmGpsEphemeris",
     "SidereonRtcmGlonassEphemeris",
+    "SidereonRtcmGalileoFnavEphemeris",
+    "SidereonRtcmGalileoInavEphemeris",
+    "SidereonRtcmBeidouEphemeris",
+    "SidereonRtcmQzssEphemeris",
     "SidereonGeoidGrid",
     "SidereonEgm2008GridSpacing",
     "SidereonEgm2008RasterWindow",
