@@ -2127,6 +2127,7 @@ fn sp3_terrestrial_frame_to_c(value: sidereon_core::frame_catalog::TerrestrialFr
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 unsafe fn sp3_merge_report_reconciliation_bytes<'a, F>(
     fn_name: &str,
     report: *const SidereonSp3MergeReport,
