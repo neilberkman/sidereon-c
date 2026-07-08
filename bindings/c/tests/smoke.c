@@ -1131,10 +1131,14 @@ static void configure_ppp_float_config(
     config->initial_state.ambiguities_m = initial_ambiguities;
     config->initial_state.ambiguity_count = PPP_INITIAL_AMBIGUITY_COUNT;
     config->initial_state.ztd_m = bits_to_f64(PPP_INITIAL_ZTD_BITS);
+    config->initial_state.tropo_gradient_north_m = 0.0;
+    config->initial_state.tropo_gradient_east_m = 0.0;
     configure_ppp_weights(&config->weights);
     configure_ppp_tropo(&config->tropo);
     configure_ppp_corrections(&config->corrections, antenna);
     configure_ppp_options(&config->options);
+    config->has_elevation_cutoff_deg = false;
+    config->elevation_cutoff_deg = 0.0;
     config->residual_screen = (bool)PPP_RESIDUAL_SCREEN;
 }
 
@@ -1150,6 +1154,8 @@ static void configure_ppp_fixed_config(
     configure_ppp_tropo(&config->tropo);
     config->corrections = *corrections;
     configure_ppp_options(&config->options);
+    config->has_elevation_cutoff_deg = false;
+    config->elevation_cutoff_deg = 0.0;
     sidereon_ppp_fixed_ambiguity_options_init(&config->ambiguity);
     config->ambiguity.wavelengths_m = wavelengths;
     config->ambiguity.wavelength_count = PPP_FIXED_AMBIGUITY_COUNT;

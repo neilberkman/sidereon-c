@@ -257,10 +257,12 @@ use sidereon_core::rinex::observations::{
 };
 use sidereon_core::rtcm::{
     self as core_rtcm, AntennaDescriptor as RtcmAntennaDescriptor,
-    GlonassEphemeris as RtcmGlonassEphemeris, GpsEphemeris as RtcmGpsEphemeris,
-    LockTimeTracker as RtcmLockTimeTracker, Message as RtcmMessage, MsmKind as RtcmMsmKind,
-    MsmMessage as RtcmMsmMessage, MsmSatellite as RtcmMsmSatellite, MsmSignal as RtcmMsmSignal,
-    PreviousLock as RtcmPreviousLock, SsrClockRecord as RtcmSsrClockRecord,
+    BeidouEphemeris as RtcmBeidouEphemeris, GalileoFnavEphemeris as RtcmGalileoFnavEphemeris,
+    GalileoInavEphemeris as RtcmGalileoInavEphemeris, GlonassEphemeris as RtcmGlonassEphemeris,
+    GpsEphemeris as RtcmGpsEphemeris, LockTimeTracker as RtcmLockTimeTracker,
+    Message as RtcmMessage, MsmKind as RtcmMsmKind, MsmMessage as RtcmMsmMessage,
+    MsmSatellite as RtcmMsmSatellite, MsmSignal as RtcmMsmSignal, PreviousLock as RtcmPreviousLock,
+    QzssEphemeris as RtcmQzssEphemeris, SsrClockRecord as RtcmSsrClockRecord,
     SsrHeader as RtcmSsrHeader, SsrKind as RtcmSsrKind, SsrMessage as RtcmSsrMessage,
     SsrOrbitRecord as RtcmSsrOrbitRecord, StationCoordinates as RtcmStationCoordinates,
     StreamDiagnostics as RtcmStreamDiagnostics, LLI_HALF_CYCLE as RTCM_LLI_HALF_CYCLE,

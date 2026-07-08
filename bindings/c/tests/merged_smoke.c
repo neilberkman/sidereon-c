@@ -985,6 +985,148 @@ static void test_rtcm_construct(void) {
         sidereon_rtcm_messages_free(decoded);
     }
 
+    /* 1042 BeiDou ephemeris. */
+    SidereonRtcmBeidouEphemeris bds;
+    memset(&bds, 0, sizeof(bds));
+    bds.satellite_id = 19;
+    bds.week_number = 902;
+    bds.aode = 17;
+    bds.t_oc = 12000;
+    bds.a_f1 = 12345;
+    bds.a_f0 = -45678;
+    bds.sqrt_a = UINT64_C(2852448983);
+    bds.t_oe = 12000;
+    built = NULL;
+    check(sidereon_rtcm_build_beidou_ephemeris(&bds, &built) == SIDEREON_STATUS_OK,
+          "rtcm_build_beidou_ephemeris");
+    decoded = roundtrip(built, "rtcm beidou ephemeris construct round-trip");
+    if (decoded) {
+        SidereonRtcmBeidouEphemeris got;
+        check(sidereon_rtcm_message_beidou_ephemeris(decoded, 0, &got) == SIDEREON_STATUS_OK &&
+                  got.satellite_id == 19 && got.week_number == 902 && got.aode == 17 &&
+                  got.a_f0 == -45678 && got.sqrt_a == bds.sqrt_a,
+              "rtcm beidou ephemeris construct fields");
+        sidereon_rtcm_messages_free(decoded);
+    }
+
+    /* 1044 QZSS ephemeris. */
+    SidereonRtcmQzssEphemeris qzs;
+    memset(&qzs, 0, sizeof(qzs));
+    qzs.satellite_id = 3;
+    qzs.week_number = 123;
+    qzs.iode = 11;
+    qzs.t_oc = 7200;
+    qzs.a_f0 = 23456;
+    qzs.sqrt_a = UINT64_C(2702336448);
+    qzs.t_oe = 3600;
+    qzs.codes_on_l2 = 1;
+    built = NULL;
+    check(sidereon_rtcm_build_qzss_ephemeris(&qzs, &built) == SIDEREON_STATUS_OK,
+          "rtcm_build_qzss_ephemeris");
+    decoded = roundtrip(built, "rtcm qzss ephemeris construct round-trip");
+    if (decoded) {
+        SidereonRtcmQzssEphemeris got;
+        check(sidereon_rtcm_message_qzss_ephemeris(decoded, 0, &got) == SIDEREON_STATUS_OK &&
+                  got.satellite_id == 3 && got.week_number == 123 && got.iode == 11 &&
+                  got.codes_on_l2 == 1 && got.sqrt_a == qzs.sqrt_a,
+              "rtcm qzss ephemeris construct fields");
+        sidereon_rtcm_messages_free(decoded);
+    }
+
+    /* 1045 Galileo F/NAV ephemeris. */
+    SidereonRtcmGalileoFnavEphemeris gal_fnav;
+    memset(&gal_fnav, 0, sizeof(gal_fnav));
+    gal_fnav.satellite_id = 12;
+    gal_fnav.week_number = 1402;
+    gal_fnav.iod_nav = 7;
+    gal_fnav.sisa = 42;
+    gal_fnav.t_oc = 5150;
+    gal_fnav.a_f1 = -151;
+    gal_fnav.a_f0 = -471483;
+    gal_fnav.sqrt_a = UINT64_C(2852448983);
+    gal_fnav.t_oe = 5150;
+    built = NULL;
+    check(sidereon_rtcm_build_galileo_fnav_ephemeris(&gal_fnav, &built) ==
+              SIDEREON_STATUS_OK,
+          "rtcm_build_galileo_fnav_ephemeris");
+    decoded = roundtrip(built, "rtcm galileo fnav ephemeris construct round-trip");
+    if (decoded) {
+        SidereonRtcmGalileoFnavEphemeris got;
+        check(sidereon_rtcm_message_galileo_fnav_ephemeris(decoded, 0, &got) ==
+                      SIDEREON_STATUS_OK &&
+                  got.satellite_id == 12 && got.week_number == 1402 && got.iod_nav == 7 &&
+                  got.a_f0 == -471483 && got.sqrt_a == gal_fnav.sqrt_a,
+              "rtcm galileo fnav ephemeris construct fields");
+        sidereon_rtcm_messages_free(decoded);
+    }
+
+    /* 1046 Galileo I/NAV ephemeris. */
+    SidereonRtcmGalileoInavEphemeris gal_inav;
+    memset(&gal_inav, 0, sizeof(gal_inav));
+    gal_inav.satellite_id = 3;
+    gal_inav.week_number = 1402;
+    gal_inav.iod_nav = 7;
+    gal_inav.sisa_index = 107;
+    gal_inav.t_oc = 5150;
+    gal_inav.a_f1 = -151;
+    gal_inav.a_f0 = -471483;
+    gal_inav.sqrt_a = UINT64_C(2852448983);
+    gal_inav.t_oe = 5150;
+    gal_inav.bgd_e5a_e1 = 5;
+    gal_inav.bgd_e5b_e1 = 7;
+    built = NULL;
+    check(sidereon_rtcm_build_galileo_inav_ephemeris(&gal_inav, &built) ==
+              SIDEREON_STATUS_OK,
+          "rtcm_build_galileo_inav_ephemeris");
+    decoded = roundtrip(built, "rtcm galileo inav ephemeris construct round-trip");
+    if (decoded) {
+        SidereonRtcmGalileoInavEphemeris got;
+        check(sidereon_rtcm_message_galileo_inav_ephemeris(decoded, 0, &got) ==
+                      SIDEREON_STATUS_OK &&
+                  got.satellite_id == 3 && got.week_number == 1402 && got.iod_nav == 7 &&
+                  got.a_f0 == -471483 && got.sqrt_a == gal_inav.sqrt_a &&
+                  got.bgd_e5b_e1 == 7,
+              "rtcm galileo inav ephemeris construct fields");
+        sidereon_rtcm_messages_free(decoded);
+    }
+
+    /* Real captured 1046 Galileo I/NAV frame. */
+    static const uint8_t real_1046[] = {
+        0xd3, 0x00, 0x3f, 0x41, 0x60, 0xd5, 0xe8, 0x07, 0x6b, 0x06, 0xc9, 0x41,
+        0xe0, 0x3f, 0xfe, 0xd3, 0xff, 0xe3, 0x39, 0x17, 0xf3, 0xa4, 0x90, 0xe9,
+        0x84, 0xd2, 0x08, 0x9b, 0xf4, 0xf4, 0x01, 0x10, 0x30, 0xb0, 0x34, 0x3a,
+        0xa8, 0x13, 0xab, 0x5d, 0x41, 0xef, 0xff, 0xb7, 0xe4, 0x4f, 0xe8, 0xcf,
+        0xff, 0x52, 0x77, 0xd0, 0xb0, 0x11, 0xa2, 0x41, 0x63, 0x97, 0xff, 0xff,
+        0xfc, 0x22, 0x80, 0x14, 0x07, 0x00, 0x80, 0x0a, 0x8e,
+    };
+    decoded = NULL;
+    check(sidereon_rtcm_decode_messages(real_1046, sizeof(real_1046), &decoded) ==
+              SIDEREON_STATUS_OK,
+          "rtcm real galileo inav decode");
+    if (decoded) {
+        SidereonRtcmMessageKind kind;
+        uint16_t message_number = 0;
+        check(sidereon_rtcm_message_kind(decoded, 0, &kind, &message_number) ==
+                      SIDEREON_STATUS_OK &&
+                  kind == SIDEREON_RTCM_MESSAGE_KIND_GALILEO_INAV_EPHEMERIS &&
+                  message_number == 1046,
+              "rtcm real galileo inav kind");
+        SidereonRtcmGalileoInavEphemeris got;
+        check(sidereon_rtcm_message_galileo_inav_ephemeris(decoded, 0, &got) ==
+                      SIDEREON_STATUS_OK &&
+                  got.satellite_id == 3 && got.week_number == 1402 && got.iod_nav == 7 &&
+                  got.sqrt_a == UINT64_C(2852448983) && got.eccentricity == UINT64_C(4459564),
+              "rtcm real galileo inav fields");
+        uint8_t frame[96];
+        size_t written = 0, required = 0;
+        check(sidereon_rtcm_message_to_frame(decoded, 0, frame, sizeof(frame), &written,
+                                             &required) == SIDEREON_STATUS_OK &&
+                  written == sizeof(real_1046) && required == sizeof(real_1046) &&
+                  memcmp(frame, real_1046, sizeof(real_1046)) == 0,
+              "rtcm real galileo inav frame round-trip");
+        sidereon_rtcm_messages_free(decoded);
+    }
+
     /* 1077 GPS MSM7: one satellite, one signal cell. */
     SidereonRtcmMsmInfo info;
     memset(&info, 0, sizeof(info));

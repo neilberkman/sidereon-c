@@ -1202,6 +1202,7 @@ pub enum SidereonNavMessage {
     GalileoFnav = 6,
     BeidouD1 = 7,
     BeidouD2 = 8,
+    QzssLnav = 9,
 }
 
 #[repr(C)]
@@ -1779,6 +1780,7 @@ fn nav_message_from_c(
         x if x == SidereonNavMessage::GpsCnav2 as u32 => Ok(M::GpsCnav2),
         x if x == SidereonNavMessage::QzssCnav as u32 => Ok(M::QzssCnav),
         x if x == SidereonNavMessage::QzssCnav2 as u32 => Ok(M::QzssCnav2),
+        x if x == SidereonNavMessage::QzssLnav as u32 => Ok(M::QzssLnav),
         x if x == SidereonNavMessage::GalileoInav as u32 => Ok(M::GalileoInav),
         x if x == SidereonNavMessage::GalileoFnav as u32 => Ok(M::GalileoFnav),
         x if x == SidereonNavMessage::BeidouD1 as u32 => Ok(M::BeidouD1),
@@ -1863,6 +1865,7 @@ fn nav_message_to_c(message: sidereon_core::rinex::nav::NavMessage) -> u32 {
         M::GpsCnav2 => SidereonNavMessage::GpsCnav2 as u32,
         M::QzssCnav => SidereonNavMessage::QzssCnav as u32,
         M::QzssCnav2 => SidereonNavMessage::QzssCnav2 as u32,
+        M::QzssLnav => SidereonNavMessage::QzssLnav as u32,
         M::GalileoInav => SidereonNavMessage::GalileoInav as u32,
         M::GalileoFnav => SidereonNavMessage::GalileoFnav as u32,
         M::BeidouD1 => SidereonNavMessage::BeidouD1 as u32,
