@@ -147,6 +147,10 @@ static int exercise_sp3_surface(const char *path) {
     SidereonSp3MergeReport *report = NULL;
     SidereonSp3 *merged2 = NULL;
     SidereonSp3MergeReport *report2 = NULL;
+    SidereonSp3 *frame_a = NULL;
+    SidereonSp3 *frame_b = NULL;
+    SidereonSp3 *frame_merged = NULL;
+    SidereonSp3MergeReport *frame_report = NULL;
 
     if (sp3_bytes == NULL) {
         fprintf(stderr, "FAIL: could not read SP3 surface file: %s\n", path);
@@ -485,6 +489,99 @@ static int exercise_sp3_surface(const char *path) {
         goto cleanup;
     }
 
+    const char *frame_a_text =
+        "#cP2020  6 25  0  0  0.00000000       1 ORBIT IGS14 FIT  TST\n"
+        "## 2111 432000.00000000   900.00000000 59025 0.0000000000000\n"
+        "+    1   G01  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0\n"
+        "++         0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0\n"
+        "%c G  cc GPS ccc cccc cccc cccc cccc ccccc ccccc ccccc ccccc\n"
+        "%c cc cc ccc ccc cccc cccc cccc cccc ccccc ccccc ccccc ccccc\n"
+        "%f  1.2500000  1.025000000  0.00000000000  0.000000000000000\n"
+        "%f  0.0000000  0.000000000  0.00000000000  0.000000000000000\n"
+        "%i    0    0    0    0      0      0      0      0         0\n"
+        "%i    0    0    0    0      0      0      0      0         0\n"
+        "/* TEST SP3-c FIXTURE\n"
+        "*  2020  6 25  0  0  0.00000000\n"
+        "PG01  15000.000000 -20000.000000   5000.000000    100.000000\n"
+        "EOF\n";
+    const char *frame_b_text =
+        "#cP2020  6 25  0  0  0.00000000       1 ORBIT ITRF2 FIT  TST\n"
+        "## 2111 432000.00000000   900.00000000 59025 0.0000000000000\n"
+        "+    1   G02  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0\n"
+        "++         0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0\n"
+        "%c G  cc GPS ccc cccc cccc cccc cccc ccccc ccccc ccccc ccccc\n"
+        "%c cc cc ccc ccc cccc cccc cccc cccc ccccc ccccc ccccc ccccc\n"
+        "%f  1.2500000  1.025000000  0.00000000000  0.000000000000000\n"
+        "%f  0.0000000  0.000000000  0.00000000000  0.000000000000000\n"
+        "%i    0    0    0    0      0      0      0      0         0\n"
+        "%i    0    0    0    0      0      0      0      0         0\n"
+        "/* TEST SP3-c FIXTURE\n"
+        "*  2020  6 25  0  0  0.00000000\n"
+        "PG02  16000.000000 -21000.000000   6000.000000    200.000000\n"
+        "EOF\n";
+    if (sidereon_sp3_load((const uint8_t *)frame_a_text, strlen(frame_a_text), &frame_a) !=
+            SIDEREON_STATUS_OK ||
+        sidereon_sp3_load((const uint8_t *)frame_b_text, strlen(frame_b_text), &frame_b) !=
+            SIDEREON_STATUS_OK) {
+        rc = fail("sidereon_sp3_load frame reconciliation fixtures", 1);
+        goto cleanup;
+    }
+    const char *asserted_labels[2] = {"IGS14", "ITRF2"};
+    SidereonSp3FrameLabelSet asserted_set = {
+        .labels = asserted_labels,
+        .label_count = 2,
+    };
+    SidereonSp3MergeOptions frame_options;
+    if (sidereon_sp3_merge_options_init(&frame_options) != SIDEREON_STATUS_OK) {
+        rc = fail("sidereon_sp3_merge_options_init frame options", 1);
+        goto cleanup;
+    }
+    frame_options.min_agree = 1;
+    frame_options.clock_min_common = 1;
+    frame_options.asserted_frame_label_sets = &asserted_set;
+    frame_options.asserted_frame_label_set_count = 1;
+    const SidereonSp3 *frame_sources[2] = {frame_a, frame_b};
+    if (sidereon_sp3_merge(frame_sources, 2, &frame_options, &frame_merged, &frame_report) !=
+        SIDEREON_STATUS_OK) {
+        rc = fail("sidereon_sp3_merge asserted frame reconciliation", 1);
+        goto cleanup;
+    }
+    size_t reconciliation_count = 123;
+    if (sidereon_sp3_merge_report_frame_reconciliation_count(frame_report, &reconciliation_count) !=
+            SIDEREON_STATUS_OK ||
+        reconciliation_count != 1) {
+        rc = fail("sidereon_sp3_merge_report_frame_reconciliation_count", 1);
+        goto cleanup;
+    }
+    SidereonSp3FrameReconciliation reconciliation;
+    if (sidereon_sp3_merge_report_frame_reconciliation(frame_report, 0, &reconciliation) !=
+            SIDEREON_STATUS_OK ||
+        reconciliation.method != SIDEREON_SP3_FRAME_RECONCILIATION_METHOD_ASSERTED_EQUIVALENCE ||
+        reconciliation.source_index != 1 || reconciliation.asserted_label_count != 2 ||
+        reconciliation.records_affected != 1 || reconciliation.parameters_present ||
+        reconciliation.source_label_len != 5 || reconciliation.target_label_len != 5) {
+        rc = fail("sidereon_sp3_merge_report_frame_reconciliation row", 1);
+        goto cleanup;
+    }
+    uint8_t label_buf[8] = {0};
+    size_t label_written = 123;
+    size_t label_required = 123;
+    if (sidereon_sp3_merge_report_frame_reconciliation_source_label(
+            frame_report, 0, label_buf, sizeof(label_buf), &label_written, &label_required) !=
+            SIDEREON_STATUS_OK ||
+        label_written != 5 || label_required != 5 || memcmp(label_buf, "ITRF2", 5) != 0) {
+        rc = fail("sidereon_sp3_merge_report_frame_reconciliation_source_label", 1);
+        goto cleanup;
+    }
+    memset(label_buf, 0, sizeof(label_buf));
+    if (sidereon_sp3_merge_report_frame_reconciliation_asserted_label(
+            frame_report, 0, 0, label_buf, sizeof(label_buf), &label_written,
+            &label_required) != SIDEREON_STATUS_OK ||
+        label_written != 5 || label_required != 5 || memcmp(label_buf, "IGS14", 5) != 0) {
+        rc = fail("sidereon_sp3_merge_report_frame_reconciliation_asserted_label", 1);
+        goto cleanup;
+    }
+
     printf("SP3 surface: %zu epochs, %zu satellites, %zu single-source merge flags, "
            "%zu agreement epochs\n",
            (size_t)SP3_SURFACE_EPOCH_COUNT, (size_t)SP3_SURFACE_SAT_COUNT,
@@ -496,6 +593,10 @@ cleanup:
     sidereon_sp3_free(merged2);
     sidereon_sp3_merge_report_free(report);
     sidereon_sp3_free(merged);
+    sidereon_sp3_merge_report_free(frame_report);
+    sidereon_sp3_free(frame_merged);
+    sidereon_sp3_free(frame_b);
+    sidereon_sp3_free(frame_a);
     sidereon_sp3_free(roundtrip);
     sidereon_sp3_free(sp3);
     free(sp3_bytes);
