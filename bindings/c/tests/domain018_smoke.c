@@ -211,6 +211,18 @@ static void test_signal_analysis(void) {
               close_abs(ssc.hz, 1.629171137084864e-7, 1.0e-20) &&
               close_abs(ssc.db_hz, -67.880332926173509, 1.0e-12),
           "signal SSC");
+    check(sidereon_signal_spectral_separation_coefficient_hz(&bpsk, &boc, 24000000.0,
+                                                             &value) == SIDEREON_STATUS_OK &&
+              close_abs(value, 1.629171137084864e-7, 1.0e-20),
+          "signal SSC scalar hz");
+    check(sidereon_signal_spectral_separation_coefficient_db_hz(&bpsk, &boc, 24000000.0,
+                                                                &value) == SIDEREON_STATUS_OK &&
+              close_abs(value, -67.880332926173509, 1.0e-12),
+          "signal SSC scalar db hz");
+    check(sidereon_signal_white_noise_spectral_separation_hz(&bpsk, 24000000.0, &value) ==
+              SIDEREON_STATUS_OK &&
+              close_abs(value, 4.1311589050907902e-8, 1.0e-20),
+          "signal white-noise SSC scalar");
 
     SidereonSignalAnalysisInterference interference = {boc, 0.01};
     SidereonSignalAnalysisCn0Degradation degradation;

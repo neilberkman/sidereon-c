@@ -23150,6 +23150,20 @@ enum SidereonStatus sidereon_nutation_matrix(double mean_obliquity_rad,
 enum SidereonStatus sidereon_nutation_mean_obliquity_radians(double jd_tdb, double *out);
 
 /**
+ * Copy the stable lowercase label for a SidereonObservabilityTier enum value
+ * into out. Mirrors Python's ObservabilityTier.label and wasm's
+ * observabilityTierLabel in the C naming convention.
+ *
+ * Safety: out points to len writable bytes or is NULL when len is 0;
+ * out_written and out_required point to size_t.
+ */
+enum SidereonStatus sidereon_observability_tier_label(uint32_t tier,
+                                                      uint8_t *out,
+                                                      size_t len,
+                                                      size_t *out_written,
+                                                      size_t *out_required);
+
+/**
  * Copy the observable-state missing-position sentinel into out. The sentinel is
  * three NaN components and is also written for every failed batch element.
  *
@@ -28378,6 +28392,41 @@ enum SidereonStatus sidereon_signal_replica(int64_t prn,
 enum SidereonStatus sidereon_signal_snr_post_db(double cn0_dbhz,
                                                 double integration_time_s,
                                                 double *out);
+
+/**
+ * Compute the spectral separation coefficient between two modulations in
+ * decibel-hertz.
+ *
+ * Safety: desired, interference, and out must point to readable and writable
+ * objects.
+ */
+enum SidereonStatus sidereon_signal_spectral_separation_coefficient_db_hz(const struct SidereonSignalAnalysisModulation *desired,
+                                                                          const struct SidereonSignalAnalysisModulation *interference,
+                                                                          double receiver_bandwidth_hz,
+                                                                          double *out);
+
+/**
+ * Compute the spectral separation coefficient between two modulations in
+ * hertz. Scalar sibling of sidereon_signal_analysis_spectral_separation,
+ * aligned with the Python and wasm scalar helper contract.
+ *
+ * Safety: desired, interference, and out must point to readable and writable
+ * objects.
+ */
+enum SidereonStatus sidereon_signal_spectral_separation_coefficient_hz(const struct SidereonSignalAnalysisModulation *desired,
+                                                                       const struct SidereonSignalAnalysisModulation *interference,
+                                                                       double receiver_bandwidth_hz,
+                                                                       double *out);
+
+/**
+ * Compute the white-interference spectral separation coefficient for one
+ * modulation over a two-sided receiver bandwidth.
+ *
+ * Safety: desired and out must point to readable and writable objects.
+ */
+enum SidereonStatus sidereon_signal_white_noise_spectral_separation_hz(const struct SidereonSignalAnalysisModulation *desired,
+                                                                       double receiver_bandwidth_hz,
+                                                                       double *out);
 
 /**
  * Hatch-smooth single-frequency code over an arc. One result is produced per

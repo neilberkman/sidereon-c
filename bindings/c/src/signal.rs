@@ -1310,6 +1310,141 @@ pub unsafe extern "C" fn sidereon_signal_analysis_spectral_separation(
     )
 }
 
+/// Compute the spectral separation coefficient between two modulations in
+/// hertz. Scalar sibling of sidereon_signal_analysis_spectral_separation,
+/// aligned with the Python and wasm scalar helper contract.
+///
+/// Safety: desired, interference, and out must point to readable and writable
+/// objects.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_signal_spectral_separation_coefficient_hz(
+    desired: *const SidereonSignalAnalysisModulation,
+    interference: *const SidereonSignalAnalysisModulation,
+    receiver_bandwidth_hz: f64,
+    out: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_signal_spectral_separation_coefficient_hz",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out,
+                "sidereon_signal_spectral_separation_coefficient_hz",
+                "out"
+            ));
+            *out = 0.0;
+            let desired = c_try!(signal_analysis_modulation_from_c(
+                "sidereon_signal_spectral_separation_coefficient_hz",
+                desired
+            ));
+            let interference = c_try!(signal_analysis_modulation_from_c(
+                "sidereon_signal_spectral_separation_coefficient_hz",
+                interference
+            ));
+            match sidereon_core::signal::analysis::spectral_separation_coefficient_hz(
+                &desired,
+                &interference,
+                receiver_bandwidth_hz,
+            ) {
+                Ok(value) => {
+                    *out = value;
+                    SidereonStatus::Ok
+                }
+                Err(err) => {
+                    extra_invalid_arg("sidereon_signal_spectral_separation_coefficient_hz", err)
+                }
+            }
+        },
+    )
+}
+
+/// Compute the spectral separation coefficient between two modulations in
+/// decibel-hertz.
+///
+/// Safety: desired, interference, and out must point to readable and writable
+/// objects.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_signal_spectral_separation_coefficient_db_hz(
+    desired: *const SidereonSignalAnalysisModulation,
+    interference: *const SidereonSignalAnalysisModulation,
+    receiver_bandwidth_hz: f64,
+    out: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_signal_spectral_separation_coefficient_db_hz",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out,
+                "sidereon_signal_spectral_separation_coefficient_db_hz",
+                "out"
+            ));
+            *out = 0.0;
+            let desired = c_try!(signal_analysis_modulation_from_c(
+                "sidereon_signal_spectral_separation_coefficient_db_hz",
+                desired
+            ));
+            let interference = c_try!(signal_analysis_modulation_from_c(
+                "sidereon_signal_spectral_separation_coefficient_db_hz",
+                interference
+            ));
+            match sidereon_core::signal::analysis::spectral_separation_coefficient_db_hz(
+                &desired,
+                &interference,
+                receiver_bandwidth_hz,
+            ) {
+                Ok(value) => {
+                    *out = value;
+                    SidereonStatus::Ok
+                }
+                Err(err) => {
+                    extra_invalid_arg("sidereon_signal_spectral_separation_coefficient_db_hz", err)
+                }
+            }
+        },
+    )
+}
+
+/// Compute the white-interference spectral separation coefficient for one
+/// modulation over a two-sided receiver bandwidth.
+///
+/// Safety: desired and out must point to readable and writable objects.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_signal_white_noise_spectral_separation_hz(
+    desired: *const SidereonSignalAnalysisModulation,
+    receiver_bandwidth_hz: f64,
+    out: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_signal_white_noise_spectral_separation_hz",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out,
+                "sidereon_signal_white_noise_spectral_separation_hz",
+                "out"
+            ));
+            *out = 0.0;
+            let desired = c_try!(signal_analysis_modulation_from_c(
+                "sidereon_signal_white_noise_spectral_separation_hz",
+                desired
+            ));
+            match sidereon_core::signal::analysis::white_noise_spectral_separation_hz(
+                &desired,
+                receiver_bandwidth_hz,
+            ) {
+                Ok(value) => {
+                    *out = value;
+                    SidereonStatus::Ok
+                }
+                Err(err) => {
+                    extra_invalid_arg("sidereon_signal_white_noise_spectral_separation_hz", err)
+                }
+            }
+        },
+    )
+}
+
 /// Compute effective C/N0 degradation from finite-band interference terms.
 ///
 /// Safety: desired and out must point to readable and writable objects;
