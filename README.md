@@ -19,8 +19,8 @@ to it, and the positioning stack is checked against IGS products.
 Rust source with cbindgen and is committed alongside it, so you do not need
 cbindgen to consume the binding.
 
-The committed header exposes `SIDEREON_VERSION_STRING` as `"0.23.0"` and the
-matching `SIDEREON_VERSION_MAJOR`, `SIDEREON_VERSION_MINOR`, and
+The committed header exposes `SIDEREON_VERSION_STRING` and the matching
+`SIDEREON_VERSION_MAJOR`, `SIDEREON_VERSION_MINOR`, and
 `SIDEREON_VERSION_PATCH` macros.
 
 ```sh
@@ -297,12 +297,12 @@ code, and per-function ownership note) lives in `bindings/c/include/sidereon.h`.
   chain) with a per-satellite residual ledger.
 - **GNSS positioning.** Single-point positioning (SPP), public static-position
   solves from SP3 or broadcast ephemeris with covariance, leave-one-out
-  redundancy diagnostics, and robust weighting, RTK float and fixed (static,
-  kinematic, and moving baseline), PPP float and fixed, static PPP
+  redundancy diagnostics, and robust weighting, RINEX NAV/OBS path loaders with
+  RINEX observation to SPP assembly and solve helpers, RTK float and fixed
+  (static, kinematic, and moving baseline), PPP float and fixed, static PPP
   temporal-correlation covariance with calibrated day-length bounds, optional
   elevation cutoff, optional tropospheric-gradient estimation, DGNSS, velocity
-  solving, RAIM / FDE fault detection and exclusion, Huber reweighting, and
-  DOP.
+  solving, RAIM / FDE fault detection and exclusion, Huber reweighting, and DOP.
 - **Integrity and error bounds.** Multi-constellation ARAIM protection levels,
   SBAS protection levels (DO-229), per-observation reliability (minimal
   detectable bias, internal and external), observability classification of
@@ -314,8 +314,8 @@ code, and per-function ownership note) lives in `bindings/c/include/sidereon.h`.
   levels.
 - **Timing, estimation, and geodesy.** Allan-family clock stability with
   power-law noise identification (IEEE 1139), scalar Kalman and alpha-beta
-  trackers with innovation gating and CFAR thresholds, source localization
-  (ToA/TDOA), station velocity (MIDAS) with trajectory fitting, step
+  trackers with innovation gating, NIS/MAD/EWMA helpers, and CFAR thresholds,
+  source localization (ToA/TDOA), station velocity (MIDAS) with trajectory fitting, step
   detection, and network motion fields, repeating-geometry (sidereal)
   filtering, geodesic direct and inverse problems (Karney), an epoch-aware
   terrestrial frame catalog (ITRF/ETRF Helmert sets), and EGM2008 geoid grids
@@ -348,8 +348,9 @@ code, and per-function ownership note) lives in `bindings/c/include/sidereon.h`.
   planetary events.
 - **Atmosphere.** Klobuchar and NeQuick-G ionosphere, IONEX maps, troposphere
   delay models, and NRLMSISE-00 density.
-- **Terrain and geoid.** DTED elevation lookup on tiles you supply, EGM96 geoid
-  undulation, and orthometric / ellipsoidal height conversion.
+- **Terrain and geoid.** DTED elevation lookup on tiles you supply, batch
+  queries, memory-mappable terrain stores, EGM96 and EGM2008 geoid grids, typed
+  terrain/geoid labels, and orthometric / ellipsoidal height conversion.
 - **RF.** Link-budget computation.
 - **GNSS/INS fusion.** Strapdown mechanization with an error-state EKF (UKF
   option), loose and tight coupling, IGG-III loose updates, an RTS smoother,
@@ -361,9 +362,9 @@ code, and per-function ownership note) lives in `bindings/c/include/sidereon.h`.
 - **Scenario simulation.** Deterministic synthetic observables and a
   ground-truth error ledger from a versioned scenario; identical bytes for the
   same scenario and seed.
-- **Signal analysis.** Closed-form BPSK/BOC spectra, spectral separation
-  coefficients, DLL jitter, and multipath error envelopes against published
-  constants.
+- **Signal analysis.** Canonical `sidereon_signal_*` helpers for closed-form
+  BPSK/BOC spectra, spectral separation coefficients, DLL jitter, and multipath
+  error envelopes against published constants.
 - **Formats.** Parsing and serialization for TLE/OMM, CCSDS (OEM/OPM/CDM/TDM),
   RINEX (observation, navigation, clock), CRINEX, SP3, IONEX, ANTEX,
   Bias-SINEX, RTCM 3, and SBAS messages.
