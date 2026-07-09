@@ -301,6 +301,9 @@ code, and per-function ownership note) lives in `bindings/c/include/sidereon.h`.
   every solution (rank, redundancy, conditioning), and covariance-derived
   error metrics (CEP, R95, SEP, error ellipse) that report wide or flagged
   bounds for weak geometry rather than fabricated confidence.
+  For C callers, direct post-solve integrity entry points are `sidereon_raim`
+  for residual fault detection and `sidereon_araim` for HPL/VPL protection
+  levels.
 - **Timing, estimation, and geodesy.** Allan-family clock stability with
   power-law noise identification (IEEE 1139), scalar Kalman and alpha-beta
   trackers with innovation gating and CFAR thresholds, source localization

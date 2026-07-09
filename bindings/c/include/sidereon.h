@@ -10995,6 +10995,19 @@ typedef struct SidereonRaimResult {
      */
     double threshold;
     /**
+     * Whether reduced_chi_square is valid.
+     */
+    bool has_reduced_chi_square;
+    /**
+     * Chi-square statistic divided by dof, valid when has_reduced_chi_square
+     * is true.
+     */
+    double reduced_chi_square;
+    /**
+     * Root-mean-square residual, meters.
+     */
+    double rms_m;
+    /**
      * Redundancy degrees of freedom.
      */
     int64_t dof;
@@ -11002,6 +11015,11 @@ typedef struct SidereonRaimResult {
      * Whether the geometry was testable.
      */
     bool testable;
+    /**
+     * Number of normalized residual rows available from
+     * sidereon_raim_normalized_residuals.
+     */
+    size_t normalized_residual_count;
     /**
      * Whether worst_sat carries a satellite token.
      */
@@ -11062,6 +11080,20 @@ typedef struct SidereonRangeFdeOptions {
      */
     size_t min_redundancy;
 } SidereonRangeFdeOptions;
+
+/**
+ * One per-satellite normalized RAIM residual.
+ */
+typedef struct SidereonRaimNormalizedResidual {
+    /**
+     * Satellite token.
+     */
+    struct SidereonSatelliteToken sat_id;
+    /**
+     * Residual multiplied by sqrt(weight), meters.
+     */
+    double normalized_residual;
+} SidereonRaimNormalizedResidual;
 
 /**
  * Per-measurement FDE diagnostic, mirroring
@@ -24441,6 +24473,28 @@ enum SidereonStatus sidereon_raim_for_solution(const struct SidereonSppSolution 
                                                bool n_systems_enabled,
                                                int64_t n_systems,
                                                struct SidereonRaimResult *out);
+
+/**
+ * Copy the normalized residual rows for the direct RAIM test. Rows are ordered
+ * by satellite token. Uses the variable-length output contract.
+ *
+ * Safety: inputs match sidereon_raim; out points to len
+ * SidereonRaimNormalizedResidual entries or NULL when len is 0; out_written
+ * and out_required point to size_t.
+ */
+enum SidereonStatus sidereon_raim_normalized_residuals(const char *const *used_sat_ids,
+                                                       const double *residuals_m,
+                                                       size_t count,
+                                                       double p_fa,
+                                                       bool unit_weights,
+                                                       const struct SidereonFdeRaimWeight *weights,
+                                                       size_t weight_count,
+                                                       bool n_systems_enabled,
+                                                       int64_t n_systems,
+                                                       struct SidereonRaimNormalizedResidual *out,
+                                                       size_t len,
+                                                       size_t *out_written,
+                                                       size_t *out_required);
 
 /**
  * Initialize SidereonRangeFdeOptions with the engine defaults (RTKLIB demo5

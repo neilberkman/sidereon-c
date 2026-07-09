@@ -33,6 +33,10 @@ static void check(int ok, const char *what) {
     }
 }
 
+static void check_close(double got, double want, double tol, const char *what) {
+    check(isfinite(got) && fabs(got - want) <= tol, what);
+}
+
 static uint8_t *read_file(const char *path, size_t *out_len) {
     FILE *f = fopen(path, "rb");
     if (!f) {
@@ -159,6 +163,33 @@ static void test_raim(void) {
     check(sidereon_raim(sats, residuals, 5, 1.0e-3, true, NULL, 0, false, 0, &result) ==
               SIDEREON_STATUS_OK,
           "raim");
+    check(!result.fault_detected && isfinite(result.test_statistic), "raim summary readable");
+    check_close(result.test_statistic, 0.6625, 1.0e-12, "raim test statistic");
+    check(result.has_threshold && result.threshold > result.test_statistic, "raim threshold");
+    check(result.has_reduced_chi_square, "raim reduced chi-square present");
+    check_close(result.reduced_chi_square, 0.6625, 1.0e-12, "raim reduced chi-square");
+    check_close(result.rms_m, sqrt(0.6625 / 5.0), 1.0e-12, "raim rms");
+    check(result.dof == 1 && result.testable, "raim dof");
+    check(result.normalized_residual_count == 5, "raim normalized residual count");
+    check(result.has_worst_sat && strncmp(result.worst_sat, "G03", sizeof(result.worst_sat)) == 0,
+          "raim worst satellite");
+
+    size_t written = 0;
+    size_t required = 0;
+    check(sidereon_raim_normalized_residuals(sats, residuals, 5, 1.0e-3, true, NULL, 0, false, 0,
+                                             NULL, 0, &written, &required) ==
+              SIDEREON_STATUS_OK &&
+              written == 0 && required == 5,
+          "raim normalized residual query");
+    SidereonRaimNormalizedResidual rows[5];
+    check(sidereon_raim_normalized_residuals(sats, residuals, 5, 1.0e-3, true, NULL, 0, false, 0,
+                                             rows, 5, &written, &required) ==
+              SIDEREON_STATUS_OK &&
+              written == 5 && required == 5,
+          "raim normalized residual copy");
+    check(strncmp(rows[0].sat_id.bytes, "G01", sizeof(rows[0].sat_id.bytes)) == 0,
+          "raim normalized residual sat id");
+    check_close(rows[0].normalized_residual, 0.4, 1.0e-12, "raim normalized residual value");
 }
 
 static void test_tropo(void) {

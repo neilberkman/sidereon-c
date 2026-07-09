@@ -92,6 +92,24 @@ a `SidereonDop` of geometry scalars. Free every handle with its `_free`
 function. See `include/sidereon.h` for the full surface and per-function safety
 notes.
 
+## Integrity
+
+The direct post-solve integrity APIs are available without ephemeris handles or
+solver coupling:
+
+- Call `sidereon_raim` with satellite tokens, post-fit residuals, optional
+  per-satellite inverse-variance weights, false-alarm probability, and optional
+  GNSS clock-system count. The output is `SidereonRaimResult` with
+  `fault_detected`, `test_statistic`, `threshold`, `worst_sat`, `dof`,
+  `reduced_chi_square`, `rms_m`, and the normalized residual count. Use
+  `sidereon_raim_normalized_residuals` to copy the per-satellite normalized
+  residual rows with the standard `(NULL, 0)` size query contract.
+- Call `sidereon_araim` with `SidereonAraimGeometry`, `SidereonAraimIsm`, and
+  `SidereonAraimIntegrityAllocation`; read `hpl_m`, `vpl_m`,
+  `sigma_acc_h_m`, and `sigma_acc_v_m` through
+  `sidereon_araim_result_summary`, then release the result with
+  `sidereon_araim_result_free`.
+
 ## Smoke test
 
 `tests/run_smoke.sh` builds the library, regenerates the header, compiles

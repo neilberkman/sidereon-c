@@ -15,16 +15,36 @@ pub struct SidereonRaimResult {
     pub has_threshold: bool,
     /// Detection threshold (valid when has_threshold is true).
     pub threshold: f64,
+    /// Whether reduced_chi_square is valid.
+    pub has_reduced_chi_square: bool,
+    /// Chi-square statistic divided by dof, valid when has_reduced_chi_square
+    /// is true.
+    pub reduced_chi_square: f64,
+    /// Root-mean-square residual, meters.
+    pub rms_m: f64,
     /// Redundancy degrees of freedom.
     pub dof: i64,
     /// Whether the geometry was testable.
     pub testable: bool,
+    /// Number of normalized residual rows available from
+    /// sidereon_raim_normalized_residuals.
+    pub normalized_residual_count: usize,
     /// Whether worst_sat carries a satellite token.
     pub has_worst_sat: bool,
     /// Worst-residual satellite token, null-terminated (valid when
     /// has_worst_sat). Sized to hold any GNSS token (16 bytes) plus the
     /// terminator; kept in step with SATELLITE_TOKEN_C_BYTES by the assert below.
     pub worst_sat: [c_char; 17],
+}
+
+/// One per-satellite normalized RAIM residual.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonRaimNormalizedResidual {
+    /// Satellite token.
+    pub sat_id: SidereonSatelliteToken,
+    /// Residual multiplied by sqrt(weight), meters.
+    pub normalized_residual: f64,
 }
 
 /// Run the RAIM chi-square test over used satellites and their residuals.
@@ -49,83 +69,100 @@ pub unsafe extern "C" fn sidereon_raim(
 ) -> SidereonStatus {
     ffi_boundary("sidereon_raim", SidereonStatus::Panic, || {
         let out = c_try!(require_out(out, "sidereon_raim", "out"));
-        *out = SidereonRaimResult {
-            fault_detected: false,
-            test_statistic: 0.0,
-            has_threshold: false,
-            threshold: 0.0,
-            dof: 0,
-            testable: false,
-            has_worst_sat: false,
-            worst_sat: [0; 17],
-        };
-        let id_ptrs = c_try!(require_slice(
+        *out = empty_raim_result();
+        let (input, residuals) = c_try!(raim_input_from_c(
+            "sidereon_raim",
             used_sat_ids,
-            count,
-            "sidereon_raim",
-            "used_sat_ids"
-        ));
-        let residuals = c_try!(require_slice(
             residuals_m,
-            count,
-            "sidereon_raim",
-            "residuals_m"
+            count
         ));
-        let mut used_sats = Vec::with_capacity(count);
-        for ptr in id_ptrs {
-            let sat = c_try!(parse_satellite_token("sidereon_raim", *ptr));
-            used_sats.push(sat.to_string());
-        }
-        let raim_weights = if unit_weights {
-            RaimWeights::Unit
-        } else {
-            let rows = c_try!(require_slice(
-                weights,
-                weight_count,
-                "sidereon_raim",
-                "weights"
-            ));
-            let mut map = BTreeMap::new();
-            for row in rows {
-                let sat = c_try!(parse_satellite_token("sidereon_raim", row.sat_id));
-                map.insert(sat.to_string(), row.weight);
-            }
-            RaimWeights::BySatellite(map)
-        };
+        let raim_weights = c_try!(raim_weights_from_c(
+            "sidereon_raim",
+            unit_weights,
+            weights,
+            weight_count
+        ));
         let options = RaimOptions {
             p_fa,
             weights: raim_weights,
             n_systems: n_systems_enabled.then_some(n_systems as isize),
         };
-        let input = sidereon_core::quality::RaimInput {
-            used_sats,
-            residuals_m: residuals.to_vec(),
-        };
         match sidereon_core::quality::raim(&input, &options) {
             Ok(result) => {
-                out.fault_detected = result.fault_detected;
-                out.test_statistic = result.test_statistic;
-                if let Some(t) = result.threshold {
-                    out.has_threshold = true;
-                    out.threshold = t;
-                }
-                out.dof = result.dof as i64;
-                out.testable = result.testable;
-                if let Some(worst) = result.worst_sat {
-                    let bytes = worst.as_bytes();
-                    if bytes.len() < SATELLITE_TOKEN_C_BYTES {
-                        for (slot, b) in out.worst_sat.iter_mut().zip(bytes.iter()) {
-                            *slot = *b as c_char;
-                        }
-                        out.worst_sat[bytes.len()] = 0;
-                        out.has_worst_sat = true;
-                    }
-                }
+                *out = raim_result_to_c(&result, &residuals);
                 SidereonStatus::Ok
             }
             Err(err) => extra_invalid_arg("sidereon_raim", err),
         }
     })
+}
+
+/// Copy the normalized residual rows for the direct RAIM test. Rows are ordered
+/// by satellite token. Uses the variable-length output contract.
+///
+/// Safety: inputs match sidereon_raim; out points to len
+/// SidereonRaimNormalizedResidual entries or NULL when len is 0; out_written
+/// and out_required point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_raim_normalized_residuals(
+    used_sat_ids: *const *const c_char,
+    residuals_m: *const f64,
+    count: usize,
+    p_fa: f64,
+    unit_weights: bool,
+    weights: *const SidereonFdeRaimWeight,
+    weight_count: usize,
+    n_systems_enabled: bool,
+    n_systems: i64,
+    out: *mut SidereonRaimNormalizedResidual,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_raim_normalized_residuals",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_raim_normalized_residuals",
+                out_written,
+                out_required
+            ));
+            let (input, _) = c_try!(raim_input_from_c(
+                "sidereon_raim_normalized_residuals",
+                used_sat_ids,
+                residuals_m,
+                count
+            ));
+            let raim_weights = c_try!(raim_weights_from_c(
+                "sidereon_raim_normalized_residuals",
+                unit_weights,
+                weights,
+                weight_count
+            ));
+            let options = RaimOptions {
+                p_fa,
+                weights: raim_weights,
+                n_systems: n_systems_enabled.then_some(n_systems as isize),
+            };
+            match sidereon_core::quality::raim(&input, &options) {
+                Ok(result) => {
+                    let rows = raim_normalized_residuals_to_c(&result);
+                    c_try!(copy_prefix_to_c(
+                        "sidereon_raim_normalized_residuals",
+                        "out",
+                        &rows,
+                        out,
+                        len,
+                        out_written,
+                        out_required,
+                    ));
+                    SidereonStatus::Ok
+                }
+                Err(err) => extra_invalid_arg("sidereon_raim_normalized_residuals", err),
+            }
+        },
+    )
 }
 
 /// Run RAIM over an SPP receiver solution handle (used satellites + post-fit
@@ -148,40 +185,18 @@ pub unsafe extern "C" fn sidereon_raim_for_solution(
 ) -> SidereonStatus {
     ffi_boundary("sidereon_raim_for_solution", SidereonStatus::Panic, || {
         let out = c_try!(require_out(out, "sidereon_raim_for_solution", "out"));
-        *out = SidereonRaimResult {
-            fault_detected: false,
-            test_statistic: 0.0,
-            has_threshold: false,
-            threshold: 0.0,
-            dof: 0,
-            testable: false,
-            has_worst_sat: false,
-            worst_sat: [0; 17],
-        };
+        *out = empty_raim_result();
         let solution = c_try!(require_ref(
             solution,
             "sidereon_raim_for_solution",
             "solution"
         ));
-        let raim_weights = if unit_weights {
-            RaimWeights::Unit
-        } else {
-            let rows = c_try!(require_slice(
-                weights,
-                weight_count,
-                "sidereon_raim_for_solution",
-                "weights"
-            ));
-            let mut map = BTreeMap::new();
-            for row in rows {
-                let sat = c_try!(parse_satellite_token(
-                    "sidereon_raim_for_solution",
-                    row.sat_id
-                ));
-                map.insert(sat.to_string(), row.weight);
-            }
-            RaimWeights::BySatellite(map)
-        };
+        let raim_weights = c_try!(raim_weights_from_c(
+            "sidereon_raim_for_solution",
+            unit_weights,
+            weights,
+            weight_count
+        ));
         let options = RaimOptions {
             p_fa,
             weights: raim_weights,
@@ -189,24 +204,7 @@ pub unsafe extern "C" fn sidereon_raim_for_solution(
         };
         match sidereon_core::quality::raim_for_solution(&solution.inner, &options) {
             Ok(result) => {
-                out.fault_detected = result.fault_detected;
-                out.test_statistic = result.test_statistic;
-                if let Some(t) = result.threshold {
-                    out.has_threshold = true;
-                    out.threshold = t;
-                }
-                out.dof = result.dof as i64;
-                out.testable = result.testable;
-                if let Some(worst) = result.worst_sat {
-                    let bytes = worst.as_bytes();
-                    if bytes.len() < SATELLITE_TOKEN_C_BYTES {
-                        for (slot, b) in out.worst_sat.iter_mut().zip(bytes.iter()) {
-                            *slot = *b as c_char;
-                        }
-                        out.worst_sat[bytes.len()] = 0;
-                        out.has_worst_sat = true;
-                    }
-                }
+                *out = raim_result_to_c(&result, &solution.inner.residuals_m);
                 SidereonStatus::Ok
             }
             Err(err) => extra_invalid_arg("sidereon_raim_for_solution", err),
@@ -263,6 +261,119 @@ fn map_quality_error(fn_name: &str, err: QualityError) -> SidereonStatus {
         QualityError::SingularGeometry => SidereonStatus::Solve,
         _ => SidereonStatus::InvalidArgument,
     }
+}
+
+unsafe fn raim_input_from_c(
+    fn_name: &str,
+    used_sat_ids: *const *const c_char,
+    residuals_m: *const f64,
+    count: usize,
+) -> Result<(sidereon_core::quality::RaimInput, Vec<f64>), SidereonStatus> {
+    let id_ptrs = require_slice(used_sat_ids, count, fn_name, "used_sat_ids")?;
+    let residuals = require_slice(residuals_m, count, fn_name, "residuals_m")?;
+    let mut used_sats = Vec::with_capacity(count);
+    for ptr in id_ptrs {
+        let sat = parse_satellite_token(fn_name, *ptr)?;
+        used_sats.push(sat.to_string());
+    }
+    let residuals = residuals.to_vec();
+    Ok((
+        sidereon_core::quality::RaimInput {
+            used_sats,
+            residuals_m: residuals.clone(),
+        },
+        residuals,
+    ))
+}
+
+unsafe fn raim_weights_from_c(
+    fn_name: &str,
+    unit_weights: bool,
+    weights: *const SidereonFdeRaimWeight,
+    weight_count: usize,
+) -> Result<RaimWeights, SidereonStatus> {
+    if unit_weights {
+        return Ok(RaimWeights::Unit);
+    }
+    let rows = require_slice(weights, weight_count, fn_name, "weights")?;
+    let mut map = BTreeMap::new();
+    for row in rows {
+        let sat = parse_satellite_token(fn_name, row.sat_id)?;
+        map.insert(sat.to_string(), row.weight);
+    }
+    Ok(RaimWeights::BySatellite(map))
+}
+
+fn empty_raim_result() -> SidereonRaimResult {
+    SidereonRaimResult {
+        fault_detected: false,
+        test_statistic: 0.0,
+        has_threshold: false,
+        threshold: 0.0,
+        has_reduced_chi_square: false,
+        reduced_chi_square: 0.0,
+        rms_m: 0.0,
+        dof: 0,
+        testable: false,
+        normalized_residual_count: 0,
+        has_worst_sat: false,
+        worst_sat: [0; 17],
+    }
+}
+
+fn raim_result_to_c(
+    value: &sidereon_core::quality::RaimResult,
+    residuals_m: &[f64],
+) -> SidereonRaimResult {
+    let mut out = empty_raim_result();
+    out.fault_detected = value.fault_detected;
+    out.test_statistic = value.test_statistic;
+    if let Some(t) = value.threshold {
+        out.has_threshold = true;
+        out.threshold = t;
+    }
+    if value.dof > 0 {
+        out.has_reduced_chi_square = true;
+        out.reduced_chi_square = value.test_statistic / value.dof as f64;
+    }
+    out.rms_m = residual_rms_m(residuals_m);
+    out.dof = value.dof as i64;
+    out.testable = value.testable;
+    out.normalized_residual_count = value.normalized_residuals.len();
+    if let Some(worst) = &value.worst_sat {
+        let bytes = worst.as_bytes();
+        if bytes.len() < SATELLITE_TOKEN_C_BYTES {
+            for (slot, byte) in out.worst_sat.iter_mut().zip(bytes.iter()) {
+                *slot = *byte as c_char;
+            }
+            out.worst_sat[bytes.len()] = 0;
+            out.has_worst_sat = true;
+        }
+    }
+    out
+}
+
+fn raim_normalized_residuals_to_c(
+    value: &sidereon_core::quality::RaimResult,
+) -> Vec<SidereonRaimNormalizedResidual> {
+    value
+        .normalized_residuals
+        .iter()
+        .map(
+            |(sat_id, normalized_residual)| SidereonRaimNormalizedResidual {
+                sat_id: satellite_token_from_text(sat_id),
+                normalized_residual: *normalized_residual,
+            },
+        )
+        .collect()
+}
+
+fn residual_rms_m(residuals_m: &[f64]) -> f64 {
+    if residuals_m.is_empty() {
+        return 0.0;
+    }
+    let sum_squares: f64 = residuals_m.iter().map(|residual| residual * residual).sum();
+    (sum_squares / residuals_m.len() as f64).sqrt()
 }
 
 unsafe fn range_fde_rows_from_c(
