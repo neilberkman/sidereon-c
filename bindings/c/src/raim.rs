@@ -48,8 +48,10 @@ pub struct SidereonRaimNormalizedResidual {
 }
 
 /// Run the RAIM chi-square test over used satellites and their residuals.
-/// weights/unit_weights/n_systems mirror SidereonFdeOptions. Delegates to
-/// sidereon_core::quality::raim.
+/// weights/unit_weights/n_systems mirror SidereonFdeOptions. Weights must be
+/// inverse variances derived from per-satellite residual variances; unit
+/// weights on metre-scale residuals make fault_detected saturate near 100%.
+/// Delegates to sidereon_core::quality::raim.
 ///
 /// Safety: used_sat_ids points to count null-terminated tokens; residuals_m
 /// points to count doubles; weights points to weight_count SidereonFdeRaimWeight

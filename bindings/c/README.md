@@ -103,7 +103,18 @@ solver coupling:
   `fault_detected`, `test_statistic`, `threshold`, `worst_sat`, `dof`,
   `reduced_chi_square`, `rms_m`, and the normalized residual count. Use
   `sidereon_raim_normalized_residuals` to copy the per-satellite normalized
-  residual rows with the standard `(NULL, 0)` size query contract.
+  residual rows with the standard `(NULL, 0)` size query contract. RAIM weights
+  must come from per-satellite residual variances; unit weights on metre-scale
+  residuals make `fault_detected` saturate near 100%.
+
+  ```c
+  SidereonFdeRaimWeight weights[6];
+  for (size_t i = 0; i < 6; i++) {
+      double sin_el = fmax(sin(elevation_rad[i]), 0.2);
+      double variance_m2 = (0.8 / sin_el) * (0.8 / sin_el);
+      weights[i] = (SidereonFdeRaimWeight){sat_ids[i], 1.0 / variance_m2};
+  }
+  ```
 - Call `sidereon_araim` with `SidereonAraimGeometry`, `SidereonAraimIsm`, and
   `SidereonAraimIntegrityAllocation`; read `hpl_m`, `vpl_m`,
   `sigma_acc_h_m`, and `sigma_acc_v_m` through

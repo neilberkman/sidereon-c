@@ -143,7 +143,9 @@ pub struct SidereonAraimSummary {
     pub emt_m: f64,
     /// Unenumerated plus unmonitorable fault probability mass.
     pub p_unmonitored: f64,
-    /// True when the solve met the allocation and all roots converged.
+    /// True when ARAIM met the allocation and all roots converged.
+    pub available: bool,
+    /// Alias for available, kept for compatibility.
     pub availability: bool,
     /// Number of fault-mode rows available.
     pub fault_mode_count: usize,
@@ -257,6 +259,7 @@ pub unsafe extern "C" fn sidereon_araim_result_summary(
                 sigma_acc_v_m: 0.0,
                 emt_m: 0.0,
                 p_unmonitored: 0.0,
+                available: false,
                 availability: false,
                 fault_mode_count: 0,
             };
@@ -522,7 +525,8 @@ fn araim_summary_to_c(value: &CoreAraimResult) -> SidereonAraimSummary {
         sigma_acc_v_m: value.sigma_acc_v_m,
         emt_m: value.emt_m,
         p_unmonitored: value.p_unmonitored,
-        availability: value.availability,
+        available: value.available,
+        availability: value.available,
         fault_mode_count: value.fault_modes.len(),
     }
 }
