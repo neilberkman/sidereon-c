@@ -19,6 +19,10 @@ to it, and the positioning stack is checked against IGS products.
 Rust source with cbindgen and is committed alongside it, so you do not need
 cbindgen to consume the binding.
 
+The committed header exposes `SIDEREON_VERSION_STRING` as `"0.23.0"` and the
+matching `SIDEREON_VERSION_MAJOR`, `SIDEREON_VERSION_MINOR`, and
+`SIDEREON_VERSION_PATCH` macros.
+
 ```sh
 cargo build --release
 # -> target/release/libsidereon.a      (static archive)
@@ -273,7 +277,7 @@ int main(void) {
 }
 ```
 
-The other solvers follow the same shape: a typed config in, an opaque solution
+The other solvers follow the same pattern: a typed config in, an opaque solution
 out, reader functions that copy scalars and positions into memory you own. Every
 variable-length result uses one contract: call with a NULL buffer and length 0
 to learn the required count, then call again with storage you own. Anything that
@@ -291,10 +295,14 @@ code, and per-function ownership note) lives in `bindings/c/include/sidereon.h`.
   coverage grids, and batch least-squares orbit fitting against precise
   ephemerides (including terrestrial-frame SP3 through the Earth-orientation
   chain) with a per-satellite residual ledger.
-- **GNSS positioning.** Single-point positioning (SPP), RTK float and fixed
-  (static, kinematic, and moving baseline), PPP float and fixed, DGNSS,
-  velocity solving, RAIM / FDE fault detection and exclusion, robust solving,
-  and DOP.
+- **GNSS positioning.** Single-point positioning (SPP), public static-position
+  solves from SP3 or broadcast ephemeris with covariance, leave-one-out
+  redundancy diagnostics, and robust weighting, RTK float and fixed (static,
+  kinematic, and moving baseline), PPP float and fixed, static PPP
+  temporal-correlation covariance with calibrated day-length bounds, optional
+  elevation cutoff, optional tropospheric-gradient estimation, DGNSS, velocity
+  solving, RAIM / FDE fault detection and exclusion, Huber reweighting, and
+  DOP.
 - **Integrity and error bounds.** Multi-constellation ARAIM protection levels,
   SBAS protection levels (DO-229), per-observation reliability (minimal
   detectable bias, internal and external), observability classification of
@@ -304,13 +312,15 @@ code, and per-function ownership note) lives in `bindings/c/include/sidereon.h`.
 - **Timing, estimation, and geodesy.** Allan-family clock stability with
   power-law noise identification (IEEE 1139), scalar Kalman and alpha-beta
   trackers with innovation gating and CFAR thresholds, source localization
-  (ToA/TDOA), robust station velocity (MIDAS) with trajectory fitting, step
+  (ToA/TDOA), station velocity (MIDAS) with trajectory fitting, step
   detection, and network motion fields, repeating-geometry (sidereal)
   filtering, geodesic direct and inverse problems (Karney), an epoch-aware
   terrestrial frame catalog (ITRF/ETRF Helmert sets), and EGM2008 geoid grids
   alongside EGM96.
 - **GNSS corrections and biases.** SBAS message decode and corrected solving,
-  SSR orbit / clock / bias corrections from RTCM SSR or Galileo HAS,
+  SSR orbit / clock / bias corrections from RTCM SSR or Galileo HAS, RTCM 3
+  broadcast ephemeris decode for GPS (1019), GLONASS (1020), Galileo
+  (1045/1046), BeiDou (1042), and QZSS (1044), each real-data validated,
   Bias-SINEX DCB and OSB products, and DGNSS pseudorange corrections.
 - **GNSS measurements.** Carrier-phase combinations (wide-lane, narrow-lane,
   Melbourne-Wubbena, ionosphere-free), cycle-slip detection, carrier smoothing,
@@ -339,7 +349,7 @@ code, and per-function ownership note) lives in `bindings/c/include/sidereon.h`.
   undulation, and orthometric / ellipsoidal height conversion.
 - **RF.** Link-budget computation.
 - **GNSS/INS fusion.** Strapdown mechanization with an error-state EKF (UKF
-  option), loose and tight coupling, robust loose updates, an RTS smoother,
+  option), loose and tight coupling, IGG-III loose updates, an RTS smoother,
   a serializable filter state, and field mode (zero-velocity and
   zero-angular-rate updates, non-holonomic constraints, per-fix-status
   weighting, IMU-to-body mounting matrix), all off by default.
