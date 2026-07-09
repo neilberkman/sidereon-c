@@ -19875,6 +19875,18 @@ enum SidereonStatus sidereon_drag_parameters_from_bc_factor(double bc_factor_m2_
                                                             struct SidereonDragParameters *out_drag);
 
 /**
+ * Copy a DTED interpolation label into out.
+ *
+ * Safety: out points to len bytes or NULL when len is 0; out_written and
+ * out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_dted_interpolation_label(uint32_t interpolation,
+                                                      uint8_t *out,
+                                                      size_t len,
+                                                      size_t *out_written,
+                                                      size_t *out_required);
+
+/**
  * Initialize DTED lookup options to bilinear interpolation. Heights returned by
  * DTED lookup functions are orthometric meters.
  *
@@ -20954,6 +20966,25 @@ enum SidereonStatus sidereon_frame_teme_to_gcrs(const double *position_km,
 enum SidereonStatus sidereon_frequency_hz(uint32_t system, uint32_t band, double *out);
 
 /**
+ * Return the covariance dimension for a fusion error-state layout.
+ *
+ * Safety: out must point to size_t.
+ */
+enum SidereonStatus sidereon_fusion_error_state_layout_dimension(uint32_t layout, size_t *out);
+
+/**
+ * Copy a fusion error-state layout label into out.
+ *
+ * Safety: out points to len bytes or NULL when len is 0; out_written and
+ * out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_fusion_error_state_layout_label(uint32_t layout,
+                                                             uint8_t *out,
+                                                             size_t len,
+                                                             size_t *out_written,
+                                                             size_t *out_required);
+
+/**
  * Initialize fusion filter configuration with core defaults.
  *
  * Safety: out must point to a SidereonFusionFilterConfig.
@@ -21015,6 +21046,18 @@ enum SidereonStatus sidereon_fusion_filter_encode_state(const struct SidereonFus
  * not already been freed.
  */
 void sidereon_fusion_filter_free(struct SidereonFusionFilter *filter);
+
+/**
+ * Copy a fusion filter kind label into out.
+ *
+ * Safety: out points to len bytes or NULL when len is 0; out_written and
+ * out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_fusion_filter_kind_label(uint32_t kind,
+                                                      uint8_t *out,
+                                                      size_t len,
+                                                      size_t *out_written,
+                                                      size_t *out_required);
 
 /**
  * Propagate a fusion filter with one IMU sample.
@@ -21219,6 +21262,18 @@ enum SidereonStatus sidereon_fusion_filter_update_tight_sp3_time_sync(struct Sid
                                                                       const struct SidereonSp3 *sp3,
                                                                       const struct SidereonFusionTightEpoch *epoch,
                                                                       struct SidereonFusionTimeSyncUpdate *out_update);
+
+/**
+ * Copy a GNSS fix-status label into out.
+ *
+ * Safety: out points to len bytes or NULL when len is 0; out_written and
+ * out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_fusion_gnss_fix_status_label(uint32_t status,
+                                                          uint8_t *out,
+                                                          size_t len,
+                                                          size_t *out_written,
+                                                          size_t *out_required);
 
 /**
  * Fill an IMU spec with one of the core preset grades.
@@ -28270,6 +28325,13 @@ enum SidereonStatus sidereon_signal_autocorrelation(const int8_t *code,
                                                     size_t *out_required);
 
 /**
+ * Return the receiver bandwidth used by the Betz L1 SSC fixture, in hertz.
+ *
+ * Safety: out must point to a double.
+ */
+enum SidereonStatus sidereon_signal_betz_l1_receiver_bandwidth_hz(double *out);
+
+/**
  * One C/A code chip (+1 or -1) for a GPS PRN at a chip index. Delegates to
  * sidereon_core::signal::ca_chip.
  *
@@ -28370,6 +28432,118 @@ enum SidereonStatus sidereon_signal_cross_correlation(const int8_t *code_a,
                                                       size_t *out_required);
 
 /**
+ * Compute the lower bound for code-delay tracking jitter. Canonical sibling of
+ * sidereon_signal_analysis_dll_lower_bound.
+ *
+ * Safety: modulation, options, and out must point to readable and writable
+ * objects.
+ */
+enum SidereonStatus sidereon_signal_dll_lower_bound(const struct SidereonSignalAnalysisModulation *modulation,
+                                                    const struct SidereonSignalAnalysisDllTrackingOptions *options,
+                                                    struct SidereonSignalAnalysisDllJitter *out);
+
+/**
+ * Compute early-late DLL thermal-noise jitter for a modulation. Canonical
+ * sibling of sidereon_signal_analysis_dll_jitter.
+ *
+ * Safety: modulation, options, and out must point to readable and writable
+ * objects.
+ */
+enum SidereonStatus sidereon_signal_dll_thermal_noise_jitter(const struct SidereonSignalAnalysisModulation *modulation,
+                                                             const struct SidereonSignalAnalysisDllTrackingOptions *options,
+                                                             uint32_t processing,
+                                                             struct SidereonSignalAnalysisDllJitter *out);
+
+/**
+ * Compute effective C/N0 degradation from finite-band interference terms.
+ * Canonical sibling of sidereon_signal_analysis_effective_cn0_degradation.
+ *
+ * Safety: desired and out must point to readable and writable objects;
+ * interferences must point to interference_count rows or NULL when the count is
+ * zero.
+ */
+enum SidereonStatus sidereon_signal_effective_cn0_degradation(const struct SidereonSignalAnalysisModulation *desired,
+                                                              double cn0_db_hz,
+                                                              double receiver_bandwidth_hz,
+                                                              const struct SidereonSignalAnalysisInterference *interferences,
+                                                              size_t interference_count,
+                                                              struct SidereonSignalAnalysisCn0Degradation *out);
+
+/**
+ * Compute the fraction of modulation power inside a two-sided bandwidth.
+ *
+ * Safety: modulation and out must point to readable and writable objects.
+ */
+enum SidereonStatus sidereon_signal_fraction_power_in_band(const struct SidereonSignalAnalysisModulation *modulation,
+                                                           double receiver_bandwidth_hz,
+                                                           double *out);
+
+/**
+ * Return the code rate for a signal modulation, in hertz.
+ *
+ * Safety: modulation and out must point to readable and writable objects.
+ */
+enum SidereonStatus sidereon_signal_modulation_code_rate_hz(const struct SidereonSignalAnalysisModulation *modulation,
+                                                            double *out);
+
+/**
+ * Copy a stable signal-modulation label into out.
+ *
+ * Safety: modulation must point to a SidereonSignalAnalysisModulation; out
+ * points to len bytes or NULL when len is 0; out_written and out_required must
+ * point to size_t.
+ */
+enum SidereonStatus sidereon_signal_modulation_label(const struct SidereonSignalAnalysisModulation *modulation,
+                                                     uint8_t *out,
+                                                     size_t len,
+                                                     size_t *out_written,
+                                                     size_t *out_required);
+
+/**
+ * Compute one-path early-late multipath envelopes on a delay grid. Canonical
+ * sibling of sidereon_signal_analysis_multipath_envelope.
+ *
+ * Safety: modulation and options must point to readable objects; delay_chips
+ * must point to delay_count doubles or NULL when count is zero; out must point
+ * to len rows or NULL when len is 0; out_written and out_required must point to
+ * size_t.
+ */
+enum SidereonStatus sidereon_signal_multipath_error_envelope(const struct SidereonSignalAnalysisModulation *modulation,
+                                                             const struct SidereonSignalAnalysisMultipathOptions *options,
+                                                             const double *delay_chips,
+                                                             size_t delay_count,
+                                                             struct SidereonSignalAnalysisMultipathEnvelopePoint *out,
+                                                             size_t len,
+                                                             size_t *out_written,
+                                                             size_t *out_required);
+
+/**
+ * Integrate normalized PSD over a two-sided receiver bandwidth.
+ *
+ * Safety: modulation and out must point to readable and writable objects.
+ */
+enum SidereonStatus sidereon_signal_power_in_band(const struct SidereonSignalAnalysisModulation *modulation,
+                                                  double receiver_bandwidth_hz,
+                                                  double *out);
+
+/**
+ * Evaluate a normalized modulation PSD at an offset frequency. Canonical
+ * scalar sibling of sidereon_signal_analysis_psd.
+ *
+ * Safety: modulation and out must point to readable and writable objects.
+ */
+enum SidereonStatus sidereon_signal_psd_hz(const struct SidereonSignalAnalysisModulation *modulation,
+                                           double offset_hz,
+                                           double *out);
+
+/**
+ * Return the reference chipping-rate unit used by BPSK and BOC, in hertz.
+ *
+ * Safety: out must point to a double.
+ */
+enum SidereonStatus sidereon_signal_reference_chip_rate_hz(double *out);
+
+/**
  * Build a sampled C/A-code replica. Variable-length output contract. Delegates
  * to sidereon_core::signal::replica.
  *
@@ -28382,6 +28556,15 @@ enum SidereonStatus sidereon_signal_replica(int64_t prn,
                                             size_t len,
                                             size_t *out_written,
                                             size_t *out_required);
+
+/**
+ * Compute the RMS, or Gabor, bandwidth over a two-sided receiver bandwidth.
+ *
+ * Safety: modulation and out must point to readable and writable objects.
+ */
+enum SidereonStatus sidereon_signal_rms_bandwidth_hz(const struct SidereonSignalAnalysisModulation *modulation,
+                                                     double receiver_bandwidth_hz,
+                                                     double *out);
 
 /**
  * Post-correlation SNR in dB for a C/N0 and integration time. Delegates to
@@ -30834,6 +31017,18 @@ enum SidereonStatus sidereon_terminator_latitude_deg(double sub_solar_latitude_d
                                                      double *out_latitude_deg);
 
 /**
+ * Copy a terrain geoid-model label into out.
+ *
+ * Safety: out points to len bytes or NULL when len is 0; out_written and
+ * out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_terrain_geoid_model_label(uint32_t model,
+                                                       uint8_t *out,
+                                                       size_t len,
+                                                       size_t *out_written,
+                                                       size_t *out_required);
+
+/**
  * Return an FNV-1a checksum for terrain store bytes.
  *
  * Safety: bytes must point to len readable bytes; out_checksum64 must point to
@@ -31936,6 +32131,18 @@ void sidereon_version(uint32_t *out_major, uint32_t *out_minor, uint32_t *out_pa
  * pointer refers to static storage and must not be freed.
  */
 const char *sidereon_version_string(void);
+
+/**
+ * Copy a terrain vertical-datum label into out.
+ *
+ * Safety: out points to len bytes or NULL when len is 0; out_written and
+ * out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_vertical_datum_label(uint32_t datum,
+                                                  uint8_t *out,
+                                                  size_t len,
+                                                  size_t *out_written,
+                                                  size_t *out_required);
 
 /**
  * Find the satellites of a constellation visible above min_elevation_deg from a

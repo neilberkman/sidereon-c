@@ -34,6 +34,20 @@ static void check_close(double got, double want, double tol, const char *what) {
     check(isfinite(got) && fabs(got - want) <= tol, what);
 }
 
+static void check_label(SidereonStatus (*fn)(uint32_t, uint8_t *, size_t, size_t *, size_t *),
+                        uint32_t value,
+                        const char *expected,
+                        const char *what) {
+    uint8_t buf[64];
+    size_t written = 0;
+    size_t required = 0;
+    memset(buf, 0, sizeof(buf));
+    check(fn(value, buf, sizeof(buf), &written, &required) == SIDEREON_STATUS_OK &&
+              written == strlen(expected) && required == strlen(expected) &&
+              memcmp(buf, expected, strlen(expected)) == 0,
+          what);
+}
+
 static uint64_t f64_bits(double value) {
     uint64_t bits;
     memcpy(&bits, &value, sizeof(bits));
@@ -213,6 +227,8 @@ static void test_terrain_batch(const char *dted_root) {
     SidereonDtedTerrain *terrain = NULL;
     check(sidereon_dted_lookup_options_init(&options) == SIDEREON_STATUS_OK,
           "terrain options init");
+    check_label(sidereon_dted_interpolation_label, SIDEREON_DTED_INTERPOLATION_BILINEAR,
+                "DtedInterpolation.BILINEAR", "terrain interpolation label");
     check(sidereon_dted_terrain_new(dted_root, &terrain) == SIDEREON_STATUS_OK && terrain != NULL,
           "terrain new");
     if (terrain == NULL) {
@@ -311,6 +327,10 @@ static void test_mmap_terrain_store(const char *dted_root) {
     check(sidereon_mmap_terrain_vertical_datum(mmap, &datum) == SIDEREON_STATUS_OK &&
               datum == SIDEREON_VERTICAL_DATUM_EGM96_MSL_ORTHOMETRIC,
           "mmap terrain vertical datum");
+    check_label(sidereon_vertical_datum_label, SIDEREON_VERTICAL_DATUM_EGM96_MSL_ORTHOMETRIC,
+                "VerticalDatum.EGM96_MSL_ORTHOMETRIC", "mmap terrain vertical datum label");
+    check_label(sidereon_terrain_geoid_model_label, SIDEREON_TERRAIN_GEOID_MODEL_EGM96_ONE_DEGREE,
+                "egm96_one_degree", "mmap terrain geoid model label");
 
     written = 0;
     required = 0;

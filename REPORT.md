@@ -174,3 +174,74 @@ All passed with exit code 0:
 
 Header regenerated:
 - `cbindgen --quiet --config bindings/c/cbindgen.toml --crate sidereon-c --output bindings/c/include/sidereon.h`
+
+## Run 3
+
+## #90 fusion/inertial widening
+
+Status: closed.
+
+Implemented:
+- `sidereon_fusion_filter_kind_label`
+- `sidereon_fusion_error_state_layout_label`
+- `sidereon_fusion_error_state_layout_dimension`
+- `sidereon_fusion_gnss_fix_status_label`
+
+Implemented / verified:
+- The existing C fusion family remains the core-backed opaque-handle surface for filters, recorded RTS histories, and smoothed trajectories.
+- Run 3 adds the remaining typed enum/accessor conveniences matching the Python typed model labels and layout dimension accessors.
+
+Coverage:
+- `bindings/c/tests/domain018_smoke.c`: `test_fusion_labels` verifies filter-kind, error-state-layout, GNSS fix-status labels, and the 21-state layout dimension through the C ABI. Existing tests in the same file continue to exercise propagation, updates, time-sync, state codec, RTS smoothing, and velocity matching.
+
+## #92 signal-analysis widening
+
+Status: closed.
+
+Implemented:
+- `sidereon_signal_reference_chip_rate_hz`
+- `sidereon_signal_betz_l1_receiver_bandwidth_hz`
+- `sidereon_signal_modulation_label`
+- `sidereon_signal_modulation_code_rate_hz`
+- `sidereon_signal_psd_hz`
+- `sidereon_signal_power_in_band`
+- `sidereon_signal_fraction_power_in_band`
+- `sidereon_signal_rms_bandwidth_hz`
+- `sidereon_signal_effective_cn0_degradation`
+- `sidereon_signal_dll_thermal_noise_jitter`
+- `sidereon_signal_dll_lower_bound`
+- `sidereon_signal_multipath_error_envelope`
+
+Implemented / verified:
+- Canonical `sidereon_signal_*` names now cover the Python scalar signal-analysis helper names while preserving the existing `sidereon_signal_analysis_*` entry points.
+- Acquisition and correlation coverage remains on the existing C surface (`sidereon_signal_replica`, `sidereon_signal_correlate`, `sidereon_signal_correlate_against`, `sidereon_signal_acquire`, and C/A correlation helpers).
+
+Coverage:
+- `bindings/c/tests/domain018_smoke.c`: `test_signal_analysis` verifies the new canonical helpers against real closed-form values for reference constants, modulation label/code-rate, PSD, in-band power, RMS bandwidth, C/N0 degradation, DLL jitter/lower bound, and multipath envelope. Existing smoke coverage in the same family covers acquisition/correlation.
+
+## #93 terrain/geoid store drift
+
+Status: closed for the core-backed store surface; Python network/data helpers remain intentionally out of scope as allowlisted extensions.
+
+Implemented:
+- `sidereon_dted_interpolation_label`
+- `sidereon_vertical_datum_label`
+- `sidereon_terrain_geoid_model_label`
+
+Implemented / verified:
+- Existing core-backed terrain/geoid store surface remains intact: DTED terrain handles, mmap terrain store build/read/write/from-bytes/from-vec/from-path, checksums, tile index, typed terrain errors, EGM96/EGM2008 geoid helpers, and height conversion.
+- Run 3 adds the remaining typed label helpers for DTED interpolation, vertical datum, and terrain geoid model.
+
+Coverage:
+- `bindings/c/tests/core012_smoke.c`: `test_terrain_batch` verifies the DTED interpolation label; `test_mmap_terrain_store` verifies vertical datum and terrain geoid-model labels while building and querying a real mmap terrain store.
+
+## Run 3 Gates
+
+All passed with exit code 0:
+- `cargo test`
+- `cargo clippy -p sidereon-c --all-targets -- -D warnings`
+- `cargo fmt --check`
+- `bash bindings/c/tests/run_smoke.sh`
+
+Header regenerated:
+- `cbindgen --quiet --config bindings/c/cbindgen.toml --crate sidereon-c --output bindings/c/include/sidereon.h`

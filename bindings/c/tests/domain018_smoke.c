@@ -50,6 +50,20 @@ static void check_vec_bits(const double *actual,
     }
 }
 
+static void check_label(SidereonStatus (*fn)(uint32_t, uint8_t *, size_t, size_t *, size_t *),
+                        uint32_t value,
+                        const char *expected,
+                        const char *what) {
+    uint8_t buf[64];
+    size_t written = 0;
+    size_t required = 0;
+    memset(buf, 0, sizeof(buf));
+    check(fn(value, buf, sizeof(buf), &written, &required) == SIDEREON_STATUS_OK &&
+              written == strlen(expected) && required == strlen(expected) &&
+              memcmp(buf, expected, strlen(expected)) == 0,
+          what);
+}
+
 static void copy_state_position(const SidereonFusionState *state,
                                 SidereonFusionLooseMeasurement *measurement,
                                 double t_j2000_s,
@@ -170,9 +184,31 @@ static void test_signal_analysis(void) {
         SIDEREON_SIGNAL_ANALYSIS_MODULATION_KIND_CBOC611_OVER11_MINUS, 0.0, 0.0, 0.0};
     double value = 0.0;
 
+    check(sidereon_signal_reference_chip_rate_hz(&value) == SIDEREON_STATUS_OK &&
+              close_abs(value, 1023000.0, 0.0),
+          "signal reference chip rate");
+    check(sidereon_signal_betz_l1_receiver_bandwidth_hz(&value) == SIDEREON_STATUS_OK &&
+              close_abs(value, 24000000.0, 0.0),
+          "signal Betz L1 bandwidth");
+    uint8_t label[32];
+    size_t written = 0;
+    size_t required = 0;
+    memset(label, 0, sizeof(label));
+    check(sidereon_signal_modulation_label(&bpsk, label, sizeof(label), &written, &required) ==
+                  SIDEREON_STATUS_OK &&
+              written == strlen("BPSK(n)") && required == strlen("BPSK(n)") &&
+              memcmp(label, "BPSK(n)", strlen("BPSK(n)")) == 0,
+          "signal modulation label");
+    check(sidereon_signal_modulation_code_rate_hz(&bpsk, &value) == SIDEREON_STATUS_OK &&
+              close_abs(value, 1023000.0, 0.0),
+          "signal modulation code rate");
+
     check(sidereon_signal_analysis_psd(&bpsk, 0.0, &value) == SIDEREON_STATUS_OK &&
               close_abs(value, 9.775171065493646e-7, 1.0e-21),
           "signal BPSK(1) PSD");
+    check(sidereon_signal_psd_hz(&bpsk, 0.0, &value) == SIDEREON_STATUS_OK &&
+              close_abs(value, 9.775171065493646e-7, 1.0e-21),
+          "signal BPSK(1) PSD canonical");
     check(sidereon_signal_analysis_psd(&boc, 0.5 * 1023000.0, &value) == SIDEREON_STATUS_OK &&
               close_abs(value, 3.9617276106485926e-7, 1.0e-21),
           "signal BOCsin(1,1) PSD");
@@ -200,10 +236,20 @@ static void test_signal_analysis(void) {
               SIDEREON_STATUS_OK &&
               close_abs(value, 0.99147813722178968, 1.0e-15),
           "signal fraction power");
+    check(sidereon_signal_power_in_band(&bpsk, 24000000.0, &value) == SIDEREON_STATUS_OK &&
+              close_abs(value, 0.99147813722178968, 1.0e-15),
+          "signal power in band canonical");
+    check(sidereon_signal_fraction_power_in_band(&bpsk, 24000000.0, &value) ==
+                  SIDEREON_STATUS_OK &&
+              close_abs(value, 0.99147813722178968, 1.0e-15),
+          "signal fraction power canonical");
     check(sidereon_signal_analysis_rms_bandwidth_hz(&boc, 24000000.0, &value) ==
               SIDEREON_STATUS_OK &&
               close_abs(value, 1978624.6068839289, 1.0e-9),
           "signal RMS bandwidth");
+    check(sidereon_signal_rms_bandwidth_hz(&boc, 24000000.0, &value) == SIDEREON_STATUS_OK &&
+              close_abs(value, 1978624.6068839289, 1.0e-9),
+          "signal RMS bandwidth canonical");
 
     SidereonSignalAnalysisSpectralSeparation ssc;
     check(sidereon_signal_analysis_spectral_separation(&bpsk, &boc, 24000000.0, &ssc) ==
@@ -232,6 +278,10 @@ static void test_signal_analysis(void) {
               close_abs(degradation.effective_cn0_db_hz, 44.999774338955795, 1.0e-12) &&
               close_abs(degradation.degradation_db, 0.00022566104420462807, 1.0e-15),
           "signal effective C/N0 degradation");
+    check(sidereon_signal_effective_cn0_degradation(&bpsk, 45.0, 24000000.0, &interference, 1,
+                                                    &degradation) == SIDEREON_STATUS_OK &&
+              close_abs(degradation.effective_cn0_hz, 31621.13351302073, 1.0e-8),
+          "signal effective C/N0 degradation canonical");
 
     SidereonSignalAnalysisDllTrackingOptions dll = {45.0, 1.0, 0.02, 0.5, 100000000.0};
     SidereonSignalAnalysisDllJitter jitter;
@@ -241,14 +291,23 @@ static void test_signal_analysis(void) {
               close_abs(jitter.chips, 0.0027925349810969391, 1.0e-15) &&
               close_abs(jitter.meters, 0.8183586764751074, 1.0e-12),
           "signal DLL jitter coherent");
+    check(sidereon_signal_dll_thermal_noise_jitter(
+              &bpsk, &dll, SIDEREON_SIGNAL_ANALYSIS_DLL_PROCESSING_COHERENT, &jitter) ==
+                  SIDEREON_STATUS_OK &&
+              close_abs(jitter.chips, 0.0027925349810969391, 1.0e-15),
+          "signal DLL jitter canonical");
     check(sidereon_signal_analysis_dll_lower_bound(&boc, &dll, &jitter) == SIDEREON_STATUS_OK &&
               close_abs(jitter.seconds, 2.2630212065471776e-10, 1.0e-21),
           "signal DLL lower bound");
+    check(sidereon_signal_dll_lower_bound(&boc, &dll, &jitter) == SIDEREON_STATUS_OK &&
+              close_abs(jitter.seconds, 2.2630212065471776e-10, 1.0e-21),
+          "signal DLL lower bound canonical");
 
     const double delays[3] = {0.0, 0.5, 1.0};
     SidereonSignalAnalysisMultipathOptions mp = {0.5, 1.0, 100000000.0};
     SidereonSignalAnalysisMultipathEnvelopePoint points[3];
-    size_t written = 0, required = 0;
+    written = 0;
+    required = 0;
     check(sidereon_signal_analysis_multipath_envelope(&bpsk, &mp, delays, 3, points, 3, &written,
                                                        &required) == SIDEREON_STATUS_OK &&
               written == 3 && required == 3 &&
@@ -256,6 +315,26 @@ static void test_signal_analysis(void) {
               close_abs(points[1].anti_phase_chips, -0.20000709850498244, 1.0e-12) &&
               close_abs(points[1].running_average_chips, 0.10000354925249122, 1.0e-12),
           "signal multipath envelope");
+    check(sidereon_signal_multipath_error_envelope(&bpsk, &mp, delays, 3, points, 3, &written,
+                                                   &required) == SIDEREON_STATUS_OK &&
+              written == 3 && required == 3 &&
+              close_abs(points[1].in_phase_chips, 0.16666443790427826, 1.0e-12),
+          "signal multipath envelope canonical");
+}
+
+static void test_fusion_labels(void) {
+    check_label(sidereon_fusion_filter_kind_label, SIDEREON_FUSION_FILTER_KIND_EKF,
+                "FusionFilterKind.EKF", "fusion filter kind label");
+    check_label(sidereon_fusion_error_state_layout_label,
+                SIDEREON_FUSION_ERROR_STATE_LAYOUT_TWENTY_ONE, "ErrorStateLayout.TWENTY_ONE",
+                "fusion layout label");
+    check_label(sidereon_fusion_gnss_fix_status_label, SIDEREON_FUSION_GNSS_FIX_STATUS_FIXED,
+                "GnssFixStatus.FIXED", "fusion fix status label");
+    size_t dimension = 0;
+    check(sidereon_fusion_error_state_layout_dimension(
+              SIDEREON_FUSION_ERROR_STATE_LAYOUT_TWENTY_ONE, &dimension) == SIDEREON_STATUS_OK &&
+              dimension == 21,
+          "fusion layout dimension");
 }
 
 static const char *scenario_json =
@@ -956,6 +1035,7 @@ static void test_fusion_recorded_rts(void) {
 int main(void) {
     test_signal_analysis();
     test_scenario();
+    test_fusion_labels();
     test_fusion();
     test_fusion_field_mode();
     test_fusion_recorded_rts();
