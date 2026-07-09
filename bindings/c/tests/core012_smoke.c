@@ -719,7 +719,7 @@ static void test_araim(void) {
     SidereonAraimSummary summary;
     check(sidereon_araim_result_summary(result, &summary) == SIDEREON_STATUS_OK,
           "ARAIM summary");
-    check(summary.availability && summary.fault_mode_count == 13,
+    check(summary.available && summary.availability && summary.fault_mode_count == 13,
           "ARAIM summary status");
     check_close(summary.vpl_m, 19.2, 0.05, "ARAIM VPL published reference");
     check_close(summary.hpl_m, 14.5, 0.05, "ARAIM HPL published reference");
@@ -738,8 +738,61 @@ static void test_araim(void) {
           "ARAIM fault-free mode");
     sidereon_araim_result_free(result);
 
+    const double s = 0.5773502691896258;
+    SidereonAraimRow sparse_rows[4] = {
+        {"G01", {s, s, s}, SIDEREON_GNSS_SYSTEM_GPS, M_PI / 2.0},
+        {"G02", {s, -s, -s}, SIDEREON_GNSS_SYSTEM_GPS, M_PI / 2.0},
+        {"G03", {-s, s, -s}, SIDEREON_GNSS_SYSTEM_GPS, M_PI / 2.0},
+        {"G04", {-s, -s, s}, SIDEREON_GNSS_SYSTEM_GPS, M_PI / 2.0},
+    };
+    uint32_t gps_clock_system[1] = {SIDEREON_GNSS_SYSTEM_GPS};
+    SidereonAraimGeometry sparse_geometry;
+    memset(&sparse_geometry, 0, sizeof(sparse_geometry));
+    sparse_geometry.rows = sparse_rows;
+    sparse_geometry.row_count = 4;
+    sparse_geometry.receiver.lat_rad = 0.0;
+    sparse_geometry.receiver.lon_rad = 0.0;
+    sparse_geometry.receiver.height_m = 0.0;
+    sparse_geometry.clock_systems = gps_clock_system;
+    sparse_geometry.clock_system_count = 1;
+    SidereonAraimSatelliteIsmModel sparse_model = {
+        .sigma_ura_m = 0.75,
+        .sigma_ure_m = 0.5,
+        .has_effective_sigma_int_m = false,
+        .effective_sigma_int_m = 0.0,
+        .has_effective_sigma_acc_m = false,
+        .effective_sigma_acc_m = 0.0,
+        .b_nom_m = 0.75,
+        .p_sat = 1.0e-5,
+    };
+    SidereonAraimConstellationIsm sparse_constellations[1] = {
+        {SIDEREON_GNSS_SYSTEM_GPS, 0.0, sparse_model},
+    };
+    SidereonAraimIsm sparse_ism;
+    memset(&sparse_ism, 0, sizeof(sparse_ism));
+    sparse_ism.constellations = sparse_constellations;
+    sparse_ism.constellation_count = 1;
+    sparse_ism.satellites = NULL;
+    sparse_ism.satellite_count = 0;
+    SidereonAraimResult *sparse_result = NULL;
+    check(sidereon_araim(&sparse_geometry, &sparse_ism, &allocation, &sparse_result) ==
+                  SIDEREON_STATUS_OK &&
+              sparse_result != NULL,
+          "sparse ARAIM returns result");
+    if (sparse_result != NULL) {
+        SidereonAraimSummary sparse_summary;
+        check(sidereon_araim_result_summary(sparse_result, &sparse_summary) ==
+                  SIDEREON_STATUS_OK,
+              "sparse ARAIM summary");
+        check(!sparse_summary.available && !sparse_summary.availability,
+              "sparse ARAIM unavailable status");
+        check(isinf(sparse_summary.hpl_m) && isinf(sparse_summary.vpl_m),
+              "sparse ARAIM infinite protection levels");
+        sidereon_araim_result_free(sparse_result);
+    }
+
     if (failures == start) {
-        printf("araim_smoke: OK (WG-C Appendix D reference)\n");
+        printf("araim_smoke: OK (WG-C Appendix D reference + unavailable sparse GPS)\n");
     }
 }
 
