@@ -19,6 +19,7 @@ pub struct SidereonSppDopplerSolution {
 /// Caller-populated inputs for a single SPP solve. Mirrors the engine solve
 /// input field for field; the binding adds no defaults or modeling of its own.
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct SidereonSppInputs {
     /// Pointer to observation_count observations.
     pub observations: *const SidereonObservation,
@@ -99,6 +100,7 @@ pub struct SidereonSppSolvePolicy {
 /// legacy SidereonSppInputs ABI. Initialize with sidereon_spp_inputs_v2_init,
 /// then fill base with the ordinary SPP inputs and override optional controls.
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct SidereonSppInputsV2 {
     /// The legacy SPP input fields.
     pub base: SidereonSppInputs,
@@ -1197,6 +1199,532 @@ pub struct SidereonSppBatch {
     pub(crate) inner: Vec<Result<ReceiverSolution, String>>,
 }
 
+/// Options for assembling RINEX OBS epochs into SPP inputs. Initialize with
+/// sidereon_rinex_spp_options_init, then override fields as needed. A NULL
+/// options pointer on the RINEX-SPP entry points uses these defaults.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonRinexSppOptions {
+    /// Apply the ionosphere correction requested by the broadcast NAV product.
+    pub ionosphere: bool,
+    /// Apply the troposphere correction.
+    pub troposphere: bool,
+    /// Whether initial_guess overrides the RINEX header APPROX POSITION XYZ.
+    pub initial_guess_enabled: bool,
+    /// Optional initial state guess [x_m, y_m, z_m, clock_state].
+    pub initial_guess: [f64; 4],
+    /// Surface pressure, hPa.
+    pub pressure_hpa: f64,
+    /// Surface temperature, K.
+    pub temperature_k: f64,
+    /// Relative humidity, 0..1.
+    pub relative_humidity: f64,
+    /// Whether robust Huber/IRLS reweighting is applied to each assembled solve.
+    pub robust_enabled: bool,
+    /// Robust reweighting controls, used only when robust_enabled is true.
+    pub robust: SidereonSppRobustConfig,
+}
+
+/// One assembled RINEX OBS epoch summary for SPP.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonRinexSppEpoch {
+    /// Index in the source RINEX observation file.
+    pub epoch_index: usize,
+    /// Civil epoch exactly as it appears in the RINEX observation file.
+    pub epoch: SidereonCalendarEpoch,
+    /// Number of selected pseudorange observations in the assembled SPP input.
+    pub observation_count: usize,
+}
+
+/// A set of SPP inputs assembled from RINEX OBS epochs. Opaque to C. Create with
+/// sidereon_spp_inputs_from_rinex_obs and release with
+/// sidereon_rinex_spp_inputs_free.
+pub struct SidereonRinexSppInputs {
+    pub(crate) inner: Vec<RinexSppEpochInputs>,
+    c_rows: Vec<SidereonSppInputsV2>,
+    _observations: Vec<Vec<SidereonObservation>>,
+    _sat_ids: Vec<Vec<CString>>,
+    _glonass_channels: Vec<Vec<SidereonGlonassChannel>>,
+}
+
+/// Serial per-epoch SPP solve results assembled from RINEX OBS epochs. Opaque to
+/// C. Create with sidereon_solve_spp_from_rinex_obs and release with
+/// sidereon_rinex_spp_solutions_free.
+pub struct SidereonRinexSppSolutions {
+    pub(crate) inner: Vec<RinexSppEpochSolution>,
+}
+
+/// Initialize RINEX-SPP options to the engine defaults: RINEX-version-specific
+/// signal selection, ionosphere and troposphere on, RINEX header initial guess,
+/// standard atmosphere, and robust reweighting off.
+///
+/// Safety: out_options must point to writable SidereonRinexSppOptions storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rinex_spp_options_init(
+    out_options: *mut SidereonRinexSppOptions,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rinex_spp_options_init",
+        SidereonStatus::Panic,
+        || {
+            let out_options = c_try!(require_out(
+                out_options,
+                "sidereon_rinex_spp_options_init",
+                "out_options"
+            ));
+            *out_options = default_rinex_spp_options();
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Assemble every usable RINEX OBS epoch into SPP inputs using a broadcast NAV
+/// source for atmosphere metadata and GLONASS channel context. On success writes
+/// a newly owned handle to *out_inputs. Release it with
+/// sidereon_rinex_spp_inputs_free. Delegates to
+/// sidereon::spp_inputs_from_rinex_obs.
+///
+/// Safety: obs and broadcast must be live handles; options may be NULL for
+/// defaults; out_inputs must point to storage for a SidereonRinexSppInputs*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_spp_inputs_from_rinex_obs(
+    obs: *const SidereonRinexObs,
+    broadcast: *const SidereonBroadcastEphemeris,
+    options: *const SidereonRinexSppOptions,
+    out_inputs: *mut *mut SidereonRinexSppInputs,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_spp_inputs_from_rinex_obs",
+        SidereonStatus::Panic,
+        || {
+            let out_inputs = c_try!(require_out(
+                out_inputs,
+                "sidereon_spp_inputs_from_rinex_obs",
+                "out_inputs"
+            ));
+            *out_inputs = ptr::null_mut();
+            let obs = c_try!(require_ref(
+                obs,
+                "sidereon_spp_inputs_from_rinex_obs",
+                "obs"
+            ));
+            let broadcast = c_try!(require_ref(
+                broadcast,
+                "sidereon_spp_inputs_from_rinex_obs",
+                "broadcast"
+            ));
+            let options = c_try!(rinex_spp_options_from_c(
+                "sidereon_spp_inputs_from_rinex_obs",
+                obs,
+                options
+            ));
+            let inner =
+                match sidereon::spp_inputs_from_rinex_obs(&obs.inner, &broadcast.inner, &options) {
+                    Ok(inner) => inner,
+                    Err(err) => {
+                        return map_rinex_spp_error("sidereon_spp_inputs_from_rinex_obs", err)
+                    }
+                };
+            write_boxed_handle(out_inputs, SidereonRinexSppInputs::from_core(inner));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Solve every usable RINEX OBS epoch serially against a broadcast NAV source.
+/// Per-epoch solve failures are retained in the returned handle and do not fail
+/// the overall call. Release the returned handle with
+/// sidereon_rinex_spp_solutions_free. Delegates to
+/// sidereon::solve_spp_from_rinex_obs.
+///
+/// Safety: broadcast and obs must be live handles; options and policy may be
+/// NULL for defaults; out_solutions must point to storage for a
+/// SidereonRinexSppSolutions*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_solve_spp_from_rinex_obs(
+    broadcast: *const SidereonBroadcastEphemeris,
+    obs: *const SidereonRinexObs,
+    options: *const SidereonRinexSppOptions,
+    with_geodetic: bool,
+    policy: *const SidereonSppSolvePolicy,
+    out_solutions: *mut *mut SidereonRinexSppSolutions,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_solve_spp_from_rinex_obs",
+        SidereonStatus::Panic,
+        || {
+            let out_solutions = c_try!(require_out(
+                out_solutions,
+                "sidereon_solve_spp_from_rinex_obs",
+                "out_solutions"
+            ));
+            *out_solutions = ptr::null_mut();
+            let broadcast = c_try!(require_ref(
+                broadcast,
+                "sidereon_solve_spp_from_rinex_obs",
+                "broadcast"
+            ));
+            let obs = c_try!(require_ref(obs, "sidereon_solve_spp_from_rinex_obs", "obs"));
+            let options = c_try!(rinex_spp_options_from_c(
+                "sidereon_solve_spp_from_rinex_obs",
+                obs,
+                options,
+            ));
+            let policy = if policy.is_null() {
+                SolvePolicy::default()
+            } else {
+                c_try!(crate::solve::solve_policy_from_c(
+                    "sidereon_solve_spp_from_rinex_obs",
+                    &*policy
+                ))
+            };
+            let inner = match sidereon::solve_spp_from_rinex_obs(
+                &broadcast.inner,
+                &obs.inner,
+                &options,
+                with_geodetic,
+                policy,
+            ) {
+                Ok(inner) => inner,
+                Err(err) => {
+                    return map_rinex_spp_error("sidereon_solve_spp_from_rinex_obs", err);
+                }
+            };
+            write_boxed_handle(out_solutions, SidereonRinexSppSolutions { inner });
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Write the number of assembled RINEX-SPP epochs to *out_count.
+///
+/// Safety: inputs is a live handle; out_count points to a size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rinex_spp_inputs_count(
+    inputs: *const SidereonRinexSppInputs,
+    out_count: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rinex_spp_inputs_count",
+        SidereonStatus::Panic,
+        || {
+            let out_count = c_try!(require_out(
+                out_count,
+                "sidereon_rinex_spp_inputs_count",
+                "out_count"
+            ));
+            *out_count = 0;
+            let inputs = c_try!(require_ref(
+                inputs,
+                "sidereon_rinex_spp_inputs_count",
+                "inputs"
+            ));
+            *out_count = inputs.inner.len();
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy metadata for assembled RINEX-SPP epoch `index`.
+///
+/// Safety: inputs is a live handle; out_epoch points to
+/// SidereonRinexSppEpoch storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rinex_spp_inputs_epoch(
+    inputs: *const SidereonRinexSppInputs,
+    index: usize,
+    out_epoch: *mut SidereonRinexSppEpoch,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rinex_spp_inputs_epoch",
+        SidereonStatus::Panic,
+        || {
+            let out_epoch = c_try!(require_out(
+                out_epoch,
+                "sidereon_rinex_spp_inputs_epoch",
+                "out_epoch"
+            ));
+            *out_epoch = empty_rinex_spp_epoch();
+            let inputs = c_try!(require_ref(
+                inputs,
+                "sidereon_rinex_spp_inputs_epoch",
+                "inputs"
+            ));
+            let epoch = c_try!(rinex_spp_input_at(
+                "sidereon_rinex_spp_inputs_epoch",
+                &inputs.inner,
+                index
+            ));
+            *out_epoch = rinex_spp_epoch_inputs_to_c(epoch);
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy assembled SPP inputs for epoch `index`. Pointer fields in the copied
+/// SidereonSppInputsV2 borrow storage owned by `inputs` and remain valid until
+/// sidereon_rinex_spp_inputs_free is called.
+///
+/// Safety: inputs is a live handle; out_inputs points to SidereonSppInputsV2
+/// storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rinex_spp_inputs_epoch_inputs(
+    inputs: *const SidereonRinexSppInputs,
+    index: usize,
+    out_inputs: *mut SidereonSppInputsV2,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rinex_spp_inputs_epoch_inputs",
+        SidereonStatus::Panic,
+        || {
+            let out_inputs = c_try!(require_out(
+                out_inputs,
+                "sidereon_rinex_spp_inputs_epoch_inputs",
+                "out_inputs"
+            ));
+            *out_inputs = default_spp_inputs_v2();
+            let inputs = c_try!(require_ref(
+                inputs,
+                "sidereon_rinex_spp_inputs_epoch_inputs",
+                "inputs"
+            ));
+            let row = match inputs.c_rows.get(index) {
+                Some(row) => row,
+                None => {
+                    set_last_error(format!(
+                        "sidereon_rinex_spp_inputs_epoch_inputs: index {index} out of range ({} epochs)",
+                        inputs.c_rows.len()
+                    ));
+                    return SidereonStatus::InvalidArgument;
+                }
+            };
+            *out_inputs = *row;
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Release RINEX-SPP assembled inputs. Passing NULL is a no-op.
+///
+/// Safety: inputs must be NULL or a live handle from
+/// sidereon_spp_inputs_from_rinex_obs that has not already been freed.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rinex_spp_inputs_free(inputs: *mut SidereonRinexSppInputs) {
+    free_boxed(inputs);
+}
+
+/// Write the number of per-epoch RINEX-SPP solve results to *out_count.
+///
+/// Safety: solutions is a live handle; out_count points to a size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rinex_spp_solutions_count(
+    solutions: *const SidereonRinexSppSolutions,
+    out_count: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rinex_spp_solutions_count",
+        SidereonStatus::Panic,
+        || {
+            let out_count = c_try!(require_out(
+                out_count,
+                "sidereon_rinex_spp_solutions_count",
+                "out_count"
+            ));
+            *out_count = 0;
+            let solutions = c_try!(require_ref(
+                solutions,
+                "sidereon_rinex_spp_solutions_count",
+                "solutions"
+            ));
+            *out_count = solutions.inner.len();
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy metadata for RINEX-SPP solve result `index`.
+///
+/// Safety: solutions is a live handle; out_epoch points to
+/// SidereonRinexSppEpoch storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rinex_spp_solutions_epoch(
+    solutions: *const SidereonRinexSppSolutions,
+    index: usize,
+    out_epoch: *mut SidereonRinexSppEpoch,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rinex_spp_solutions_epoch",
+        SidereonStatus::Panic,
+        || {
+            let out_epoch = c_try!(require_out(
+                out_epoch,
+                "sidereon_rinex_spp_solutions_epoch",
+                "out_epoch"
+            ));
+            *out_epoch = empty_rinex_spp_epoch();
+            let solutions = c_try!(require_ref(
+                solutions,
+                "sidereon_rinex_spp_solutions_epoch",
+                "solutions"
+            ));
+            let epoch = c_try!(rinex_spp_solution_at(
+                "sidereon_rinex_spp_solutions_epoch",
+                &solutions.inner,
+                index
+            ));
+            *out_epoch = rinex_spp_epoch_solution_to_c(epoch);
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Write whether RINEX-SPP result `index` solved to *out_ok.
+///
+/// Safety: solutions is a live handle; out_ok points to a bool.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rinex_spp_solution_ok(
+    solutions: *const SidereonRinexSppSolutions,
+    index: usize,
+    out_ok: *mut bool,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rinex_spp_solution_ok",
+        SidereonStatus::Panic,
+        || {
+            let out_ok = c_try!(require_out(
+                out_ok,
+                "sidereon_rinex_spp_solution_ok",
+                "out_ok"
+            ));
+            *out_ok = false;
+            let solutions = c_try!(require_ref(
+                solutions,
+                "sidereon_rinex_spp_solution_ok",
+                "solutions"
+            ));
+            let epoch = c_try!(rinex_spp_solution_at(
+                "sidereon_rinex_spp_solution_ok",
+                &solutions.inner,
+                index
+            ));
+            *out_ok = epoch.solution.is_ok();
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy RINEX-SPP result `index` into a newly owned SidereonSppSolution handle.
+/// Returns SIDEREON_STATUS_SOLVE when that epoch failed to solve.
+///
+/// Safety: solutions is a live handle; out_solution points to storage for a
+/// SidereonSppSolution*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rinex_spp_solution(
+    solutions: *const SidereonRinexSppSolutions,
+    index: usize,
+    out_solution: *mut *mut SidereonSppSolution,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_rinex_spp_solution", SidereonStatus::Panic, || {
+        let out_solution = c_try!(require_out(
+            out_solution,
+            "sidereon_rinex_spp_solution",
+            "out_solution"
+        ));
+        *out_solution = ptr::null_mut();
+        let solutions = c_try!(require_ref(
+            solutions,
+            "sidereon_rinex_spp_solution",
+            "solutions"
+        ));
+        let epoch = c_try!(rinex_spp_solution_at(
+            "sidereon_rinex_spp_solution",
+            &solutions.inner,
+            index
+        ));
+        match &epoch.solution {
+            Ok(solution) => {
+                write_boxed_handle(
+                    out_solution,
+                    SidereonSppSolution {
+                        inner: solution.clone(),
+                    },
+                );
+                SidereonStatus::Ok
+            }
+            Err(err) => {
+                set_last_error(format!(
+                    "sidereon_rinex_spp_solution: epoch {index} did not solve: {err}"
+                ));
+                SidereonStatus::Solve
+            }
+        }
+    })
+}
+
+/// Copy RINEX-SPP result `index`'s solve-failure message into a caller buffer
+/// (not null-terminated). A solved epoch reports *out_required 0. Uses the
+/// variable-length output contract.
+///
+/// Safety: solutions is a live handle; out points to len writable bytes or NULL
+/// when len is 0; out_written and out_required point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rinex_spp_solution_error(
+    solutions: *const SidereonRinexSppSolutions,
+    index: usize,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rinex_spp_solution_error",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_rinex_spp_solution_error",
+                out_written,
+                out_required
+            ));
+            let solutions = c_try!(require_ref(
+                solutions,
+                "sidereon_rinex_spp_solution_error",
+                "solutions"
+            ));
+            let epoch = c_try!(rinex_spp_solution_at(
+                "sidereon_rinex_spp_solution_error",
+                &solutions.inner,
+                index
+            ));
+            let message = match &epoch.solution {
+                Ok(_) => String::new(),
+                Err(err) => err.to_string(),
+            };
+            c_try!(copy_prefix_to_c(
+                "sidereon_rinex_spp_solution_error",
+                "out",
+                message.as_bytes(),
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Release RINEX-SPP solve results. Passing NULL is a no-op.
+///
+/// Safety: solutions must be NULL or a live handle from
+/// sidereon_solve_spp_from_rinex_obs that has not already been freed.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rinex_spp_solutions_free(
+    solutions: *mut SidereonRinexSppSolutions,
+) {
+    free_boxed(solutions);
+}
+
 /// Write the number of per-epoch results in a batch to *out_count.
 ///
 /// Safety: batch is a live handle; out_count points to a size_t.
@@ -1352,6 +1880,231 @@ pub unsafe extern "C" fn sidereon_spp_batch_error(
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_spp_batch_free(batch: *mut SidereonSppBatch) {
     free_boxed(batch);
+}
+
+impl SidereonRinexSppInputs {
+    fn from_core(inner: Vec<RinexSppEpochInputs>) -> Self {
+        let mut sat_ids = Vec::with_capacity(inner.len());
+        let mut observations: Vec<Vec<SidereonObservation>> = Vec::with_capacity(inner.len());
+        let mut glonass_channels: Vec<Vec<SidereonGlonassChannel>> =
+            Vec::with_capacity(inner.len());
+
+        for epoch in &inner {
+            let ids: Vec<CString> = epoch
+                .inputs
+                .observations
+                .iter()
+                .map(|obs| CString::new(obs.satellite_id.to_string()).expect("satellite token"))
+                .collect::<Vec<_>>();
+            let obs_rows = epoch
+                .inputs
+                .observations
+                .iter()
+                .zip(ids.iter())
+                .map(|(obs, sat_id)| SidereonObservation {
+                    sat_id: sat_id.as_ptr(),
+                    pseudorange_m: obs.pseudorange_m,
+                })
+                .collect::<Vec<_>>();
+            let channel_rows = epoch
+                .inputs
+                .glonass_channels
+                .iter()
+                .map(|(slot, channel)| SidereonGlonassChannel {
+                    slot: *slot,
+                    channel: *channel,
+                })
+                .collect();
+            sat_ids.push(ids);
+            observations.push(obs_rows);
+            glonass_channels.push(channel_rows);
+        }
+
+        let c_rows = inner
+            .iter()
+            .enumerate()
+            .map(|(idx, epoch)| {
+                rinex_spp_solve_inputs_to_c_row(
+                    &epoch.inputs,
+                    &observations[idx],
+                    &glonass_channels[idx],
+                )
+            })
+            .collect();
+
+        Self {
+            inner,
+            c_rows,
+            _observations: observations,
+            _sat_ids: sat_ids,
+            _glonass_channels: glonass_channels,
+        }
+    }
+}
+
+fn default_rinex_spp_options() -> SidereonRinexSppOptions {
+    let met = SurfaceMet::default();
+    SidereonRinexSppOptions {
+        ionosphere: true,
+        troposphere: true,
+        initial_guess_enabled: false,
+        initial_guess: [0.0; 4],
+        pressure_hpa: met.pressure_hpa,
+        temperature_k: met.temperature_k,
+        relative_humidity: met.relative_humidity,
+        robust_enabled: false,
+        robust: default_robust_config(),
+    }
+}
+
+unsafe fn rinex_spp_options_from_c(
+    fn_name: &str,
+    obs: &SidereonRinexObs,
+    options: *const SidereonRinexSppOptions,
+) -> Result<RinexSppOptions, SidereonStatus> {
+    let mut out = RinexSppOptions::default_for(&obs.inner).map_err(|err| {
+        set_last_error(format!("{fn_name}: {err}"));
+        SidereonStatus::InvalidArgument
+    })?;
+    if options.is_null() {
+        return Ok(out);
+    }
+    let options = &*options;
+    out.corrections = Corrections {
+        ionosphere: options.ionosphere,
+        troposphere: options.troposphere,
+    };
+    if options.initial_guess_enabled {
+        out.initial_guess = Some(options.initial_guess);
+    }
+    out.met = SurfaceMet {
+        pressure_hpa: options.pressure_hpa,
+        temperature_k: options.temperature_k,
+        relative_humidity: options.relative_humidity,
+    };
+    if options.robust_enabled {
+        out.robust = Some(RobustConfig {
+            huber_k: options.robust.huber_k,
+            scale_floor_m: options.robust.scale_floor_m,
+            max_outer: options.robust.max_outer,
+            outer_tol_m: options.robust.outer_tol_m,
+        });
+    }
+    Ok(out)
+}
+
+fn rinex_spp_solve_inputs_to_c_row(
+    inputs: &SolveInputs,
+    observations: &[SidereonObservation],
+    glonass_channels: &[SidereonGlonassChannel],
+) -> SidereonSppInputsV2 {
+    let robust = inputs.robust.unwrap_or_default();
+    SidereonSppInputsV2 {
+        base: SidereonSppInputs {
+            observations: observations.as_ptr(),
+            observation_count: observations.len(),
+            t_rx_j2000_s: inputs.t_rx_j2000_s,
+            t_rx_second_of_day_s: inputs.t_rx_second_of_day_s,
+            day_of_year: inputs.day_of_year,
+            initial_guess: inputs.initial_guess,
+            ionosphere: inputs.corrections.ionosphere,
+            troposphere: inputs.corrections.troposphere,
+            klobuchar_alpha: inputs.klobuchar.alpha,
+            klobuchar_beta: inputs.klobuchar.beta,
+            pressure_hpa: inputs.met.pressure_hpa,
+            temperature_k: inputs.met.temperature_k,
+            relative_humidity: inputs.met.relative_humidity,
+            with_geodetic: false,
+        },
+        beidou_klobuchar_enabled: inputs.beidou_klobuchar.is_some(),
+        beidou_klobuchar_alpha: inputs
+            .beidou_klobuchar
+            .map(|coeffs| coeffs.alpha)
+            .unwrap_or([0.0; 4]),
+        beidou_klobuchar_beta: inputs
+            .beidou_klobuchar
+            .map(|coeffs| coeffs.beta)
+            .unwrap_or([0.0; 4]),
+        robust_enabled: inputs.robust.is_some(),
+        robust: SidereonSppRobustConfig {
+            huber_k: robust.huber_k,
+            scale_floor_m: robust.scale_floor_m,
+            max_outer: robust.max_outer,
+            outer_tol_m: robust.outer_tol_m,
+        },
+        policy: default_solve_policy(),
+        glonass_channels: glonass_channels.as_ptr(),
+        glonass_channel_count: glonass_channels.len(),
+    }
+}
+
+fn empty_rinex_spp_epoch() -> SidereonRinexSppEpoch {
+    SidereonRinexSppEpoch {
+        epoch_index: 0,
+        epoch: SidereonCalendarEpoch {
+            year: 0,
+            month: 0,
+            day: 0,
+            hour: 0,
+            minute: 0,
+            second: 0.0,
+        },
+        observation_count: 0,
+    }
+}
+
+fn rinex_spp_epoch_inputs_to_c(epoch: &RinexSppEpochInputs) -> SidereonRinexSppEpoch {
+    SidereonRinexSppEpoch {
+        epoch_index: epoch.epoch_index,
+        epoch: rinex_epoch_time_to_c(epoch.epoch),
+        observation_count: epoch.inputs.observations.len(),
+    }
+}
+
+fn rinex_spp_epoch_solution_to_c(epoch: &RinexSppEpochSolution) -> SidereonRinexSppEpoch {
+    let observation_count = epoch
+        .solution
+        .as_ref()
+        .map(|solution| solution.metadata.used_count + solution.rejected_sats.len())
+        .unwrap_or(0);
+    SidereonRinexSppEpoch {
+        epoch_index: epoch.epoch_index,
+        epoch: rinex_epoch_time_to_c(epoch.epoch),
+        observation_count,
+    }
+}
+
+fn rinex_spp_input_at<'a>(
+    fn_name: &str,
+    inputs: &'a [RinexSppEpochInputs],
+    index: usize,
+) -> Result<&'a RinexSppEpochInputs, SidereonStatus> {
+    inputs.get(index).ok_or_else(|| {
+        set_last_error(format!(
+            "{fn_name}: index {index} out of range ({} epochs)",
+            inputs.len()
+        ));
+        SidereonStatus::InvalidArgument
+    })
+}
+
+fn rinex_spp_solution_at<'a>(
+    fn_name: &str,
+    solutions: &'a [RinexSppEpochSolution],
+    index: usize,
+) -> Result<&'a RinexSppEpochSolution, SidereonStatus> {
+    solutions.get(index).ok_or_else(|| {
+        set_last_error(format!(
+            "{fn_name}: index {index} out of range ({} results)",
+            solutions.len()
+        ));
+        SidereonStatus::InvalidArgument
+    })
+}
+
+fn map_rinex_spp_error(fn_name: &str, err: RinexSppError) -> SidereonStatus {
+    set_last_error(format!("{fn_name}: {err}"));
+    SidereonStatus::InvalidArgument
 }
 
 fn rejection_reason_to_c(

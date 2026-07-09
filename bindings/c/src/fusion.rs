@@ -63,6 +63,151 @@ pub enum SidereonFusionGnssFixStatus {
     Fixed = 2,
 }
 
+/// Copy a fusion filter kind label into out.
+///
+/// Safety: out points to len bytes or NULL when len is 0; out_written and
+/// out_required must point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_fusion_filter_kind_label(
+    kind: u32,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_fusion_filter_kind_label",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_fusion_filter_kind_label",
+                out_written,
+                out_required
+            ));
+            let label = c_try!(fusion_filter_kind_label_from_c(
+                "sidereon_fusion_filter_kind_label",
+                kind
+            ));
+            c_try!(copy_prefix_to_c(
+                "sidereon_fusion_filter_kind_label",
+                "out",
+                label.as_bytes(),
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy a fusion error-state layout label into out.
+///
+/// Safety: out points to len bytes or NULL when len is 0; out_written and
+/// out_required must point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_fusion_error_state_layout_label(
+    layout: u32,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_fusion_error_state_layout_label",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_fusion_error_state_layout_label",
+                out_written,
+                out_required
+            ));
+            let label = c_try!(fusion_error_state_layout_label_from_c(
+                "sidereon_fusion_error_state_layout_label",
+                layout
+            ));
+            c_try!(copy_prefix_to_c(
+                "sidereon_fusion_error_state_layout_label",
+                "out",
+                label.as_bytes(),
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Return the covariance dimension for a fusion error-state layout.
+///
+/// Safety: out must point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_fusion_error_state_layout_dimension(
+    layout: u32,
+    out: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_fusion_error_state_layout_dimension",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out,
+                "sidereon_fusion_error_state_layout_dimension",
+                "out"
+            ));
+            *out = 0;
+            let layout = c_try!(fusion_layout_from_c(
+                "sidereon_fusion_error_state_layout_dimension",
+                layout
+            ));
+            *out = layout.dimension();
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy a GNSS fix-status label into out.
+///
+/// Safety: out points to len bytes or NULL when len is 0; out_written and
+/// out_required must point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_fusion_gnss_fix_status_label(
+    status: u32,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_fusion_gnss_fix_status_label",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_fusion_gnss_fix_status_label",
+                out_written,
+                out_required
+            ));
+            let label = c_try!(fusion_gnss_fix_status_label_from_c(
+                "sidereon_fusion_gnss_fix_status_label",
+                status
+            ));
+            c_try!(copy_prefix_to_c(
+                "sidereon_fusion_gnss_fix_status_label",
+                "out",
+                label.as_bytes(),
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
 /// Opaque GNSS/INS fusion filter. Create with sidereon_fusion_filter_create and
 /// release with sidereon_fusion_filter_free.
 pub struct SidereonFusionFilter {
@@ -2455,6 +2600,16 @@ fn fusion_filter_kind_from_c(
     }
 }
 
+fn fusion_filter_kind_label_from_c(
+    fn_name: &str,
+    kind: u32,
+) -> Result<&'static str, SidereonStatus> {
+    match fusion_filter_kind_from_c(fn_name, kind)? {
+        sidereon_core::fusion::FusionFilterKind::Ekf => Ok("FusionFilterKind.EKF"),
+        sidereon_core::fusion::FusionFilterKind::Ukf => Ok("FusionFilterKind.UKF"),
+    }
+}
+
 fn fusion_layout_from_c(
     fn_name: &str,
     layout: u32,
@@ -2470,6 +2625,16 @@ fn fusion_layout_from_c(
             set_last_error(format!("{fn_name}: invalid fusion error-state layout"));
             Err(SidereonStatus::InvalidArgument)
         }
+    }
+}
+
+fn fusion_error_state_layout_label_from_c(
+    fn_name: &str,
+    layout: u32,
+) -> Result<&'static str, SidereonStatus> {
+    match fusion_layout_from_c(fn_name, layout)? {
+        sidereon_core::fusion::ErrorStateLayout::Fifteen => Ok("ErrorStateLayout.FIFTEEN"),
+        sidereon_core::fusion::ErrorStateLayout::TwentyOne => Ok("ErrorStateLayout.TWENTY_ONE"),
     }
 }
 
@@ -2491,6 +2656,17 @@ fn fusion_fix_status_from_c(
             set_last_error(format!("{fn_name}: invalid GNSS fix status"));
             Err(SidereonStatus::InvalidArgument)
         }
+    }
+}
+
+fn fusion_gnss_fix_status_label_from_c(
+    fn_name: &str,
+    status: u32,
+) -> Result<&'static str, SidereonStatus> {
+    match fusion_fix_status_from_c(fn_name, status)? {
+        sidereon_core::fusion::GnssFixStatus::Single => Ok("GnssFixStatus.SINGLE"),
+        sidereon_core::fusion::GnssFixStatus::Float => Ok("GnssFixStatus.FLOAT"),
+        sidereon_core::fusion::GnssFixStatus::Fixed => Ok("GnssFixStatus.FIXED"),
     }
 }
 

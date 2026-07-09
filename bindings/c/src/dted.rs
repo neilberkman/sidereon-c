@@ -45,6 +45,45 @@ pub struct SidereonDtedHeightResult {
     pub height_m: f64,
 }
 
+/// Copy a DTED interpolation label into out.
+///
+/// Safety: out points to len bytes or NULL when len is 0; out_written and
+/// out_required must point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_dted_interpolation_label(
+    interpolation: u32,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_dted_interpolation_label",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_dted_interpolation_label",
+                out_written,
+                out_required
+            ));
+            let label = c_try!(dted_interpolation_label_from_c(
+                "sidereon_dted_interpolation_label",
+                interpolation
+            ));
+            c_try!(copy_prefix_to_c(
+                "sidereon_dted_interpolation_label",
+                "out",
+                label.as_bytes(),
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
 /// Initialize DTED lookup options to bilinear interpolation. Heights returned by
 /// DTED lookup functions are orthometric meters.
 ///
@@ -429,6 +468,24 @@ pub struct SidereonLonLatDeg {
     pub lon_deg: f64,
     /// Latitude, degrees.
     pub lat_deg: f64,
+}
+
+fn dted_interpolation_label_from_c(
+    fn_name: &str,
+    interpolation: u32,
+) -> Result<&'static str, SidereonStatus> {
+    match interpolation {
+        value if value == SidereonDtedInterpolation::NearestPosting as u32 => {
+            Ok("DtedInterpolation.NEAREST_POSTING")
+        }
+        value if value == SidereonDtedInterpolation::Bilinear as u32 => {
+            Ok("DtedInterpolation.BILINEAR")
+        }
+        _ => {
+            set_last_error(format!("{fn_name}: invalid DTED interpolation"));
+            Err(SidereonStatus::InvalidArgument)
+        }
+    }
 }
 
 fn map_dted_string_error(fn_name: &str, err: String) -> SidereonStatus {

@@ -74,6 +74,46 @@ pub unsafe extern "C" fn sidereon_broadcast_ephemeris_parse_nav(
     )
 }
 
+/// Read and parse a RINEX navigation file from a UTF-8 filesystem path into a
+/// broadcast ephemeris source. On success writes a newly owned handle to
+/// *out_broadcast. Release it with sidereon_broadcast_ephemeris_free. Delegates
+/// to sidereon::load_rinex_nav.
+///
+/// Safety: path must be a non-empty UTF-8 C string; out_broadcast must point to
+/// storage for a SidereonBroadcastEphemeris*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_broadcast_ephemeris_load_nav(
+    path: *const c_char,
+    out_broadcast: *mut *mut SidereonBroadcastEphemeris,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_broadcast_ephemeris_load_nav",
+        SidereonStatus::Panic,
+        || {
+            let out_broadcast = c_try!(require_out(
+                out_broadcast,
+                "sidereon_broadcast_ephemeris_load_nav",
+                "out_broadcast"
+            ));
+            *out_broadcast = ptr::null_mut();
+            let path = c_try!(parse_c_string(
+                "sidereon_broadcast_ephemeris_load_nav",
+                "path",
+                path
+            ));
+            let inner = match sidereon::load_rinex_nav(&path) {
+                Ok(inner) => inner,
+                Err(err) => {
+                    set_last_error(format!("sidereon_broadcast_ephemeris_load_nav: {err}"));
+                    return SidereonStatus::InvalidArgument;
+                }
+            };
+            write_boxed_handle(out_broadcast, SidereonBroadcastEphemeris { inner });
+            SidereonStatus::Ok
+        },
+    )
+}
+
 /// Release a broadcast ephemeris handle from
 /// sidereon_broadcast_ephemeris_parse_nav. Passing NULL is a no-op.
 ///

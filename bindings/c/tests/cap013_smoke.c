@@ -435,6 +435,18 @@ static int exercise_source_localization(void) {
         sidereon_source_solution_free(solution);
         return fail("source localization: toa summary");
     }
+    size_t written = 0;
+    size_t required = 0;
+    uint8_t tier_label[16];
+    if (require_ok(sidereon_observability_tier_label((uint32_t)summary.geometry_quality.tier,
+                                                     tier_label, sizeof(tier_label), &written,
+                                                     &required),
+                   "observability tier label") != 0 ||
+        written != strlen("nominal") || required != strlen("nominal") ||
+        memcmp(tier_label, "nominal", strlen("nominal")) != 0) {
+        sidereon_source_solution_free(solution);
+        return fail("source localization: observability tier label");
+    }
 
     bool covariance_available = false;
     SidereonSourceCovariance covariance;
@@ -446,8 +458,6 @@ static int exercise_source_localization(void) {
         return fail("source localization: covariance");
     }
 
-    size_t written = 0;
-    size_t required = 0;
     if (require_ok(sidereon_source_solution_residuals(solution, NULL, 0, &written, &required),
                    "source residual count") != 0 ||
         written != 0 || required != 5) {

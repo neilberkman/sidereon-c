@@ -1148,6 +1148,121 @@ pub struct SidereonSignalAnalysisMultipathEnvelopePoint {
     pub running_average_m: f64,
 }
 
+/// Return the reference chipping-rate unit used by BPSK and BOC, in hertz.
+///
+/// Safety: out must point to a double.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_signal_reference_chip_rate_hz(out: *mut f64) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_signal_reference_chip_rate_hz",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out,
+                "sidereon_signal_reference_chip_rate_hz",
+                "out"
+            ));
+            *out = sidereon_core::signal::analysis::REFERENCE_CHIP_RATE_HZ;
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Return the receiver bandwidth used by the Betz L1 SSC fixture, in hertz.
+///
+/// Safety: out must point to a double.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_signal_betz_l1_receiver_bandwidth_hz(
+    out: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_signal_betz_l1_receiver_bandwidth_hz",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out,
+                "sidereon_signal_betz_l1_receiver_bandwidth_hz",
+                "out"
+            ));
+            *out = sidereon_core::signal::analysis::BETZ_L1_RECEIVER_BANDWIDTH_HZ;
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy a stable signal-modulation label into out.
+///
+/// Safety: modulation must point to a SidereonSignalAnalysisModulation; out
+/// points to len bytes or NULL when len is 0; out_written and out_required must
+/// point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_signal_modulation_label(
+    modulation: *const SidereonSignalAnalysisModulation,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_signal_modulation_label",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_signal_modulation_label",
+                out_written,
+                out_required
+            ));
+            let modulation = c_try!(signal_analysis_modulation_from_c(
+                "sidereon_signal_modulation_label",
+                modulation
+            ));
+            c_try!(copy_prefix_to_c(
+                "sidereon_signal_modulation_label",
+                "out",
+                modulation.label().as_bytes(),
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Return the code rate for a signal modulation, in hertz.
+///
+/// Safety: modulation and out must point to readable and writable objects.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_signal_modulation_code_rate_hz(
+    modulation: *const SidereonSignalAnalysisModulation,
+    out: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_signal_modulation_code_rate_hz",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out,
+                "sidereon_signal_modulation_code_rate_hz",
+                "out"
+            ));
+            *out = 0.0;
+            let modulation = c_try!(signal_analysis_modulation_from_c(
+                "sidereon_signal_modulation_code_rate_hz",
+                modulation
+            ));
+            match modulation.code_rate_hz() {
+                Ok(value) => {
+                    *out = value;
+                    SidereonStatus::Ok
+                }
+                Err(err) => extra_invalid_arg("sidereon_signal_modulation_code_rate_hz", err),
+            }
+        },
+    )
+}
+
 /// Evaluate a normalized modulation PSD at an offset frequency.
 ///
 /// Safety: modulation and out must point to readable and writable objects.
@@ -1173,6 +1288,101 @@ pub unsafe extern "C" fn sidereon_signal_analysis_psd(
                     SidereonStatus::Ok
                 }
                 Err(err) => extra_invalid_arg("sidereon_signal_analysis_psd", err),
+            }
+        },
+    )
+}
+
+/// Evaluate a normalized modulation PSD at an offset frequency. Canonical
+/// scalar sibling of sidereon_signal_analysis_psd.
+///
+/// Safety: modulation and out must point to readable and writable objects.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_signal_psd_hz(
+    modulation: *const SidereonSignalAnalysisModulation,
+    offset_hz: f64,
+    out: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_signal_psd_hz", SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out, "sidereon_signal_psd_hz", "out"));
+        *out = 0.0;
+        let modulation = c_try!(signal_analysis_modulation_from_c(
+            "sidereon_signal_psd_hz",
+            modulation
+        ));
+        match modulation.psd_hz(offset_hz) {
+            Ok(value) => {
+                *out = value;
+                SidereonStatus::Ok
+            }
+            Err(err) => extra_invalid_arg("sidereon_signal_psd_hz", err),
+        }
+    })
+}
+
+/// Integrate normalized PSD over a two-sided receiver bandwidth.
+///
+/// Safety: modulation and out must point to readable and writable objects.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_signal_power_in_band(
+    modulation: *const SidereonSignalAnalysisModulation,
+    receiver_bandwidth_hz: f64,
+    out: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_signal_power_in_band",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(out, "sidereon_signal_power_in_band", "out"));
+            *out = 0.0;
+            let modulation = c_try!(signal_analysis_modulation_from_c(
+                "sidereon_signal_power_in_band",
+                modulation
+            ));
+            match sidereon_core::signal::analysis::power_in_band(&modulation, receiver_bandwidth_hz)
+            {
+                Ok(value) => {
+                    *out = value;
+                    SidereonStatus::Ok
+                }
+                Err(err) => extra_invalid_arg("sidereon_signal_power_in_band", err),
+            }
+        },
+    )
+}
+
+/// Compute the fraction of modulation power inside a two-sided bandwidth.
+///
+/// Safety: modulation and out must point to readable and writable objects.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_signal_fraction_power_in_band(
+    modulation: *const SidereonSignalAnalysisModulation,
+    receiver_bandwidth_hz: f64,
+    out: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_signal_fraction_power_in_band",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out,
+                "sidereon_signal_fraction_power_in_band",
+                "out"
+            ));
+            *out = 0.0;
+            let modulation = c_try!(signal_analysis_modulation_from_c(
+                "sidereon_signal_fraction_power_in_band",
+                modulation
+            ));
+            match sidereon_core::signal::analysis::fraction_power_in_band(
+                &modulation,
+                receiver_bandwidth_hz,
+            ) {
+                Ok(value) => {
+                    *out = value;
+                    SidereonStatus::Ok
+                }
+                Err(err) => extra_invalid_arg("sidereon_signal_fraction_power_in_band", err),
             }
         },
     )
@@ -1210,6 +1420,39 @@ pub unsafe extern "C" fn sidereon_signal_analysis_fraction_power(
                     SidereonStatus::Ok
                 }
                 Err(err) => extra_invalid_arg("sidereon_signal_analysis_fraction_power", err),
+            }
+        },
+    )
+}
+
+/// Compute the RMS, or Gabor, bandwidth over a two-sided receiver bandwidth.
+///
+/// Safety: modulation and out must point to readable and writable objects.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_signal_rms_bandwidth_hz(
+    modulation: *const SidereonSignalAnalysisModulation,
+    receiver_bandwidth_hz: f64,
+    out: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_signal_rms_bandwidth_hz",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(out, "sidereon_signal_rms_bandwidth_hz", "out"));
+            *out = 0.0;
+            let modulation = c_try!(signal_analysis_modulation_from_c(
+                "sidereon_signal_rms_bandwidth_hz",
+                modulation
+            ));
+            match sidereon_core::signal::analysis::rms_bandwidth_hz(
+                &modulation,
+                receiver_bandwidth_hz,
+            ) {
+                Ok(value) => {
+                    *out = value;
+                    SidereonStatus::Ok
+                }
+                Err(err) => extra_invalid_arg("sidereon_signal_rms_bandwidth_hz", err),
             }
         },
     )
@@ -1310,6 +1553,167 @@ pub unsafe extern "C" fn sidereon_signal_analysis_spectral_separation(
     )
 }
 
+/// Compute the spectral separation coefficient between two modulations in
+/// hertz. Scalar sibling of sidereon_signal_analysis_spectral_separation,
+/// aligned with the Python and wasm scalar helper contract.
+///
+/// Safety: desired, interference, and out must point to readable and writable
+/// objects.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_signal_spectral_separation_coefficient_hz(
+    desired: *const SidereonSignalAnalysisModulation,
+    interference: *const SidereonSignalAnalysisModulation,
+    receiver_bandwidth_hz: f64,
+    out: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_signal_spectral_separation_coefficient_hz",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out,
+                "sidereon_signal_spectral_separation_coefficient_hz",
+                "out"
+            ));
+            *out = 0.0;
+            let desired = c_try!(signal_analysis_modulation_from_c(
+                "sidereon_signal_spectral_separation_coefficient_hz",
+                desired
+            ));
+            let interference = c_try!(signal_analysis_modulation_from_c(
+                "sidereon_signal_spectral_separation_coefficient_hz",
+                interference
+            ));
+            match sidereon_core::signal::analysis::spectral_separation_coefficient_hz(
+                &desired,
+                &interference,
+                receiver_bandwidth_hz,
+            ) {
+                Ok(value) => {
+                    *out = value;
+                    SidereonStatus::Ok
+                }
+                Err(err) => {
+                    extra_invalid_arg("sidereon_signal_spectral_separation_coefficient_hz", err)
+                }
+            }
+        },
+    )
+}
+
+/// Compute the spectral separation coefficient between two modulations in
+/// decibel-hertz.
+///
+/// Safety: desired, interference, and out must point to readable and writable
+/// objects.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_signal_spectral_separation_coefficient_db_hz(
+    desired: *const SidereonSignalAnalysisModulation,
+    interference: *const SidereonSignalAnalysisModulation,
+    receiver_bandwidth_hz: f64,
+    out: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_signal_spectral_separation_coefficient_db_hz",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out,
+                "sidereon_signal_spectral_separation_coefficient_db_hz",
+                "out"
+            ));
+            *out = 0.0;
+            let desired = c_try!(signal_analysis_modulation_from_c(
+                "sidereon_signal_spectral_separation_coefficient_db_hz",
+                desired
+            ));
+            let interference = c_try!(signal_analysis_modulation_from_c(
+                "sidereon_signal_spectral_separation_coefficient_db_hz",
+                interference
+            ));
+            match sidereon_core::signal::analysis::spectral_separation_coefficient_db_hz(
+                &desired,
+                &interference,
+                receiver_bandwidth_hz,
+            ) {
+                Ok(value) => {
+                    *out = value;
+                    SidereonStatus::Ok
+                }
+                Err(err) => {
+                    extra_invalid_arg("sidereon_signal_spectral_separation_coefficient_db_hz", err)
+                }
+            }
+        },
+    )
+}
+
+/// Compute the white-interference spectral separation coefficient for one
+/// modulation over a two-sided receiver bandwidth.
+///
+/// Safety: desired and out must point to readable and writable objects.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_signal_white_noise_spectral_separation_hz(
+    desired: *const SidereonSignalAnalysisModulation,
+    receiver_bandwidth_hz: f64,
+    out: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_signal_white_noise_spectral_separation_hz",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out,
+                "sidereon_signal_white_noise_spectral_separation_hz",
+                "out"
+            ));
+            *out = 0.0;
+            let desired = c_try!(signal_analysis_modulation_from_c(
+                "sidereon_signal_white_noise_spectral_separation_hz",
+                desired
+            ));
+            match sidereon_core::signal::analysis::white_noise_spectral_separation_hz(
+                &desired,
+                receiver_bandwidth_hz,
+            ) {
+                Ok(value) => {
+                    *out = value;
+                    SidereonStatus::Ok
+                }
+                Err(err) => {
+                    extra_invalid_arg("sidereon_signal_white_noise_spectral_separation_hz", err)
+                }
+            }
+        },
+    )
+}
+
+/// Compute effective C/N0 degradation from finite-band interference terms.
+/// Canonical sibling of sidereon_signal_analysis_effective_cn0_degradation.
+///
+/// Safety: desired and out must point to readable and writable objects;
+/// interferences must point to interference_count rows or NULL when the count is
+/// zero.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_signal_effective_cn0_degradation(
+    desired: *const SidereonSignalAnalysisModulation,
+    cn0_db_hz: f64,
+    receiver_bandwidth_hz: f64,
+    interferences: *const SidereonSignalAnalysisInterference,
+    interference_count: usize,
+    out: *mut SidereonSignalAnalysisCn0Degradation,
+) -> SidereonStatus {
+    signal_effective_cn0_degradation_impl(
+        "sidereon_signal_effective_cn0_degradation",
+        desired,
+        cn0_db_hz,
+        receiver_bandwidth_hz,
+        interferences,
+        interference_count,
+        out,
+    )
+}
+
 /// Compute effective C/N0 degradation from finite-band interference terms.
 ///
 /// Safety: desired and out must point to readable and writable objects;
@@ -1324,48 +1728,35 @@ pub unsafe extern "C" fn sidereon_signal_analysis_effective_cn0_degradation(
     interference_count: usize,
     out: *mut SidereonSignalAnalysisCn0Degradation,
 ) -> SidereonStatus {
-    ffi_boundary(
+    signal_effective_cn0_degradation_impl(
         "sidereon_signal_analysis_effective_cn0_degradation",
-        SidereonStatus::Panic,
-        || {
-            let out = c_try!(require_out(
-                out,
-                "sidereon_signal_analysis_effective_cn0_degradation",
-                "out"
-            ));
-            *out = SidereonSignalAnalysisCn0Degradation {
-                effective_cn0_hz: 0.0,
-                effective_cn0_db_hz: 0.0,
-                degradation_db: 0.0,
-            };
-            let desired = c_try!(signal_analysis_modulation_from_c(
-                "sidereon_signal_analysis_effective_cn0_degradation",
-                desired
-            ));
-            let interferences = c_try!(signal_analysis_interferences_from_c(
-                "sidereon_signal_analysis_effective_cn0_degradation",
-                interferences,
-                interference_count
-            ));
-            match sidereon_core::signal::analysis::effective_cn0_degradation(
-                &desired,
-                cn0_db_hz,
-                receiver_bandwidth_hz,
-                &interferences,
-            ) {
-                Ok(value) => {
-                    *out = SidereonSignalAnalysisCn0Degradation {
-                        effective_cn0_hz: value.effective_cn0_hz,
-                        effective_cn0_db_hz: value.effective_cn0_db_hz,
-                        degradation_db: value.degradation_db,
-                    };
-                    SidereonStatus::Ok
-                }
-                Err(err) => {
-                    extra_invalid_arg("sidereon_signal_analysis_effective_cn0_degradation", err)
-                }
-            }
-        },
+        desired,
+        cn0_db_hz,
+        receiver_bandwidth_hz,
+        interferences,
+        interference_count,
+        out,
+    )
+}
+
+/// Compute early-late DLL thermal-noise jitter for a modulation. Canonical
+/// sibling of sidereon_signal_analysis_dll_jitter.
+///
+/// Safety: modulation, options, and out must point to readable and writable
+/// objects.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_signal_dll_thermal_noise_jitter(
+    modulation: *const SidereonSignalAnalysisModulation,
+    options: *const SidereonSignalAnalysisDllTrackingOptions,
+    processing: u32,
+    out: *mut SidereonSignalAnalysisDllJitter,
+) -> SidereonStatus {
+    signal_dll_jitter_impl(
+        "sidereon_signal_dll_thermal_noise_jitter",
+        modulation,
+        options,
+        processing,
+        out,
     )
 }
 
@@ -1380,41 +1771,27 @@ pub unsafe extern "C" fn sidereon_signal_analysis_dll_jitter(
     processing: u32,
     out: *mut SidereonSignalAnalysisDllJitter,
 ) -> SidereonStatus {
-    ffi_boundary(
+    signal_dll_jitter_impl(
         "sidereon_signal_analysis_dll_jitter",
-        SidereonStatus::Panic,
-        || {
-            let out = c_try!(require_out(
-                out,
-                "sidereon_signal_analysis_dll_jitter",
-                "out"
-            ));
-            *out = zero_signal_jitter();
-            let modulation = c_try!(signal_analysis_modulation_from_c(
-                "sidereon_signal_analysis_dll_jitter",
-                modulation
-            ));
-            let options = c_try!(signal_analysis_dll_options_from_c(
-                "sidereon_signal_analysis_dll_jitter",
-                options
-            ));
-            let processing = c_try!(signal_analysis_processing_from_c(
-                "sidereon_signal_analysis_dll_jitter",
-                processing
-            ));
-            match sidereon_core::signal::analysis::dll_thermal_noise_jitter(
-                &modulation,
-                options,
-                processing,
-            ) {
-                Ok(value) => {
-                    *out = signal_jitter_to_c(value);
-                    SidereonStatus::Ok
-                }
-                Err(err) => extra_invalid_arg("sidereon_signal_analysis_dll_jitter", err),
-            }
-        },
+        modulation,
+        options,
+        processing,
+        out,
     )
+}
+
+/// Compute the lower bound for code-delay tracking jitter. Canonical sibling of
+/// sidereon_signal_analysis_dll_lower_bound.
+///
+/// Safety: modulation, options, and out must point to readable and writable
+/// objects.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_signal_dll_lower_bound(
+    modulation: *const SidereonSignalAnalysisModulation,
+    options: *const SidereonSignalAnalysisDllTrackingOptions,
+    out: *mut SidereonSignalAnalysisDllJitter,
+) -> SidereonStatus {
+    signal_dll_lower_bound_impl("sidereon_signal_dll_lower_bound", modulation, options, out)
 }
 
 /// Compute the lower bound for code-delay tracking jitter.
@@ -1427,31 +1804,43 @@ pub unsafe extern "C" fn sidereon_signal_analysis_dll_lower_bound(
     options: *const SidereonSignalAnalysisDllTrackingOptions,
     out: *mut SidereonSignalAnalysisDllJitter,
 ) -> SidereonStatus {
-    ffi_boundary(
+    signal_dll_lower_bound_impl(
         "sidereon_signal_analysis_dll_lower_bound",
-        SidereonStatus::Panic,
-        || {
-            let out = c_try!(require_out(
-                out,
-                "sidereon_signal_analysis_dll_lower_bound",
-                "out"
-            ));
-            *out = zero_signal_jitter();
-            let modulation = c_try!(signal_analysis_modulation_from_c(
-                "sidereon_signal_analysis_dll_lower_bound",
-                modulation
-            ));
-            let options = c_try!(signal_analysis_dll_options_from_c(
-                "sidereon_signal_analysis_dll_lower_bound",
-                options
-            ));
-            match sidereon_core::signal::analysis::dll_lower_bound(&modulation, options) {
-                Ok(value) => {
-                    *out = signal_jitter_to_c(value);
-                    SidereonStatus::Ok
-                }
-                Err(err) => extra_invalid_arg("sidereon_signal_analysis_dll_lower_bound", err),
-            }
+        modulation,
+        options,
+        out,
+    )
+}
+
+/// Compute one-path early-late multipath envelopes on a delay grid. Canonical
+/// sibling of sidereon_signal_analysis_multipath_envelope.
+///
+/// Safety: modulation and options must point to readable objects; delay_chips
+/// must point to delay_count doubles or NULL when count is zero; out must point
+/// to len rows or NULL when len is 0; out_written and out_required must point to
+/// size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_signal_multipath_error_envelope(
+    modulation: *const SidereonSignalAnalysisModulation,
+    options: *const SidereonSignalAnalysisMultipathOptions,
+    delay_chips: *const f64,
+    delay_count: usize,
+    out: *mut SidereonSignalAnalysisMultipathEnvelopePoint,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    signal_multipath_envelope_impl(
+        "sidereon_signal_multipath_error_envelope",
+        SignalMultipathEnvelopeRequest {
+            modulation,
+            options,
+            delay_chips,
+            delay_count,
+            out,
+            len,
+            out_written,
+            out_required,
         },
     )
 }
@@ -1473,52 +1862,165 @@ pub unsafe extern "C" fn sidereon_signal_analysis_multipath_envelope(
     out_written: *mut usize,
     out_required: *mut usize,
 ) -> SidereonStatus {
-    ffi_boundary(
+    signal_multipath_envelope_impl(
         "sidereon_signal_analysis_multipath_envelope",
-        SidereonStatus::Panic,
-        || {
-            c_try!(init_copy_counts(
-                "sidereon_signal_analysis_multipath_envelope",
-                out_written,
-                out_required
-            ));
-            let modulation = c_try!(signal_analysis_modulation_from_c(
-                "sidereon_signal_analysis_multipath_envelope",
-                modulation
-            ));
-            let options = c_try!(signal_analysis_multipath_options_from_c(
-                "sidereon_signal_analysis_multipath_envelope",
-                options
-            ));
-            let delays = c_try!(require_slice(
-                delay_chips,
-                delay_count,
-                "sidereon_signal_analysis_multipath_envelope",
-                "delay_chips"
-            ));
-            let points = match sidereon_core::signal::analysis::multipath_error_envelope(
-                &modulation,
-                options,
-                delays,
-            ) {
-                Ok(points) => points,
-                Err(err) => {
-                    return extra_invalid_arg("sidereon_signal_analysis_multipath_envelope", err)
-                }
-            };
-            let rows: Vec<_> = points.into_iter().map(multipath_point_to_c).collect();
-            c_try!(copy_prefix_to_c(
-                "sidereon_signal_analysis_multipath_envelope",
-                "out",
-                &rows,
-                out,
-                len,
-                out_written,
-                out_required,
-            ));
-            SidereonStatus::Ok
+        SignalMultipathEnvelopeRequest {
+            modulation,
+            options,
+            delay_chips,
+            delay_count,
+            out,
+            len,
+            out_written,
+            out_required,
         },
     )
+}
+
+struct SignalMultipathEnvelopeRequest {
+    modulation: *const SidereonSignalAnalysisModulation,
+    options: *const SidereonSignalAnalysisMultipathOptions,
+    delay_chips: *const f64,
+    delay_count: usize,
+    out: *mut SidereonSignalAnalysisMultipathEnvelopePoint,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+}
+
+unsafe fn signal_effective_cn0_degradation_impl(
+    fn_name: &'static str,
+    desired: *const SidereonSignalAnalysisModulation,
+    cn0_db_hz: f64,
+    receiver_bandwidth_hz: f64,
+    interferences: *const SidereonSignalAnalysisInterference,
+    interference_count: usize,
+    out: *mut SidereonSignalAnalysisCn0Degradation,
+) -> SidereonStatus {
+    ffi_boundary(fn_name, SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out, fn_name, "out"));
+        *out = SidereonSignalAnalysisCn0Degradation {
+            effective_cn0_hz: 0.0,
+            effective_cn0_db_hz: 0.0,
+            degradation_db: 0.0,
+        };
+        let desired = c_try!(signal_analysis_modulation_from_c(fn_name, desired));
+        let interferences = c_try!(signal_analysis_interferences_from_c(
+            fn_name,
+            interferences,
+            interference_count
+        ));
+        match sidereon_core::signal::analysis::effective_cn0_degradation(
+            &desired,
+            cn0_db_hz,
+            receiver_bandwidth_hz,
+            &interferences,
+        ) {
+            Ok(value) => {
+                *out = SidereonSignalAnalysisCn0Degradation {
+                    effective_cn0_hz: value.effective_cn0_hz,
+                    effective_cn0_db_hz: value.effective_cn0_db_hz,
+                    degradation_db: value.degradation_db,
+                };
+                SidereonStatus::Ok
+            }
+            Err(err) => extra_invalid_arg(fn_name, err),
+        }
+    })
+}
+
+unsafe fn signal_dll_jitter_impl(
+    fn_name: &'static str,
+    modulation: *const SidereonSignalAnalysisModulation,
+    options: *const SidereonSignalAnalysisDllTrackingOptions,
+    processing: u32,
+    out: *mut SidereonSignalAnalysisDllJitter,
+) -> SidereonStatus {
+    ffi_boundary(fn_name, SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out, fn_name, "out"));
+        *out = zero_signal_jitter();
+        let modulation = c_try!(signal_analysis_modulation_from_c(fn_name, modulation));
+        let options = c_try!(signal_analysis_dll_options_from_c(fn_name, options));
+        let processing = c_try!(signal_analysis_processing_from_c(fn_name, processing));
+        match sidereon_core::signal::analysis::dll_thermal_noise_jitter(
+            &modulation,
+            options,
+            processing,
+        ) {
+            Ok(value) => {
+                *out = signal_jitter_to_c(value);
+                SidereonStatus::Ok
+            }
+            Err(err) => extra_invalid_arg(fn_name, err),
+        }
+    })
+}
+
+unsafe fn signal_dll_lower_bound_impl(
+    fn_name: &'static str,
+    modulation: *const SidereonSignalAnalysisModulation,
+    options: *const SidereonSignalAnalysisDllTrackingOptions,
+    out: *mut SidereonSignalAnalysisDllJitter,
+) -> SidereonStatus {
+    ffi_boundary(fn_name, SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out, fn_name, "out"));
+        *out = zero_signal_jitter();
+        let modulation = c_try!(signal_analysis_modulation_from_c(fn_name, modulation));
+        let options = c_try!(signal_analysis_dll_options_from_c(fn_name, options));
+        match sidereon_core::signal::analysis::dll_lower_bound(&modulation, options) {
+            Ok(value) => {
+                *out = signal_jitter_to_c(value);
+                SidereonStatus::Ok
+            }
+            Err(err) => extra_invalid_arg(fn_name, err),
+        }
+    })
+}
+
+unsafe fn signal_multipath_envelope_impl(
+    fn_name: &'static str,
+    request: SignalMultipathEnvelopeRequest,
+) -> SidereonStatus {
+    ffi_boundary(fn_name, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(
+            fn_name,
+            request.out_written,
+            request.out_required
+        ));
+        let modulation = c_try!(signal_analysis_modulation_from_c(
+            fn_name,
+            request.modulation
+        ));
+        let options = c_try!(signal_analysis_multipath_options_from_c(
+            fn_name,
+            request.options
+        ));
+        let delays = c_try!(require_slice(
+            request.delay_chips,
+            request.delay_count,
+            fn_name,
+            "delay_chips"
+        ));
+        let points = match sidereon_core::signal::analysis::multipath_error_envelope(
+            &modulation,
+            options,
+            delays,
+        ) {
+            Ok(points) => points,
+            Err(err) => return extra_invalid_arg(fn_name, err),
+        };
+        let rows: Vec<_> = points.into_iter().map(multipath_point_to_c).collect();
+        c_try!(copy_prefix_to_c(
+            fn_name,
+            "out",
+            &rows,
+            request.out,
+            request.len,
+            request.out_written,
+            request.out_required,
+        ));
+        SidereonStatus::Ok
+    })
 }
 
 fn carrier_band_from_c(

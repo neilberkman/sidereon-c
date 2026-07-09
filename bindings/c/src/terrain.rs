@@ -23,6 +23,84 @@ pub enum SidereonTerrainGeoidModel {
     Egm96FifteenMinute = 1,
 }
 
+/// Copy a terrain vertical-datum label into out.
+///
+/// Safety: out points to len bytes or NULL when len is 0; out_written and
+/// out_required must point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_vertical_datum_label(
+    datum: u32,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_vertical_datum_label",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_vertical_datum_label",
+                out_written,
+                out_required
+            ));
+            let label = c_try!(vertical_datum_label_from_c(
+                "sidereon_vertical_datum_label",
+                datum
+            ));
+            c_try!(copy_prefix_to_c(
+                "sidereon_vertical_datum_label",
+                "out",
+                label.as_bytes(),
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy a terrain geoid-model label into out.
+///
+/// Safety: out points to len bytes or NULL when len is 0; out_written and
+/// out_required must point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_terrain_geoid_model_label(
+    model: u32,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_terrain_geoid_model_label",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_terrain_geoid_model_label",
+                out_written,
+                out_required
+            ));
+            let label = c_try!(terrain_geoid_model_label_from_c(
+                "sidereon_terrain_geoid_model_label",
+                model
+            ));
+            c_try!(copy_prefix_to_c(
+                "sidereon_terrain_geoid_model_label",
+                "out",
+                label.as_bytes(),
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
 /// Terrain store conversion or reader error kind.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -239,4 +317,34 @@ pub unsafe extern "C" fn sidereon_terrain_store_checksum64(
             SidereonStatus::Ok
         },
     )
+}
+
+fn vertical_datum_label_from_c(fn_name: &str, datum: u32) -> Result<&'static str, SidereonStatus> {
+    match datum {
+        value if value == SidereonVerticalDatum::Egm96MslOrthometric as u32 => {
+            Ok("VerticalDatum.EGM96_MSL_ORTHOMETRIC")
+        }
+        _ => {
+            set_last_error(format!("{fn_name}: invalid vertical datum"));
+            Err(SidereonStatus::InvalidArgument)
+        }
+    }
+}
+
+fn terrain_geoid_model_label_from_c(
+    fn_name: &str,
+    model: u32,
+) -> Result<&'static str, SidereonStatus> {
+    match model {
+        value if value == SidereonTerrainGeoidModel::Egm96OneDegree as u32 => {
+            Ok("egm96_one_degree")
+        }
+        value if value == SidereonTerrainGeoidModel::Egm96FifteenMinute as u32 => {
+            Ok("egm96_fifteen_minute")
+        }
+        _ => {
+            set_last_error(format!("{fn_name}: invalid terrain geoid model"));
+            Err(SidereonStatus::InvalidArgument)
+        }
+    }
 }

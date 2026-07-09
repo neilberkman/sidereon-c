@@ -1387,7 +1387,7 @@ unsafe fn data_problem_from_c(
     })
 }
 
-fn solve_policy_from_c(
+pub(crate) fn solve_policy_from_c(
     fn_name: &str,
     policy: &SidereonSppSolvePolicy,
 ) -> Result<SolvePolicy, SidereonStatus> {

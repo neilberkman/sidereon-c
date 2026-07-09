@@ -3021,6 +3021,20 @@ typedef struct SidereonRinexObs SidereonRinexObs;
 typedef struct SidereonRinexRepair SidereonRinexRepair;
 
 /**
+ * A set of SPP inputs assembled from RINEX OBS epochs. Opaque to C. Create with
+ * sidereon_spp_inputs_from_rinex_obs and release with
+ * sidereon_rinex_spp_inputs_free.
+ */
+typedef struct SidereonRinexSppInputs SidereonRinexSppInputs;
+
+/**
+ * Serial per-epoch SPP solve results assembled from RINEX OBS epochs. Opaque to
+ * C. Create with sidereon_solve_spp_from_rinex_obs and release with
+ * sidereon_rinex_spp_solutions_free.
+ */
+typedef struct SidereonRinexSppSolutions SidereonRinexSppSolutions;
+
+/**
  * A set of scanned RTCM 3 transport frames. Opaque to C. Create with
  * sidereon_rtcm_scan_frames; release with sidereon_rtcm_frames_free.
  */
@@ -11899,6 +11913,68 @@ typedef struct SidereonRinexRepairOptions {
 } SidereonRinexRepairOptions;
 
 /**
+ * One assembled RINEX OBS epoch summary for SPP.
+ */
+typedef struct SidereonRinexSppEpoch {
+    /**
+     * Index in the source RINEX observation file.
+     */
+    size_t epoch_index;
+    /**
+     * Civil epoch exactly as it appears in the RINEX observation file.
+     */
+    struct SidereonCalendarEpoch epoch;
+    /**
+     * Number of selected pseudorange observations in the assembled SPP input.
+     */
+    size_t observation_count;
+} SidereonRinexSppEpoch;
+
+/**
+ * Options for assembling RINEX OBS epochs into SPP inputs. Initialize with
+ * sidereon_rinex_spp_options_init, then override fields as needed. A NULL
+ * options pointer on the RINEX-SPP entry points uses these defaults.
+ */
+typedef struct SidereonRinexSppOptions {
+    /**
+     * Apply the ionosphere correction requested by the broadcast NAV product.
+     */
+    bool ionosphere;
+    /**
+     * Apply the troposphere correction.
+     */
+    bool troposphere;
+    /**
+     * Whether initial_guess overrides the RINEX header APPROX POSITION XYZ.
+     */
+    bool initial_guess_enabled;
+    /**
+     * Optional initial state guess [x_m, y_m, z_m, clock_state].
+     */
+    double initial_guess[4];
+    /**
+     * Surface pressure, hPa.
+     */
+    double pressure_hpa;
+    /**
+     * Surface temperature, K.
+     */
+    double temperature_k;
+    /**
+     * Relative humidity, 0..1.
+     */
+    double relative_humidity;
+    /**
+     * Whether robust Huber/IRLS reweighting is applied to each assembled solve.
+     */
+    bool robust_enabled;
+    /**
+     * Robust reweighting controls, used only when robust_enabled is true.
+     */
+    struct SidereonSppRobustConfig robust;
+} SidereonRinexSppOptions;
+
+/**
  * A decoded 1042 BeiDou broadcast ephemeris, mirroring
  * sidereon_core::rtcm::BeidouEphemeris. Every field is the raw transmitted
  * integer.
@@ -18002,6 +18078,18 @@ enum SidereonStatus sidereon_broadcast_emission_media_batch_at_j2000_s(const str
  */
 void sidereon_broadcast_ephemeris_free(struct SidereonBroadcastEphemeris *broadcast);
 
+/**
+ * Read and parse a RINEX navigation file from a UTF-8 filesystem path into a
+ * broadcast ephemeris source. On success writes a newly owned handle to
+ * *out_broadcast. Release it with sidereon_broadcast_ephemeris_free. Delegates
+ * to sidereon::load_rinex_nav.
+ *
+ * Safety: path must be a non-empty UTF-8 C string; out_broadcast must point to
+ * storage for a SidereonBroadcastEphemeris*.
+ */
+enum SidereonStatus sidereon_broadcast_ephemeris_load_nav(const char *path,
+                                                          struct SidereonBroadcastEphemeris **out_broadcast);
+
 enum SidereonStatus sidereon_broadcast_ephemeris_nav_message_preference(const struct SidereonBroadcastEphemeris *broadcast,
                                                                         uint32_t *out_preference);
 
@@ -19787,6 +19875,18 @@ enum SidereonStatus sidereon_drag_parameters_from_bc_factor(double bc_factor_m2_
                                                             struct SidereonDragParameters *out_drag);
 
 /**
+ * Copy a DTED interpolation label into out.
+ *
+ * Safety: out points to len bytes or NULL when len is 0; out_written and
+ * out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_dted_interpolation_label(uint32_t interpolation,
+                                                      uint8_t *out,
+                                                      size_t len,
+                                                      size_t *out_written,
+                                                      size_t *out_required);
+
+/**
  * Initialize DTED lookup options to bilinear interpolation. Heights returned by
  * DTED lookup functions are orthometric meters.
  *
@@ -20866,6 +20966,25 @@ enum SidereonStatus sidereon_frame_teme_to_gcrs(const double *position_km,
 enum SidereonStatus sidereon_frequency_hz(uint32_t system, uint32_t band, double *out);
 
 /**
+ * Return the covariance dimension for a fusion error-state layout.
+ *
+ * Safety: out must point to size_t.
+ */
+enum SidereonStatus sidereon_fusion_error_state_layout_dimension(uint32_t layout, size_t *out);
+
+/**
+ * Copy a fusion error-state layout label into out.
+ *
+ * Safety: out points to len bytes or NULL when len is 0; out_written and
+ * out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_fusion_error_state_layout_label(uint32_t layout,
+                                                             uint8_t *out,
+                                                             size_t len,
+                                                             size_t *out_written,
+                                                             size_t *out_required);
+
+/**
  * Initialize fusion filter configuration with core defaults.
  *
  * Safety: out must point to a SidereonFusionFilterConfig.
@@ -20927,6 +21046,18 @@ enum SidereonStatus sidereon_fusion_filter_encode_state(const struct SidereonFus
  * not already been freed.
  */
 void sidereon_fusion_filter_free(struct SidereonFusionFilter *filter);
+
+/**
+ * Copy a fusion filter kind label into out.
+ *
+ * Safety: out points to len bytes or NULL when len is 0; out_written and
+ * out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_fusion_filter_kind_label(uint32_t kind,
+                                                      uint8_t *out,
+                                                      size_t len,
+                                                      size_t *out_written,
+                                                      size_t *out_required);
 
 /**
  * Propagate a fusion filter with one IMU sample.
@@ -21131,6 +21262,18 @@ enum SidereonStatus sidereon_fusion_filter_update_tight_sp3_time_sync(struct Sid
                                                                       const struct SidereonSp3 *sp3,
                                                                       const struct SidereonFusionTightEpoch *epoch,
                                                                       struct SidereonFusionTimeSyncUpdate *out_update);
+
+/**
+ * Copy a GNSS fix-status label into out.
+ *
+ * Safety: out points to len bytes or NULL when len is 0; out_written and
+ * out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_fusion_gnss_fix_status_label(uint32_t status,
+                                                          uint8_t *out,
+                                                          size_t len,
+                                                          size_t *out_written,
+                                                          size_t *out_required);
 
 /**
  * Fill an IMU spec with one of the core preset grades.
@@ -23060,6 +23203,20 @@ enum SidereonStatus sidereon_nutation_matrix(double mean_obliquity_rad,
  * Safety: out points to a double.
  */
 enum SidereonStatus sidereon_nutation_mean_obliquity_radians(double jd_tdb, double *out);
+
+/**
+ * Copy the stable lowercase label for a SidereonObservabilityTier enum value
+ * into out. Mirrors Python's ObservabilityTier.label and wasm's
+ * observabilityTierLabel in the C naming convention.
+ *
+ * Safety: out points to len writable bytes or is NULL when len is 0;
+ * out_written and out_required point to size_t.
+ */
+enum SidereonStatus sidereon_observability_tier_label(uint32_t tier,
+                                                      uint8_t *out,
+                                                      size_t len,
+                                                      size_t *out_written,
+                                                      size_t *out_required);
 
 /**
  * Copy the observable-state missing-position sentinel into out. The sentinel is
@@ -25279,6 +25436,16 @@ enum SidereonStatus sidereon_rinex_obs_header(const struct SidereonRinexObs *obs
                                               struct SidereonRinexObsHeader *out_header);
 
 /**
+ * Read and parse a RINEX observation file from a UTF-8 filesystem path. On
+ * success writes a newly owned handle to *out_obs. Release it with
+ * sidereon_rinex_obs_free. Delegates to sidereon::load_rinex_obs.
+ *
+ * Safety: path must be a non-empty UTF-8 C string; out_obs must point to
+ * storage for a SidereonRinexObs*.
+ */
+enum SidereonStatus sidereon_rinex_obs_load(const char *path, struct SidereonRinexObs **out_obs);
+
+/**
  * Look up one observation value at `epoch_index` for satellite `sat_id` and
  * observation `code` (e.g. "C1C"). On success writes the value to *out_value and
  * whether the field was present to *out_present (a blank field is present=false
@@ -25416,6 +25583,114 @@ enum SidereonStatus sidereon_rinex_repair_text(const struct SidereonRinexRepair 
                                                size_t len,
                                                size_t *out_written,
                                                size_t *out_required);
+
+/**
+ * Write the number of assembled RINEX-SPP epochs to *out_count.
+ *
+ * Safety: inputs is a live handle; out_count points to a size_t.
+ */
+enum SidereonStatus sidereon_rinex_spp_inputs_count(const struct SidereonRinexSppInputs *inputs,
+                                                    size_t *out_count);
+
+/**
+ * Copy metadata for assembled RINEX-SPP epoch `index`.
+ *
+ * Safety: inputs is a live handle; out_epoch points to
+ * SidereonRinexSppEpoch storage.
+ */
+enum SidereonStatus sidereon_rinex_spp_inputs_epoch(const struct SidereonRinexSppInputs *inputs,
+                                                    size_t index,
+                                                    struct SidereonRinexSppEpoch *out_epoch);
+
+/**
+ * Copy assembled SPP inputs for epoch `index`. Pointer fields in the copied
+ * SidereonSppInputsV2 borrow storage owned by `inputs` and remain valid until
+ * sidereon_rinex_spp_inputs_free is called.
+ *
+ * Safety: inputs is a live handle; out_inputs points to SidereonSppInputsV2
+ * storage.
+ */
+enum SidereonStatus sidereon_rinex_spp_inputs_epoch_inputs(const struct SidereonRinexSppInputs *inputs,
+                                                           size_t index,
+                                                           struct SidereonSppInputsV2 *out_inputs);
+
+/**
+ * Release RINEX-SPP assembled inputs. Passing NULL is a no-op.
+ *
+ * Safety: inputs must be NULL or a live handle from
+ * sidereon_spp_inputs_from_rinex_obs that has not already been freed.
+ */
+void sidereon_rinex_spp_inputs_free(struct SidereonRinexSppInputs *inputs);
+
+/**
+ * Initialize RINEX-SPP options to the engine defaults: RINEX-version-specific
+ * signal selection, ionosphere and troposphere on, RINEX header initial guess,
+ * standard atmosphere, and robust reweighting off.
+ *
+ * Safety: out_options must point to writable SidereonRinexSppOptions storage.
+ */
+enum SidereonStatus sidereon_rinex_spp_options_init(struct SidereonRinexSppOptions *out_options);
+
+/**
+ * Copy RINEX-SPP result `index` into a newly owned SidereonSppSolution handle.
+ * Returns SIDEREON_STATUS_SOLVE when that epoch failed to solve.
+ *
+ * Safety: solutions is a live handle; out_solution points to storage for a
+ * SidereonSppSolution*.
+ */
+enum SidereonStatus sidereon_rinex_spp_solution(const struct SidereonRinexSppSolutions *solutions,
+                                                size_t index,
+                                                struct SidereonSppSolution **out_solution);
+
+/**
+ * Copy RINEX-SPP result `index`'s solve-failure message into a caller buffer
+ * (not null-terminated). A solved epoch reports *out_required 0. Uses the
+ * variable-length output contract.
+ *
+ * Safety: solutions is a live handle; out points to len writable bytes or NULL
+ * when len is 0; out_written and out_required point to size_t.
+ */
+enum SidereonStatus sidereon_rinex_spp_solution_error(const struct SidereonRinexSppSolutions *solutions,
+                                                      size_t index,
+                                                      uint8_t *out,
+                                                      size_t len,
+                                                      size_t *out_written,
+                                                      size_t *out_required);
+
+/**
+ * Write whether RINEX-SPP result `index` solved to *out_ok.
+ *
+ * Safety: solutions is a live handle; out_ok points to a bool.
+ */
+enum SidereonStatus sidereon_rinex_spp_solution_ok(const struct SidereonRinexSppSolutions *solutions,
+                                                   size_t index,
+                                                   bool *out_ok);
+
+/**
+ * Write the number of per-epoch RINEX-SPP solve results to *out_count.
+ *
+ * Safety: solutions is a live handle; out_count points to a size_t.
+ */
+enum SidereonStatus sidereon_rinex_spp_solutions_count(const struct SidereonRinexSppSolutions *solutions,
+                                                       size_t *out_count);
+
+/**
+ * Copy metadata for RINEX-SPP solve result `index`.
+ *
+ * Safety: solutions is a live handle; out_epoch points to
+ * SidereonRinexSppEpoch storage.
+ */
+enum SidereonStatus sidereon_rinex_spp_solutions_epoch(const struct SidereonRinexSppSolutions *solutions,
+                                                       size_t index,
+                                                       struct SidereonRinexSppEpoch *out_epoch);
+
+/**
+ * Release RINEX-SPP solve results. Passing NULL is a no-op.
+ *
+ * Safety: solutions must be NULL or a live handle from
+ * sidereon_solve_spp_from_rinex_obs that has not already been freed.
+ */
+void sidereon_rinex_spp_solutions_free(struct SidereonRinexSppSolutions *solutions);
 
 enum SidereonStatus sidereon_robust_fde_solve_broadcast(const struct SidereonBroadcastEphemeris *broadcast,
                                                         const struct SidereonSppInputs *inputs,
@@ -28050,6 +28325,13 @@ enum SidereonStatus sidereon_signal_autocorrelation(const int8_t *code,
                                                     size_t *out_required);
 
 /**
+ * Return the receiver bandwidth used by the Betz L1 SSC fixture, in hertz.
+ *
+ * Safety: out must point to a double.
+ */
+enum SidereonStatus sidereon_signal_betz_l1_receiver_bandwidth_hz(double *out);
+
+/**
  * One C/A code chip (+1 or -1) for a GPS PRN at a chip index. Delegates to
  * sidereon_core::signal::ca_chip.
  *
@@ -28150,6 +28432,118 @@ enum SidereonStatus sidereon_signal_cross_correlation(const int8_t *code_a,
                                                       size_t *out_required);
 
 /**
+ * Compute the lower bound for code-delay tracking jitter. Canonical sibling of
+ * sidereon_signal_analysis_dll_lower_bound.
+ *
+ * Safety: modulation, options, and out must point to readable and writable
+ * objects.
+ */
+enum SidereonStatus sidereon_signal_dll_lower_bound(const struct SidereonSignalAnalysisModulation *modulation,
+                                                    const struct SidereonSignalAnalysisDllTrackingOptions *options,
+                                                    struct SidereonSignalAnalysisDllJitter *out);
+
+/**
+ * Compute early-late DLL thermal-noise jitter for a modulation. Canonical
+ * sibling of sidereon_signal_analysis_dll_jitter.
+ *
+ * Safety: modulation, options, and out must point to readable and writable
+ * objects.
+ */
+enum SidereonStatus sidereon_signal_dll_thermal_noise_jitter(const struct SidereonSignalAnalysisModulation *modulation,
+                                                             const struct SidereonSignalAnalysisDllTrackingOptions *options,
+                                                             uint32_t processing,
+                                                             struct SidereonSignalAnalysisDllJitter *out);
+
+/**
+ * Compute effective C/N0 degradation from finite-band interference terms.
+ * Canonical sibling of sidereon_signal_analysis_effective_cn0_degradation.
+ *
+ * Safety: desired and out must point to readable and writable objects;
+ * interferences must point to interference_count rows or NULL when the count is
+ * zero.
+ */
+enum SidereonStatus sidereon_signal_effective_cn0_degradation(const struct SidereonSignalAnalysisModulation *desired,
+                                                              double cn0_db_hz,
+                                                              double receiver_bandwidth_hz,
+                                                              const struct SidereonSignalAnalysisInterference *interferences,
+                                                              size_t interference_count,
+                                                              struct SidereonSignalAnalysisCn0Degradation *out);
+
+/**
+ * Compute the fraction of modulation power inside a two-sided bandwidth.
+ *
+ * Safety: modulation and out must point to readable and writable objects.
+ */
+enum SidereonStatus sidereon_signal_fraction_power_in_band(const struct SidereonSignalAnalysisModulation *modulation,
+                                                           double receiver_bandwidth_hz,
+                                                           double *out);
+
+/**
+ * Return the code rate for a signal modulation, in hertz.
+ *
+ * Safety: modulation and out must point to readable and writable objects.
+ */
+enum SidereonStatus sidereon_signal_modulation_code_rate_hz(const struct SidereonSignalAnalysisModulation *modulation,
+                                                            double *out);
+
+/**
+ * Copy a stable signal-modulation label into out.
+ *
+ * Safety: modulation must point to a SidereonSignalAnalysisModulation; out
+ * points to len bytes or NULL when len is 0; out_written and out_required must
+ * point to size_t.
+ */
+enum SidereonStatus sidereon_signal_modulation_label(const struct SidereonSignalAnalysisModulation *modulation,
+                                                     uint8_t *out,
+                                                     size_t len,
+                                                     size_t *out_written,
+                                                     size_t *out_required);
+
+/**
+ * Compute one-path early-late multipath envelopes on a delay grid. Canonical
+ * sibling of sidereon_signal_analysis_multipath_envelope.
+ *
+ * Safety: modulation and options must point to readable objects; delay_chips
+ * must point to delay_count doubles or NULL when count is zero; out must point
+ * to len rows or NULL when len is 0; out_written and out_required must point to
+ * size_t.
+ */
+enum SidereonStatus sidereon_signal_multipath_error_envelope(const struct SidereonSignalAnalysisModulation *modulation,
+                                                             const struct SidereonSignalAnalysisMultipathOptions *options,
+                                                             const double *delay_chips,
+                                                             size_t delay_count,
+                                                             struct SidereonSignalAnalysisMultipathEnvelopePoint *out,
+                                                             size_t len,
+                                                             size_t *out_written,
+                                                             size_t *out_required);
+
+/**
+ * Integrate normalized PSD over a two-sided receiver bandwidth.
+ *
+ * Safety: modulation and out must point to readable and writable objects.
+ */
+enum SidereonStatus sidereon_signal_power_in_band(const struct SidereonSignalAnalysisModulation *modulation,
+                                                  double receiver_bandwidth_hz,
+                                                  double *out);
+
+/**
+ * Evaluate a normalized modulation PSD at an offset frequency. Canonical
+ * scalar sibling of sidereon_signal_analysis_psd.
+ *
+ * Safety: modulation and out must point to readable and writable objects.
+ */
+enum SidereonStatus sidereon_signal_psd_hz(const struct SidereonSignalAnalysisModulation *modulation,
+                                           double offset_hz,
+                                           double *out);
+
+/**
+ * Return the reference chipping-rate unit used by BPSK and BOC, in hertz.
+ *
+ * Safety: out must point to a double.
+ */
+enum SidereonStatus sidereon_signal_reference_chip_rate_hz(double *out);
+
+/**
  * Build a sampled C/A-code replica. Variable-length output contract. Delegates
  * to sidereon_core::signal::replica.
  *
@@ -28164,6 +28558,15 @@ enum SidereonStatus sidereon_signal_replica(int64_t prn,
                                             size_t *out_required);
 
 /**
+ * Compute the RMS, or Gabor, bandwidth over a two-sided receiver bandwidth.
+ *
+ * Safety: modulation and out must point to readable and writable objects.
+ */
+enum SidereonStatus sidereon_signal_rms_bandwidth_hz(const struct SidereonSignalAnalysisModulation *modulation,
+                                                     double receiver_bandwidth_hz,
+                                                     double *out);
+
+/**
  * Post-correlation SNR in dB for a C/N0 and integration time. Delegates to
  * sidereon_core::signal::snr_post_db.
  *
@@ -28172,6 +28575,41 @@ enum SidereonStatus sidereon_signal_replica(int64_t prn,
 enum SidereonStatus sidereon_signal_snr_post_db(double cn0_dbhz,
                                                 double integration_time_s,
                                                 double *out);
+
+/**
+ * Compute the spectral separation coefficient between two modulations in
+ * decibel-hertz.
+ *
+ * Safety: desired, interference, and out must point to readable and writable
+ * objects.
+ */
+enum SidereonStatus sidereon_signal_spectral_separation_coefficient_db_hz(const struct SidereonSignalAnalysisModulation *desired,
+                                                                          const struct SidereonSignalAnalysisModulation *interference,
+                                                                          double receiver_bandwidth_hz,
+                                                                          double *out);
+
+/**
+ * Compute the spectral separation coefficient between two modulations in
+ * hertz. Scalar sibling of sidereon_signal_analysis_spectral_separation,
+ * aligned with the Python and wasm scalar helper contract.
+ *
+ * Safety: desired, interference, and out must point to readable and writable
+ * objects.
+ */
+enum SidereonStatus sidereon_signal_spectral_separation_coefficient_hz(const struct SidereonSignalAnalysisModulation *desired,
+                                                                       const struct SidereonSignalAnalysisModulation *interference,
+                                                                       double receiver_bandwidth_hz,
+                                                                       double *out);
+
+/**
+ * Compute the white-interference spectral separation coefficient for one
+ * modulation over a two-sided receiver bandwidth.
+ *
+ * Safety: desired and out must point to readable and writable objects.
+ */
+enum SidereonStatus sidereon_signal_white_noise_spectral_separation_hz(const struct SidereonSignalAnalysisModulation *desired,
+                                                                       double receiver_bandwidth_hz,
+                                                                       double *out);
 
 /**
  * Hatch-smooth single-frequency code over an arc. One result is produced per
@@ -28626,6 +29064,24 @@ enum SidereonStatus sidereon_solve_spp_batch_serial(const struct SidereonSp3 *sp
                                                     bool with_geodetic,
                                                     const struct SidereonSppSolvePolicy *policy,
                                                     struct SidereonSppBatch **out_batch);
+
+/**
+ * Solve every usable RINEX OBS epoch serially against a broadcast NAV source.
+ * Per-epoch solve failures are retained in the returned handle and do not fail
+ * the overall call. Release the returned handle with
+ * sidereon_rinex_spp_solutions_free. Delegates to
+ * sidereon::solve_spp_from_rinex_obs.
+ *
+ * Safety: broadcast and obs must be live handles; options and policy may be
+ * NULL for defaults; out_solutions must point to storage for a
+ * SidereonRinexSppSolutions*.
+ */
+enum SidereonStatus sidereon_solve_spp_from_rinex_obs(const struct SidereonBroadcastEphemeris *broadcast,
+                                                      const struct SidereonRinexObs *obs,
+                                                      const struct SidereonRinexSppOptions *options,
+                                                      bool with_geodetic,
+                                                      const struct SidereonSppSolvePolicy *policy,
+                                                      struct SidereonRinexSppSolutions **out_solutions);
 
 /**
  * Run single-point positioning with extended V2 controls. On success writes a
@@ -29761,6 +30217,21 @@ enum SidereonStatus sidereon_spp_doppler_solution_velocity_error_kind(const stru
                                                                       enum SidereonSppDopplerVelocityErrorKind *out_error);
 
 /**
+ * Assemble every usable RINEX OBS epoch into SPP inputs using a broadcast NAV
+ * source for atmosphere metadata and GLONASS channel context. On success writes
+ * a newly owned handle to *out_inputs. Release it with
+ * sidereon_rinex_spp_inputs_free. Delegates to
+ * sidereon::spp_inputs_from_rinex_obs.
+ *
+ * Safety: obs and broadcast must be live handles; options may be NULL for
+ * defaults; out_inputs must point to storage for a SidereonRinexSppInputs*.
+ */
+enum SidereonStatus sidereon_spp_inputs_from_rinex_obs(const struct SidereonRinexObs *obs,
+                                                       const struct SidereonBroadcastEphemeris *broadcast,
+                                                       const struct SidereonRinexSppOptions *options,
+                                                       struct SidereonRinexSppInputs **out_inputs);
+
+/**
  * Initialize an SPP V2 input struct with engine defaults for optional controls.
  * After this call, fill inputs->base with the ordinary SPP fields and override
  * any V2 controls needed by the solve.
@@ -30544,6 +31015,18 @@ enum SidereonStatus sidereon_terminator_latitude_deg(double sub_solar_latitude_d
                                                      double sub_solar_longitude_deg,
                                                      double longitude_deg,
                                                      double *out_latitude_deg);
+
+/**
+ * Copy a terrain geoid-model label into out.
+ *
+ * Safety: out points to len bytes or NULL when len is 0; out_written and
+ * out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_terrain_geoid_model_label(uint32_t model,
+                                                       uint8_t *out,
+                                                       size_t len,
+                                                       size_t *out_written,
+                                                       size_t *out_required);
 
 /**
  * Return an FNV-1a checksum for terrain store bytes.
@@ -31648,6 +32131,18 @@ void sidereon_version(uint32_t *out_major, uint32_t *out_minor, uint32_t *out_pa
  * pointer refers to static storage and must not be freed.
  */
 const char *sidereon_version_string(void);
+
+/**
+ * Copy a terrain vertical-datum label into out.
+ *
+ * Safety: out points to len bytes or NULL when len is 0; out_written and
+ * out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_vertical_datum_label(uint32_t datum,
+                                                  uint8_t *out,
+                                                  size_t len,
+                                                  size_t *out_written,
+                                                  size_t *out_required);
 
 /**
  * Find the satellites of a constellation visible above min_elevation_deg from a
