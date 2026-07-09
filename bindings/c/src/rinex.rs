@@ -182,6 +182,33 @@ pub unsafe extern "C" fn sidereon_rinex_obs_parse(
     })
 }
 
+/// Read and parse a RINEX observation file from a UTF-8 filesystem path. On
+/// success writes a newly owned handle to *out_obs. Release it with
+/// sidereon_rinex_obs_free. Delegates to sidereon::load_rinex_obs.
+///
+/// Safety: path must be a non-empty UTF-8 C string; out_obs must point to
+/// storage for a SidereonRinexObs*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rinex_obs_load(
+    path: *const c_char,
+    out_obs: *mut *mut SidereonRinexObs,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_rinex_obs_load", SidereonStatus::Panic, || {
+        let out_obs = c_try!(require_out(out_obs, "sidereon_rinex_obs_load", "out_obs"));
+        *out_obs = ptr::null_mut();
+        let path = c_try!(parse_c_string("sidereon_rinex_obs_load", "path", path));
+        let inner = match sidereon::load_rinex_obs(&path) {
+            Ok(obs) => obs,
+            Err(err) => {
+                set_last_error(format!("sidereon_rinex_obs_load: {err}"));
+                return SidereonStatus::InvalidArgument;
+            }
+        };
+        write_boxed_handle(out_obs, SidereonRinexObs { inner });
+        SidereonStatus::Ok
+    })
+}
+
 /// Write the parsed RINEX version (e.g. 3.05) to *out_version.
 ///
 /// Safety: obs must be a live handle from sidereon_rinex_obs_parse; out_version

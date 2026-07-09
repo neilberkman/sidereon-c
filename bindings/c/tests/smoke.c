@@ -4085,6 +4085,126 @@ static int sourced_pos_clock(const SidereonSourcedSolution *sourced, double pos[
     return rc;
 }
 
+/* File-path RINEX NAV/OBS loaders plus the RINEX OBS -> SPP assembly and solve
+ * conveniences. Uses the committed ESBC mixed NAV and trimmed OBS fixtures. */
+static int exercise_rinex_spp_surface(const char *nav_path, const char *obs_path) {
+    SidereonBroadcastEphemeris *broadcast = NULL;
+    SidereonRinexObs *obs = NULL;
+    SidereonRinexSppInputs *assembled = NULL;
+    SidereonRinexSppSolutions *solutions = NULL;
+    int rc = 1;
+
+    if (sidereon_broadcast_ephemeris_load_nav(nav_path, &broadcast) != SIDEREON_STATUS_OK ||
+        broadcast == NULL) {
+        return fail("rinex_spp: sidereon_broadcast_ephemeris_load_nav", 1);
+    }
+    if (sidereon_rinex_obs_load(obs_path, &obs) != SIDEREON_STATUS_OK || obs == NULL) {
+        (void)fail("rinex_spp: sidereon_rinex_obs_load", 1);
+        goto cleanup;
+    }
+
+    SidereonRinexSppOptions options;
+    if (sidereon_rinex_spp_options_init(&options) != SIDEREON_STATUS_OK) {
+        (void)fail("rinex_spp: options_init", 1);
+        goto cleanup;
+    }
+
+    if (sidereon_spp_inputs_from_rinex_obs(obs, broadcast, &options, &assembled) !=
+            SIDEREON_STATUS_OK ||
+        assembled == NULL) {
+        (void)fail("rinex_spp: sidereon_spp_inputs_from_rinex_obs", 1);
+        goto cleanup;
+    }
+
+    size_t raw_epoch_count = 0;
+    size_t assembled_count = 0;
+    if (sidereon_rinex_obs_epoch_count(obs, &raw_epoch_count) != SIDEREON_STATUS_OK ||
+        sidereon_rinex_spp_inputs_count(assembled, &assembled_count) != SIDEREON_STATUS_OK ||
+        raw_epoch_count == 0 || assembled_count == 0 || assembled_count > raw_epoch_count) {
+        (void)fail("rinex_spp: assembled epoch counts", 1);
+        goto cleanup;
+    }
+
+    SidereonRinexSppEpoch first_epoch;
+    SidereonSppInputsV2 first_inputs;
+    if (sidereon_rinex_spp_inputs_epoch(assembled, 0, &first_epoch) != SIDEREON_STATUS_OK ||
+        sidereon_rinex_spp_inputs_epoch_inputs(assembled, 0, &first_inputs) !=
+            SIDEREON_STATUS_OK ||
+        first_epoch.observation_count < 4 ||
+        first_inputs.base.observation_count != first_epoch.observation_count ||
+        first_inputs.base.observations == NULL ||
+        !isfinite(first_inputs.base.t_rx_j2000_s)) {
+        (void)fail("rinex_spp: assembled epoch accessors", 1);
+        goto cleanup;
+    }
+
+    if (sidereon_solve_spp_from_rinex_obs(broadcast, obs, &options, true, NULL, &solutions) !=
+            SIDEREON_STATUS_OK ||
+        solutions == NULL) {
+        (void)fail("rinex_spp: sidereon_solve_spp_from_rinex_obs", 1);
+        goto cleanup;
+    }
+
+    size_t solution_count = 0;
+    if (sidereon_rinex_spp_solutions_count(solutions, &solution_count) != SIDEREON_STATUS_OK ||
+        solution_count != assembled_count) {
+        (void)fail("rinex_spp: solution count", 1);
+        goto cleanup;
+    }
+
+    int solved_any = 0;
+    for (size_t i = 0; i < solution_count; i++) {
+        bool ok = false;
+        if (sidereon_rinex_spp_solution_ok(solutions, i, &ok) != SIDEREON_STATUS_OK) {
+            (void)fail("rinex_spp: solution_ok", 1);
+            goto cleanup;
+        }
+        if (!ok) {
+            continue;
+        }
+
+        SidereonRinexSppEpoch solved_epoch;
+        SidereonSppSolution *sol = NULL;
+        double pos[3];
+        double clock = 0.0;
+        size_t used = 0;
+        if (sidereon_rinex_spp_solutions_epoch(solutions, i, &solved_epoch) !=
+                SIDEREON_STATUS_OK ||
+            sidereon_rinex_spp_solution(solutions, i, &sol) != SIDEREON_STATUS_OK ||
+            sol == NULL ||
+            spp_solution_pos_clock(sol, pos, &clock, &used) != 0) {
+            sidereon_spp_solution_free(sol);
+            (void)fail("rinex_spp: solved epoch readout", 1);
+            goto cleanup;
+        }
+        double radius = sqrt(pos[0] * pos[0] + pos[1] * pos[1] + pos[2] * pos[2]);
+        if (used < 4 || !(radius > 6.0e6 && radius < 7.0e6) || !isfinite(clock) ||
+            solved_epoch.epoch_index >= raw_epoch_count) {
+            sidereon_spp_solution_free(sol);
+            (void)fail("rinex_spp: solved epoch physical checks", 1);
+            goto cleanup;
+        }
+        sidereon_spp_solution_free(sol);
+        solved_any = 1;
+        break;
+    }
+
+    if (!solved_any) {
+        (void)fail("rinex_spp: no solved epochs", 1);
+        goto cleanup;
+    }
+
+    printf("RINEX SPP surface: path NAV/OBS loaders + assembled inputs + serial solve\n");
+    rc = 0;
+
+cleanup:
+    sidereon_rinex_spp_solutions_free(solutions);
+    sidereon_rinex_spp_inputs_free(assembled);
+    sidereon_rinex_obs_free(obs);
+    sidereon_broadcast_ephemeris_free(broadcast);
+    return rc;
+}
+
 /* Broadcast-ephemeris SPP and the precise-with-broadcast fallback through the C
  * ABI. Inputs are the ESBC DOY177 GPS C1C first-epoch observations extracted from
  * the engine into broadcast_fixture.h; the products are the committed broadcast
@@ -4534,6 +4654,8 @@ int main(int argc, char **argv) {
     sidereon_tle_batch_look_angles_free(NULL);
     sidereon_ephemeris_free(NULL);
     sidereon_broadcast_ephemeris_free(NULL);
+    sidereon_rinex_spp_inputs_free(NULL);
+    sidereon_rinex_spp_solutions_free(NULL);
     sidereon_sourced_solution_free(NULL);
 
     /* Version and status-string accessors agree with the compile-time macros. */
@@ -4661,6 +4783,12 @@ int main(int argc, char **argv) {
     if (rinex_status != 0) {
         sidereon_sp3_free(sp3);
         return rinex_status;
+    }
+
+    int rinex_spp_status = exercise_rinex_spp_surface(argv[11], argv[8]);
+    if (rinex_spp_status != 0) {
+        sidereon_sp3_free(sp3);
+        return rinex_spp_status;
     }
 
     int timescale_status = exercise_timescale_surface();
