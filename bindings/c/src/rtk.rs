@@ -1113,12 +1113,6 @@ pub struct SidereonRtkArcUpdateOptions {
     pub float_only_systems: *const u32,
     /// Number of float-only systems.
     pub float_only_system_count: usize,
-    /// Whether the optional predicted-residual innovation screen is enabled.
-    pub has_innovation_screen: bool,
-    /// Innovation screen rejection threshold (sigmas) when enabled.
-    pub innovation_threshold_sigma: f64,
-    /// Innovation screen minimum row count when enabled.
-    pub innovation_min_rows: usize,
     /// Emit public residual diagnostics in each epoch solution.
     pub report_residuals: bool,
     /// Whether the optional AR commitment arming gate is set.
@@ -1865,9 +1859,6 @@ pub unsafe extern "C" fn sidereon_rtk_arc_update_options_init(
                 dynamics_velocity_propagated: false,
                 float_only_systems: ptr::null(),
                 float_only_system_count: 0,
-                has_innovation_screen: false,
-                innovation_threshold_sigma: 0.0,
-                innovation_min_rows: 0,
                 report_residuals: false,
                 has_ar_arming_sigma_m: false,
                 ar_arming_sigma_m: 0.0,
@@ -4193,95 +4184,6 @@ pub unsafe extern "C" fn sidereon_rtk_arc_solution_free(solution: *mut SidereonR
 // accessors close the construct -> encode -> decode loop. Each builder wraps one
 // constructed sidereon_core::rtcm::Message in a single-element list.
 
-// --- RTK arc per-epoch innovation screen ------------------------------------
-
-/// One epoch's predicted-residual innovation-screen diagnostics, mirroring
-/// sidereon_core::rtk_filter::InnovationScreen. The two max fields are NaN when
-/// no row populated them. Read with sidereon_rtk_arc_solution_epoch_innovation_screen,
-/// whose out_present flag reports whether the screen ran this epoch.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct SidereonRtkInnovationScreen {
-    /// Rejection threshold (sigmas).
-    pub threshold_sigma: f64,
-    /// Minimum row count required to run the screen.
-    pub min_rows: usize,
-    /// Rows presented to the screen.
-    pub input_rows: usize,
-    /// Rows accepted.
-    pub accepted_rows: usize,
-    /// Rows rejected.
-    pub rejected_rows: usize,
-    /// Code rows rejected.
-    pub rejected_code_rows: usize,
-    /// Phase rows rejected.
-    pub rejected_phase_rows: usize,
-    /// Maximum absolute normalized innovation over all rows (NaN if none).
-    pub max_abs_normalized_innovation: f64,
-    /// Maximum absolute normalized innovation over rejected rows (NaN if none).
-    pub max_rejected_abs_normalized_innovation: f64,
-    /// Whether the epoch coasted (screen rejected enough to skip the update).
-    pub coasted: bool,
-}
-
-/// Copy one epoch's innovation-screen diagnostics into *out and set *out_present
-/// to whether the screen ran this epoch (it is absent when disabled in the arc
-/// update options). When absent, *out is zeroed and *out_present is false.
-///
-/// Safety: solution is a live handle; out points to a SidereonRtkInnovationScreen;
-/// out_present points to a bool.
-#[no_mangle]
-pub unsafe extern "C" fn sidereon_rtk_arc_solution_epoch_innovation_screen(
-    solution: *const SidereonRtkArcSolution,
-    index: usize,
-    out: *mut SidereonRtkInnovationScreen,
-    out_present: *mut bool,
-) -> SidereonStatus {
-    ffi_boundary(
-        "sidereon_rtk_arc_solution_epoch_innovation_screen",
-        SidereonStatus::Panic,
-        || {
-            let fn_name = "sidereon_rtk_arc_solution_epoch_innovation_screen";
-            let out = c_try!(require_out(out, fn_name, "out"));
-            *out = SidereonRtkInnovationScreen {
-                threshold_sigma: 0.0,
-                min_rows: 0,
-                input_rows: 0,
-                accepted_rows: 0,
-                rejected_rows: 0,
-                rejected_code_rows: 0,
-                rejected_phase_rows: 0,
-                max_abs_normalized_innovation: f64::NAN,
-                max_rejected_abs_normalized_innovation: f64::NAN,
-                coasted: false,
-            };
-            let out_present = c_try!(require_out(out_present, fn_name, "out_present"));
-            *out_present = false;
-            let epoch = c_try!(rtk_arc_epoch_at(fn_name, solution, index));
-            if let Some(screen) = epoch.innovation_screen.as_ref() {
-                *out = SidereonRtkInnovationScreen {
-                    threshold_sigma: screen.threshold_sigma,
-                    min_rows: screen.min_rows,
-                    input_rows: screen.input_rows,
-                    accepted_rows: screen.accepted_rows,
-                    rejected_rows: screen.rejected_rows,
-                    rejected_code_rows: screen.rejected_code_rows,
-                    rejected_phase_rows: screen.rejected_phase_rows,
-                    max_abs_normalized_innovation: none_to_nan(
-                        screen.max_abs_normalized_innovation,
-                    ),
-                    max_rejected_abs_normalized_innovation: none_to_nan(
-                        screen.max_rejected_abs_normalized_innovation,
-                    ),
-                    coasted: screen.coasted,
-                };
-                *out_present = true;
-            }
-            SidereonStatus::Ok
-        },
-    )
-}
-
 /// Solve one static RTK baseline directly from parsed RINEX OBS plus SP3. On
 /// success writes a static-arc solution handle to *out_solution. Release it with
 /// sidereon_rtk_static_arc_solution_free.
@@ -4773,9 +4675,6 @@ fn default_rtk_arc_update_options_value() -> SidereonRtkArcUpdateOptions {
         dynamics_velocity_propagated: false,
         float_only_systems: ptr::null(),
         float_only_system_count: 0,
-        has_innovation_screen: false,
-        innovation_threshold_sigma: 0.0,
-        innovation_min_rows: 0,
         report_residuals: false,
         has_ar_arming_sigma_m: false,
         ar_arming_sigma_m: 0.0,

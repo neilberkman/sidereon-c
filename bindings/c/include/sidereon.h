@@ -45,9 +45,9 @@
 #include <stdlib.h>
 
 #define SIDEREON_VERSION_MAJOR 0
-#define SIDEREON_VERSION_MINOR 25
+#define SIDEREON_VERSION_MINOR 26
 #define SIDEREON_VERSION_PATCH 0
-#define SIDEREON_VERSION_STRING "0.25.0"
+#define SIDEREON_VERSION_STRING "0.26.0"
 
 #define BIAS_OBS_C_BYTES (MAX_BIAS_OBS_BYTES + 1)
 
@@ -12787,55 +12787,6 @@ typedef struct SidereonRtcmFrameSkip {
 } SidereonRtcmFrameSkip;
 
 /**
- * One epoch's predicted-residual innovation-screen diagnostics, mirroring
- * sidereon_core::rtk_filter::InnovationScreen. The two max fields are NaN when
- * no row populated them. Read with sidereon_rtk_arc_solution_epoch_innovation_screen,
- * whose out_present flag reports whether the screen ran this epoch.
- */
-typedef struct SidereonRtkInnovationScreen {
-    /**
-     * Rejection threshold (sigmas).
-     */
-    double threshold_sigma;
-    /**
-     * Minimum row count required to run the screen.
-     */
-    size_t min_rows;
-    /**
-     * Rows presented to the screen.
-     */
-    size_t input_rows;
-    /**
-     * Rows accepted.
-     */
-    size_t accepted_rows;
-    /**
-     * Rows rejected.
-     */
-    size_t rejected_rows;
-    /**
-     * Code rows rejected.
-     */
-    size_t rejected_code_rows;
-    /**
-     * Phase rows rejected.
-     */
-    size_t rejected_phase_rows;
-    /**
-     * Maximum absolute normalized innovation over all rows (NaN if none).
-     */
-    double max_abs_normalized_innovation;
-    /**
-     * Maximum absolute normalized innovation over rejected rows (NaN if none).
-     */
-    double max_rejected_abs_normalized_innovation;
-    /**
-     * Whether the epoch coasted (screen rejected enough to skip the update).
-     */
-    bool coasted;
-} SidereonRtkInnovationScreen;
-
-/**
  * One epoch's reported RTK arc solution metadata, mirroring the scalar fields of
  * sidereon_core::rtk_filter::RtkArcEpochSolution. Read the id and ambiguity
  * lists with the sidereon_rtk_arc_solution_epoch_* accessors.
@@ -13002,18 +12953,6 @@ typedef struct SidereonRtkArcUpdateOptions {
      * Number of float-only systems.
      */
     size_t float_only_system_count;
-    /**
-     * Whether the optional predicted-residual innovation screen is enabled.
-     */
-    bool has_innovation_screen;
-    /**
-     * Innovation screen rejection threshold (sigmas) when enabled.
-     */
-    double innovation_threshold_sigma;
-    /**
-     * Innovation screen minimum row count when enabled.
-     */
-    size_t innovation_min_rows;
     /**
      * Emit public residual diagnostics in each epoch solution.
      */
@@ -26330,19 +26269,6 @@ enum SidereonStatus sidereon_rtk_arc_solution_elevation_masked_sats(const struct
  */
 enum SidereonStatus sidereon_rtk_arc_solution_epoch_count(const struct SidereonRtkArcSolution *solution,
                                                           size_t *out_count);
-
-/**
- * Copy one epoch's innovation-screen diagnostics into *out and set *out_present
- * to whether the screen ran this epoch (it is absent when disabled in the arc
- * update options). When absent, *out is zeroed and *out_present is false.
- *
- * Safety: solution is a live handle; out points to a SidereonRtkInnovationScreen;
- * out_present points to a bool.
- */
-enum SidereonStatus sidereon_rtk_arc_solution_epoch_innovation_screen(const struct SidereonRtkArcSolution *solution,
-                                                                      size_t index,
-                                                                      struct SidereonRtkInnovationScreen *out,
-                                                                      bool *out_present);
 
 /**
  * Copy one epoch's reported solution metadata into *out.

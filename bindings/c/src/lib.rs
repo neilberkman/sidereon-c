@@ -281,7 +281,7 @@ use sidereon_core::rtk_filter::{
     prepare_ionosphere_free_rtk_arc, solve_moving_baseline, solve_rtk_arc, solve_static_rtk_arc,
     solve_wide_lane_fixed_rtk_arc, AmbiguityScale, AmbiguitySet, CycleSlipPolicy,
     CycleSlipSplitArc, DynamicsModel, Epoch as RtkEpoch, FixedBaselineSolution, FixedSolveOpts,
-    FloatBaselineSolution, FloatResidual, FloatSolveOpts, FloatSolveStatus, InnovationScreenOpts,
+    FloatBaselineSolution, FloatResidual, FloatSolveOpts, FloatSolveStatus,
     IntegerStatus as RtkIntegerStatus, MeasModel, MovingBaselineEpoch, MovingBaselineEpochSolution,
     MovingBaselineOpts, MovingBaselineStatus,
     ReceiverAntennaCalibration as RtkReceiverAntennaCalibrationInner,
@@ -3597,12 +3597,6 @@ unsafe fn rtk_arc_update_opts_from_c(
         options.float_only_systems,
         options.float_only_system_count,
     )?;
-    let innovation_screen = options
-        .has_innovation_screen
-        .then_some(InnovationScreenOpts {
-            threshold_sigma: options.innovation_threshold_sigma,
-            min_rows: options.innovation_min_rows,
-        });
     let receiver_antenna_corrections =
         rtk_receiver_antenna_from_c(fn_name, options.receiver_antenna)?;
     Ok(UpdateOpts {
@@ -3617,7 +3611,6 @@ unsafe fn rtk_arc_update_opts_from_c(
             DynamicsModel::ConstantPosition
         },
         float_only_systems,
-        innovation_screen,
         report_residuals: options.report_residuals,
         receiver_antenna_corrections,
         ar_arming_sigma_m: options

@@ -307,12 +307,6 @@ static void test_rtk_arc(void) {
     config.offset_count = 5;
     sidereon_rtk_arc_update_options_init(&config.update_options);
     config.update_options.report_residuals = true;
-    /* Enable the predicted-residual innovation screen so the per-epoch
-     * diagnostics surface. A generous threshold keeps the planted clean data. */
-    config.update_options.has_innovation_screen = true;
-    config.update_options.innovation_threshold_sigma = 1000.0;
-    config.update_options.innovation_min_rows = 1;
-
     SidereonRtkArcSolution *sol = NULL;
     check(sidereon_solve_rtk_arc(epochs, 2, &config, &sol) == SIDEREON_STATUS_OK && sol != NULL,
           "solve_rtk_arc");
@@ -337,24 +331,6 @@ static void test_rtk_arc(void) {
         err += (meta.reported_baseline_m[k] - baseline[k]) * (meta.reported_baseline_m[k] - baseline[k]);
     }
     check(sqrt(err) < 2.0, "rtk_arc recovers the planted baseline");
-
-    /* Per-epoch innovation-screen diagnostics: with the screen enabled at least
-     * one epoch must surface it, accepting the clean planted rows. */
-    int screen_seen = 0;
-    for (size_t e = 0; e < epoch_count; e++) {
-        SidereonRtkInnovationScreen screen;
-        bool present = false;
-        check(sidereon_rtk_arc_solution_epoch_innovation_screen(sol, e, &screen, &present) ==
-                  SIDEREON_STATUS_OK,
-              "rtk_arc innovation screen accessor");
-        if (present) {
-            screen_seen = 1;
-            check(screen.input_rows > 0 && screen.accepted_rows <= screen.input_rows &&
-                      screen.threshold_sigma == 1000.0,
-                  "rtk_arc innovation screen diagnostics");
-        }
-    }
-    check(screen_seen, "rtk_arc innovation screen surfaced on an epoch");
 
     SidereonSatelliteToken used[8];
     size_t written = 0, required = 0;
