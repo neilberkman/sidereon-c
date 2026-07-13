@@ -25,6 +25,31 @@
 
 static int failures = 0;
 
+static void put_be_u32(unsigned char *out, uint32_t value) {
+    out[0] = (unsigned char)(value >> 24);
+    out[1] = (unsigned char)(value >> 16);
+    out[2] = (unsigned char)(value >> 8);
+    out[3] = (unsigned char)value;
+}
+
+static void put_be_u64(unsigned char *out, uint64_t value) {
+    for (int i = 0; i < 8; i++) {
+        out[i] = (unsigned char)(value >> (56 - 8 * i));
+    }
+}
+
+static void put_be_f32(unsigned char *out, float value) {
+    uint32_t bits = 0;
+    memcpy(&bits, &value, sizeof(bits));
+    put_be_u32(out, bits);
+}
+
+static void put_be_f64(unsigned char *out, double value) {
+    uint64_t bits = 0;
+    memcpy(&bits, &value, sizeof(bits));
+    put_be_u64(out, bits);
+}
+
 static void check(int ok, const char *what) {
     if (!ok) {
         char msg[512];
@@ -177,6 +202,93 @@ static void test_geoid(void) {
               SIDEREON_STATUS_OK,
           "geoid_grid_new");
     sidereon_geoid_grid_free(grid2);
+
+    /* Minimal self-contained PROJ EGM96 GTX: the loader requires the published
+     * 721x1440 layout, but zero-filled finite samples keep the fixture compact
+     * in source. Four southwest samples exercise bilinear interpolation. */
+    const size_t rows = 721, cols = 1440, header_bytes = 40;
+    const size_t gtx_len = header_bytes + rows * cols * sizeof(float);
+    unsigned char *gtx = calloc(gtx_len, 1);
+    check(gtx != NULL, "allocate PROJ EGM96 GTX fixture");
+    if (gtx) {
+        put_be_f64(gtx + 0, -90.0);
+        put_be_f64(gtx + 8, -180.0);
+        put_be_f64(gtx + 16, 0.25);
+        put_be_f64(gtx + 24, 0.25);
+        put_be_u32(gtx + 32, (uint32_t)rows);
+        put_be_u32(gtx + 36, (uint32_t)cols);
+        put_be_f32(gtx + header_bytes + 0 * sizeof(float), 1.0f);
+        put_be_f32(gtx + header_bytes + 1 * sizeof(float), 2.0f);
+        put_be_f32(gtx + header_bytes + cols * sizeof(float), 3.0f);
+        put_be_f32(gtx + header_bytes + (cols + 1) * sizeof(float), 4.0f);
+
+        SidereonGeoidGrid *proj = NULL;
+        check(sidereon_geoid_grid_from_proj_egm96_gtx(gtx, gtx_len - 1, &proj) ==
+                      SIDEREON_STATUS_INVALID_ARGUMENT &&
+                  proj == NULL,
+              "geoid_grid_from_proj_egm96_gtx rejects truncated input");
+        check(sidereon_geoid_grid_from_proj_egm96_gtx(gtx, gtx_len, &proj) ==
+                      SIDEREON_STATUS_OK &&
+                  proj != NULL,
+              "geoid_grid_from_proj_egm96_gtx");
+        if (proj) {
+            SidereonProjVgridshiftError err = {99, 99};
+            double separate = -1.0;
+            check(sidereon_geoid_grid_undulation_proj_rad(
+                      proj, -89.875 * M_PI / 180.0, -179.875 * M_PI / 180.0,
+                      SIDEREON_PROJ_VGRIDSHIFT_ARITHMETIC_SEPARATE_MULTIPLY_ADD,
+                      &err, &separate) == SIDEREON_STATUS_OK &&
+                      err.kind == SIDEREON_PROJ_VGRIDSHIFT_ERROR_KIND_NONE &&
+                      err.coordinate == SIDEREON_PROJ_VGRIDSHIFT_COORDINATE_NONE &&
+                      fabs(separate - 2.5) < 1e-12,
+                  "PROJ separate multiply/add interpolation");
+
+            double fused = -1.0;
+            check(sidereon_geoid_grid_undulation_proj_rad(
+                      proj, -89.875 * M_PI / 180.0, -179.875 * M_PI / 180.0,
+                      SIDEREON_PROJ_VGRIDSHIFT_ARITHMETIC_FUSED_MULTIPLY_ADD, &err,
+                      &fused) == SIDEREON_STATUS_OK &&
+                      fabs(fused - 2.5) < 1e-12,
+                  "PROJ fused multiply/add interpolation");
+
+            double rejected = 123.0;
+            check(sidereon_geoid_grid_undulation_proj_rad(
+                      proj, NAN, 0.0,
+                      SIDEREON_PROJ_VGRIDSHIFT_ARITHMETIC_SEPARATE_MULTIPLY_ADD,
+                      &err, &rejected) == SIDEREON_STATUS_INVALID_ARGUMENT &&
+                      err.kind ==
+                          SIDEREON_PROJ_VGRIDSHIFT_ERROR_KIND_NON_FINITE_COORDINATE &&
+                      err.coordinate == SIDEREON_PROJ_VGRIDSHIFT_COORDINATE_LATITUDE &&
+                      rejected == 0.0,
+                  "PROJ typed non-finite latitude error");
+
+            check(sidereon_geoid_grid_undulation_proj_rad(
+                      proj, 0.0, INFINITY,
+                      SIDEREON_PROJ_VGRIDSHIFT_ARITHMETIC_SEPARATE_MULTIPLY_ADD,
+                      &err, &rejected) == SIDEREON_STATUS_INVALID_ARGUMENT &&
+                      err.kind ==
+                          SIDEREON_PROJ_VGRIDSHIFT_ERROR_KIND_NON_FINITE_COORDINATE &&
+                      err.coordinate == SIDEREON_PROJ_VGRIDSHIFT_COORDINATE_LONGITUDE,
+                  "PROJ typed non-finite longitude error");
+
+            check(sidereon_geoid_grid_undulation_proj_rad(
+                      proj, 2.0, 0.0,
+                      SIDEREON_PROJ_VGRIDSHIFT_ARITHMETIC_SEPARATE_MULTIPLY_ADD,
+                      &err, &rejected) == SIDEREON_STATUS_INVALID_ARGUMENT &&
+                      err.kind ==
+                          SIDEREON_PROJ_VGRIDSHIFT_ERROR_KIND_COORDINATE_OUTSIDE_GRID &&
+                      err.coordinate == SIDEREON_PROJ_VGRIDSHIFT_COORDINATE_LATITUDE,
+                  "PROJ typed outside-grid latitude error");
+
+            check(sidereon_geoid_grid_undulation_proj_rad(proj, 0.0, 0.0, 99, &err,
+                                                           &rejected) ==
+                          SIDEREON_STATUS_INVALID_ARGUMENT &&
+                      err.kind == SIDEREON_PROJ_VGRIDSHIFT_ERROR_KIND_NONE,
+                  "PROJ invalid arithmetic recipe rejected before coordinate lookup");
+            sidereon_geoid_grid_free(proj);
+        }
+        free(gtx);
+    }
 }
 
 static void test_instant(void) {

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.27.0 - 2026-07-12
+
+- Builds against `sidereon` and `sidereon-core` 0.27.0.
+- Adds `sidereon_geoid_grid_from_proj_egm96_gtx` for PROJ's public EGM96
+  15-arcminute GTX grid.
+- Adds `sidereon_geoid_grid_undulation_proj_rad` with an explicit
+  fused-versus-separately-rounded arithmetic selector and typed coordinate
+  error detail. Existing geoid lookup functions retain their previous bits.
+
 ## 0.26.1 - 2026-07-12
 
 - Builds against `sidereon` and `sidereon-core` 0.26.1.

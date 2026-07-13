@@ -18,6 +18,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace --verbose
+      # This focused binding contract is platform-independent and release-gates
+      # the PROJ GTX loader, explicit arithmetic selector, and typed coordinate
+      # failures on every supported CI host.
+      - run: cargo test --workspace proj_vgridshift_binding --verbose
       # The 0-ULP parity tests are certified only for the pinned target
       # (macOS / Apple libm + Accelerate). Other libm/FMA implementations
       # legitimately differ in the last bits, so the test suite (which reads the

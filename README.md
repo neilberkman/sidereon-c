@@ -284,6 +284,21 @@ to learn the required count, then call again with storage you own. Anything that
 takes time takes UTC unix microseconds. The full surface (every struct, status
 code, and per-function ownership note) lives in `bindings/c/include/sidereon.h`.
 
+## Example: PROJ EGM96 vertical-grid interpolation
+
+Load the public OSGeo `egm96_15.gtx` bytes with
+`sidereon_geoid_grid_from_proj_egm96_gtx`, then call
+`sidereon_geoid_grid_undulation_proj_rad`. The arithmetic argument is required:
+choose `SIDEREON_PROJ_VGRIDSHIFT_ARITHMETIC_SEPARATE_MULTIPLY_ADD` for a PROJ
+build without floating-point contraction, or
+`SIDEREON_PROJ_VGRIDSHIFT_ARITHMETIC_FUSED_MULTIPLY_ADD` for a contracted build.
+The two valid recipes can differ by one ULP.
+
+Coordinate failures return `SIDEREON_STATUS_INVALID_ARGUMENT` plus a
+`SidereonProjVgridshiftError` containing both the error category and the
+offending coordinate. The function never panics, silently extrapolates, or
+selects arithmetic from the host platform.
+
 ## Capabilities
 
 - **Orbit propagation.** SGP4 from TLE/OMM, numerical state propagation with a
@@ -349,8 +364,10 @@ code, and per-function ownership note) lives in `bindings/c/include/sidereon.h`.
 - **Atmosphere.** Klobuchar and NeQuick-G ionosphere, IONEX maps, troposphere
   delay models, and NRLMSISE-00 density.
 - **Terrain and geoid.** DTED elevation lookup on tiles you supply, batch
-  queries, memory-mappable terrain stores, EGM96 and EGM2008 geoid grids, typed
-  terrain/geoid labels, and orthometric / ellipsoidal height conversion.
+  queries, memory-mappable terrain stores, EGM96 and EGM2008 geoid grids,
+  PROJ-compatible EGM96 GTX interpolation with explicit fused/separate
+  arithmetic and typed coordinate errors, typed terrain/geoid labels, and
+  orthometric / ellipsoidal height conversion.
 - **RF.** Link-budget computation.
 - **GNSS/INS fusion.** Strapdown mechanization with an error-state EKF (UKF
   option), loose and tight coupling, IGG-III loose updates, an RTS smoother,

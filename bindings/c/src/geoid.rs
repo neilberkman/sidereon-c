@@ -2,9 +2,8 @@ use super::*;
 
 // --- Geoid undulation / orthometric height (sidereon_core::geoid) -------------
 
-/// A loaded geoid undulation grid. Opaque to C. Create with
-/// sidereon_geoid_grid_from_text or sidereon_geoid_grid_new; release with
-/// sidereon_geoid_grid_free.
+/// A loaded geoid undulation grid. Opaque to C. Create with a
+/// sidereon_geoid_grid_* constructor; release with sidereon_geoid_grid_free.
 pub struct SidereonGeoidGrid {
     pub(crate) inner: GeoidGrid,
 }
@@ -17,6 +16,50 @@ pub enum SidereonEgm2008GridSpacing {
     OneMinute = 0,
     /// Two-and-a-half-arcminute global raster.
     TwoPointFiveMinute = 1,
+}
+
+/// Floating-point evaluation recipe for PROJ vertical-grid interpolation.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonProjVgridshiftArithmetic {
+    /// Round every multiplication and addition separately.
+    SeparateMultiplyAdd = 0,
+    /// Evaluate each accumulation with a fused multiply-add and one rounding.
+    FusedMultiplyAdd = 1,
+}
+
+/// PROJ vertical-grid coordinate error category.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonProjVgridshiftErrorKind {
+    /// No coordinate error occurred.
+    None = 0,
+    /// A coordinate was not finite.
+    NonFiniteCoordinate = 1,
+    /// A coordinate was outside the grid extent.
+    CoordinateOutsideGrid = 2,
+}
+
+/// Coordinate identified by a PROJ vertical-grid error.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonProjVgridshiftCoordinate {
+    /// No coordinate error occurred.
+    None = 0,
+    /// Latitude was invalid.
+    Latitude = 1,
+    /// Longitude was invalid.
+    Longitude = 2,
+}
+
+/// Typed detail returned by sidereon_geoid_grid_undulation_proj_rad.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SidereonProjVgridshiftError {
+    /// Error category as SidereonProjVgridshiftErrorKind.
+    pub kind: u32,
+    /// Offending coordinate as SidereonProjVgridshiftCoordinate.
+    pub coordinate: u32,
 }
 
 /// EGM2008 raster window descriptor.
@@ -159,6 +202,45 @@ pub unsafe extern "C" fn sidereon_geoid_grid_from_text(
     )
 }
 
+/// Parse PROJ's public EGM96 15-arcminute `egm96_15.gtx` byte stream. On
+/// success writes a newly owned generic geoid-grid handle to *out_grid.
+/// Delegates to sidereon_core::geoid::GeoidGrid::from_proj_egm96_gtx.
+///
+/// Safety: data points to len readable bytes; out_grid points to a
+/// SidereonGeoidGrid*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_geoid_grid_from_proj_egm96_gtx(
+    data: *const u8,
+    len: usize,
+    out_grid: *mut *mut SidereonGeoidGrid,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_geoid_grid_from_proj_egm96_gtx",
+        SidereonStatus::Panic,
+        || {
+            let out_grid = c_try!(require_out(
+                out_grid,
+                "sidereon_geoid_grid_from_proj_egm96_gtx",
+                "out_grid"
+            ));
+            *out_grid = ptr::null_mut();
+            let bytes = c_try!(require_slice(
+                data,
+                len,
+                "sidereon_geoid_grid_from_proj_egm96_gtx",
+                "data"
+            ));
+            match GeoidGrid::from_proj_egm96_gtx(bytes) {
+                Ok(inner) => {
+                    write_boxed_handle(out_grid, SidereonGeoidGrid { inner });
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_geoid_error("sidereon_geoid_grid_from_proj_egm96_gtx", err),
+            }
+        },
+    )
+}
+
 /// Build a geoid grid from its origin, spacing, dimensions, and row-major
 /// samples (metres, latitude ascending outer, longitude ascending inner). On
 /// success writes a newly owned handle to *out_grid. Delegates to
@@ -265,6 +347,62 @@ pub unsafe extern "C" fn sidereon_geoid_grid_undulation_rad(
             ));
             *out = grid.inner.undulation_rad(lat_rad, lon_rad);
             SidereonStatus::Ok
+        },
+    )
+}
+
+/// Evaluate PROJ 9.3.0-compatible vertical-grid interpolation at geodetic
+/// radians with an explicit floating-point recipe. Full-world grids wrap every
+/// finite longitude. Invalid coordinates return typed detail through out_error
+/// and SIDEREON_STATUS_INVALID_ARGUMENT; the output value remains zero.
+///
+/// Safety: grid is a live handle; out_error points to a
+/// SidereonProjVgridshiftError; out_undulation_m points to a double.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_geoid_grid_undulation_proj_rad(
+    grid: *const SidereonGeoidGrid,
+    lat_rad: f64,
+    lon_rad: f64,
+    arithmetic: u32,
+    out_error: *mut SidereonProjVgridshiftError,
+    out_undulation_m: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_geoid_grid_undulation_proj_rad",
+        SidereonStatus::Panic,
+        || {
+            let out_error = c_try!(require_out(
+                out_error,
+                "sidereon_geoid_grid_undulation_proj_rad",
+                "out_error"
+            ));
+            *out_error = proj_vgridshift_no_error();
+            let out = c_try!(require_out(
+                out_undulation_m,
+                "sidereon_geoid_grid_undulation_proj_rad",
+                "out_undulation_m"
+            ));
+            *out = 0.0;
+            let grid = c_try!(require_ref(
+                grid,
+                "sidereon_geoid_grid_undulation_proj_rad",
+                "grid"
+            ));
+            let arithmetic = c_try!(proj_vgridshift_arithmetic_from_c(
+                "sidereon_geoid_grid_undulation_proj_rad",
+                arithmetic
+            ));
+            match grid.inner.undulation_proj_rad(lat_rad, lon_rad, arithmetic) {
+                Ok(value) => {
+                    *out = value;
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_proj_vgridshift_error(
+                    "sidereon_geoid_grid_undulation_proj_rad",
+                    err,
+                    out_error,
+                ),
+            }
         },
     )
 }
@@ -877,6 +1015,60 @@ fn map_geoid_error(fn_name: &str, err: GeoidError) -> SidereonStatus {
     SidereonStatus::InvalidArgument
 }
 
+fn proj_vgridshift_no_error() -> SidereonProjVgridshiftError {
+    SidereonProjVgridshiftError {
+        kind: SidereonProjVgridshiftErrorKind::None as u32,
+        coordinate: SidereonProjVgridshiftCoordinate::None as u32,
+    }
+}
+
+fn proj_vgridshift_arithmetic_from_c(
+    fn_name: &str,
+    value: u32,
+) -> Result<ProjVgridshiftArithmetic, SidereonStatus> {
+    match value {
+        value if value == SidereonProjVgridshiftArithmetic::SeparateMultiplyAdd as u32 => {
+            Ok(ProjVgridshiftArithmetic::SeparateMultiplyAdd)
+        }
+        value if value == SidereonProjVgridshiftArithmetic::FusedMultiplyAdd as u32 => {
+            Ok(ProjVgridshiftArithmetic::FusedMultiplyAdd)
+        }
+        _ => {
+            set_last_error(format!(
+                "{fn_name}: invalid PROJ vertical-grid arithmetic recipe"
+            ));
+            Err(SidereonStatus::InvalidArgument)
+        }
+    }
+}
+
+unsafe fn map_proj_vgridshift_error(
+    fn_name: &str,
+    err: ProjVgridshiftError,
+    out_error: *mut SidereonProjVgridshiftError,
+) -> SidereonStatus {
+    let (kind, field) = match err {
+        ProjVgridshiftError::NonFiniteCoordinate { field } => {
+            (SidereonProjVgridshiftErrorKind::NonFiniteCoordinate, field)
+        }
+        ProjVgridshiftError::CoordinateOutsideGrid { field } => (
+            SidereonProjVgridshiftErrorKind::CoordinateOutsideGrid,
+            field,
+        ),
+    };
+    let coordinate = match field {
+        "latitude" => SidereonProjVgridshiftCoordinate::Latitude,
+        "longitude" => SidereonProjVgridshiftCoordinate::Longitude,
+        _ => SidereonProjVgridshiftCoordinate::None,
+    };
+    *out_error = SidereonProjVgridshiftError {
+        kind: kind as u32,
+        coordinate: coordinate as u32,
+    };
+    set_last_error(format!("{fn_name}: {err}"));
+    SidereonStatus::InvalidArgument
+}
+
 fn egm2008_spacing_from_c(
     fn_name: &str,
     arg_name: &str,
@@ -944,4 +1136,77 @@ unsafe fn copy_geoid_values(
         out_required,
     ));
     SidereonStatus::Ok
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn synthetic_proj_egm96_gtx() -> Vec<u8> {
+        const ROWS: usize = 721;
+        const COLUMNS: usize = 1440;
+        const HEADER_BYTES: usize = 40;
+        let mut bytes = vec![0_u8; HEADER_BYTES + ROWS * COLUMNS * 4];
+        bytes[0..8].copy_from_slice(&(-90.0_f64).to_be_bytes());
+        bytes[8..16].copy_from_slice(&(-180.0_f64).to_be_bytes());
+        bytes[16..24].copy_from_slice(&0.25_f64.to_be_bytes());
+        bytes[24..32].copy_from_slice(&0.25_f64.to_be_bytes());
+        bytes[32..36].copy_from_slice(&(ROWS as i32).to_be_bytes());
+        bytes[36..40].copy_from_slice(&(COLUMNS as i32).to_be_bytes());
+        for (index, value) in [(0, 1.0_f32), (1, 2.0), (COLUMNS, 3.0), (COLUMNS + 1, 4.0)] {
+            let start = HEADER_BYTES + index * 4;
+            bytes[start..start + 4].copy_from_slice(&value.to_be_bytes());
+        }
+        bytes
+    }
+
+    #[test]
+    fn proj_vgridshift_binding_loads_selects_arithmetic_and_types_errors() {
+        let bytes = synthetic_proj_egm96_gtx();
+        let mut grid = ptr::null_mut();
+        let load_status = unsafe {
+            sidereon_geoid_grid_from_proj_egm96_gtx(bytes.as_ptr(), bytes.len(), &mut grid)
+        };
+        assert_eq!(load_status, SidereonStatus::Ok);
+        assert!(!grid.is_null());
+
+        let mut detail = proj_vgridshift_no_error();
+        let mut value = 0.0;
+        let status = unsafe {
+            sidereon_geoid_grid_undulation_proj_rad(
+                grid,
+                -89.875_f64.to_radians(),
+                -179.875_f64.to_radians(),
+                SidereonProjVgridshiftArithmetic::FusedMultiplyAdd as u32,
+                &mut detail,
+                &mut value,
+            )
+        };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert_eq!(detail.kind, SidereonProjVgridshiftErrorKind::None as u32);
+        assert!((value - 2.5).abs() < 1.0e-12);
+
+        let status = unsafe {
+            sidereon_geoid_grid_undulation_proj_rad(
+                grid,
+                f64::NAN,
+                0.0,
+                SidereonProjVgridshiftArithmetic::SeparateMultiplyAdd as u32,
+                &mut detail,
+                &mut value,
+            )
+        };
+        assert_eq!(status, SidereonStatus::InvalidArgument);
+        assert_eq!(
+            detail.kind,
+            SidereonProjVgridshiftErrorKind::NonFiniteCoordinate as u32
+        );
+        assert_eq!(
+            detail.coordinate,
+            SidereonProjVgridshiftCoordinate::Latitude as u32
+        );
+        assert_eq!(value, 0.0);
+
+        unsafe { sidereon_geoid_grid_free(grid) };
+    }
 }

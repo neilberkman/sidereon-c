@@ -165,7 +165,7 @@ use sidereon_core::geofence::{
 };
 use sidereon_core::geoid::{
     ellipsoidal_height_m, geoid_undulation, orthometric_height_m, Egm2008GridSpacing,
-    Egm2008RasterWindow, GeoidError, GeoidGrid,
+    Egm2008RasterWindow, GeoidError, GeoidGrid, ProjVgridshiftArithmetic, ProjVgridshiftError,
 };
 use sidereon_core::geometry::{
     dop as core_dop, line_of_sight_from_az_el_deg, passes as geometry_passes,

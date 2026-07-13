@@ -57,9 +57,9 @@ usize_is_size_t = true
 after_includes = """
 
 #define SIDEREON_VERSION_MAJOR 0
-#define SIDEREON_VERSION_MINOR 26
-#define SIDEREON_VERSION_PATCH 1
-#define SIDEREON_VERSION_STRING "0.26.1\""""
+#define SIDEREON_VERSION_MINOR 27
+#define SIDEREON_VERSION_PATCH 0
+#define SIDEREON_VERSION_STRING "0.27.0\""""
 
 [enum]
 # Idiomatic C enum constants: SidereonStatus::Ok -> SIDEREON_STATUS_OK.
@@ -68,6 +68,10 @@ rename_variants = "QualifiedScreamingSnakeCase"
 [export]
 include = [
     "SidereonStatus",
+    "SidereonProjVgridshiftArithmetic",
+    "SidereonProjVgridshiftErrorKind",
+    "SidereonProjVgridshiftCoordinate",
+    "SidereonProjVgridshiftError",
     "SidereonObservation",
     "SidereonSatelliteToken",
     "SidereonGnssSystem",

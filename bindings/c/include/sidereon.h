@@ -45,9 +45,9 @@
 #include <stdlib.h>
 
 #define SIDEREON_VERSION_MAJOR 0
-#define SIDEREON_VERSION_MINOR 26
-#define SIDEREON_VERSION_PATCH 1
-#define SIDEREON_VERSION_STRING "0.26.1"
+#define SIDEREON_VERSION_MINOR 27
+#define SIDEREON_VERSION_PATCH 0
+#define SIDEREON_VERSION_STRING "0.27.0"
 
 #define BIAS_OBS_C_BYTES (MAX_BIAS_OBS_BYTES + 1)
 
@@ -1042,6 +1042,56 @@ typedef enum SidereonStaticPositionInfluenceStatus {
      */
     SIDEREON_STATIC_POSITION_INFLUENCE_STATUS_SOLVE_FAILED = 5,
 } SidereonStaticPositionInfluenceStatus;
+
+/**
+ * Floating-point evaluation recipe for PROJ vertical-grid interpolation.
+ */
+typedef enum SidereonProjVgridshiftArithmetic {
+    /**
+     * Round every multiplication and addition separately.
+     */
+    SIDEREON_PROJ_VGRIDSHIFT_ARITHMETIC_SEPARATE_MULTIPLY_ADD = 0,
+    /**
+     * Evaluate each accumulation with a fused multiply-add and one rounding.
+     */
+    SIDEREON_PROJ_VGRIDSHIFT_ARITHMETIC_FUSED_MULTIPLY_ADD = 1,
+} SidereonProjVgridshiftArithmetic;
+
+/**
+ * PROJ vertical-grid coordinate error category.
+ */
+typedef enum SidereonProjVgridshiftErrorKind {
+    /**
+     * No coordinate error occurred.
+     */
+    SIDEREON_PROJ_VGRIDSHIFT_ERROR_KIND_NONE = 0,
+    /**
+     * A coordinate was not finite.
+     */
+    SIDEREON_PROJ_VGRIDSHIFT_ERROR_KIND_NON_FINITE_COORDINATE = 1,
+    /**
+     * A coordinate was outside the grid extent.
+     */
+    SIDEREON_PROJ_VGRIDSHIFT_ERROR_KIND_COORDINATE_OUTSIDE_GRID = 2,
+} SidereonProjVgridshiftErrorKind;
+
+/**
+ * Coordinate identified by a PROJ vertical-grid error.
+ */
+typedef enum SidereonProjVgridshiftCoordinate {
+    /**
+     * No coordinate error occurred.
+     */
+    SIDEREON_PROJ_VGRIDSHIFT_COORDINATE_NONE = 0,
+    /**
+     * Latitude was invalid.
+     */
+    SIDEREON_PROJ_VGRIDSHIFT_COORDINATE_LATITUDE = 1,
+    /**
+     * Longitude was invalid.
+     */
+    SIDEREON_PROJ_VGRIDSHIFT_COORDINATE_LONGITUDE = 2,
+} SidereonProjVgridshiftCoordinate;
 
 /**
  * A time scale, tagging the system a time reading is expressed in. Pass as a
@@ -2825,9 +2875,8 @@ typedef struct SidereonGeodeticTrajectory SidereonGeodeticTrajectory;
 typedef struct SidereonGeofence SidereonGeofence;
 
 /**
- * A loaded geoid undulation grid. Opaque to C. Create with
- * sidereon_geoid_grid_from_text or sidereon_geoid_grid_new; release with
- * sidereon_geoid_grid_free.
+ * A loaded geoid undulation grid. Opaque to C. Create with a
+ * sidereon_geoid_grid_* constructor; release with sidereon_geoid_grid_free.
  */
 typedef struct SidereonGeoidGrid SidereonGeoidGrid;
 
@@ -8207,6 +8256,20 @@ typedef struct SidereonEgm2008RasterWindow {
      */
     size_t n_lon;
 } SidereonEgm2008RasterWindow;
+
+/**
+ * Typed detail returned by sidereon_geoid_grid_undulation_proj_rad.
+ */
+typedef struct SidereonProjVgridshiftError {
+    /**
+     * Error category as SidereonProjVgridshiftErrorKind.
+     */
+    uint32_t kind;
+    /**
+     * Offending coordinate as SidereonProjVgridshiftCoordinate.
+     */
+    uint32_t coordinate;
+} SidereonProjVgridshiftError;
 
 /**
  * GNSS week and time-of-week value.
@@ -21717,6 +21780,18 @@ enum SidereonStatus sidereon_geoid_grid_from_egm96_dac(const uint8_t *data,
                                                        struct SidereonGeoidGrid **out_grid);
 
 /**
+ * Parse PROJ's public EGM96 15-arcminute `egm96_15.gtx` byte stream. On
+ * success writes a newly owned generic geoid-grid handle to *out_grid.
+ * Delegates to sidereon_core::geoid::GeoidGrid::from_proj_egm96_gtx.
+ *
+ * Safety: data points to len readable bytes; out_grid points to a
+ * SidereonGeoidGrid*.
+ */
+enum SidereonStatus sidereon_geoid_grid_from_proj_egm96_gtx(const uint8_t *data,
+                                                            size_t len,
+                                                            struct SidereonGeoidGrid **out_grid);
+
+/**
  * Parse a geoid grid from the documented whitespace text format. On success
  * writes a newly owned handle to *out_grid. Delegates to
  * sidereon_core::geoid::GeoidGrid::from_text.
@@ -21763,6 +21838,22 @@ enum SidereonStatus sidereon_geoid_grid_undulation_deg(const struct SidereonGeoi
                                                        double lat_deg,
                                                        double lon_deg,
                                                        double *out_undulation_m);
+
+/**
+ * Evaluate PROJ 9.3.0-compatible vertical-grid interpolation at geodetic
+ * radians with an explicit floating-point recipe. Full-world grids wrap every
+ * finite longitude. Invalid coordinates return typed detail through out_error
+ * and SIDEREON_STATUS_INVALID_ARGUMENT; the output value remains zero.
+ *
+ * Safety: grid is a live handle; out_error points to a
+ * SidereonProjVgridshiftError; out_undulation_m points to a double.
+ */
+enum SidereonStatus sidereon_geoid_grid_undulation_proj_rad(const struct SidereonGeoidGrid *grid,
+                                                            double lat_rad,
+                                                            double lon_rad,
+                                                            uint32_t arithmetic,
+                                                            struct SidereonProjVgridshiftError *out_error,
+                                                            double *out_undulation_m);
 
 /**
  * Bilinearly interpolated undulation N (metres) at a geodetic position in
