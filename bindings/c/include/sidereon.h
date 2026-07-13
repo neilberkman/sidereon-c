@@ -46,8 +46,8 @@
 
 #define SIDEREON_VERSION_MAJOR 0
 #define SIDEREON_VERSION_MINOR 27
-#define SIDEREON_VERSION_PATCH 0
-#define SIDEREON_VERSION_STRING "0.27.0"
+#define SIDEREON_VERSION_PATCH 1
+#define SIDEREON_VERSION_STRING "0.27.1"
 
 #define BIAS_OBS_C_BYTES (MAX_BIAS_OBS_BYTES + 1)
 
@@ -22432,8 +22432,8 @@ enum SidereonStatus sidereon_klobuchar_native(const double *alpha,
  * value is 3.0). On success the best integer vector is written to out_fixed (n
  * entries, parallel to float_cycles) and the scores/verdict to *out_result.
  * Fails with SIDEREON_STATUS_INVALID_ARGUMENT for a singular/degenerate
- * covariance, a dimension mismatch, or non-finite inputs (see
- * sidereon_last_error_message).
+ * covariance, a dimension mismatch, non-finite inputs, or ambiguities outside
+ * the int64 output domain (see sidereon_last_error_message).
  *
  * Safety: float_cycles must point to n readable doubles; covariance must point to
  * covariance_len readable doubles; out_fixed must point to at least n writable
