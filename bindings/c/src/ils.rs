@@ -34,8 +34,8 @@ pub struct SidereonIlsResult {
 /// value is 3.0). On success the best integer vector is written to out_fixed (n
 /// entries, parallel to float_cycles) and the scores/verdict to *out_result.
 /// Fails with SIDEREON_STATUS_INVALID_ARGUMENT for a singular/degenerate
-/// covariance, a dimension mismatch, or non-finite inputs (see
-/// sidereon_last_error_message).
+/// covariance, a dimension mismatch, non-finite inputs, or ambiguities outside
+/// the int64 output domain (see sidereon_last_error_message).
 ///
 /// Safety: float_cycles must point to n readable doubles; covariance must point to
 /// covariance_len readable doubles; out_fixed must point to at least n writable

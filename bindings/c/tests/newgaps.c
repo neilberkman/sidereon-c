@@ -9,6 +9,7 @@
  * Compiled with -std=c11 -Wall -Wextra -Werror by run_smoke.sh. argv[1] is an
  * SP3 fixture path (used only by the agreement section). Exits 0 on success.
  */
+#include <float.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -213,6 +214,16 @@ static int exercise_lambda(void) {
     if (sidereon_lambda_ils_search(a, 6, q, 35, 3.0, fixed, &result) !=
         SIDEREON_STATUS_INVALID_ARGUMENT) {
         return fail("sidereon_lambda_ils_search dimension mismatch");
+    }
+
+    /* A finite ambiguity outside int64_t's output domain is rejected instead
+     * of saturating the integer result and returning non-finite scores. */
+    const double outside_integer_domain[1] = {DBL_MAX};
+    const double identity_covariance[1] = {1.0};
+    int64_t outside_fixed[1] = {0};
+    if (sidereon_lambda_ils_search(outside_integer_domain, 1, identity_covariance, 1, 3.0,
+                                  outside_fixed, &result) != SIDEREON_STATUS_INVALID_ARGUMENT) {
+        return fail("sidereon_lambda_ils_search integer output domain");
     }
 
     /* bounded_ils_search on a trivial diagonal case rounds componentwise. */

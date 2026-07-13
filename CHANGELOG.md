@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.27.1 - 2026-07-13
+
+- Builds against `sidereon` and `sidereon-core` 0.27.1.
+- Fixes LAMBDA integer least-squares searches with finite ambiguities outside
+  the `int64_t` output domain: they now return
+  `SIDEREON_STATUS_INVALID_ARGUMENT` instead of a successful result containing
+  saturated integers and non-finite scores.
+
 ## 0.27.0 - 2026-07-12
 
 - Builds against `sidereon` and `sidereon-core` 0.27.0.
