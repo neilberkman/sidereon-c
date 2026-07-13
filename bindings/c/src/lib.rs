@@ -139,11 +139,11 @@ use sidereon_core::constellation::{
 };
 use sidereon_core::ephemeris::{
     align_clock_reference, clock_reference_offset, merge, precise_interpolant_store_checksum64,
-    EpochAgreement, MergeCombine, MergeFlag, MergeOptions, MergeReport,
-    MmapPreciseEphemerisInterpolant, PreciseEphemerisInterpolant, PreciseEphemerisSample,
-    PreciseEphemerisSamples, PreciseInterpolantError, PreciseInterpolantStoreError,
-    PreciseSamplesError, Sp3, Sp3FrameLabelSet, Sp3FrameReconciliationMethod,
-    Sp3FrameReconciliationOptions, Sp3State,
+    EpochAgreement, MergeCombine, MergeFlag, MergeOptions, MergePrecedenceScope, MergeReport,
+    MmapPreciseEphemerisInterpolant, OutlierRejectOptions, PreciseEphemerisInterpolant,
+    PreciseEphemerisSample, PreciseEphemerisSamples, PreciseInterpolantError,
+    PreciseInterpolantStoreError, PreciseSamplesError, Sp3, Sp3FrameLabelSet,
+    Sp3FrameReconciliationMethod, Sp3FrameReconciliationOptions, Sp3State,
 };
 use sidereon_core::ephemeris::{
     sample as ephemeris_sample, BroadcastEphemeris, EphemerisSampleRow, EphemerisSampleStatus,
@@ -2306,6 +2306,9 @@ fn sp3_merge_flag_slice<'a>(
         }
         value if value == SidereonSp3MergeFlagKind::PositionOutlier as u32 => {
             Ok(&report.position_outliers)
+        }
+        value if value == SidereonSp3MergeFlagKind::ClockOutlier as u32 => {
+            Ok(&report.clock_outliers)
         }
         _ => {
             set_last_error(format!("{fn_name}: invalid merge report flag kind"));

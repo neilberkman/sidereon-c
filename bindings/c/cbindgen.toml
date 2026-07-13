@@ -57,9 +57,9 @@ usize_is_size_t = true
 after_includes = """
 
 #define SIDEREON_VERSION_MAJOR 0
-#define SIDEREON_VERSION_MINOR 27
-#define SIDEREON_VERSION_PATCH 1
-#define SIDEREON_VERSION_STRING "0.27.1\""""
+#define SIDEREON_VERSION_MINOR 28
+#define SIDEREON_VERSION_PATCH 0
+#define SIDEREON_VERSION_STRING "0.28.0\""""
 
 [enum]
 # Idiomatic C enum constants: SidereonStatus::Ok -> SIDEREON_STATUS_OK.
@@ -100,9 +100,12 @@ include = [
     "SidereonRtkFixedMetadata",
     "SidereonSp3State",
     "SidereonSp3MergeCombine",
+    "SidereonSp3MergePrecedenceScope",
     "SidereonSp3MergeOptions",
     "SidereonSp3MergeFlagKind",
     "SidereonSp3MergeFlag",
+    "SidereonSp3PredictionSummary",
+    "SidereonSp3EpochPrediction",
     "SidereonSp3EpochAgreement",
     "SidereonSp3AgreementSummary",
     "SidereonSppInputs",

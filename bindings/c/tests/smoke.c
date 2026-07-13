@@ -221,6 +221,23 @@ static int exercise_sp3_surface(const char *path) {
         }
     }
 
+    SidereonSp3PredictionSummary prediction_summary;
+    if (sidereon_sp3_prediction_summary(sp3, &prediction_summary) != SIDEREON_STATUS_OK ||
+        prediction_summary.epoch_count != SP3_SURFACE_EPOCH_COUNT ||
+        !prediction_summary.observed_through_present ||
+        f64_to_bits(prediction_summary.observed_through_j2000_seconds) !=
+            SP3_SURFACE_EPOCH_BITS[SP3_SURFACE_EPOCH_COUNT - 1]) {
+        rc = fail("sidereon_sp3_prediction_summary", 1);
+        goto cleanup;
+    }
+    SidereonSp3EpochPrediction epoch_prediction;
+    if (sidereon_sp3_epoch_prediction(sp3, 0, &epoch_prediction) != SIDEREON_STATUS_OK ||
+        !epoch_prediction.observed || epoch_prediction.orbit_predicted_satellite_count != 0 ||
+        epoch_prediction.clock_predicted_satellite_count != 0) {
+        rc = fail("sidereon_sp3_epoch_prediction", 1);
+        goto cleanup;
+    }
+
     SidereonSp3State state;
     if (sidereon_sp3_state(sp3, "G01", 0, &state) != SIDEREON_STATUS_OK) {
         rc = fail("sidereon_sp3_state", 1);
@@ -339,6 +356,11 @@ static int exercise_sp3_surface(const char *path) {
         rc = fail("sidereon_sp3_merge_options_init", 1);
         goto cleanup;
     }
+    if (merge_options.precedence_scope != SIDEREON_SP3_MERGE_PRECEDENCE_SCOPE_CELL ||
+        merge_options.outlier_reject_enabled) {
+        rc = fail("sidereon_sp3_merge_options_init new defaults", 1);
+        goto cleanup;
+    }
     merge_options.min_agree = 1;
     merge_options.clock_min_common = 1;
     SidereonSp3 *empty_merged = (SidereonSp3 *)(uintptr_t)1;
@@ -372,6 +394,7 @@ static int exercise_sp3_surface(const char *path) {
     size_t merge_quarantined = 123;
     size_t merge_single_source = 123;
     size_t merge_outliers = 123;
+    size_t merge_clock_outliers = 123;
     if (sidereon_sp3_merge_report_flag_count(
             NULL, SIDEREON_SP3_MERGE_FLAG_KIND_SINGLE_SOURCE, &merge_single_source) !=
             SIDEREON_STATUS_NULL_POINTER ||
@@ -388,9 +411,12 @@ static int exercise_sp3_surface(const char *path) {
         sidereon_sp3_merge_report_flag_count(
             report, SIDEREON_SP3_MERGE_FLAG_KIND_POSITION_OUTLIER, &merge_outliers) !=
             SIDEREON_STATUS_OK ||
+        sidereon_sp3_merge_report_flag_count(
+            report, SIDEREON_SP3_MERGE_FLAG_KIND_CLOCK_OUTLIER, &merge_clock_outliers) !=
+            SIDEREON_STATUS_OK ||
         merge_quarantined != 0 ||
         merge_single_source != SP3_SURFACE_EPOCH_COUNT * SP3_SURFACE_SAT_COUNT ||
-        merge_outliers != 0) {
+        merge_outliers != 0 || merge_clock_outliers != 0) {
         rc = fail("sidereon_sp3_merge_report_flag_count values", 1);
         goto cleanup;
     }

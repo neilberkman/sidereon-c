@@ -57,6 +57,16 @@ pub enum SidereonSp3MergeCombine {
     Precedence = 2,
 }
 
+/// Scope used by precedence-mode SP3 source selection.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonSp3MergePrecedenceScope {
+    /// Select the highest-precedence source present in each cell.
+    Cell = 0,
+    /// Keep one source owner for an entire satellite arc.
+    SatelliteArc = 1,
+}
+
 /// Controls for merging SP3 products. Initialize with
 /// sidereon_sp3_merge_options_init before overriding fields.
 #[repr(C)]
@@ -72,6 +82,14 @@ pub struct SidereonSp3MergeOptions {
     pub clock_min_common: usize,
     /// One of SidereonSp3MergeCombine_*.
     pub combine: u32,
+    /// One of SidereonSp3MergePrecedenceScope_*.
+    pub precedence_scope: u32,
+    /// Enable contested-cell outlier rejection.
+    pub outlier_reject_enabled: bool,
+    /// Position tolerance for the outlier guard, meters.
+    pub outlier_reject_position_tolerance_m: f64,
+    /// Clock tolerance for the outlier guard, seconds.
+    pub outlier_reject_clock_tolerance_s: f64,
     /// Whether target_epoch_interval_s is supplied.
     pub target_epoch_interval_s_enabled: bool,
     /// Output epoch spacing in seconds when enabled.
@@ -182,6 +200,36 @@ pub enum SidereonSp3MergeFlagKind {
     SingleSource = 1,
     /// Cells where an accepted consensus rejected source outliers.
     PositionOutlier = 2,
+    /// Clock contributors rejected from an accepted consensus or guard.
+    ClockOutlier = 3,
+}
+
+/// Product-wide SP3 observed/predicted boundary metadata.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonSp3PredictionSummary {
+    /// Number of per-epoch prediction rows.
+    pub epoch_count: usize,
+    /// Whether observed_through_j2000_seconds is present.
+    pub observed_through_present: bool,
+    /// Last contiguous observed epoch as seconds since J2000 when present.
+    pub observed_through_j2000_seconds: f64,
+}
+
+/// Prediction status aggregated over every satellite record at one SP3 epoch.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonSp3EpochPrediction {
+    /// Epoch as seconds since J2000 in the product time scale.
+    pub epoch_j2000_seconds: f64,
+    /// True when no orbit or clock record at this epoch is predicted.
+    pub observed: bool,
+    /// Number of orbit-predicted satellites. Query exact ids through
+    /// sidereon_sp3_state and its orbit_predicted flag.
+    pub orbit_predicted_satellite_count: usize,
+    /// Number of clock-predicted satellites. Query exact ids through
+    /// sidereon_sp3_state and its clock_predicted flag.
+    pub clock_predicted_satellite_count: usize,
 }
 
 /// One SP3 merge audit flag. Source indices are copied with
@@ -405,6 +453,90 @@ pub unsafe extern "C" fn sidereon_sp3_epochs_j2000_seconds(
                 out_written,
                 out_required,
             ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Read the product-wide observed/predicted boundary derived from SP3 record
+/// flags. Exact per-satellite flags remain available through sidereon_sp3_state.
+///
+/// Safety: sp3 must be a live handle and out_summary must point to writable
+/// SidereonSp3PredictionSummary storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sp3_prediction_summary(
+    sp3: *const SidereonSp3,
+    out_summary: *mut SidereonSp3PredictionSummary,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_sp3_prediction_summary",
+        SidereonStatus::Panic,
+        || {
+            let out_summary = c_try!(require_out(
+                out_summary,
+                "sidereon_sp3_prediction_summary",
+                "out_summary"
+            ));
+            *out_summary = SidereonSp3PredictionSummary {
+                epoch_count: 0,
+                observed_through_present: false,
+                observed_through_j2000_seconds: 0.0,
+            };
+            let sp3 = c_try!(require_ref(sp3, "sidereon_sp3_prediction_summary", "sp3"));
+            let summary = sp3.inner.prediction_summary();
+            let observed_through = summary
+                .observed_through
+                .as_ref()
+                .and_then(instant_to_j2000_seconds);
+            *out_summary = SidereonSp3PredictionSummary {
+                epoch_count: summary.epochs.len(),
+                observed_through_present: observed_through.is_some(),
+                observed_through_j2000_seconds: observed_through.unwrap_or(0.0),
+            };
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Read one per-epoch observed/predicted aggregate by parsed epoch index.
+///
+/// Safety: sp3 must be a live handle and out_prediction must point to writable
+/// SidereonSp3EpochPrediction storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sp3_epoch_prediction(
+    sp3: *const SidereonSp3,
+    epoch_index: usize,
+    out_prediction: *mut SidereonSp3EpochPrediction,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_sp3_epoch_prediction",
+        SidereonStatus::Panic,
+        || {
+            let out_prediction = c_try!(require_out(
+                out_prediction,
+                "sidereon_sp3_epoch_prediction",
+                "out_prediction"
+            ));
+            *out_prediction = SidereonSp3EpochPrediction {
+                epoch_j2000_seconds: 0.0,
+                observed: false,
+                orbit_predicted_satellite_count: 0,
+                clock_predicted_satellite_count: 0,
+            };
+            let sp3 = c_try!(require_ref(sp3, "sidereon_sp3_epoch_prediction", "sp3"));
+            let summary = sp3.inner.prediction_summary();
+            let Some(epoch) = summary.epochs.get(epoch_index) else {
+                set_last_error(format!(
+                    "sidereon_sp3_epoch_prediction: epoch index {epoch_index} out of range"
+                ));
+                return SidereonStatus::InvalidArgument;
+            };
+            *out_prediction = SidereonSp3EpochPrediction {
+                epoch_j2000_seconds: instant_to_j2000_seconds(&epoch.epoch).unwrap_or(f64::NAN),
+                observed: epoch.is_observed(),
+                orbit_predicted_satellite_count: epoch.orbit_predicted_satellites.len(),
+                clock_predicted_satellite_count: epoch.clock_predicted_satellites.len(),
+            };
             SidereonStatus::Ok
         },
     )
@@ -1865,6 +1997,16 @@ fn default_sp3_merge_options() -> SidereonSp3MergeOptions {
         min_agree: options.min_agree,
         clock_min_common: options.clock_min_common,
         combine: SidereonSp3MergeCombine::Mean as u32,
+        precedence_scope: SidereonSp3MergePrecedenceScope::Cell as u32,
+        outlier_reject_enabled: options.outlier_reject.is_some(),
+        outlier_reject_position_tolerance_m: options
+            .outlier_reject
+            .map(|guard| guard.position_tolerance_m)
+            .unwrap_or(0.0),
+        outlier_reject_clock_tolerance_s: options
+            .outlier_reject
+            .map(|guard| guard.clock_tolerance_s)
+            .unwrap_or(0.0),
         target_epoch_interval_s_enabled: options.target_epoch_interval_s.is_some(),
         target_epoch_interval_s: options.target_epoch_interval_s.unwrap_or(0.0),
         systems: ptr::null(),
@@ -1904,6 +2046,38 @@ unsafe fn sp3_merge_options_from_c(
             set_last_error(format!("{fn_name}: invalid merge combine selector"));
             return Err(SidereonStatus::InvalidArgument);
         }
+    };
+    let precedence_scope = match options.precedence_scope {
+        value if value == SidereonSp3MergePrecedenceScope::Cell as u32 => {
+            MergePrecedenceScope::Cell
+        }
+        value if value == SidereonSp3MergePrecedenceScope::SatelliteArc as u32 => {
+            MergePrecedenceScope::SatelliteArc
+        }
+        _ => {
+            set_last_error(format!(
+                "{fn_name}: invalid merge precedence scope selector"
+            ));
+            return Err(SidereonStatus::InvalidArgument);
+        }
+    };
+    let outlier_reject = if options.outlier_reject_enabled {
+        if !options.outlier_reject_position_tolerance_m.is_finite()
+            || options.outlier_reject_position_tolerance_m < 0.0
+            || !options.outlier_reject_clock_tolerance_s.is_finite()
+            || options.outlier_reject_clock_tolerance_s < 0.0
+        {
+            set_last_error(format!(
+                "{fn_name}: outlier-reject tolerances must be non-negative and finite"
+            ));
+            return Err(SidereonStatus::InvalidArgument);
+        }
+        Some(OutlierRejectOptions {
+            position_tolerance_m: options.outlier_reject_position_tolerance_m,
+            clock_tolerance_s: options.outlier_reject_clock_tolerance_s,
+        })
+    } else {
+        None
     };
     let target_epoch_interval_s = if options.target_epoch_interval_s_enabled {
         require_positive_finite(
@@ -1945,6 +2119,8 @@ unsafe fn sp3_merge_options_from_c(
         min_agree: options.min_agree,
         clock_min_common: options.clock_min_common,
         combine,
+        precedence_scope,
+        outlier_reject,
         target_epoch_interval_s,
         systems,
         frame_reconciliation: Sp3FrameReconciliationOptions {

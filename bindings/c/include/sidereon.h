@@ -45,9 +45,9 @@
 #include <stdlib.h>
 
 #define SIDEREON_VERSION_MAJOR 0
-#define SIDEREON_VERSION_MINOR 27
-#define SIDEREON_VERSION_PATCH 1
-#define SIDEREON_VERSION_STRING "0.27.1"
+#define SIDEREON_VERSION_MINOR 28
+#define SIDEREON_VERSION_PATCH 0
+#define SIDEREON_VERSION_STRING "0.28.0"
 
 #define BIAS_OBS_C_BYTES (MAX_BIAS_OBS_BYTES + 1)
 
@@ -1177,6 +1177,20 @@ typedef enum SidereonSp3MergeCombine {
 } SidereonSp3MergeCombine;
 
 /**
+ * Scope used by precedence-mode SP3 source selection.
+ */
+typedef enum SidereonSp3MergePrecedenceScope {
+    /**
+     * Select the highest-precedence source present in each cell.
+     */
+    SIDEREON_SP3_MERGE_PRECEDENCE_SCOPE_CELL = 0,
+    /**
+     * Keep one source owner for an entire satellite arc.
+     */
+    SIDEREON_SP3_MERGE_PRECEDENCE_SCOPE_SATELLITE_ARC = 1,
+} SidereonSp3MergePrecedenceScope;
+
+/**
  * Which merge report flag list to query.
  */
 typedef enum SidereonSp3MergeFlagKind {
@@ -1192,6 +1206,10 @@ typedef enum SidereonSp3MergeFlagKind {
      * Cells where an accepted consensus rejected source outliers.
      */
     SIDEREON_SP3_MERGE_FLAG_KIND_POSITION_OUTLIER = 2,
+    /**
+     * Clock contributors rejected from an accepted consensus or guard.
+     */
+    SIDEREON_SP3_MERGE_FLAG_KIND_CLOCK_OUTLIER = 3,
 } SidereonSp3MergeFlagKind;
 
 /**
@@ -16086,6 +16104,30 @@ typedef struct SidereonSp3ClockReferenceOffset {
 } SidereonSp3ClockReferenceOffset;
 
 /**
+ * Prediction status aggregated over every satellite record at one SP3 epoch.
+ */
+typedef struct SidereonSp3EpochPrediction {
+    /**
+     * Epoch as seconds since J2000 in the product time scale.
+     */
+    double epoch_j2000_seconds;
+    /**
+     * True when no orbit or clock record at this epoch is predicted.
+     */
+    bool observed;
+    /**
+     * Number of orbit-predicted satellites. Query exact ids through
+     * sidereon_sp3_state and its orbit_predicted flag.
+     */
+    size_t orbit_predicted_satellite_count;
+    /**
+     * Number of clock-predicted satellites. Query exact ids through
+     * sidereon_sp3_state and its clock_predicted flag.
+     */
+    size_t clock_predicted_satellite_count;
+} SidereonSp3EpochPrediction;
+
+/**
  * One sampled visibility pass, from sidereon_sp3_geometry_passes.
  */
 typedef struct SidereonVisibilityPass {
@@ -16184,6 +16226,22 @@ typedef struct SidereonSp3MergeOptions {
      * One of SidereonSp3MergeCombine_*.
      */
     uint32_t combine;
+    /**
+     * One of SidereonSp3MergePrecedenceScope_*.
+     */
+    uint32_t precedence_scope;
+    /**
+     * Enable contested-cell outlier rejection.
+     */
+    bool outlier_reject_enabled;
+    /**
+     * Position tolerance for the outlier guard, meters.
+     */
+    double outlier_reject_position_tolerance_m;
+    /**
+     * Clock tolerance for the outlier guard, seconds.
+     */
+    double outlier_reject_clock_tolerance_s;
     /**
      * Whether target_epoch_interval_s is supplied.
      */
@@ -16459,6 +16517,24 @@ typedef struct SidereonSp3FrameReconciliation {
      */
     bool identity;
 } SidereonSp3FrameReconciliation;
+
+/**
+ * Product-wide SP3 observed/predicted boundary metadata.
+ */
+typedef struct SidereonSp3PredictionSummary {
+    /**
+     * Number of per-epoch prediction rows.
+     */
+    size_t epoch_count;
+    /**
+     * Whether observed_through_j2000_seconds is present.
+     */
+    bool observed_through_present;
+    /**
+     * Last contiguous observed epoch as seconds since J2000 when present.
+     */
+    double observed_through_j2000_seconds;
+} SidereonSp3PredictionSummary;
 
 typedef struct SidereonSpaceWeatherCoverage {
     double first_j2000_s;
@@ -29521,6 +29597,16 @@ enum SidereonStatus sidereon_sp3_ephemeris_sample(const struct SidereonSp3 *sp3,
 enum SidereonStatus sidereon_sp3_epoch_count(const struct SidereonSp3 *sp3, size_t *out_count);
 
 /**
+ * Read one per-epoch observed/predicted aggregate by parsed epoch index.
+ *
+ * Safety: sp3 must be a live handle and out_prediction must point to writable
+ * SidereonSp3EpochPrediction storage.
+ */
+enum SidereonStatus sidereon_sp3_epoch_prediction(const struct SidereonSp3 *sp3,
+                                                  size_t epoch_index,
+                                                  struct SidereonSp3EpochPrediction *out_prediction);
+
+/**
  * Copy parsed SP3 epoch nodes as seconds since J2000, in the product time
  * scale. Uses the variable-length output contract documented at the top of the
  * header.
@@ -29969,6 +30055,16 @@ enum SidereonStatus sidereon_sp3_predict_ranges(const struct SidereonSp3 *sp3,
                                                 size_t count,
                                                 const struct SidereonObservablesOptions *options,
                                                 struct SidereonRangePrediction *out);
+
+/**
+ * Read the product-wide observed/predicted boundary derived from SP3 record
+ * flags. Exact per-satellite flags remain available through sidereon_sp3_state.
+ *
+ * Safety: sp3 must be a live handle and out_summary must point to writable
+ * SidereonSp3PredictionSummary storage.
+ */
+enum SidereonStatus sidereon_sp3_prediction_summary(const struct SidereonSp3 *sp3,
+                                                    struct SidereonSp3PredictionSummary *out_summary);
 
 /**
  * Copy satellite tokens present in the product. Uses the variable-length
