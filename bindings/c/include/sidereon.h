@@ -159,6 +159,10 @@
  */
 #define SIDEREON_TERRAIN_ERROR_TEXT_C_BYTES 512
 
+#define SP3_ARTIFACT_FILENAME_C_BYTES 160
+
+#define SP3_ARTIFACT_SHA256_C_BYTES 65
+
 #define TLE_FIELD_C_BYTES 32
 
 /**
@@ -16422,6 +16426,52 @@ typedef struct SidereonSp3MergeOptions {
 } SidereonSp3MergeOptions;
 
 /**
+ * Complete, verified identity of one exact artifact supplied to an SP3 merge.
+ *
+ * Retrieval timestamps, URLs, HTTP metadata, credentials, cache paths, and
+ * retry history are deliberately absent because they are observational facts,
+ * not reproducible merge inputs. Fixed text buffers must be null-terminated.
+ */
+typedef struct SidereonSp3ArtifactIdentity {
+    /**
+     * Exact identity requested from the selected distributor.
+     */
+    struct SidereonProductIdentity requested_identity;
+    /**
+     * Identity resolved by parsing and validating the product bytes.
+     */
+    struct SidereonProductIdentity resolved_identity;
+    /**
+     * Explicit distributor that supplied the artifact.
+     */
+    enum SidereonDistributionSource distribution_source;
+    /**
+     * Official decompressed product filename.
+     */
+    char official_filename[SP3_ARTIFACT_FILENAME_C_BYTES];
+    /**
+     * Lower-case SHA-256 of the validated decompressed product bytes.
+     */
+    char product_sha256[SP3_ARTIFACT_SHA256_C_BYTES];
+    /**
+     * Length of the validated decompressed product bytes.
+     */
+    uint64_t product_byte_length;
+    /**
+     * Lower-case SHA-256 of the exact distributor archive bytes.
+     */
+    char archive_sha256[SP3_ARTIFACT_SHA256_C_BYTES];
+    /**
+     * Length of the exact distributor archive bytes.
+     */
+    uint64_t archive_byte_length;
+    /**
+     * Compression applied to the distributor archive.
+     */
+    enum SidereonArchiveCompression compression;
+} SidereonSp3ArtifactIdentity;
+
+/**
  * Whole-product rollup of the merge agreement metric: the pooled position/clock
  * dispersion of the consensus members about the combined values. Each scalar
  * mirrors a sidereon_core::ephemeris::MergeReport agreement method and carries a
@@ -30096,6 +30146,31 @@ enum SidereonStatus sidereon_sp3_merge(const struct SidereonSp3 *const *sources,
                                        const struct SidereonSp3MergeOptions *options,
                                        struct SidereonSp3 **out_sp3,
                                        struct SidereonSp3MergeReport **out_report);
+
+/**
+ * Build the canonical, versioned identity of a complete exact SP3 artifact
+ * set and the full merge policy.
+ *
+ * Contributor enumeration order and unordered policy fields do not affect the
+ * result. Every artifact field is validated by the core; empty, duplicate,
+ * incomplete, malformed, non-SP3, or mismatched records fail closed. The
+ * stable-id output follows the standard variable-length contract and is not
+ * null-terminated. Pass NULL with `out_stable_id_len == 0` to query its size.
+ *
+ * Safety: `contributors` must reference `contributor_count` readable records
+ * (and may be NULL only when the count is zero); `options` may be NULL for
+ * defaults; all output/count pointers must reference writable storage;
+ * `out_stable_id` must reference `out_stable_id_len` writable bytes or be NULL
+ * when that length is zero.
+ */
+enum SidereonStatus sidereon_sp3_merge_input_identity(const struct SidereonSp3ArtifactIdentity *contributors,
+                                                      size_t contributor_count,
+                                                      const struct SidereonSp3MergeOptions *options,
+                                                      uint8_t *out_schema_version,
+                                                      uint8_t *out_stable_id,
+                                                      size_t out_stable_id_len,
+                                                      size_t *out_written,
+                                                      size_t *out_required);
 
 /**
  * Initialize SP3 merge options with engine defaults.

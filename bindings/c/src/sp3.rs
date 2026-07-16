@@ -1,6 +1,8 @@
 use super::*;
 
 const SP3_FRAME_LABEL_MAX_BYTES: usize = 64;
+pub const SP3_ARTIFACT_SHA256_C_BYTES: usize = 65;
+pub const SP3_ARTIFACT_FILENAME_C_BYTES: usize = 160;
 
 /// A parsed SP3 precise-ephemeris product. Opaque to C. Create with
 /// sidereon_sp3_load or sidereon_sp3_merge and release with sidereon_sp3_free.
@@ -104,6 +106,34 @@ pub struct SidereonSp3MergeOptions {
     pub asserted_frame_label_set_count: usize,
     /// Enable catalog Helmert reconciliation between known ITRF/IGS labels.
     pub helmert_frame_reconciliation: bool,
+}
+
+/// Complete, verified identity of one exact artifact supplied to an SP3 merge.
+///
+/// Retrieval timestamps, URLs, HTTP metadata, credentials, cache paths, and
+/// retry history are deliberately absent because they are observational facts,
+/// not reproducible merge inputs. Fixed text buffers must be null-terminated.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonSp3ArtifactIdentity {
+    /// Exact identity requested from the selected distributor.
+    pub requested_identity: SidereonProductIdentity,
+    /// Identity resolved by parsing and validating the product bytes.
+    pub resolved_identity: SidereonProductIdentity,
+    /// Explicit distributor that supplied the artifact.
+    pub distribution_source: SidereonDistributionSource,
+    /// Official decompressed product filename.
+    pub official_filename: [c_char; SP3_ARTIFACT_FILENAME_C_BYTES],
+    /// Lower-case SHA-256 of the validated decompressed product bytes.
+    pub product_sha256: [c_char; SP3_ARTIFACT_SHA256_C_BYTES],
+    /// Length of the validated decompressed product bytes.
+    pub product_byte_length: u64,
+    /// Lower-case SHA-256 of the exact distributor archive bytes.
+    pub archive_sha256: [c_char; SP3_ARTIFACT_SHA256_C_BYTES],
+    /// Length of the exact distributor archive bytes.
+    pub archive_byte_length: u64,
+    /// Compression applied to the distributor archive.
+    pub compression: SidereonArchiveCompression,
 }
 
 /// One caller-asserted set of SP3 coordinate labels.
@@ -820,6 +850,74 @@ pub unsafe extern "C" fn sidereon_sp3_merge_options_init(
             SidereonStatus::Ok
         },
     )
+}
+
+/// Build the canonical, versioned identity of a complete exact SP3 artifact
+/// set and the full merge policy.
+///
+/// Contributor enumeration order and unordered policy fields do not affect the
+/// result. Every artifact field is validated by the core; empty, duplicate,
+/// incomplete, malformed, non-SP3, or mismatched records fail closed. The
+/// stable-id output follows the standard variable-length contract and is not
+/// null-terminated. Pass NULL with `out_stable_id_len == 0` to query its size.
+///
+/// Safety: `contributors` must reference `contributor_count` readable records
+/// (and may be NULL only when the count is zero); `options` may be NULL for
+/// defaults; all output/count pointers must reference writable storage;
+/// `out_stable_id` must reference `out_stable_id_len` writable bytes or be NULL
+/// when that length is zero.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sp3_merge_input_identity(
+    contributors: *const SidereonSp3ArtifactIdentity,
+    contributor_count: usize,
+    options: *const SidereonSp3MergeOptions,
+    out_schema_version: *mut u8,
+    out_stable_id: *mut u8,
+    out_stable_id_len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_sp3_merge_input_identity";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(FN_NAME, out_written, out_required));
+        let out_schema_version = c_try!(require_out(
+            out_schema_version,
+            FN_NAME,
+            "out_schema_version"
+        ));
+        *out_schema_version = 0;
+        let contributors = c_try!(require_slice(
+            contributors,
+            contributor_count,
+            FN_NAME,
+            "contributors"
+        ));
+        let contributors = c_try!(contributors
+            .iter()
+            .enumerate()
+            .map(|(index, contributor)| {
+                sp3_artifact_identity_from_c(FN_NAME, index, contributor)
+            })
+            .collect::<Result<Vec<_>, SidereonStatus>>());
+        let options = c_try!(sp3_merge_options_from_c(FN_NAME, options));
+        let identity = c_try!(Sp3MergeInputIdentity::new(&contributors, &options).map_err(
+            |error| {
+                set_last_error(format!("{FN_NAME}: {error}"));
+                SidereonStatus::InvalidArgument
+            }
+        ));
+        *out_schema_version = identity.schema_version;
+        c_try!(copy_prefix_to_c(
+            FN_NAME,
+            "out_stable_id",
+            identity.stable_id.as_bytes(),
+            out_stable_id,
+            out_stable_id_len,
+            out_written,
+            out_required,
+        ));
+        SidereonStatus::Ok
+    })
 }
 
 /// Merge SP3 products using the engine consensus merge path. On success writes
@@ -2015,6 +2113,43 @@ fn default_sp3_merge_options() -> SidereonSp3MergeOptions {
         asserted_frame_label_set_count: 0,
         helmert_frame_reconciliation: false,
     }
+}
+
+fn sp3_artifact_identity_from_c(
+    fn_name: &str,
+    index: usize,
+    artifact: &SidereonSp3ArtifactIdentity,
+) -> Result<Sp3ArtifactIdentity, SidereonStatus> {
+    let field = |name: &str| format!("contributors[{index}].{name}");
+    Ok(Sp3ArtifactIdentity {
+        requested_identity: data_distribution::identity_from_c(
+            fn_name,
+            &artifact.requested_identity,
+        )?,
+        resolved_identity: data_distribution::identity_from_c(
+            fn_name,
+            &artifact.resolved_identity,
+        )?,
+        distribution_source: data_distribution::source_to_core(artifact.distribution_source),
+        official_filename: data_distribution::fixed_text_from_c(
+            fn_name,
+            &field("official_filename"),
+            &artifact.official_filename,
+        )?,
+        product_sha256: data_distribution::fixed_text_from_c(
+            fn_name,
+            &field("product_sha256"),
+            &artifact.product_sha256,
+        )?,
+        product_byte_length: artifact.product_byte_length,
+        archive_sha256: data_distribution::fixed_text_from_c(
+            fn_name,
+            &field("archive_sha256"),
+            &artifact.archive_sha256,
+        )?,
+        archive_byte_length: artifact.archive_byte_length,
+        compression: data_distribution::compression_to_core(artifact.compression),
+    })
 }
 
 unsafe fn sp3_merge_options_from_c(

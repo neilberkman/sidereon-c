@@ -204,12 +204,19 @@ fn family_to_core(family: SidereonProductFamily) -> ProductType {
     }
 }
 
-fn source_to_core(source: SidereonDistributionSource) -> DistributionSource {
+pub(super) fn source_to_core(source: SidereonDistributionSource) -> DistributionSource {
     match source {
         SidereonDistributionSource::Direct => DistributionSource::Direct,
         SidereonDistributionSource::NasaCddis => DistributionSource::NasaCddis,
         SidereonDistributionSource::LocalFile => DistributionSource::LocalFile,
         SidereonDistributionSource::InMemory => DistributionSource::InMemory,
+    }
+}
+
+pub(super) fn compression_to_core(compression: SidereonArchiveCompression) -> ArchiveCompression {
+    match compression {
+        SidereonArchiveCompression::None => ArchiveCompression::None,
+        SidereonArchiveCompression::Gzip => ArchiveCompression::Gzip,
     }
 }
 
@@ -330,7 +337,7 @@ fn identity_to_c(
     })
 }
 
-fn fixed_text_from_c<const N: usize>(
+pub(super) fn fixed_text_from_c<const N: usize>(
     fn_name: &str,
     label: &str,
     value: &[c_char; N],
@@ -349,7 +356,7 @@ fn fixed_text_from_c<const N: usize>(
     })
 }
 
-fn identity_from_c(
+pub(super) fn identity_from_c(
     fn_name: &str,
     identity: &SidereonProductIdentity,
 ) -> Result<ProductIdentity, SidereonStatus> {

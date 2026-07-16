@@ -100,6 +100,16 @@ returns `SIDEREON_STATUS_OK`. For SP3 observed/predicted timing, use
 `sidereon_sp3_prediction_summary`; do not infer the boundary from issue times or
 catalog fields.
 
+After acquiring and validating every SP3 input, describe each contributor with
+`SidereonSp3ArtifactIdentity`: requested and resolved identities, distributor,
+official filename, decompressed and archive SHA-256/length pairs, and archive
+compression. `sidereon_sp3_merge_input_identity` validates those records with
+the complete `SidereonSp3MergeOptions` and returns a schema version plus a
+stable ID. Contributor enumeration order does not affect the ID; changing an
+artifact or any effective merge control does. The record intentionally has no
+URL, credential, cache path, retrieval timestamp, or HTTP metadata fields.
+Use the usual NULL/zero first call to query the stable-ID buffer length.
+
 The C interface deliberately leaves HTTP, Earthdata credentials, retries, and
 product-format validation to the caller. After validation,
 `sidereon_exact_cache_open` acquires the bounded native writer lock;
