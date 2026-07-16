@@ -484,4 +484,59 @@ COD0MGXFIN_20261930000_01D_05M_ORB.SP3.gz"
         };
         assert_eq!(status, SidereonStatus::InvalidArgument);
     }
+
+    #[test]
+    fn predicted_ionex_direct_locations_preserve_tier_and_identity_year() {
+        for (center, year, month, day, expected) in [
+            (
+                "cod_prd1",
+                2026,
+                7,
+                15,
+                "https://www.aiub.unibe.ch/download/CODE/IONO/P1/2026/\
+COD0OPSPRD_20261960000_01D_01H_GIM.INX.gz",
+            ),
+            (
+                "cod_prd2",
+                2026,
+                7,
+                16,
+                "https://www.aiub.unibe.ch/download/CODE/IONO/P2/2026/\
+COD0OPSPRD_20261970000_01D_01H_GIM.INX.gz",
+            ),
+            (
+                "cod_prd2",
+                2027,
+                1,
+                1,
+                "https://www.aiub.unibe.ch/download/CODE/IONO/P2/2027/\
+COD0OPSPRD_20270010000_01D_01H_GIM.INX.gz",
+            ),
+        ] {
+            let center = CString::new(center).unwrap();
+            let mut location = MaybeUninit::<SidereonDistributionLocation>::uninit();
+            let status = unsafe {
+                sidereon_data_distribution_location(
+                    center.as_ptr(),
+                    SidereonProductFamily::Ionex,
+                    year,
+                    month,
+                    day,
+                    ptr::null(),
+                    ptr::null(),
+                    SidereonDistributionSource::Direct,
+                    location.as_mut_ptr(),
+                )
+            };
+            assert_eq!(status, SidereonStatus::Ok);
+            let location = unsafe { location.assume_init() };
+            assert_eq!(location.compression, SidereonArchiveCompression::Gzip);
+            assert_eq!(
+                unsafe { CStr::from_ptr(location.original_url.as_ptr()) }
+                    .to_str()
+                    .unwrap(),
+                expected
+            );
+        }
+    }
 }
