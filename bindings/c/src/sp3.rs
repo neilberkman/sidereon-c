@@ -74,9 +74,11 @@ pub enum SidereonSp3MergePrecedenceScope {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct SidereonSp3MergeOptions {
-    /// Maximum agreeing-source 3D position difference, meters.
+    /// Maximum agreeing-source 3D position difference, meters. Must be finite
+    /// and non-negative.
     pub position_tolerance_m: f64,
     /// Maximum agreeing-source clock difference after datum alignment, seconds.
+    /// Must be finite and non-negative.
     pub clock_tolerance_s: f64,
     /// Minimum agreeing sources required when several sources cover one cell.
     pub min_agree: usize,
@@ -2161,12 +2163,12 @@ unsafe fn sp3_merge_options_from_c(
     let Some(options) = options.as_ref() else {
         return Ok(MergeOptions::default());
     };
-    require_positive_finite(
+    require_nonnegative_finite(
         fn_name,
         "position_tolerance_m",
         options.position_tolerance_m,
     )?;
-    require_positive_finite(fn_name, "clock_tolerance_s", options.clock_tolerance_s)?;
+    require_nonnegative_finite(fn_name, "clock_tolerance_s", options.clock_tolerance_s)?;
     if options.min_agree == 0 {
         set_last_error(format!("{fn_name}: min_agree must be at least 1"));
         return Err(SidereonStatus::InvalidArgument);
@@ -2555,6 +2557,21 @@ fn require_positive_finite(
         Ok(())
     } else {
         set_last_error(format!("{fn_name}: {arg_name} must be positive and finite"));
+        Err(SidereonStatus::InvalidArgument)
+    }
+}
+
+fn require_nonnegative_finite(
+    fn_name: &str,
+    arg_name: &str,
+    value: f64,
+) -> Result<(), SidereonStatus> {
+    if value.is_finite() && value >= 0.0 {
+        Ok(())
+    } else {
+        set_last_error(format!(
+            "{fn_name}: {arg_name} must be non-negative and finite"
+        ));
         Err(SidereonStatus::InvalidArgument)
     }
 }

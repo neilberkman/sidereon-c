@@ -16360,11 +16360,13 @@ typedef struct SidereonSp3FrameLabelSet {
  */
 typedef struct SidereonSp3MergeOptions {
     /**
-     * Maximum agreeing-source 3D position difference, meters.
+     * Maximum agreeing-source 3D position difference, meters. Must be finite
+     * and non-negative.
      */
     double position_tolerance_m;
     /**
      * Maximum agreeing-source clock difference after datum alignment, seconds.
+     * Must be finite and non-negative.
      */
     double clock_tolerance_s;
     /**

@@ -38,6 +38,30 @@ static int merge_input_identity_checks(
         return 10;
     }
 
+    const double default_position_tolerance_m = options.position_tolerance_m;
+    const double default_clock_tolerance_s = options.clock_tolerance_s;
+    options.position_tolerance_m = 0.0;
+    options.clock_tolerance_s = 0.0;
+    uint8_t zero_schema = 0;
+    size_t zero_written = 99;
+    size_t zero_required = 0;
+    if (sidereon_sp3_merge_input_identity(
+            artifacts, 2, &options, &zero_schema, NULL, 0, &zero_written,
+            &zero_required) != SIDEREON_STATUS_OK ||
+        zero_schema != 1 || zero_written != 0 || zero_required == 0) {
+        return 20;
+    }
+    options.target_epoch_interval_s_enabled = true;
+    options.target_epoch_interval_s = 0.0;
+    if (sidereon_sp3_merge_input_identity(
+            artifacts, 2, &options, &zero_schema, NULL, 0, &zero_written,
+            &zero_required) == SIDEREON_STATUS_OK) {
+        return 21;
+    }
+    options.target_epoch_interval_s_enabled = false;
+    options.position_tolerance_m = default_position_tolerance_m;
+    options.clock_tolerance_s = default_clock_tolerance_s;
+
     uint8_t schema = 0;
     size_t written = 99;
     size_t required = 0;
