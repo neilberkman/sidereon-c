@@ -371,22 +371,30 @@ static int exercise_rinex_encode_nav(const char *nav_path) {
 /* ------------------------------ angles-only IOD ------------------------- */
 
 static int exercise_iod_gauss(void) {
-    /* The exact orbit recovery needs a real geometry; the smoke confirms the
-     * marshalling and delegation run (a converged orbit or a typed validation
-     * error, never a panic or null-pointer fault). */
-    const double decl[3] = {0.1, 0.12, 0.14};
-    const double rtasc[3] = {0.5, 0.55, 0.6};
-    const double jd[3] = {2459000.0, 2459000.0, 2459000.0};
-    const double jdf[3] = {0.0, 0.0006944, 0.0013888};
-    const double rseci[9] = {-5000.0, 0.0, 3500.0, -4990.0, 100.0, 3510.0, -4980.0, 200.0, 3520.0};
+    const double deg_to_rad = 3.14159265358979323846 / 180.0;
+    const double decl[3] = {18.667717 * deg_to_rad, 35.664741 * deg_to_rad,
+                            36.996583 * deg_to_rad};
+    const double rtasc[3] = {0.939913 * deg_to_rad, 45.025748 * deg_to_rad,
+                             67.886655 * deg_to_rad};
+    const double jd[3] = {2456159.5, 2456159.5, 2456159.5};
+    const double jdf[3] = {0.4864351851851852, 0.49199074074074073, 0.4947685185185185};
+    const double rseci[9] = {4054.881, 2748.195, 4074.237, 3956.224, 2888.232,
+                             4074.364, 3905.073, 2956.935, 4074.430};
+    const double expected_pos[3] = {6313.378130210396, 5247.50563344895,
+                                    6467.707164431651};
+    const double expected_vel[3] = {-4.185488280436629, 4.7884929168898145,
+                                    1.721714659663034};
     double pos[3];
     double vel[3];
     SidereonStatus st = sidereon_iod_gauss_angles(decl, rtasc, jd, jdf, rseci, pos, vel);
-    if (st == SIDEREON_STATUS_PANIC || st == SIDEREON_STATUS_NULL_POINTER) {
-        return fail("iod_gauss_angles ran", 1);
+    if (st != SIDEREON_STATUS_OK) {
+        return fail("iod_gauss_angles Vallado solve", 1);
     }
-    if (st == SIDEREON_STATUS_OK && (!finite3(pos) || !finite3(vel))) {
-        return fail("iod_gauss_angles output finite", 1);
+    for (int axis = 0; axis < 3; axis++) {
+        if (fabs(pos[axis] - expected_pos[axis]) > 1.0e-12 * fabs(expected_pos[axis]) ||
+            fabs(vel[axis] - expected_vel[axis]) > 1.0e-12 * fabs(expected_vel[axis])) {
+            return fail("iod_gauss_angles Vallado reference", 1);
+        }
     }
     return 0;
 }

@@ -307,19 +307,47 @@ static void test_angles_eclipse_bodies(void) {
 }
 
 static void test_iod_lambert_conjunction(void) {
-    double r1[3] = {7000.0, 0.0, 0.0};
-    double r2[3] = {7000.0 * cos(0.1745), 7000.0 * sin(0.1745), 0.0};
-    double r3[3] = {7000.0 * cos(0.3491), 7000.0 * sin(0.3491), 0.0};
+    double r1[3] = {0.0, 0.0, 6378.1363};
+    double r2[3] = {0.0, -4464.696, -5102.509};
+    double r3[3] = {0.0, 5740.323, 3189.068};
     double v2[3], t12 = 0.0, t23 = 0.0, copa = 0.0;
     check(sidereon_iod_gibbs(r1, r2, r3, v2, &t12, &t23, &copa) == SIDEREON_STATUS_OK,
           "iod_gibbs");
+    const double gibbs_v2[3] = {0.0, 5.5311472050176125, -5.191806413494606};
+    check(memcmp(v2, gibbs_v2, sizeof(v2)) == 0, "iod_gibbs Vallado velocity 0 ULP");
 
-    double lr2[3] = {0.0, 7000.0, 0.0};
-    double v1[3] = {0.0, 7.5, 0.0};
+    double hr1[3] = {3419.85564, 6019.82602, 2784.60022};
+    double hr2[3] = {2935.91195, 6326.18324, 2660.59584};
+    double hr3[3] = {2434.95202, 6597.38674, 2521.52311};
+    const double jd1 = 0.0;
+    const double jd2 = (60.0 + 16.48) / 86400.0;
+    const double jd3 = (120.0 + 33.04) / 86400.0;
+    check(sidereon_iod_hgibbs(hr1, hr2, hr3, jd1, jd2, jd3, v2, &t12, &t23, &copa) ==
+              SIDEREON_STATUS_OK,
+          "iod_hgibbs");
+    const double hgibbs_v2[3] = {-6.441557227511062, 3.777559606719521,
+                                  -1.7205675602414345};
+    check(memcmp(v2, hgibbs_v2, sizeof(v2)) == 0,
+          "iod_hgibbs Vallado velocity 0 ULP");
+
+    const double earth_radius_km = 6378.1363;
+    double lr1[3] = {2.5 * earth_radius_km, 0.0, 0.0};
+    double lr2[3] = {1.9151111 * earth_radius_km, 1.6069690 * earth_radius_km, 0.0};
+    double v1[3] = {0.0, 4.999792554221911, 0.0};
     double out_v1[3], out_v2[3];
-    check(sidereon_lambert_battin(r1, lr2, v1, 0, 0, 0, 1800.0, out_v1, out_v2) ==
+    check(sidereon_lambert_battin(lr1, lr2, v1, 0, 1, 1, 92854.234, out_v1, out_v2) ==
               SIDEREON_STATUS_OK,
           "lambert_battin");
+    const double lambert_v1[3] = {-0.8696153795282852, 6.3351545812502374, 0.0};
+    const double lambert_v2[3] = {-3.405994961791248, 5.41198791828363, 0.0};
+    for (int axis = 0; axis < 3; axis++) {
+        const double v1_scale = fmax(fabs(lambert_v1[axis]), 1.0);
+        const double v2_scale = fmax(fabs(lambert_v2[axis]), 1.0);
+        check(fabs(out_v1[axis] - lambert_v1[axis]) <= 1.0e-12 * v1_scale,
+              "lambert_battin Vallado departure velocity");
+        check(fabs(out_v2[axis] - lambert_v2[axis]) <= 1.0e-12 * v2_scale,
+              "lambert_battin Vallado arrival velocity");
+    }
 
     double cr1[3] = {7000.0, 0.0, 0.0};
     double cv1[3] = {0.0, 7.5, 0.0};
