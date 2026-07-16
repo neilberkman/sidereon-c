@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.31.2 - 2026-07-16
+
+- Returns the complete merged-SP3 identity through an owned result handle,
+  including canonical contributors and ordered precedence contributors.
+- Uses validated fixed-width integers for every nested identity selector and
+  presence flag crossing the C ABI, rejecting invalid values without undefined
+  behavior.
+- Adds the shared literal provenance fixture and builds against `sidereon` and
+  `sidereon-core` 0.31.2.
+
 ## 0.31.0 - 2026-07-16
 
 - Adds `sidereon_sp3_merge_input_identity`, which validates complete exact SP3

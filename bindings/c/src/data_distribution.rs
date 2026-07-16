@@ -104,24 +104,33 @@ pub enum SidereonArchiveCompression {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct SidereonProductIdentity {
-    pub family: SidereonProductFamily,
+    /// One of SidereonProductFamily_*, encoded as uint32_t so malformed C
+    /// input can be rejected without constructing an invalid Rust enum.
+    pub family: u32,
     pub analysis_center: [c_char; ANALYSIS_CENTER_C_BYTES],
-    pub publisher: SidereonProductPublisher,
-    pub solution_class: SidereonSolutionClass,
-    pub campaign: SidereonProductCampaign,
+    /// One of SidereonProductPublisher_*.
+    pub publisher: u32,
+    /// One of SidereonSolutionClass_*.
+    pub solution_class: u32,
+    /// One of SidereonProductCampaign_*.
+    pub campaign: u32,
     pub filename_version: u8,
     pub year: i32,
     pub month: u8,
     pub day: u8,
-    pub has_issue: bool,
+    /// Exactly 0 or 1.
+    pub has_issue: u8,
     pub issue: [c_char; PRODUCT_TOKEN_C_BYTES],
     pub span: [c_char; PRODUCT_TOKEN_C_BYTES],
     pub sample: [c_char; PRODUCT_TOKEN_C_BYTES],
     pub official_filename: [c_char; OFFICIAL_FILENAME_C_BYTES],
-    pub format: SidereonProductFormat,
-    pub has_format_version: bool,
+    /// One of SidereonProductFormat_*.
+    pub format: u32,
+    /// Exactly 0 or 1.
+    pub has_format_version: u8,
     pub format_version: [c_char; FORMAT_VERSION_C_BYTES],
-    pub has_prediction_horizon_days: bool,
+    /// Exactly 0 or 1.
+    pub has_prediction_horizon_days: u8,
     pub prediction_horizon_days: u8,
 }
 
@@ -177,7 +186,7 @@ fn map_cache_error(fn_name: &str, error: ExactCacheError) -> SidereonStatus {
     status
 }
 
-fn fixed_text<const N: usize>(
+pub(super) fn fixed_text<const N: usize>(
     fn_name: &str,
     label: &str,
     value: &str,
@@ -195,65 +204,128 @@ fn fixed_text<const N: usize>(
     Ok(output)
 }
 
-fn family_to_core(family: SidereonProductFamily) -> ProductType {
-    match family {
-        SidereonProductFamily::Sp3 => ProductType::Sp3,
-        SidereonProductFamily::Ionex => ProductType::Ionex,
-        SidereonProductFamily::RinexClock => ProductType::Clk,
-        SidereonProductFamily::RinexNavigation => ProductType::Nav,
-    }
+fn invalid_discriminant(fn_name: &str, label: &str, value: u32) -> SidereonStatus {
+    set_last_error(format!(
+        "{fn_name}: {label} has invalid discriminant {value}"
+    ));
+    SidereonStatus::InvalidArgument
 }
 
-pub(super) fn source_to_core(source: SidereonDistributionSource) -> DistributionSource {
-    match source {
-        SidereonDistributionSource::Direct => DistributionSource::Direct,
-        SidereonDistributionSource::NasaCddis => DistributionSource::NasaCddis,
-        SidereonDistributionSource::LocalFile => DistributionSource::LocalFile,
-        SidereonDistributionSource::InMemory => DistributionSource::InMemory,
-    }
-}
-
-pub(super) fn compression_to_core(compression: SidereonArchiveCompression) -> ArchiveCompression {
-    match compression {
-        SidereonArchiveCompression::None => ArchiveCompression::None,
-        SidereonArchiveCompression::Gzip => ArchiveCompression::Gzip,
-    }
-}
-
-fn publisher_to_core(value: SidereonProductPublisher) -> ProductPublisher {
+pub(super) fn bool_from_c(fn_name: &str, label: &str, value: u8) -> Result<bool, SidereonStatus> {
     match value {
-        SidereonProductPublisher::Igs => ProductPublisher::Igs,
-        SidereonProductPublisher::Code => ProductPublisher::Code,
-        SidereonProductPublisher::Esa => ProductPublisher::Esa,
-        SidereonProductPublisher::Gfz => ProductPublisher::Gfz,
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => {
+            set_last_error(format!("{fn_name}: {label} must be exactly 0 or 1"));
+            Err(SidereonStatus::InvalidArgument)
+        }
     }
 }
 
-fn solution_to_core(value: SidereonSolutionClass) -> SolutionClass {
+fn family_from_c(fn_name: &str, label: &str, value: u32) -> Result<ProductType, SidereonStatus> {
     match value {
-        SidereonSolutionClass::Final => SolutionClass::Final,
-        SidereonSolutionClass::Rapid => SolutionClass::Rapid,
-        SidereonSolutionClass::UltraRapid => SolutionClass::UltraRapid,
-        SidereonSolutionClass::Predicted => SolutionClass::Predicted,
-        SidereonSolutionClass::Broadcast => SolutionClass::Broadcast,
+        value if value == SidereonProductFamily::Sp3 as u32 => Ok(ProductType::Sp3),
+        value if value == SidereonProductFamily::Ionex as u32 => Ok(ProductType::Ionex),
+        value if value == SidereonProductFamily::RinexClock as u32 => Ok(ProductType::Clk),
+        value if value == SidereonProductFamily::RinexNavigation as u32 => Ok(ProductType::Nav),
+        _ => Err(invalid_discriminant(fn_name, label, value)),
     }
 }
 
-fn campaign_to_core(value: SidereonProductCampaign) -> ProductCampaign {
+pub(super) fn source_from_c(
+    fn_name: &str,
+    label: &str,
+    value: u32,
+) -> Result<DistributionSource, SidereonStatus> {
     match value {
-        SidereonProductCampaign::Operational => ProductCampaign::Operational,
-        SidereonProductCampaign::MultiGnss => ProductCampaign::MultiGnss,
-        SidereonProductCampaign::MultiGnssExperiment => ProductCampaign::MultiGnssExperiment,
-        SidereonProductCampaign::Broadcast => ProductCampaign::Broadcast,
+        value if value == SidereonDistributionSource::Direct as u32 => {
+            Ok(DistributionSource::Direct)
+        }
+        value if value == SidereonDistributionSource::NasaCddis as u32 => {
+            Ok(DistributionSource::NasaCddis)
+        }
+        value if value == SidereonDistributionSource::LocalFile as u32 => {
+            Ok(DistributionSource::LocalFile)
+        }
+        value if value == SidereonDistributionSource::InMemory as u32 => {
+            Ok(DistributionSource::InMemory)
+        }
+        _ => Err(invalid_discriminant(fn_name, label, value)),
     }
 }
 
-fn format_to_core(value: SidereonProductFormat) -> ProductFormat {
+pub(super) fn compression_from_c(
+    fn_name: &str,
+    label: &str,
+    value: u32,
+) -> Result<ArchiveCompression, SidereonStatus> {
     match value {
-        SidereonProductFormat::Sp3 => ProductFormat::Sp3,
-        SidereonProductFormat::Ionex => ProductFormat::Ionex,
-        SidereonProductFormat::RinexClock => ProductFormat::RinexClock,
-        SidereonProductFormat::RinexNavigation => ProductFormat::RinexNavigation,
+        value if value == SidereonArchiveCompression::None as u32 => Ok(ArchiveCompression::None),
+        value if value == SidereonArchiveCompression::Gzip as u32 => Ok(ArchiveCompression::Gzip),
+        _ => Err(invalid_discriminant(fn_name, label, value)),
+    }
+}
+
+fn publisher_from_c(
+    fn_name: &str,
+    label: &str,
+    value: u32,
+) -> Result<ProductPublisher, SidereonStatus> {
+    match value {
+        value if value == SidereonProductPublisher::Igs as u32 => Ok(ProductPublisher::Igs),
+        value if value == SidereonProductPublisher::Code as u32 => Ok(ProductPublisher::Code),
+        value if value == SidereonProductPublisher::Esa as u32 => Ok(ProductPublisher::Esa),
+        value if value == SidereonProductPublisher::Gfz as u32 => Ok(ProductPublisher::Gfz),
+        _ => Err(invalid_discriminant(fn_name, label, value)),
+    }
+}
+
+fn solution_from_c(
+    fn_name: &str,
+    label: &str,
+    value: u32,
+) -> Result<SolutionClass, SidereonStatus> {
+    match value {
+        value if value == SidereonSolutionClass::Final as u32 => Ok(SolutionClass::Final),
+        value if value == SidereonSolutionClass::Rapid as u32 => Ok(SolutionClass::Rapid),
+        value if value == SidereonSolutionClass::UltraRapid as u32 => Ok(SolutionClass::UltraRapid),
+        value if value == SidereonSolutionClass::Predicted as u32 => Ok(SolutionClass::Predicted),
+        value if value == SidereonSolutionClass::Broadcast as u32 => Ok(SolutionClass::Broadcast),
+        _ => Err(invalid_discriminant(fn_name, label, value)),
+    }
+}
+
+fn campaign_from_c(
+    fn_name: &str,
+    label: &str,
+    value: u32,
+) -> Result<ProductCampaign, SidereonStatus> {
+    match value {
+        value if value == SidereonProductCampaign::Operational as u32 => {
+            Ok(ProductCampaign::Operational)
+        }
+        value if value == SidereonProductCampaign::MultiGnss as u32 => {
+            Ok(ProductCampaign::MultiGnss)
+        }
+        value if value == SidereonProductCampaign::MultiGnssExperiment as u32 => {
+            Ok(ProductCampaign::MultiGnssExperiment)
+        }
+        value if value == SidereonProductCampaign::Broadcast as u32 => {
+            Ok(ProductCampaign::Broadcast)
+        }
+        _ => Err(invalid_discriminant(fn_name, label, value)),
+    }
+}
+
+fn format_from_c(fn_name: &str, label: &str, value: u32) -> Result<ProductFormat, SidereonStatus> {
+    match value {
+        value if value == SidereonProductFormat::Sp3 as u32 => Ok(ProductFormat::Sp3),
+        value if value == SidereonProductFormat::Ionex as u32 => Ok(ProductFormat::Ionex),
+        value if value == SidereonProductFormat::RinexClock as u32 => Ok(ProductFormat::RinexClock),
+        value if value == SidereonProductFormat::RinexNavigation as u32 => {
+            Ok(ProductFormat::RinexNavigation)
+        }
+        _ => Err(invalid_discriminant(fn_name, label, value)),
     }
 }
 
@@ -301,38 +373,38 @@ fn compression_from_core(value: ArchiveCompression) -> SidereonArchiveCompressio
     }
 }
 
-fn identity_to_c(
+pub(super) fn identity_to_c(
     fn_name: &str,
     identity: &ProductIdentity,
 ) -> Result<SidereonProductIdentity, SidereonStatus> {
     Ok(SidereonProductIdentity {
         family: match identity.family {
-            ProductType::Sp3 => SidereonProductFamily::Sp3,
-            ProductType::Ionex => SidereonProductFamily::Ionex,
-            ProductType::Clk => SidereonProductFamily::RinexClock,
-            ProductType::Nav => SidereonProductFamily::RinexNavigation,
+            ProductType::Sp3 => SidereonProductFamily::Sp3 as u32,
+            ProductType::Ionex => SidereonProductFamily::Ionex as u32,
+            ProductType::Clk => SidereonProductFamily::RinexClock as u32,
+            ProductType::Nav => SidereonProductFamily::RinexNavigation as u32,
         },
         analysis_center: fixed_text(fn_name, "analysis_center", identity.analysis_center.code())?,
-        publisher: publisher_from_core(identity.publisher),
-        solution_class: solution_from_core(identity.solution),
-        campaign: campaign_from_core(identity.campaign),
+        publisher: publisher_from_core(identity.publisher) as u32,
+        solution_class: solution_from_core(identity.solution) as u32,
+        campaign: campaign_from_core(identity.campaign) as u32,
         filename_version: identity.version,
         year: identity.date.year,
         month: identity.date.month,
         day: identity.date.day,
-        has_issue: identity.issue.is_some(),
+        has_issue: u8::from(identity.issue.is_some()),
         issue: fixed_text(fn_name, "issue", identity.issue.as_deref().unwrap_or(""))?,
         span: fixed_text(fn_name, "span", &identity.span)?,
         sample: fixed_text(fn_name, "sample", &identity.sample)?,
         official_filename: fixed_text(fn_name, "official_filename", &identity.official_filename)?,
-        format: format_from_core(identity.format),
-        has_format_version: identity.format_version.is_some(),
+        format: format_from_core(identity.format) as u32,
+        has_format_version: u8::from(identity.format_version.is_some()),
         format_version: fixed_text(
             fn_name,
             "format_version",
             identity.format_version.as_deref().unwrap_or(""),
         )?,
-        has_prediction_horizon_days: identity.prediction_horizon_days.is_some(),
+        has_prediction_horizon_days: u8::from(identity.prediction_horizon_days.is_some()),
         prediction_horizon_days: identity.prediction_horizon_days.unwrap_or(0),
     })
 }
@@ -361,8 +433,19 @@ pub(super) fn identity_from_c(
     identity: &SidereonProductIdentity,
 ) -> Result<ProductIdentity, SidereonStatus> {
     let issue = fixed_text_from_c(fn_name, "identity.issue", &identity.issue)?;
+    let has_issue = bool_from_c(fn_name, "identity.has_issue", identity.has_issue)?;
+    let has_format_version = bool_from_c(
+        fn_name,
+        "identity.has_format_version",
+        identity.has_format_version,
+    )?;
+    let has_prediction_horizon_days = bool_from_c(
+        fn_name,
+        "identity.has_prediction_horizon_days",
+        identity.has_prediction_horizon_days,
+    )?;
     let product = ProductIdentity {
-        family: family_to_core(identity.family),
+        family: family_from_c(fn_name, "identity.family", identity.family)?,
         analysis_center: fixed_text_from_c(
             fn_name,
             "identity.analysis_center",
@@ -370,17 +453,13 @@ pub(super) fn identity_from_c(
         )?
         .parse()
         .map_err(|error| map_error(fn_name, error))?,
-        publisher: publisher_to_core(identity.publisher),
-        solution: solution_to_core(identity.solution_class),
-        campaign: campaign_to_core(identity.campaign),
+        publisher: publisher_from_c(fn_name, "identity.publisher", identity.publisher)?,
+        solution: solution_from_c(fn_name, "identity.solution_class", identity.solution_class)?,
+        campaign: campaign_from_c(fn_name, "identity.campaign", identity.campaign)?,
         version: identity.filename_version,
         date: ProductDate::new(identity.year, identity.month, identity.day)
             .map_err(|error| map_error(fn_name, error))?,
-        issue: if identity.has_issue {
-            Some(issue)
-        } else {
-            None
-        },
+        issue: if has_issue { Some(issue) } else { None },
         span: fixed_text_from_c(fn_name, "identity.span", &identity.span)?,
         sample: fixed_text_from_c(fn_name, "identity.sample", &identity.sample)?,
         official_filename: fixed_text_from_c(
@@ -388,8 +467,8 @@ pub(super) fn identity_from_c(
             "identity.official_filename",
             &identity.official_filename,
         )?,
-        format: format_to_core(identity.format),
-        format_version: if identity.has_format_version {
+        format: format_from_c(fn_name, "identity.format", identity.format)?,
+        format_version: if has_format_version {
             Some(fixed_text_from_c(
                 fn_name,
                 "identity.format_version",
@@ -398,8 +477,7 @@ pub(super) fn identity_from_c(
         } else {
             None
         },
-        prediction_horizon_days: identity
-            .has_prediction_horizon_days
+        prediction_horizon_days: has_prediction_horizon_days
             .then_some(identity.prediction_horizon_days),
     };
     product
@@ -411,7 +489,7 @@ pub(super) fn identity_from_c(
 #[derive(Clone, Copy)]
 struct ProductInputs {
     center: *const c_char,
-    family: SidereonProductFamily,
+    family: u32,
     year: i32,
     month: u8,
     day: u8,
@@ -440,17 +518,15 @@ unsafe fn product_spec(
     } else {
         Some(parse_bounded_c_string(fn_name, "issue", input.issue, 16)?)
     };
-    core_data::product(
-        center,
-        family_to_core(input.family),
-        date,
-        sample.as_deref(),
-        issue.as_deref(),
-    )
-    .map_err(|error| map_error(fn_name, error))
+    let family = family_from_c(fn_name, "family", input.family)?;
+    core_data::product(center, family, date, sample.as_deref(), issue.as_deref())
+        .map_err(|error| map_error(fn_name, error))
 }
 
 /// Resolve an exact catalog product identity independently from distributor.
+///
+/// `family` is one of SidereonProductFamily_* encoded as uint32_t. Invalid
+/// values fail closed with SIDEREON_STATUS_INVALID_ARGUMENT.
 ///
 /// `sample` may be NULL to use the catalog default. `issue` may be NULL only
 /// for product lines that do not require an ultra-rapid issue.
@@ -460,7 +536,7 @@ unsafe fn product_spec(
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_data_product_identity(
     center: *const c_char,
-    family: SidereonProductFamily,
+    family: u32,
     year: i32,
     month: u8,
     day: u8,
@@ -601,20 +677,22 @@ pub unsafe extern "C" fn sidereon_data_validate_exact_product_set(
 /// Resolve one explicit distributor for an exact catalog product.
 ///
 /// This function performs no network or file IO. `original_url` is absent for
-/// local-file and in-memory sources.
+/// local-file and in-memory sources. `family` and `source` are the corresponding
+/// SidereonProductFamily_* and SidereonDistributionSource_* values encoded as
+/// uint32_t; invalid values fail closed.
 ///
 /// Safety: non-null text pointers must reference null-terminated UTF-8 strings;
 /// `out_location` must reference writable storage.
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_data_distribution_location(
     center: *const c_char,
-    family: SidereonProductFamily,
+    family: u32,
     year: i32,
     month: u8,
     day: u8,
     sample: *const c_char,
     issue: *const c_char,
-    source: SidereonDistributionSource,
+    source: u32,
     out_location: *mut SidereonDistributionLocation,
 ) -> SidereonStatus {
     const FN_NAME: &str = "sidereon_data_distribution_location";
@@ -638,14 +716,23 @@ pub unsafe extern "C" fn sidereon_data_distribution_location(
             Ok(product) => product,
             Err(status) => return status,
         };
-        let location = match product.distribution_location(source_to_core(source)) {
+        let source = match source_from_c(FN_NAME, "source", source) {
+            Ok(source) => source,
+            Err(status) => return status,
+        };
+        let location = match product.distribution_location(source) {
             Ok(location) => location,
             Err(error) => return map_error(FN_NAME, error),
         };
         let original_url = location.original_url.as_deref().unwrap_or("");
         let converted = (|| {
             Ok::<_, SidereonStatus>(SidereonDistributionLocation {
-                source,
+                source: match source {
+                    DistributionSource::Direct => SidereonDistributionSource::Direct,
+                    DistributionSource::NasaCddis => SidereonDistributionSource::NasaCddis,
+                    DistributionSource::LocalFile => SidereonDistributionSource::LocalFile,
+                    DistributionSource::InMemory => SidereonDistributionSource::InMemory,
+                },
                 has_original_url: location.original_url.is_some(),
                 original_url: fixed_text(FN_NAME, "original_url", original_url)?,
                 archive_filename: fixed_text(
@@ -668,6 +755,8 @@ pub unsafe extern "C" fn sidereon_data_distribution_location(
 
 /// Open one exact identity/source cache and acquire its bounded cross-process lock.
 ///
+/// `source` is one SidereonDistributionSource_* value encoded as uint32_t.
+///
 /// `stable_path` names the official product below its identity/source cache
 /// directory. The returned handle owns the lock until
 /// `sidereon_exact_cache_free` is called.
@@ -678,7 +767,7 @@ pub unsafe extern "C" fn sidereon_data_distribution_location(
 pub unsafe extern "C" fn sidereon_exact_cache_open(
     stable_path: *const c_char,
     identity: *const SidereonProductIdentity,
-    source: SidereonDistributionSource,
+    source: u32,
     timeout_ms: u64,
     out_cache: *mut *mut SidereonExactCache,
 ) -> SidereonStatus {
@@ -699,7 +788,11 @@ pub unsafe extern "C" fn sidereon_exact_cache_open(
             Ok(identity) => identity,
             Err(status) => return status,
         };
-        let cache = match ExactProductCache::new(stable_path, identity, source_to_core(source)) {
+        let source = match source_from_c(FN_NAME, "source", source) {
+            Ok(source) => source,
+            Err(status) => return status,
+        };
+        let cache = match ExactProductCache::new(stable_path, identity, source) {
             Ok(cache) => cache,
             Err(error) => return map_cache_error(FN_NAME, error),
         };
@@ -771,6 +864,7 @@ pub unsafe extern "C" fn sidereon_exact_cache_read(
 /// complete entry or the newly committed complete entry while a cooperating
 /// writer publishes. Miss and error behavior matches
 /// `sidereon_exact_cache_read`.
+/// `source` is one SidereonDistributionSource_* value encoded as uint32_t.
 ///
 /// Safety: `stable_path` and `identity` must be readable; `out_hit` and
 /// `out_entry` must be writable storage.
@@ -778,7 +872,7 @@ pub unsafe extern "C" fn sidereon_exact_cache_read(
 pub unsafe extern "C" fn sidereon_exact_cache_read_unlocked(
     stable_path: *const c_char,
     identity: *const SidereonProductIdentity,
-    source: SidereonDistributionSource,
+    source: u32,
     out_hit: *mut bool,
     out_entry: *mut *mut SidereonExactCacheEntry,
 ) -> SidereonStatus {
@@ -804,7 +898,11 @@ pub unsafe extern "C" fn sidereon_exact_cache_read_unlocked(
             Ok(identity) => identity,
             Err(status) => return status,
         };
-        let cache = match ExactProductCache::new(stable_path, identity, source_to_core(source)) {
+        let source = match source_from_c(FN_NAME, "source", source) {
+            Ok(source) => source,
+            Err(status) => return status,
+        };
+        let cache = match ExactProductCache::new(stable_path, identity, source) {
             Ok(cache) => cache,
             Err(error) => return map_cache_error(FN_NAME, error),
         };
@@ -901,30 +999,54 @@ pub unsafe extern "C" fn sidereon_exact_cache_cleanup(
     })
 }
 
-fn entry_component_bytes(
-    entry: &SidereonExactCacheEntry,
-    component: SidereonExactCacheComponent,
-) -> &[u8] {
+#[derive(Clone, Copy)]
+enum ExactCacheComponent {
+    Product,
+    Archive,
+    Provenance,
+}
+
+fn cache_component_from_c(
+    fn_name: &str,
+    value: u32,
+) -> Result<ExactCacheComponent, SidereonStatus> {
+    match value {
+        value if value == SidereonExactCacheComponent::Product as u32 => {
+            Ok(ExactCacheComponent::Product)
+        }
+        value if value == SidereonExactCacheComponent::Archive as u32 => {
+            Ok(ExactCacheComponent::Archive)
+        }
+        value if value == SidereonExactCacheComponent::Provenance as u32 => {
+            Ok(ExactCacheComponent::Provenance)
+        }
+        _ => Err(invalid_discriminant(fn_name, "component", value)),
+    }
+}
+
+fn entry_component_bytes(entry: &SidereonExactCacheEntry, component: ExactCacheComponent) -> &[u8] {
     match component {
-        SidereonExactCacheComponent::Product => &entry.entry.product,
-        SidereonExactCacheComponent::Archive => &entry.entry.archive,
-        SidereonExactCacheComponent::Provenance => &entry.entry.provenance,
+        ExactCacheComponent::Product => &entry.entry.product,
+        ExactCacheComponent::Archive => &entry.entry.archive,
+        ExactCacheComponent::Provenance => &entry.entry.provenance,
     }
 }
 
 fn entry_component_path(
     entry: &SidereonExactCacheEntry,
-    component: SidereonExactCacheComponent,
+    component: ExactCacheComponent,
 ) -> Vec<u8> {
     let path = match component {
-        SidereonExactCacheComponent::Product => &entry.entry.product_path,
-        SidereonExactCacheComponent::Archive => &entry.entry.archive_path,
-        SidereonExactCacheComponent::Provenance => &entry.entry.provenance_path,
+        ExactCacheComponent::Product => &entry.entry.product_path,
+        ExactCacheComponent::Archive => &entry.entry.archive_path,
+        ExactCacheComponent::Provenance => &entry.entry.provenance_path,
     };
     path.to_string_lossy().as_bytes().to_vec()
 }
 
 /// Copy one authenticated byte component from a verified cache entry.
+///
+/// `component` is one SidereonExactCacheComponent_* value encoded as uint32_t.
 ///
 /// Uses the standard variable-length output contract; output is not
 /// null-terminated.
@@ -934,7 +1056,7 @@ fn entry_component_path(
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_exact_cache_entry_copy_bytes(
     entry: *const SidereonExactCacheEntry,
-    component: SidereonExactCacheComponent,
+    component: u32,
     out: *mut u8,
     out_len: usize,
     out_written: *mut usize,
@@ -945,6 +1067,10 @@ pub unsafe extern "C" fn sidereon_exact_cache_entry_copy_bytes(
         if let Err(status) = init_copy_counts(FN_NAME, out_written, out_required) {
             return status;
         }
+        let component = match cache_component_from_c(FN_NAME, component) {
+            Ok(component) => component,
+            Err(status) => return status,
+        };
         let entry = match require_ref(entry, FN_NAME, "entry") {
             Ok(entry) => entry,
             Err(status) => return status,
@@ -973,7 +1099,7 @@ pub unsafe extern "C" fn sidereon_exact_cache_entry_copy_bytes(
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_exact_cache_entry_copy_path(
     entry: *const SidereonExactCacheEntry,
-    component: SidereonExactCacheComponent,
+    component: u32,
     out: *mut u8,
     out_len: usize,
     out_written: *mut usize,
@@ -984,6 +1110,10 @@ pub unsafe extern "C" fn sidereon_exact_cache_entry_copy_path(
         if let Err(status) = init_copy_counts(FN_NAME, out_written, out_required) {
             return status;
         }
+        let component = match cache_component_from_c(FN_NAME, component) {
+            Ok(component) => component,
+            Err(status) => return status,
+        };
         let entry = match require_ref(entry, FN_NAME, "entry") {
             Ok(entry) => entry,
             Err(status) => return status,
@@ -1072,7 +1202,7 @@ mod tests {
         let status = unsafe {
             sidereon_data_product_identity(
                 center.as_ptr(),
-                SidereonProductFamily::Sp3,
+                SidereonProductFamily::Sp3 as u32,
                 2026,
                 7,
                 12,
@@ -1083,8 +1213,8 @@ mod tests {
         };
         assert_eq!(status, SidereonStatus::Ok);
         let identity = unsafe { identity.assume_init() };
-        assert_eq!(identity.publisher, SidereonProductPublisher::Code);
-        assert_eq!(identity.solution_class, SidereonSolutionClass::Final);
+        assert_eq!(identity.publisher, SidereonProductPublisher::Code as u32);
+        assert_eq!(identity.solution_class, SidereonSolutionClass::Final as u32);
         assert_eq!(
             unsafe { CStr::from_ptr(identity.analysis_center.as_ptr()) }
                 .to_str()
@@ -1093,7 +1223,7 @@ mod tests {
         );
         assert_eq!(
             identity.campaign,
-            SidereonProductCampaign::MultiGnssExperiment
+            SidereonProductCampaign::MultiGnssExperiment as u32
         );
         assert_eq!(
             unsafe { CStr::from_ptr(identity.official_filename.as_ptr()) }
@@ -1134,13 +1264,13 @@ mod tests {
         let status = unsafe {
             sidereon_data_distribution_location(
                 center.as_ptr(),
-                SidereonProductFamily::Sp3,
+                SidereonProductFamily::Sp3 as u32,
                 2026,
                 7,
                 12,
                 ptr::null(),
                 ptr::null(),
-                SidereonDistributionSource::NasaCddis,
+                SidereonDistributionSource::NasaCddis as u32,
                 location.as_mut_ptr(),
             )
         };
@@ -1164,7 +1294,7 @@ COD0MGXFIN_20261930000_01D_05M_ORB.SP3.gz"
             unsafe {
                 sidereon_data_product_identity(
                     center.as_ptr(),
-                    SidereonProductFamily::Sp3,
+                    SidereonProductFamily::Sp3 as u32,
                     2026,
                     7,
                     12,
@@ -1192,7 +1322,7 @@ COD0MGXFIN_20261930000_01D_05M_ORB.SP3.gz"
                 sidereon_exact_cache_open(
                     stable_c.as_ptr(),
                     &identity,
-                    SidereonDistributionSource::InMemory,
+                    SidereonDistributionSource::InMemory as u32,
                     1_000,
                     &mut cache,
                 )
@@ -1207,7 +1337,7 @@ COD0MGXFIN_20261930000_01D_05M_ORB.SP3.gz"
                 sidereon_exact_cache_open(
                     stable_c.as_ptr(),
                     &identity,
-                    SidereonDistributionSource::InMemory,
+                    SidereonDistributionSource::InMemory as u32,
                     0,
                     &mut blocked,
                 )
@@ -1242,7 +1372,7 @@ COD0MGXFIN_20261930000_01D_05M_ORB.SP3.gz"
             unsafe {
                 sidereon_exact_cache_entry_copy_bytes(
                     published,
-                    SidereonExactCacheComponent::Product,
+                    SidereonExactCacheComponent::Product as u32,
                     ptr::null_mut(),
                     0,
                     &mut written,
@@ -1256,7 +1386,7 @@ COD0MGXFIN_20261930000_01D_05M_ORB.SP3.gz"
             unsafe {
                 sidereon_exact_cache_entry_copy_bytes(
                     published,
-                    SidereonExactCacheComponent::Product,
+                    SidereonExactCacheComponent::Product as u32,
                     copied.as_mut_ptr(),
                     copied.len(),
                     &mut written,
@@ -1306,7 +1436,7 @@ COD0MGXFIN_20261930000_01D_05M_ORB.SP3.gz"
                 sidereon_exact_cache_read_unlocked(
                     stable_c.as_ptr(),
                     &identity,
-                    SidereonDistributionSource::InMemory,
+                    SidereonDistributionSource::InMemory as u32,
                     &mut unlocked_hit,
                     &mut unlocked,
                 )
@@ -1323,7 +1453,7 @@ COD0MGXFIN_20261930000_01D_05M_ORB.SP3.gz"
                 sidereon_exact_cache_open(
                     stable_c.as_ptr(),
                     &identity,
-                    SidereonDistributionSource::InMemory,
+                    SidereonDistributionSource::InMemory as u32,
                     1_000,
                     &mut reopened,
                 )
@@ -1341,13 +1471,13 @@ COD0MGXFIN_20261930000_01D_05M_ORB.SP3.gz"
         let status = unsafe {
             sidereon_data_distribution_location(
                 center.as_ptr(),
-                SidereonProductFamily::RinexNavigation,
+                SidereonProductFamily::RinexNavigation as u32,
                 2020,
                 6,
                 25,
                 ptr::null(),
                 ptr::null(),
-                SidereonDistributionSource::NasaCddis,
+                SidereonDistributionSource::NasaCddis as u32,
                 location.as_mut_ptr(),
             )
         };
@@ -1387,13 +1517,13 @@ COD0OPSPRD_20270010000_01D_01H_GIM.INX.gz",
             let status = unsafe {
                 sidereon_data_distribution_location(
                     center.as_ptr(),
-                    SidereonProductFamily::Ionex,
+                    SidereonProductFamily::Ionex as u32,
                     year,
                     month,
                     day,
                     ptr::null(),
                     ptr::null(),
-                    SidereonDistributionSource::Direct,
+                    SidereonDistributionSource::Direct as u32,
                     location.as_mut_ptr(),
                 )
             };

@@ -46,8 +46,8 @@
 
 #define SIDEREON_VERSION_MAJOR 0
 #define SIDEREON_VERSION_MINOR 31
-#define SIDEREON_VERSION_PATCH 0
-#define SIDEREON_VERSION_STRING "0.31.0"
+#define SIDEREON_VERSION_PATCH 2
+#define SIDEREON_VERSION_STRING "0.31.2"
 
 #define ANALYSIS_CENTER_C_BYTES 32
 
@@ -352,16 +352,6 @@ typedef enum SidereonObservableStateElementStatus {
 } SidereonObservableStateElementStatus;
 
 /**
- * Standard GNSS product family.
- */
-typedef enum SidereonProductFamily {
-    SIDEREON_PRODUCT_FAMILY_SP3 = 0,
-    SIDEREON_PRODUCT_FAMILY_IONEX = 1,
-    SIDEREON_PRODUCT_FAMILY_RINEX_CLOCK = 2,
-    SIDEREON_PRODUCT_FAMILY_RINEX_NAVIGATION = 3,
-} SidereonProductFamily;
-
-/**
  * Explicit public distributor or caller-provided input.
  */
 typedef enum SidereonDistributionSource {
@@ -378,47 +368,6 @@ typedef enum SidereonArchiveCompression {
     SIDEREON_ARCHIVE_COMPRESSION_NONE = 0,
     SIDEREON_ARCHIVE_COMPRESSION_GZIP = 1,
 } SidereonArchiveCompression;
-
-/**
- * Public organization that produced or combined the product.
- */
-typedef enum SidereonProductPublisher {
-    SIDEREON_PRODUCT_PUBLISHER_IGS = 0,
-    SIDEREON_PRODUCT_PUBLISHER_CODE = 1,
-    SIDEREON_PRODUCT_PUBLISHER_ESA = 2,
-    SIDEREON_PRODUCT_PUBLISHER_GFZ = 3,
-} SidereonProductPublisher;
-
-/**
- * Public product solution class.
- */
-typedef enum SidereonSolutionClass {
-    SIDEREON_SOLUTION_CLASS_FINAL = 0,
-    SIDEREON_SOLUTION_CLASS_RAPID = 1,
-    SIDEREON_SOLUTION_CLASS_ULTRA_RAPID = 2,
-    SIDEREON_SOLUTION_CLASS_PREDICTED = 3,
-    SIDEREON_SOLUTION_CLASS_BROADCAST = 4,
-} SidereonSolutionClass;
-
-/**
- * Public campaign token encoded by the official filename.
- */
-typedef enum SidereonProductCampaign {
-    SIDEREON_PRODUCT_CAMPAIGN_OPERATIONAL = 0,
-    SIDEREON_PRODUCT_CAMPAIGN_MULTI_GNSS = 1,
-    SIDEREON_PRODUCT_CAMPAIGN_MULTI_GNSS_EXPERIMENT = 2,
-    SIDEREON_PRODUCT_CAMPAIGN_BROADCAST = 3,
-} SidereonProductCampaign;
-
-/**
- * Standard serialization format.
- */
-typedef enum SidereonProductFormat {
-    SIDEREON_PRODUCT_FORMAT_SP3 = 0,
-    SIDEREON_PRODUCT_FORMAT_IONEX = 1,
-    SIDEREON_PRODUCT_FORMAT_RINEX_CLOCK = 2,
-    SIDEREON_PRODUCT_FORMAT_RINEX_NAVIGATION = 3,
-} SidereonProductFormat;
 
 /**
  * Eclipse status, mirroring sidereon_core::astro::events::eclipse::EclipseStatus.
@@ -463,15 +412,6 @@ typedef enum SidereonErrorMetricsErrorKind {
      */
     SIDEREON_ERROR_METRICS_ERROR_KIND_ROTATION = 4,
 } SidereonErrorMetricsErrorKind;
-
-/**
- * Byte/path component of an immutable exact-cache entry.
- */
-typedef enum SidereonExactCacheComponent {
-    SIDEREON_EXACT_CACHE_COMPONENT_PRODUCT = 0,
-    SIDEREON_EXACT_CACHE_COMPONENT_ARCHIVE = 1,
-    SIDEREON_EXACT_CACHE_COMPONENT_PROVENANCE = 2,
-} SidereonExactCacheComponent;
 
 /**
  * Direction of a Moon elevation threshold crossing.
@@ -1140,6 +1080,66 @@ typedef enum SidereonStaticPositionInfluenceStatus {
      */
     SIDEREON_STATIC_POSITION_INFLUENCE_STATUS_SOLVE_FAILED = 5,
 } SidereonStaticPositionInfluenceStatus;
+
+/**
+ * Standard GNSS product family.
+ */
+typedef enum SidereonProductFamily {
+    SIDEREON_PRODUCT_FAMILY_SP3 = 0,
+    SIDEREON_PRODUCT_FAMILY_IONEX = 1,
+    SIDEREON_PRODUCT_FAMILY_RINEX_CLOCK = 2,
+    SIDEREON_PRODUCT_FAMILY_RINEX_NAVIGATION = 3,
+} SidereonProductFamily;
+
+/**
+ * Public organization that produced or combined the product.
+ */
+typedef enum SidereonProductPublisher {
+    SIDEREON_PRODUCT_PUBLISHER_IGS = 0,
+    SIDEREON_PRODUCT_PUBLISHER_CODE = 1,
+    SIDEREON_PRODUCT_PUBLISHER_ESA = 2,
+    SIDEREON_PRODUCT_PUBLISHER_GFZ = 3,
+} SidereonProductPublisher;
+
+/**
+ * Public product solution class.
+ */
+typedef enum SidereonSolutionClass {
+    SIDEREON_SOLUTION_CLASS_FINAL = 0,
+    SIDEREON_SOLUTION_CLASS_RAPID = 1,
+    SIDEREON_SOLUTION_CLASS_ULTRA_RAPID = 2,
+    SIDEREON_SOLUTION_CLASS_PREDICTED = 3,
+    SIDEREON_SOLUTION_CLASS_BROADCAST = 4,
+} SidereonSolutionClass;
+
+/**
+ * Public campaign token encoded by the official filename.
+ */
+typedef enum SidereonProductCampaign {
+    SIDEREON_PRODUCT_CAMPAIGN_OPERATIONAL = 0,
+    SIDEREON_PRODUCT_CAMPAIGN_MULTI_GNSS = 1,
+    SIDEREON_PRODUCT_CAMPAIGN_MULTI_GNSS_EXPERIMENT = 2,
+    SIDEREON_PRODUCT_CAMPAIGN_BROADCAST = 3,
+} SidereonProductCampaign;
+
+/**
+ * Standard serialization format.
+ */
+typedef enum SidereonProductFormat {
+    SIDEREON_PRODUCT_FORMAT_SP3 = 0,
+    SIDEREON_PRODUCT_FORMAT_IONEX = 1,
+    SIDEREON_PRODUCT_FORMAT_RINEX_CLOCK = 2,
+    SIDEREON_PRODUCT_FORMAT_RINEX_NAVIGATION = 3,
+} SidereonProductFormat;
+
+/**
+ * Byte/path component of an immutable exact-cache entry.
+ */
+typedef enum SidereonExactCacheComponent {
+    SIDEREON_EXACT_CACHE_COMPONENT_PRODUCT = 0,
+    SIDEREON_EXACT_CACHE_COMPONENT_ARCHIVE = 1,
+    SIDEREON_EXACT_CACHE_COMPONENT_PROVENANCE = 2,
+} SidereonExactCacheComponent;
 
 /**
  * Floating-point evaluation recipe for PROJ vertical-grid interpolation.
@@ -3394,6 +3394,15 @@ typedef struct SidereonSourcedSolution SidereonSourcedSolution;
 typedef struct SidereonSp3 SidereonSp3;
 
 /**
+ * Canonical, versioned identity of exact SP3 merge inputs and policy.
+ *
+ * The handle retains both the distributor-independent canonical contributor
+ * order and, for precedence merges, the caller's semantic priority order.
+ * Release it with `sidereon_sp3_merge_input_identity_free`.
+ */
+typedef struct SidereonSp3MergeInputIdentity SidereonSp3MergeInputIdentity;
+
+/**
  * An SP3 merge audit report. Opaque to C. Create with sidereon_sp3_merge and
  * release with sidereon_sp3_merge_report_free.
  */
@@ -5443,24 +5452,49 @@ typedef struct SidereonDataProblem {
  * distributor transport-compression suffixes.
  */
 typedef struct SidereonProductIdentity {
-    enum SidereonProductFamily family;
+    /**
+     * One of SidereonProductFamily_*, encoded as uint32_t so malformed C
+     * input can be rejected without constructing an invalid Rust enum.
+     */
+    uint32_t family;
     char analysis_center[ANALYSIS_CENTER_C_BYTES];
-    enum SidereonProductPublisher publisher;
-    enum SidereonSolutionClass solution_class;
-    enum SidereonProductCampaign campaign;
+    /**
+     * One of SidereonProductPublisher_*.
+     */
+    uint32_t publisher;
+    /**
+     * One of SidereonSolutionClass_*.
+     */
+    uint32_t solution_class;
+    /**
+     * One of SidereonProductCampaign_*.
+     */
+    uint32_t campaign;
     uint8_t filename_version;
     int32_t year;
     uint8_t month;
     uint8_t day;
-    bool has_issue;
+    /**
+     * Exactly 0 or 1.
+     */
+    uint8_t has_issue;
     char issue[PRODUCT_TOKEN_C_BYTES];
     char span[PRODUCT_TOKEN_C_BYTES];
     char sample[PRODUCT_TOKEN_C_BYTES];
     char official_filename[OFFICIAL_FILENAME_C_BYTES];
-    enum SidereonProductFormat format;
-    bool has_format_version;
+    /**
+     * One of SidereonProductFormat_*.
+     */
+    uint32_t format;
+    /**
+     * Exactly 0 or 1.
+     */
+    uint8_t has_format_version;
     char format_version[FORMAT_VERSION_C_BYTES];
-    bool has_prediction_horizon_days;
+    /**
+     * Exactly 0 or 1.
+     */
+    uint8_t has_prediction_horizon_days;
     uint8_t prediction_horizon_days;
 } SidereonProductIdentity;
 
@@ -16387,8 +16421,9 @@ typedef struct SidereonSp3MergeOptions {
     uint32_t precedence_scope;
     /**
      * Enable contested-cell outlier rejection.
+     * Exactly 0 or 1.
      */
-    bool outlier_reject_enabled;
+    uint8_t outlier_reject_enabled;
     /**
      * Position tolerance for the outlier guard, meters.
      */
@@ -16399,8 +16434,9 @@ typedef struct SidereonSp3MergeOptions {
     double outlier_reject_clock_tolerance_s;
     /**
      * Whether target_epoch_interval_s is supplied.
+     * Exactly 0 or 1.
      */
-    bool target_epoch_interval_s_enabled;
+    uint8_t target_epoch_interval_s_enabled;
     /**
      * Output epoch spacing in seconds when enabled.
      */
@@ -16423,8 +16459,9 @@ typedef struct SidereonSp3MergeOptions {
     size_t asserted_frame_label_set_count;
     /**
      * Enable catalog Helmert reconciliation between known ITRF/IGS labels.
+     * Exactly 0 or 1.
      */
-    bool helmert_frame_reconciliation;
+    uint8_t helmert_frame_reconciliation;
 } SidereonSp3MergeOptions;
 
 /**
@@ -16445,8 +16482,9 @@ typedef struct SidereonSp3ArtifactIdentity {
     struct SidereonProductIdentity resolved_identity;
     /**
      * Explicit distributor that supplied the artifact.
+     * One of SidereonDistributionSource_*, encoded as uint32_t.
      */
-    enum SidereonDistributionSource distribution_source;
+    uint32_t distribution_source;
     /**
      * Official decompressed product filename.
      */
@@ -16469,8 +16507,9 @@ typedef struct SidereonSp3ArtifactIdentity {
     uint64_t archive_byte_length;
     /**
      * Compression applied to the distributor archive.
+     * One of SidereonArchiveCompression_*, encoded as uint32_t.
      */
-    enum SidereonArchiveCompression compression;
+    uint32_t compression;
 } SidereonSp3ArtifactIdentity;
 
 /**
@@ -19843,19 +19882,21 @@ enum SidereonStatus sidereon_cycle_slip_options_init(struct SidereonCycleSlipOpt
  * Resolve one explicit distributor for an exact catalog product.
  *
  * This function performs no network or file IO. `original_url` is absent for
- * local-file and in-memory sources.
+ * local-file and in-memory sources. `family` and `source` are the corresponding
+ * SidereonProductFamily_* and SidereonDistributionSource_* values encoded as
+ * uint32_t; invalid values fail closed.
  *
  * Safety: non-null text pointers must reference null-terminated UTF-8 strings;
  * `out_location` must reference writable storage.
  */
 enum SidereonStatus sidereon_data_distribution_location(const char *center,
-                                                        enum SidereonProductFamily family,
+                                                        uint32_t family,
                                                         int32_t year,
                                                         uint8_t month,
                                                         uint8_t day,
                                                         const char *sample,
                                                         const char *issue,
-                                                        enum SidereonDistributionSource source,
+                                                        uint32_t source,
                                                         struct SidereonDistributionLocation *out_location);
 
 /**
@@ -19873,6 +19914,9 @@ enum SidereonStatus sidereon_data_problem_init(uint32_t kind,
 /**
  * Resolve an exact catalog product identity independently from distributor.
  *
+ * `family` is one of SidereonProductFamily_* encoded as uint32_t. Invalid
+ * values fail closed with SIDEREON_STATUS_INVALID_ARGUMENT.
+ *
  * `sample` may be NULL to use the catalog default. `issue` may be NULL only
  * for product lines that do not require an ultra-rapid issue.
  *
@@ -19880,7 +19924,7 @@ enum SidereonStatus sidereon_data_problem_init(uint32_t kind,
  * `out_identity` must reference writable storage.
  */
 enum SidereonStatus sidereon_data_product_identity(const char *center,
-                                                   enum SidereonProductFamily family,
+                                                   uint32_t family,
                                                    int32_t year,
                                                    uint8_t month,
                                                    uint8_t day,
@@ -20728,6 +20772,8 @@ enum SidereonStatus sidereon_exact_cache_cleanup(const struct SidereonExactCache
 /**
  * Copy one authenticated byte component from a verified cache entry.
  *
+ * `component` is one SidereonExactCacheComponent_* value encoded as uint32_t.
+ *
  * Uses the standard variable-length output contract; output is not
  * null-terminated.
  *
@@ -20735,7 +20781,7 @@ enum SidereonStatus sidereon_exact_cache_cleanup(const struct SidereonExactCache
  * writable bytes or be NULL when `out_len` is zero.
  */
 enum SidereonStatus sidereon_exact_cache_entry_copy_bytes(const struct SidereonExactCacheEntry *entry,
-                                                          enum SidereonExactCacheComponent component,
+                                                          uint32_t component,
                                                           uint8_t *out,
                                                           size_t out_len,
                                                           size_t *out_written,
@@ -20765,7 +20811,7 @@ enum SidereonStatus sidereon_exact_cache_entry_copy_id(const struct SidereonExac
  * Safety: pointer requirements match `sidereon_exact_cache_entry_copy_bytes`.
  */
 enum SidereonStatus sidereon_exact_cache_entry_copy_path(const struct SidereonExactCacheEntry *entry,
-                                                         enum SidereonExactCacheComponent component,
+                                                         uint32_t component,
                                                          uint8_t *out,
                                                          size_t out_len,
                                                          size_t *out_written,
@@ -20784,6 +20830,8 @@ void sidereon_exact_cache_free(struct SidereonExactCache *cache);
 /**
  * Open one exact identity/source cache and acquire its bounded cross-process lock.
  *
+ * `source` is one SidereonDistributionSource_* value encoded as uint32_t.
+ *
  * `stable_path` names the official product below its identity/source cache
  * directory. The returned handle owns the lock until
  * `sidereon_exact_cache_free` is called.
@@ -20793,7 +20841,7 @@ void sidereon_exact_cache_free(struct SidereonExactCache *cache);
  */
 enum SidereonStatus sidereon_exact_cache_open(const char *stable_path,
                                               const struct SidereonProductIdentity *identity,
-                                              enum SidereonDistributionSource source,
+                                              uint32_t source,
                                               uint64_t timeout_ms,
                                               struct SidereonExactCache **out_cache);
 
@@ -20838,13 +20886,14 @@ enum SidereonStatus sidereon_exact_cache_read(const struct SidereonExactCache *c
  * complete entry or the newly committed complete entry while a cooperating
  * writer publishes. Miss and error behavior matches
  * `sidereon_exact_cache_read`.
+ * `source` is one SidereonDistributionSource_* value encoded as uint32_t.
  *
  * Safety: `stable_path` and `identity` must be readable; `out_hit` and
  * `out_entry` must be writable storage.
  */
 enum SidereonStatus sidereon_exact_cache_read_unlocked(const char *stable_path,
                                                        const struct SidereonProductIdentity *identity,
-                                                       enum SidereonDistributionSource source,
+                                                       uint32_t source,
                                                        bool *out_hit,
                                                        struct SidereonExactCacheEntry **out_entry);
 
@@ -30157,24 +30206,68 @@ enum SidereonStatus sidereon_sp3_merge(const struct SidereonSp3 *const *sources,
  * Precedence identities bind the original order because it determines source
  * priority. Unordered policy fields are canonicalized. Every artifact field is
  * validated by the core; empty, duplicate, incomplete, malformed, non-SP3, or
- * mismatched records fail closed. The stable-id output follows the standard
- * variable-length contract and is not null-terminated. Pass NULL with
- * `out_stable_id_len == 0` to query its size.
+ * mismatched records fail closed. The returned handle exposes the stable ID,
+ * canonical contributors, and ordered precedence contributors without
+ * discarding any part of the core result.
  *
  * Safety: `contributors` must reference `contributor_count` readable records
  * (and may be NULL only when the count is zero); `options` may be NULL for
- * defaults; all output/count pointers must reference writable storage;
- * `out_stable_id` must reference `out_stable_id_len` writable bytes or be NULL
- * when that length is zero.
+ * defaults; `out_identity` must reference writable storage. On success the
+ * caller owns the returned handle.
  */
 enum SidereonStatus sidereon_sp3_merge_input_identity(const struct SidereonSp3ArtifactIdentity *contributors,
                                                       size_t contributor_count,
                                                       const struct SidereonSp3MergeOptions *options,
-                                                      uint8_t *out_schema_version,
-                                                      uint8_t *out_stable_id,
-                                                      size_t out_stable_id_len,
-                                                      size_t *out_written,
-                                                      size_t *out_required);
+                                                      struct SidereonSp3MergeInputIdentity **out_identity);
+
+/**
+ * Copy one distributor-independent canonical contributor.
+ */
+enum SidereonStatus sidereon_sp3_merge_input_identity_contributor(const struct SidereonSp3MergeInputIdentity *identity,
+                                                                  size_t index,
+                                                                  struct SidereonSp3ArtifactIdentity *out_contributor);
+
+/**
+ * Number of distributor-independent canonical contributors.
+ */
+enum SidereonStatus sidereon_sp3_merge_input_identity_contributor_count(const struct SidereonSp3MergeInputIdentity *identity,
+                                                                        size_t *out_count);
+
+/**
+ * Release a merged-SP3 input identity handle. NULL is accepted.
+ */
+void sidereon_sp3_merge_input_identity_free(struct SidereonSp3MergeInputIdentity *identity);
+
+/**
+ * Copy one ordered precedence contributor. This fails for mean/median results.
+ */
+enum SidereonStatus sidereon_sp3_merge_input_identity_precedence_contributor(const struct SidereonSp3MergeInputIdentity *identity,
+                                                                             size_t index,
+                                                                             struct SidereonSp3ArtifactIdentity *out_contributor);
+
+/**
+ * Report whether precedence ordering is present and its contributor count.
+ * `out_present` is exactly 0 for mean/median and 1 for precedence.
+ */
+enum SidereonStatus sidereon_sp3_merge_input_identity_precedence_contributor_count(const struct SidereonSp3MergeInputIdentity *identity,
+                                                                                   uint8_t *out_present,
+                                                                                   size_t *out_count);
+
+/**
+ * Read the canonical encoding version.
+ */
+enum SidereonStatus sidereon_sp3_merge_input_identity_schema_version(const struct SidereonSp3MergeInputIdentity *identity,
+                                                                     uint8_t *out_schema_version);
+
+/**
+ * Copy the versioned stable identity. The bytes are not null-terminated; pass
+ * NULL with `out_stable_id_len == 0` to query the required length.
+ */
+enum SidereonStatus sidereon_sp3_merge_input_identity_stable_id(const struct SidereonSp3MergeInputIdentity *identity,
+                                                                uint8_t *out_stable_id,
+                                                                size_t out_stable_id_len,
+                                                                size_t *out_written,
+                                                                size_t *out_required);
 
 /**
  * Initialize SP3 merge options with engine defaults.

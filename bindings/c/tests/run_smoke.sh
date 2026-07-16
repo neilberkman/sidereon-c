@@ -17,6 +17,13 @@ mkdir -p "${binding_root}/.tmp"
 export TMPDIR="${SIDEREON_C_TMPDIR:-${binding_root}/.tmp}"
 
 fixtures="${here}/fixtures"
+provenance_fixture="${fixtures}/provenance/sp3-merge-input-v1.json"
+provenance_fixture_sha256="6c8b8305ff09a884fb34f1e3f2c14c32735f1758a55e82019710874582d951de"
+actual_provenance_fixture_sha256="$(shasum -a 256 "${provenance_fixture}" | awk '{print $1}')"
+if [[ "${actual_provenance_fixture_sha256}" != "${provenance_fixture_sha256}" ]]; then
+    echo "merged-SP3 provenance fixture digest mismatch" >&2
+    exit 1
+fi
 sp3_path="${fixtures}/sp3/GRG0MGXFIN_20201760000_01D_15M_ORB.SP3"
 sp3_surface_path="${fixtures}/sp3/IGS0OPSFIN_20261200945_02H30M_15M_ORB.SP3"
 ppp_sp3_path="${fixtures}/sp3/GBM0MGXRAP_20201770000_01D_05M_ORB_120epoch.sp3"

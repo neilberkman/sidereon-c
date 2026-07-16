@@ -1,4 +1,5 @@
 use super::*;
+use sidereon_core::data::{ArchiveCompression, DistributionSource};
 
 const SP3_FRAME_LABEL_MAX_BYTES: usize = 64;
 pub const SP3_ARTIFACT_SHA256_C_BYTES: usize = 65;
@@ -17,6 +18,15 @@ pub struct SidereonSp3MergeReport {
     /// Per-epoch agreement aggregate, computed once at merge time so the C
     /// accessors are O(1) lookups rather than recomputing the rollup per call.
     pub(crate) epoch_agreement: Vec<EpochAgreement>,
+}
+
+/// Canonical, versioned identity of exact SP3 merge inputs and policy.
+///
+/// The handle retains both the distributor-independent canonical contributor
+/// order and, for precedence merges, the caller's semantic priority order.
+/// Release it with `sidereon_sp3_merge_input_identity_free`.
+pub struct SidereonSp3MergeInputIdentity {
+    inner: Sp3MergeInputIdentity,
 }
 
 /// Exact parsed state of one satellite at one SP3 epoch.
@@ -89,13 +99,15 @@ pub struct SidereonSp3MergeOptions {
     /// One of SidereonSp3MergePrecedenceScope_*.
     pub precedence_scope: u32,
     /// Enable contested-cell outlier rejection.
-    pub outlier_reject_enabled: bool,
+    /// Exactly 0 or 1.
+    pub outlier_reject_enabled: u8,
     /// Position tolerance for the outlier guard, meters.
     pub outlier_reject_position_tolerance_m: f64,
     /// Clock tolerance for the outlier guard, seconds.
     pub outlier_reject_clock_tolerance_s: f64,
     /// Whether target_epoch_interval_s is supplied.
-    pub target_epoch_interval_s_enabled: bool,
+    /// Exactly 0 or 1.
+    pub target_epoch_interval_s_enabled: u8,
     /// Output epoch spacing in seconds when enabled.
     pub target_epoch_interval_s: f64,
     /// Optional array of SidereonGnssSystem_* values encoded as uint32_t.
@@ -107,7 +119,8 @@ pub struct SidereonSp3MergeOptions {
     /// Number of entries in asserted_frame_label_sets.
     pub asserted_frame_label_set_count: usize,
     /// Enable catalog Helmert reconciliation between known ITRF/IGS labels.
-    pub helmert_frame_reconciliation: bool,
+    /// Exactly 0 or 1.
+    pub helmert_frame_reconciliation: u8,
 }
 
 /// Complete, verified identity of one exact artifact supplied to an SP3 merge.
@@ -123,7 +136,8 @@ pub struct SidereonSp3ArtifactIdentity {
     /// Identity resolved by parsing and validating the product bytes.
     pub resolved_identity: SidereonProductIdentity,
     /// Explicit distributor that supplied the artifact.
-    pub distribution_source: SidereonDistributionSource,
+    /// One of SidereonDistributionSource_*, encoded as uint32_t.
+    pub distribution_source: u32,
     /// Official decompressed product filename.
     pub official_filename: [c_char; SP3_ARTIFACT_FILENAME_C_BYTES],
     /// Lower-case SHA-256 of the validated decompressed product bytes.
@@ -135,7 +149,8 @@ pub struct SidereonSp3ArtifactIdentity {
     /// Length of the exact distributor archive bytes.
     pub archive_byte_length: u64,
     /// Compression applied to the distributor archive.
-    pub compression: SidereonArchiveCompression,
+    /// One of SidereonArchiveCompression_*, encoded as uint32_t.
+    pub compression: u32,
 }
 
 /// One caller-asserted set of SP3 coordinate labels.
@@ -861,35 +876,25 @@ pub unsafe extern "C" fn sidereon_sp3_merge_options_init(
 /// Precedence identities bind the original order because it determines source
 /// priority. Unordered policy fields are canonicalized. Every artifact field is
 /// validated by the core; empty, duplicate, incomplete, malformed, non-SP3, or
-/// mismatched records fail closed. The stable-id output follows the standard
-/// variable-length contract and is not null-terminated. Pass NULL with
-/// `out_stable_id_len == 0` to query its size.
+/// mismatched records fail closed. The returned handle exposes the stable ID,
+/// canonical contributors, and ordered precedence contributors without
+/// discarding any part of the core result.
 ///
 /// Safety: `contributors` must reference `contributor_count` readable records
 /// (and may be NULL only when the count is zero); `options` may be NULL for
-/// defaults; all output/count pointers must reference writable storage;
-/// `out_stable_id` must reference `out_stable_id_len` writable bytes or be NULL
-/// when that length is zero.
+/// defaults; `out_identity` must reference writable storage. On success the
+/// caller owns the returned handle.
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_sp3_merge_input_identity(
     contributors: *const SidereonSp3ArtifactIdentity,
     contributor_count: usize,
     options: *const SidereonSp3MergeOptions,
-    out_schema_version: *mut u8,
-    out_stable_id: *mut u8,
-    out_stable_id_len: usize,
-    out_written: *mut usize,
-    out_required: *mut usize,
+    out_identity: *mut *mut SidereonSp3MergeInputIdentity,
 ) -> SidereonStatus {
     const FN_NAME: &str = "sidereon_sp3_merge_input_identity";
     ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
-        c_try!(init_copy_counts(FN_NAME, out_written, out_required));
-        let out_schema_version = c_try!(require_out(
-            out_schema_version,
-            FN_NAME,
-            "out_schema_version"
-        ));
-        *out_schema_version = 0;
+        let out_identity = c_try!(require_out(out_identity, FN_NAME, "out_identity"));
+        *out_identity = ptr::null_mut();
         let contributors = c_try!(require_slice(
             contributors,
             contributor_count,
@@ -910,16 +915,148 @@ pub unsafe extern "C" fn sidereon_sp3_merge_input_identity(
                 SidereonStatus::InvalidArgument
             }
         ));
-        *out_schema_version = identity.schema_version;
+        write_boxed_handle(
+            out_identity,
+            SidereonSp3MergeInputIdentity { inner: identity },
+        );
+        SidereonStatus::Ok
+    })
+}
+
+/// Release a merged-SP3 input identity handle. NULL is accepted.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sp3_merge_input_identity_free(
+    identity: *mut SidereonSp3MergeInputIdentity,
+) {
+    free_boxed(identity);
+}
+
+/// Read the canonical encoding version.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sp3_merge_input_identity_schema_version(
+    identity: *const SidereonSp3MergeInputIdentity,
+    out_schema_version: *mut u8,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_sp3_merge_input_identity_schema_version";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let identity = c_try!(require_ref(identity, FN_NAME, "identity"));
+        let output = c_try!(require_out(
+            out_schema_version,
+            FN_NAME,
+            "out_schema_version"
+        ));
+        *output = identity.inner.schema_version;
+        SidereonStatus::Ok
+    })
+}
+
+/// Copy the versioned stable identity. The bytes are not null-terminated; pass
+/// NULL with `out_stable_id_len == 0` to query the required length.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sp3_merge_input_identity_stable_id(
+    identity: *const SidereonSp3MergeInputIdentity,
+    out_stable_id: *mut u8,
+    out_stable_id_len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_sp3_merge_input_identity_stable_id";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(FN_NAME, out_written, out_required));
+        let identity = c_try!(require_ref(identity, FN_NAME, "identity"));
         c_try!(copy_prefix_to_c(
             FN_NAME,
             "out_stable_id",
-            identity.stable_id.as_bytes(),
+            identity.inner.stable_id.as_bytes(),
             out_stable_id,
             out_stable_id_len,
             out_written,
             out_required,
         ));
+        SidereonStatus::Ok
+    })
+}
+
+/// Number of distributor-independent canonical contributors.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sp3_merge_input_identity_contributor_count(
+    identity: *const SidereonSp3MergeInputIdentity,
+    out_count: *mut usize,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_sp3_merge_input_identity_contributor_count";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let identity = c_try!(require_ref(identity, FN_NAME, "identity"));
+        let output = c_try!(require_out(out_count, FN_NAME, "out_count"));
+        *output = identity.inner.contributors.len();
+        SidereonStatus::Ok
+    })
+}
+
+/// Copy one distributor-independent canonical contributor.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sp3_merge_input_identity_contributor(
+    identity: *const SidereonSp3MergeInputIdentity,
+    index: usize,
+    out_contributor: *mut SidereonSp3ArtifactIdentity,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_sp3_merge_input_identity_contributor";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let identity = c_try!(require_ref(identity, FN_NAME, "identity"));
+        let contributor = c_try!(identity.inner.contributors.get(index).ok_or_else(|| {
+            set_last_error(format!("{FN_NAME}: index {index} is out of range"));
+            SidereonStatus::InvalidArgument
+        }));
+        let output = c_try!(require_out(out_contributor, FN_NAME, "out_contributor"));
+        *output = c_try!(sp3_artifact_identity_to_c(FN_NAME, contributor));
+        SidereonStatus::Ok
+    })
+}
+
+/// Report whether precedence ordering is present and its contributor count.
+/// `out_present` is exactly 0 for mean/median and 1 for precedence.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sp3_merge_input_identity_precedence_contributor_count(
+    identity: *const SidereonSp3MergeInputIdentity,
+    out_present: *mut u8,
+    out_count: *mut usize,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_sp3_merge_input_identity_precedence_contributor_count";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let identity = c_try!(require_ref(identity, FN_NAME, "identity"));
+        let present = c_try!(require_out(out_present, FN_NAME, "out_present"));
+        let count = c_try!(require_out(out_count, FN_NAME, "out_count"));
+        let contributors = identity.inner.precedence_contributors.as_deref();
+        *present = u8::from(contributors.is_some());
+        *count = contributors.map_or(0, <[_]>::len);
+        SidereonStatus::Ok
+    })
+}
+
+/// Copy one ordered precedence contributor. This fails for mean/median results.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sp3_merge_input_identity_precedence_contributor(
+    identity: *const SidereonSp3MergeInputIdentity,
+    index: usize,
+    out_contributor: *mut SidereonSp3ArtifactIdentity,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_sp3_merge_input_identity_precedence_contributor";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let identity = c_try!(require_ref(identity, FN_NAME, "identity"));
+        let contributors =
+            c_try!(identity
+                .inner
+                .precedence_contributors
+                .as_ref()
+                .ok_or_else(|| {
+                    set_last_error(format!("{FN_NAME}: precedence ordering is absent"));
+                    SidereonStatus::InvalidArgument
+                }));
+        let contributor = c_try!(contributors.get(index).ok_or_else(|| {
+            set_last_error(format!("{FN_NAME}: index {index} is out of range"));
+            SidereonStatus::InvalidArgument
+        }));
+        let output = c_try!(require_out(out_contributor, FN_NAME, "out_contributor"));
+        *output = c_try!(sp3_artifact_identity_to_c(FN_NAME, contributor));
         SidereonStatus::Ok
     })
 }
@@ -2100,7 +2237,7 @@ fn default_sp3_merge_options() -> SidereonSp3MergeOptions {
         clock_min_common: options.clock_min_common,
         combine: SidereonSp3MergeCombine::Mean as u32,
         precedence_scope: SidereonSp3MergePrecedenceScope::Cell as u32,
-        outlier_reject_enabled: options.outlier_reject.is_some(),
+        outlier_reject_enabled: u8::from(options.outlier_reject.is_some()),
         outlier_reject_position_tolerance_m: options
             .outlier_reject
             .map(|guard| guard.position_tolerance_m)
@@ -2109,14 +2246,54 @@ fn default_sp3_merge_options() -> SidereonSp3MergeOptions {
             .outlier_reject
             .map(|guard| guard.clock_tolerance_s)
             .unwrap_or(0.0),
-        target_epoch_interval_s_enabled: options.target_epoch_interval_s.is_some(),
+        target_epoch_interval_s_enabled: u8::from(options.target_epoch_interval_s.is_some()),
         target_epoch_interval_s: options.target_epoch_interval_s.unwrap_or(0.0),
         systems: ptr::null(),
         system_count: 0,
         asserted_frame_label_sets: ptr::null(),
         asserted_frame_label_set_count: 0,
-        helmert_frame_reconciliation: false,
+        helmert_frame_reconciliation: 0,
     }
+}
+
+fn sp3_artifact_identity_to_c(
+    fn_name: &str,
+    artifact: &Sp3ArtifactIdentity,
+) -> Result<SidereonSp3ArtifactIdentity, SidereonStatus> {
+    Ok(SidereonSp3ArtifactIdentity {
+        requested_identity: data_distribution::identity_to_c(
+            fn_name,
+            &artifact.requested_identity,
+        )?,
+        resolved_identity: data_distribution::identity_to_c(fn_name, &artifact.resolved_identity)?,
+        distribution_source: match artifact.distribution_source {
+            DistributionSource::Direct => SidereonDistributionSource::Direct as u32,
+            DistributionSource::NasaCddis => SidereonDistributionSource::NasaCddis as u32,
+            DistributionSource::LocalFile => SidereonDistributionSource::LocalFile as u32,
+            DistributionSource::InMemory => SidereonDistributionSource::InMemory as u32,
+        },
+        official_filename: data_distribution::fixed_text(
+            fn_name,
+            "artifact.official_filename",
+            &artifact.official_filename,
+        )?,
+        product_sha256: data_distribution::fixed_text(
+            fn_name,
+            "artifact.product_sha256",
+            &artifact.product_sha256,
+        )?,
+        product_byte_length: artifact.product_byte_length,
+        archive_sha256: data_distribution::fixed_text(
+            fn_name,
+            "artifact.archive_sha256",
+            &artifact.archive_sha256,
+        )?,
+        archive_byte_length: artifact.archive_byte_length,
+        compression: match artifact.compression {
+            ArchiveCompression::None => SidereonArchiveCompression::None as u32,
+            ArchiveCompression::Gzip => SidereonArchiveCompression::Gzip as u32,
+        },
+    })
 }
 
 fn sp3_artifact_identity_from_c(
@@ -2134,7 +2311,11 @@ fn sp3_artifact_identity_from_c(
             fn_name,
             &artifact.resolved_identity,
         )?,
-        distribution_source: data_distribution::source_to_core(artifact.distribution_source),
+        distribution_source: data_distribution::source_from_c(
+            fn_name,
+            &field("distribution_source"),
+            artifact.distribution_source,
+        )?,
         official_filename: data_distribution::fixed_text_from_c(
             fn_name,
             &field("official_filename"),
@@ -2152,7 +2333,11 @@ fn sp3_artifact_identity_from_c(
             &artifact.archive_sha256,
         )?,
         archive_byte_length: artifact.archive_byte_length,
-        compression: data_distribution::compression_to_core(artifact.compression),
+        compression: data_distribution::compression_from_c(
+            fn_name,
+            &field("compression"),
+            artifact.compression,
+        )?,
     })
 }
 
@@ -2200,7 +2385,22 @@ unsafe fn sp3_merge_options_from_c(
             return Err(SidereonStatus::InvalidArgument);
         }
     };
-    let outlier_reject = if options.outlier_reject_enabled {
+    let outlier_reject_enabled = data_distribution::bool_from_c(
+        fn_name,
+        "outlier_reject_enabled",
+        options.outlier_reject_enabled,
+    )?;
+    let target_epoch_interval_s_enabled = data_distribution::bool_from_c(
+        fn_name,
+        "target_epoch_interval_s_enabled",
+        options.target_epoch_interval_s_enabled,
+    )?;
+    let helmert_frame_reconciliation = data_distribution::bool_from_c(
+        fn_name,
+        "helmert_frame_reconciliation",
+        options.helmert_frame_reconciliation,
+    )?;
+    let outlier_reject = if outlier_reject_enabled {
         if !options.outlier_reject_position_tolerance_m.is_finite()
             || options.outlier_reject_position_tolerance_m < 0.0
             || !options.outlier_reject_clock_tolerance_s.is_finite()
@@ -2218,12 +2418,20 @@ unsafe fn sp3_merge_options_from_c(
     } else {
         None
     };
-    let target_epoch_interval_s = if options.target_epoch_interval_s_enabled {
+    let target_epoch_interval_s = if target_epoch_interval_s_enabled {
         require_positive_finite(
             fn_name,
             "target_epoch_interval_s",
             options.target_epoch_interval_s,
         )?;
+        if (options.target_epoch_interval_s - options.target_epoch_interval_s.round()).abs()
+            > 1.0e-6
+        {
+            set_last_error(format!(
+                "{fn_name}: target_epoch_interval_s must be a positive whole number of seconds"
+            ));
+            return Err(SidereonStatus::InvalidArgument);
+        }
         Some(options.target_epoch_interval_s)
     } else {
         None
@@ -2264,7 +2472,7 @@ unsafe fn sp3_merge_options_from_c(
         systems,
         frame_reconciliation: Sp3FrameReconciliationOptions {
             asserted_equivalent_label_sets,
-            helmert: options.helmert_frame_reconciliation,
+            helmert: helmert_frame_reconciliation,
         },
     })
 }
