@@ -26,6 +26,12 @@ static double bits_to_f64(uint64_t bits) {
     return value;
 }
 
+static uint64_t f64_to_bits(double value) {
+    uint64_t bits;
+    memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
 static int fail(const char *what, int code) {
     fprintf(stderr, "round2_smoke: %s failed\n", what);
     return code;
@@ -129,6 +135,45 @@ static int exercise_frames(void) {
     }
     if (!finite3(gpos) || !finite3(gvel)) {
         return fail("teme_to_gcrs finite", 1);
+    }
+
+    /* Independent Skyfield 1.49 oracle, captured as IEEE-754 bit patterns. */
+    SidereonTimeScales skyfield_ts;
+    if (sidereon_timescales_from_utc(2018, 7, 4, 0, 0, 0.0, &skyfield_ts) != SIDEREON_STATUS_OK) {
+        return fail("skyfield reference epoch", 1);
+    }
+    const uint64_t teme_pos_bits[3] = {
+        UINT64_C(0x40ace86c23dffb6b), UINT64_C(0x409f7fa61c81cb47), UINT64_C(0x40b4bd8359159cde)};
+    const uint64_t teme_vel_bits[3] = {
+        UINT64_C(0xc00b2ffb7cf9ad7d), UINT64_C(0x401b7a8751f7fc4a), UINT64_C(0xbfceb36925f07cb4)};
+    const uint64_t gcrs_pos_bits[3] = {
+        UINT64_C(0x40ad0bd9193713e1), UINT64_C(0x409f41a3b2073733), UINT64_C(0x40b4b6ffad1289d1)};
+    const uint64_t gcrs_vel_bits[3] = {
+        UINT64_C(0xc00af690723d6cb1), UINT64_C(0x401b88e06212f969), UINT64_C(0xbfcde8575471eaf0)};
+    const uint64_t itrs_pos_bits[3] = {
+        UINT64_C(0xc092d5d32b319db8), UINT64_C(0x40af8b3b3a722474), UINT64_C(0x40b4bd8359159cdb)};
+    double skyfield_teme_pos[3];
+    double skyfield_teme_vel[3];
+    for (int i = 0; i < 3; i++) {
+        skyfield_teme_pos[i] = bits_to_f64(teme_pos_bits[i]);
+        skyfield_teme_vel[i] = bits_to_f64(teme_vel_bits[i]);
+    }
+    if (sidereon_frame_teme_to_gcrs(skyfield_teme_pos, skyfield_teme_vel, &skyfield_ts, true,
+                                    gpos, gvel) != SIDEREON_STATUS_OK) {
+        return fail("skyfield teme_to_gcrs", 1);
+    }
+    for (int i = 0; i < 3; i++) {
+        if (f64_to_bits(gpos[i]) != gcrs_pos_bits[i] || f64_to_bits(gvel[i]) != gcrs_vel_bits[i]) {
+            return fail("skyfield teme_to_gcrs zero ULP", 1);
+        }
+    }
+    if (sidereon_frame_gcrs_to_itrs(gpos, &skyfield_ts, true, itrs) != SIDEREON_STATUS_OK) {
+        return fail("skyfield gcrs_to_itrs", 1);
+    }
+    for (int i = 0; i < 3; i++) {
+        if (f64_to_bits(itrs[i]) != itrs_pos_bits[i]) {
+            return fail("skyfield gcrs_to_itrs zero ULP", 1);
+        }
     }
 
     /* mat3_vec3_mul with identity returns the vector unchanged. */
