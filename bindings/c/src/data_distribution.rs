@@ -11,7 +11,10 @@ use sidereon_core::data::{
     ProductDate, ProductFormat, ProductIdentity, ProductPublisher, ProductType, SolutionClass,
 };
 
-use super::{ffi_boundary, parse_bounded_c_string, require_out, set_last_error, SidereonStatus};
+use super::{
+    ffi_boundary, parse_bounded_c_string, require_out, require_slice, set_last_error,
+    SidereonStatus,
+};
 
 pub const PRODUCT_TOKEN_C_BYTES: usize = 16;
 pub const OFFICIAL_FILENAME_C_BYTES: usize = 160;
@@ -164,6 +167,43 @@ fn source_to_core(source: SidereonDistributionSource) -> DistributionSource {
     }
 }
 
+fn publisher_to_core(value: SidereonProductPublisher) -> ProductPublisher {
+    match value {
+        SidereonProductPublisher::Igs => ProductPublisher::Igs,
+        SidereonProductPublisher::Code => ProductPublisher::Code,
+        SidereonProductPublisher::Esa => ProductPublisher::Esa,
+        SidereonProductPublisher::Gfz => ProductPublisher::Gfz,
+    }
+}
+
+fn solution_to_core(value: SidereonSolutionClass) -> SolutionClass {
+    match value {
+        SidereonSolutionClass::Final => SolutionClass::Final,
+        SidereonSolutionClass::Rapid => SolutionClass::Rapid,
+        SidereonSolutionClass::UltraRapid => SolutionClass::UltraRapid,
+        SidereonSolutionClass::Predicted => SolutionClass::Predicted,
+        SidereonSolutionClass::Broadcast => SolutionClass::Broadcast,
+    }
+}
+
+fn campaign_to_core(value: SidereonProductCampaign) -> ProductCampaign {
+    match value {
+        SidereonProductCampaign::Operational => ProductCampaign::Operational,
+        SidereonProductCampaign::MultiGnss => ProductCampaign::MultiGnss,
+        SidereonProductCampaign::MultiGnssExperiment => ProductCampaign::MultiGnssExperiment,
+        SidereonProductCampaign::Broadcast => ProductCampaign::Broadcast,
+    }
+}
+
+fn format_to_core(value: SidereonProductFormat) -> ProductFormat {
+    match value {
+        SidereonProductFormat::Sp3 => ProductFormat::Sp3,
+        SidereonProductFormat::Ionex => ProductFormat::Ionex,
+        SidereonProductFormat::RinexClock => ProductFormat::RinexClock,
+        SidereonProductFormat::RinexNavigation => ProductFormat::RinexNavigation,
+    }
+}
+
 fn publisher_from_core(value: ProductPublisher) -> SidereonProductPublisher {
     match value {
         ProductPublisher::Igs => SidereonProductPublisher::Igs,
@@ -235,6 +275,61 @@ fn identity_to_c(
         has_prediction_horizon_days: identity.prediction_horizon_days.is_some(),
         prediction_horizon_days: identity.prediction_horizon_days.unwrap_or(0),
     })
+}
+
+fn fixed_text_from_c<const N: usize>(
+    fn_name: &str,
+    label: &str,
+    value: &[c_char; N],
+) -> Result<String, SidereonStatus> {
+    let end = value.iter().position(|&byte| byte == 0).ok_or_else(|| {
+        set_last_error(format!("{fn_name}: {label} is not null-terminated"));
+        SidereonStatus::InvalidArgument
+    })?;
+    let bytes = value[..end]
+        .iter()
+        .map(|&byte| byte as u8)
+        .collect::<Vec<_>>();
+    String::from_utf8(bytes).map_err(|_| {
+        set_last_error(format!("{fn_name}: {label} is not UTF-8"));
+        SidereonStatus::InvalidArgument
+    })
+}
+
+fn identity_from_c(
+    fn_name: &str,
+    identity: &SidereonProductIdentity,
+) -> Result<ProductIdentity, SidereonStatus> {
+    let issue = fixed_text_from_c(fn_name, "identity.issue", &identity.issue)?;
+    let product = ProductIdentity {
+        family: family_to_core(identity.family),
+        publisher: publisher_to_core(identity.publisher),
+        solution: solution_to_core(identity.solution_class),
+        campaign: campaign_to_core(identity.campaign),
+        version: identity.filename_version,
+        date: ProductDate::new(identity.year, identity.month, identity.day)
+            .map_err(|error| map_error(fn_name, error))?,
+        issue: if identity.has_issue {
+            Some(issue)
+        } else {
+            None
+        },
+        span: fixed_text_from_c(fn_name, "identity.span", &identity.span)?,
+        sample: fixed_text_from_c(fn_name, "identity.sample", &identity.sample)?,
+        official_filename: fixed_text_from_c(
+            fn_name,
+            "identity.official_filename",
+            &identity.official_filename,
+        )?,
+        format: format_to_core(identity.format),
+        prediction_horizon_days: identity
+            .has_prediction_horizon_days
+            .then_some(identity.prediction_horizon_days),
+    };
+    product
+        .validate()
+        .map_err(|error| map_error(fn_name, error))?;
+    Ok(product)
 }
 
 #[derive(Clone, Copy)]
@@ -328,6 +423,56 @@ pub unsafe extern "C" fn sidereon_data_product_identity(
                 SidereonStatus::Ok
             }
             Err(status) => status,
+        }
+    })
+}
+
+/// Require available identities to be exactly the declared product set.
+///
+/// The expected set must be non-empty. Both inputs reject duplicates; missing
+/// and undeclared identities fail. Comparison includes every identity field,
+/// not only the official filename. For SP3 observed/predicted timing, use
+/// `sidereon_sp3_prediction_summary`; catalog fields and issue times are not
+/// substitutes for product record flags.
+///
+/// Safety: each pointer must reference `count` readable identities, or may be
+/// NULL only when its count is zero.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_data_validate_exact_product_set(
+    expected: *const SidereonProductIdentity,
+    expected_count: usize,
+    available: *const SidereonProductIdentity,
+    available_count: usize,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_data_validate_exact_product_set";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let expected = match require_slice(expected, expected_count, FN_NAME, "expected") {
+            Ok(values) => values,
+            Err(status) => return status,
+        };
+        let available = match require_slice(available, available_count, FN_NAME, "available") {
+            Ok(values) => values,
+            Err(status) => return status,
+        };
+        let expected = match expected
+            .iter()
+            .map(|identity| identity_from_c(FN_NAME, identity))
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(values) => values,
+            Err(status) => return status,
+        };
+        let available = match available
+            .iter()
+            .map(|identity| identity_from_c(FN_NAME, identity))
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(values) => values,
+            Err(status) => return status,
+        };
+        match core_data::validate_exact_product_set(&expected, &available) {
+            Ok(()) => SidereonStatus::Ok,
+            Err(error) => map_error(FN_NAME, error),
         }
     })
 }

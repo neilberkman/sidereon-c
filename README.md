@@ -80,6 +80,10 @@ status = sidereon_data_distribution_location(
     SIDEREON_DISTRIBUTION_SOURCE_NASA_CDDIS,
     &location
 );
+
+const SidereonProductIdentity expected[] = {identity};
+const SidereonProductIdentity available[] = {identity};
+status = sidereon_data_validate_exact_product_set(expected, 1, available, 1);
 ```
 
 `identity.official_filename` is the exact decompressed standard-product name.
@@ -88,6 +92,13 @@ transport compression. Switching from CDDIS to the direct location cannot
 change publisher, solution class, campaign, issue, date, cadence, family, or
 format. Unsupported combinations return `SIDEREON_STATUS_INVALID_ARGUMENT` and
 the typed core detail through `sidereon_last_error_message`.
+
+The exact-set gate rejects an empty declaration, duplicates, missing products,
+and undeclared products. It compares all identity fields, so same-filename
+prediction tiers remain distinct. Start dependent processing only after it
+returns `SIDEREON_STATUS_OK`. For SP3 observed/predicted timing, use
+`sidereon_sp3_prediction_summary`; do not infer the boundary from issue times or
+catalog fields.
 
 The C interface deliberately leaves HTTP, Earthdata credentials, retries, and
 cache policy to the caller. For CDDIS, send caller-managed credentials only to

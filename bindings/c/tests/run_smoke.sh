@@ -102,6 +102,20 @@ echo "== running smoke program =="
     "${ionex_path}" "${esbc_crx_path}" "${esbc_rnx_path}" "${algo_crx_path}" "${algo_rnx_path}" \
     "${nav_path}" "${precise_sp3_path}" "${prior_sp3_path}"
 
+echo "== compiling data_distribution_smoke program =="
+data_distribution_out="${target_dir}/data_distribution_smoke"
+cc -std=c11 -Wall -Wextra -Werror \
+    -I"${binding_root}/include" \
+    "${here}/data_distribution_smoke.c" \
+    -L"${lib_dir}" \
+    -lsidereon \
+    -Wl,-rpath,"${lib_dir}" \
+    -lm \
+    -o "${data_distribution_out}"
+
+echo "== running data_distribution_smoke program =="
+"${data_distribution_out}"
+
 # Focused exercise for the parity-gap closes (lenient OMM, standalone LAMBDA, and
 # the SP3 merge agreement metric). Built and run with the same warnings-as-errors.
 echo "== compiling newgaps program =="

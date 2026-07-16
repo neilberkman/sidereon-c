@@ -45,9 +45,9 @@
 #include <stdlib.h>
 
 #define SIDEREON_VERSION_MAJOR 0
-#define SIDEREON_VERSION_MINOR 28
-#define SIDEREON_VERSION_PATCH 1
-#define SIDEREON_VERSION_STRING "0.28.1"
+#define SIDEREON_VERSION_MINOR 29
+#define SIDEREON_VERSION_PATCH 2
+#define SIDEREON_VERSION_STRING "0.29.2"
 
 #define ARCHIVE_FILENAME_C_BYTES 164
 
@@ -19799,6 +19799,23 @@ enum SidereonStatus sidereon_data_product_identity(const char *center,
                                                    const char *sample,
                                                    const char *issue,
                                                    struct SidereonProductIdentity *out_identity);
+
+/**
+ * Require available identities to be exactly the declared product set.
+ *
+ * The expected set must be non-empty. Both inputs reject duplicates; missing
+ * and undeclared identities fail. Comparison includes every identity field,
+ * not only the official filename. For SP3 observed/predicted timing, use
+ * `sidereon_sp3_prediction_summary`; catalog fields and issue times are not
+ * substitutes for product record flags.
+ *
+ * Safety: each pointer must reference `count` readable identities, or may be
+ * NULL only when its count is zero.
+ */
+enum SidereonStatus sidereon_data_validate_exact_product_set(const struct SidereonProductIdentity *expected,
+                                                             size_t expected_count,
+                                                             const struct SidereonProductIdentity *available,
+                                                             size_t available_count);
 
 /**
  * Initialize decay-estimate controls with core defaults.
