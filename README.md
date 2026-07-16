@@ -53,6 +53,51 @@ cc -std=c11 -I bindings/c/include my_program.c \
 Link `target/release/libsidereon.a` directly instead of `-lsidereon` if you want
 the solver baked into your binary with no shared object to ship.
 
+## Exact GNSS product sources
+
+Product identity and distribution are separate. The pure C functions derive a
+catalog identity or one explicitly selected public location without performing
+network or file IO:
+
+```c
+SidereonProductIdentity identity;
+SidereonStatus status = sidereon_data_product_identity(
+    "cod",
+    SIDEREON_PRODUCT_FAMILY_SP3,
+    2026, 7, 12,
+    NULL,  /* catalog default cadence */
+    NULL,  /* no ultra-rapid issue */
+    &identity
+);
+
+SidereonDistributionLocation location;
+status = sidereon_data_distribution_location(
+    "cod",
+    SIDEREON_PRODUCT_FAMILY_SP3,
+    2026, 7, 12,
+    NULL,
+    NULL,
+    SIDEREON_DISTRIBUTION_SOURCE_NASA_CDDIS,
+    &location
+);
+```
+
+`identity.official_filename` is the exact decompressed standard-product name.
+`location` records the selected source, public URL, archive filename, and
+transport compression. Switching from CDDIS to the direct location cannot
+change publisher, solution class, campaign, issue, date, cadence, family, or
+format. Unsupported combinations return `SIDEREON_STATUS_INVALID_ARGUMENT` and
+the typed core detail through `sidereon_last_error_message`.
+
+The C interface deliberately leaves HTTP, Earthdata credentials, retries, and
+cache policy to the caller. For CDDIS, send caller-managed credentials only to
+NASA's documented hosts, remove URL queries from logs/provenance, reject HTML
+success bodies, validate gzip completion and content length, and parse the
+result with `sidereon_sp3_load` or `sidereon_ionex_load`. NASA's public access
+documentation is at
+[CDDIS archive access](https://www.earthdata.nasa.gov/centers/cddis-daac/archive-access)
+and [Earthdata Login data access](https://urs.earthdata.nasa.gov/documentation/for_users/data_access/curl_and_wget).
+
 ## Example: a single-point positioning solve
 
 A complete program with no external data files. It loads a trimmed SP3 precise

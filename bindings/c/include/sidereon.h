@@ -49,9 +49,13 @@
 #define SIDEREON_VERSION_PATCH 1
 #define SIDEREON_VERSION_STRING "0.28.1"
 
+#define ARCHIVE_FILENAME_C_BYTES 164
+
 #define BIAS_OBS_C_BYTES (MAX_BIAS_OBS_BYTES + 1)
 
 #define BIAS_TEXT_C_BYTES (MAX_BIAS_TEXT_BYTES + 1)
+
+#define DISTRIBUTION_URL_C_BYTES 1024
 
 #define MAX_BIAS_OBS_BYTES 16
 
@@ -62,6 +66,10 @@
 #define NTRIP_FIELD_C_BYTES 129
 
 #define NTRIP_MISC_C_BYTES 257
+
+#define OFFICIAL_FILENAME_C_BYTES 160
+
+#define PRODUCT_TOKEN_C_BYTES 16
 
 #define RINEX_OBS_CODE_C_BYTES 9
 
@@ -330,6 +338,75 @@ typedef enum SidereonObservableStateElementStatus {
      */
     SIDEREON_OBSERVABLE_STATE_ELEMENT_STATUS_ERROR = 2,
 } SidereonObservableStateElementStatus;
+
+/**
+ * Standard GNSS product family.
+ */
+typedef enum SidereonProductFamily {
+    SIDEREON_PRODUCT_FAMILY_SP3 = 0,
+    SIDEREON_PRODUCT_FAMILY_IONEX = 1,
+    SIDEREON_PRODUCT_FAMILY_RINEX_CLOCK = 2,
+    SIDEREON_PRODUCT_FAMILY_RINEX_NAVIGATION = 3,
+} SidereonProductFamily;
+
+/**
+ * Explicit public distributor or caller-provided input.
+ */
+typedef enum SidereonDistributionSource {
+    SIDEREON_DISTRIBUTION_SOURCE_DIRECT = 0,
+    SIDEREON_DISTRIBUTION_SOURCE_NASA_CDDIS = 1,
+    SIDEREON_DISTRIBUTION_SOURCE_LOCAL_FILE = 2,
+    SIDEREON_DISTRIBUTION_SOURCE_IN_MEMORY = 3,
+} SidereonDistributionSource;
+
+/**
+ * Transport compression applied by a distributor.
+ */
+typedef enum SidereonArchiveCompression {
+    SIDEREON_ARCHIVE_COMPRESSION_NONE = 0,
+    SIDEREON_ARCHIVE_COMPRESSION_GZIP = 1,
+} SidereonArchiveCompression;
+
+/**
+ * Public organization that produced or combined the product.
+ */
+typedef enum SidereonProductPublisher {
+    SIDEREON_PRODUCT_PUBLISHER_IGS = 0,
+    SIDEREON_PRODUCT_PUBLISHER_CODE = 1,
+    SIDEREON_PRODUCT_PUBLISHER_ESA = 2,
+    SIDEREON_PRODUCT_PUBLISHER_GFZ = 3,
+} SidereonProductPublisher;
+
+/**
+ * Public product solution class.
+ */
+typedef enum SidereonSolutionClass {
+    SIDEREON_SOLUTION_CLASS_FINAL = 0,
+    SIDEREON_SOLUTION_CLASS_RAPID = 1,
+    SIDEREON_SOLUTION_CLASS_ULTRA_RAPID = 2,
+    SIDEREON_SOLUTION_CLASS_PREDICTED = 3,
+    SIDEREON_SOLUTION_CLASS_BROADCAST = 4,
+} SidereonSolutionClass;
+
+/**
+ * Public campaign token encoded by the official filename.
+ */
+typedef enum SidereonProductCampaign {
+    SIDEREON_PRODUCT_CAMPAIGN_OPERATIONAL = 0,
+    SIDEREON_PRODUCT_CAMPAIGN_MULTI_GNSS = 1,
+    SIDEREON_PRODUCT_CAMPAIGN_MULTI_GNSS_EXPERIMENT = 2,
+    SIDEREON_PRODUCT_CAMPAIGN_BROADCAST = 3,
+} SidereonProductCampaign;
+
+/**
+ * Standard serialization format.
+ */
+typedef enum SidereonProductFormat {
+    SIDEREON_PRODUCT_FORMAT_SP3 = 0,
+    SIDEREON_PRODUCT_FORMAT_IONEX = 1,
+    SIDEREON_PRODUCT_FORMAT_RINEX_CLOCK = 2,
+    SIDEREON_PRODUCT_FORMAT_RINEX_NAVIGATION = 3,
+} SidereonProductFormat;
 
 /**
  * Eclipse status, mirroring sidereon_core::astro::events::eclipse::EclipseStatus.
@@ -5196,6 +5273,17 @@ typedef struct SidereonCycleSlipOptions {
 } SidereonCycleSlipOptions;
 
 /**
+ * Public location and transport metadata for one exact product identity.
+ */
+typedef struct SidereonDistributionLocation {
+    enum SidereonDistributionSource source;
+    bool has_original_url;
+    char original_url[DISTRIBUTION_URL_C_BYTES];
+    char archive_filename[ARCHIVE_FILENAME_C_BYTES];
+    enum SidereonArchiveCompression compression;
+} SidereonDistributionLocation;
+
+/**
  * A fully specified data-driven least-squares problem, flat for FFI.
  *
  * Fill the kind-specific data pointers and lengths, the starting point `x0`,
@@ -5310,6 +5398,31 @@ typedef struct SidereonDataProblem {
      */
     uint32_t backend;
 } SidereonDataProblem;
+
+/**
+ * Exact product identity, independent of distributor.
+ *
+ * Fixed text buffers are always null-terminated. `official_filename` excludes
+ * distributor transport-compression suffixes.
+ */
+typedef struct SidereonProductIdentity {
+    enum SidereonProductFamily family;
+    enum SidereonProductPublisher publisher;
+    enum SidereonSolutionClass solution_class;
+    enum SidereonProductCampaign campaign;
+    uint8_t filename_version;
+    int32_t year;
+    uint8_t month;
+    uint8_t day;
+    bool has_issue;
+    char issue[PRODUCT_TOKEN_C_BYTES];
+    char span[PRODUCT_TOKEN_C_BYTES];
+    char sample[PRODUCT_TOKEN_C_BYTES];
+    char official_filename[OFFICIAL_FILENAME_C_BYTES];
+    enum SidereonProductFormat format;
+    bool has_prediction_horizon_days;
+    uint8_t prediction_horizon_days;
+} SidereonProductIdentity;
 
 /**
  * Space-weather inputs used by the drag model.
@@ -19639,6 +19752,25 @@ enum SidereonStatus sidereon_cw_stm(double mean_motion_rad_s,
 enum SidereonStatus sidereon_cycle_slip_options_init(struct SidereonCycleSlipOptions *out_options);
 
 /**
+ * Resolve one explicit distributor for an exact catalog product.
+ *
+ * This function performs no network or file IO. `original_url` is absent for
+ * local-file and in-memory sources.
+ *
+ * Safety: non-null text pointers must reference null-terminated UTF-8 strings;
+ * `out_location` must reference writable storage.
+ */
+enum SidereonStatus sidereon_data_distribution_location(const char *center,
+                                                        enum SidereonProductFamily family,
+                                                        int32_t year,
+                                                        uint8_t month,
+                                                        uint8_t day,
+                                                        const char *sample,
+                                                        const char *issue,
+                                                        enum SidereonDistributionSource source,
+                                                        struct SidereonDistributionLocation *out_location);
+
+/**
  * Populate `*out_problem` with the SciPy `least_squares` defaults for `kind`:
  * linear loss, `f_scale = 1`, unit `x_scale`, default evaluation budget, the
  * SciPy `ftol = xtol = 1e-8` / `gtol = 1e-10` tolerances, and the native
@@ -19649,6 +19781,24 @@ enum SidereonStatus sidereon_cycle_slip_options_init(struct SidereonCycleSlipOpt
  */
 enum SidereonStatus sidereon_data_problem_init(uint32_t kind,
                                                struct SidereonDataProblem *out_problem);
+
+/**
+ * Resolve an exact catalog product identity independently from distributor.
+ *
+ * `sample` may be NULL to use the catalog default. `issue` may be NULL only
+ * for product lines that do not require an ultra-rapid issue.
+ *
+ * Safety: non-null text pointers must reference null-terminated UTF-8 strings;
+ * `out_identity` must reference writable storage.
+ */
+enum SidereonStatus sidereon_data_product_identity(const char *center,
+                                                   enum SidereonProductFamily family,
+                                                   int32_t year,
+                                                   uint8_t month,
+                                                   uint8_t day,
+                                                   const char *sample,
+                                                   const char *issue,
+                                                   struct SidereonProductIdentity *out_identity);
 
 /**
  * Initialize decay-estimate controls with core defaults.
