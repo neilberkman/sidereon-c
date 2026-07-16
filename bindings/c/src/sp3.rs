@@ -855,11 +855,13 @@ pub unsafe extern "C" fn sidereon_sp3_merge_options_init(
 /// Build the canonical, versioned identity of a complete exact SP3 artifact
 /// set and the full merge policy.
 ///
-/// Contributor enumeration order and unordered policy fields do not affect the
-/// result. Every artifact field is validated by the core; empty, duplicate,
-/// incomplete, malformed, non-SP3, or mismatched records fail closed. The
-/// stable-id output follows the standard variable-length contract and is not
-/// null-terminated. Pass NULL with `out_stable_id_len == 0` to query its size.
+/// Contributor enumeration order does not affect mean or median identities.
+/// Precedence identities bind the original order because it determines source
+/// priority. Unordered policy fields are canonicalized. Every artifact field is
+/// validated by the core; empty, duplicate, incomplete, malformed, non-SP3, or
+/// mismatched records fail closed. The stable-id output follows the standard
+/// variable-length contract and is not null-terminated. Pass NULL with
+/// `out_stable_id_len == 0` to query its size.
 ///
 /// Safety: `contributors` must reference `contributor_count` readable records
 /// (and may be NULL only when the count is zero); `options` may be NULL for

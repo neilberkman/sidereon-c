@@ -68,6 +68,28 @@ static int merge_input_identity_checks(
         return 13;
     }
 
+    options.combine = SIDEREON_SP3_MERGE_COMBINE_PRECEDENCE;
+    uint8_t precedence_id[128];
+    size_t precedence_written = 0;
+    size_t precedence_required = 0;
+    if (sidereon_sp3_merge_input_identity(
+            artifacts, 2, &options, &schema, precedence_id, sizeof(precedence_id),
+            &precedence_written, &precedence_required) != SIDEREON_STATUS_OK ||
+        precedence_written != written) {
+        return 18;
+    }
+    uint8_t reversed_precedence_id[128];
+    size_t reversed_precedence_written = 0;
+    size_t reversed_precedence_required = 0;
+    if (sidereon_sp3_merge_input_identity(
+            reversed, 2, &options, &schema, reversed_precedence_id,
+            sizeof(reversed_precedence_id), &reversed_precedence_written,
+            &reversed_precedence_required) != SIDEREON_STATUS_OK ||
+        reversed_precedence_written != precedence_written ||
+        memcmp(precedence_id, reversed_precedence_id, precedence_written) == 0) {
+        return 19;
+    }
+
     options.combine = SIDEREON_SP3_MERGE_COMBINE_MEDIAN;
     uint8_t policy_id[128];
     size_t policy_written = 0;

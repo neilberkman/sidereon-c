@@ -105,10 +105,12 @@ After acquiring and validating every SP3 input, describe each contributor with
 official filename, decompressed and archive SHA-256/length pairs, and archive
 compression. `sidereon_sp3_merge_input_identity` validates those records with
 the complete `SidereonSp3MergeOptions` and returns a schema version plus a
-stable ID. Contributor enumeration order does not affect the ID; changing an
-artifact or any effective merge control does. The record intentionally has no
-URL, credential, cache path, retrieval timestamp, or HTTP metadata fields.
-Use the usual NULL/zero first call to query the stable-ID buffer length.
+stable ID. Contributor enumeration order does not affect mean or median IDs.
+Precedence IDs bind the original order because it determines source priority.
+Changing an artifact or any effective merge control changes the ID. The record
+intentionally has no URL, credential, cache path, retrieval timestamp, or HTTP
+metadata fields. Use the usual NULL/zero first call to query the stable-ID
+buffer length.
 
 The C interface deliberately leaves HTTP, Earthdata credentials, retries, and
 product-format validation to the caller. After validation,
