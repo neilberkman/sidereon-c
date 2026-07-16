@@ -1,6 +1,17 @@
 # Changelog
 
-## Unreleased
+## 0.30.0 - 2026-07-16
+
+- Adds the complete analysis-center and parsed-format-version fields to
+  `SidereonProductIdentity`, plus public canonical cache-key derivation.
+- Adds native exact-cache handles with bounded cross-process lock ownership,
+  locked and unlocked digest-verified reads, immutable atomic publication,
+  abandoned-entry cleanup, and authenticated byte/path/entry-id accessors.
+- Adds `SIDEREON_STATUS_TIMEOUT` so a bounded cache-lock wait is not reported as
+  an invalid argument.
+- This is an intentional C ABI version advance because
+  `SidereonProductIdentity` grows to retain the complete exact identity.
+- Builds against `sidereon` and `sidereon-core` 0.30.0.
 
 ## 0.29.2 - 2026-07-16
 

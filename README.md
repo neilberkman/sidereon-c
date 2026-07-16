@@ -101,7 +101,17 @@ returns `SIDEREON_STATUS_OK`. For SP3 observed/predicted timing, use
 catalog fields.
 
 The C interface deliberately leaves HTTP, Earthdata credentials, retries, and
-cache policy to the caller. For CDDIS, send caller-managed credentials only to
+product-format validation to the caller. After validation,
+`sidereon_exact_cache_open` acquires the bounded native writer lock;
+`sidereon_exact_cache_publish` commits product, archive, and provenance bytes
+as one immutable transaction. Locked and unlocked reads return only a complete
+digest-verified entry, and `sidereon_exact_cache_cleanup` removes abandoned
+entries only under the held lock. Entry accessors copy its authenticated bytes,
+paths, and immutable transaction identifier. Use
+`sidereon_data_product_identity_cache_key` when constructing a portable cache
+layout.
+
+For CDDIS, send caller-managed credentials only to
 NASA's documented hosts, remove URL queries from logs/provenance, reject HTML
 success bodies, validate gzip completion and content length, and parse the
 result with `sidereon_sp3_load` or `sidereon_ionex_load`. NASA's public access
