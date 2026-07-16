@@ -357,6 +357,8 @@ pub enum SidereonStatus {
     Solve = 5,
     /// An internal panic reached the FFI boundary and was contained.
     Panic = 6,
+    /// A bounded wait expired before the requested operation could proceed.
+    Timeout = 7,
 }
 
 /// Observability and covariance-validation tier for an estimation geometry.
@@ -2489,6 +2491,7 @@ pub extern "C" fn sidereon_status_message(status: SidereonStatus) -> *const c_ch
         SidereonStatus::Sp3Parse => c"SP3 parse error",
         SidereonStatus::Solve => c"solve failed",
         SidereonStatus::Panic => c"internal panic contained at the FFI boundary",
+        SidereonStatus::Timeout => c"operation timed out",
     };
     text.as_ptr()
 }
@@ -2743,9 +2746,10 @@ fn marshal_status_to_selection(status: SidereonStatus) -> SidereonSelectionStatu
         SidereonStatus::NullPointer => SidereonSelectionStatus::NullPointer,
         SidereonStatus::InvalidToken => SidereonSelectionStatus::InvalidToken,
         SidereonStatus::Panic => SidereonSelectionStatus::Panic,
-        SidereonStatus::InvalidArgument | SidereonStatus::Sp3Parse | SidereonStatus::Solve => {
-            SidereonSelectionStatus::InvalidArgument
-        }
+        SidereonStatus::InvalidArgument
+        | SidereonStatus::Sp3Parse
+        | SidereonStatus::Solve
+        | SidereonStatus::Timeout => SidereonSelectionStatus::InvalidArgument,
     }
 }
 
@@ -2756,9 +2760,10 @@ fn marshal_status_to_fallback(status: SidereonStatus) -> SidereonFallbackStatus 
         SidereonStatus::NullPointer => SidereonFallbackStatus::NullPointer,
         SidereonStatus::InvalidToken => SidereonFallbackStatus::InvalidToken,
         SidereonStatus::Panic => SidereonFallbackStatus::Panic,
-        SidereonStatus::InvalidArgument | SidereonStatus::Sp3Parse | SidereonStatus::Solve => {
-            SidereonFallbackStatus::InvalidArgument
-        }
+        SidereonStatus::InvalidArgument
+        | SidereonStatus::Sp3Parse
+        | SidereonStatus::Solve
+        | SidereonStatus::Timeout => SidereonFallbackStatus::InvalidArgument,
     }
 }
 

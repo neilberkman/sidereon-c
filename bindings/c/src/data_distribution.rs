@@ -1,22 +1,29 @@
-//! Pure GNSS product identity and public-distributor derivation.
+//! GNSS product identity, public-distributor derivation, and exact cache IO.
 //!
-//! The C interface intentionally performs no HTTP or cache IO. Callers select a
-//! source, use the returned public URL and compression metadata with their own
-//! transport, then pass verified SP3/IONEX bytes to the existing parsers.
+//! Callers own transport and product parsing. The exact-cache functions expose
+//! the same cross-process lock and atomic immutable-entry protocol as the other
+//! Sidereon interfaces.
 
 use std::ffi::c_char;
+use std::ptr;
+use std::time::Duration;
 
 use sidereon_core::data::{
     self as core_data, AnalysisCenter, ArchiveCompression, DistributionSource, ProductCampaign,
     ProductDate, ProductFormat, ProductIdentity, ProductPublisher, ProductType, SolutionClass,
 };
+use sidereon_core::exact_cache::{
+    CommittedExactCacheEntry, ExactCacheError, ExactCacheGuard, ExactProductCache,
+};
 
 use super::{
-    ffi_boundary, parse_bounded_c_string, require_out, require_slice, set_last_error,
-    SidereonStatus,
+    copy_prefix_to_c, ffi_boundary, free_boxed, init_copy_counts, parse_bounded_c_string,
+    require_out, require_ref, require_slice, set_last_error, write_boxed_handle, SidereonStatus,
 };
 
 pub const PRODUCT_TOKEN_C_BYTES: usize = 16;
+pub const ANALYSIS_CENTER_C_BYTES: usize = 32;
+pub const FORMAT_VERSION_C_BYTES: usize = 16;
 pub const OFFICIAL_FILENAME_C_BYTES: usize = 160;
 pub const ARCHIVE_FILENAME_C_BYTES: usize = 164;
 pub const DISTRIBUTION_URL_C_BYTES: usize = 1024;
@@ -98,6 +105,7 @@ pub enum SidereonArchiveCompression {
 #[derive(Clone, Copy)]
 pub struct SidereonProductIdentity {
     pub family: SidereonProductFamily,
+    pub analysis_center: [c_char; ANALYSIS_CENTER_C_BYTES],
     pub publisher: SidereonProductPublisher,
     pub solution_class: SidereonSolutionClass,
     pub campaign: SidereonProductCampaign,
@@ -111,6 +119,8 @@ pub struct SidereonProductIdentity {
     pub sample: [c_char; PRODUCT_TOKEN_C_BYTES],
     pub official_filename: [c_char; OFFICIAL_FILENAME_C_BYTES],
     pub format: SidereonProductFormat,
+    pub has_format_version: bool,
+    pub format_version: [c_char; FORMAT_VERSION_C_BYTES],
     pub has_prediction_horizon_days: bool,
     pub prediction_horizon_days: u8,
 }
@@ -126,9 +136,45 @@ pub struct SidereonDistributionLocation {
     pub compression: SidereonArchiveCompression,
 }
 
+/// Lock-owning native exact-product cache transaction.
+///
+/// Release with `sidereon_exact_cache_free`; releasing it also releases the
+/// cross-process entry lock.
+pub struct SidereonExactCache {
+    cache: ExactProductCache,
+    guard: Option<ExactCacheGuard>,
+}
+
+/// Immutable digest-verified exact-product cache entry.
+///
+/// Byte, path, and identifier accessors copy from this handle. Release it with
+/// `sidereon_exact_cache_entry_free` after the required copies are complete.
+pub struct SidereonExactCacheEntry {
+    entry: CommittedExactCacheEntry,
+}
+
+/// Byte/path component of an immutable exact-cache entry.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SidereonExactCacheComponent {
+    Product = 0,
+    Archive = 1,
+    Provenance = 2,
+}
+
 fn map_error(fn_name: &str, error: impl core::fmt::Display) -> SidereonStatus {
     set_last_error(format!("{fn_name}: {error}"));
     SidereonStatus::InvalidArgument
+}
+
+fn map_cache_error(fn_name: &str, error: ExactCacheError) -> SidereonStatus {
+    let status = if matches!(error, ExactCacheError::LockTimeout) {
+        SidereonStatus::Timeout
+    } else {
+        SidereonStatus::InvalidArgument
+    };
+    set_last_error(format!("{fn_name}: {error}"));
+    status
 }
 
 fn fixed_text<const N: usize>(
@@ -259,6 +305,7 @@ fn identity_to_c(
             ProductType::Clk => SidereonProductFamily::RinexClock,
             ProductType::Nav => SidereonProductFamily::RinexNavigation,
         },
+        analysis_center: fixed_text(fn_name, "analysis_center", identity.analysis_center.code())?,
         publisher: publisher_from_core(identity.publisher),
         solution_class: solution_from_core(identity.solution),
         campaign: campaign_from_core(identity.campaign),
@@ -272,6 +319,12 @@ fn identity_to_c(
         sample: fixed_text(fn_name, "sample", &identity.sample)?,
         official_filename: fixed_text(fn_name, "official_filename", &identity.official_filename)?,
         format: format_from_core(identity.format),
+        has_format_version: identity.format_version.is_some(),
+        format_version: fixed_text(
+            fn_name,
+            "format_version",
+            identity.format_version.as_deref().unwrap_or(""),
+        )?,
         has_prediction_horizon_days: identity.prediction_horizon_days.is_some(),
         prediction_horizon_days: identity.prediction_horizon_days.unwrap_or(0),
     })
@@ -303,6 +356,13 @@ fn identity_from_c(
     let issue = fixed_text_from_c(fn_name, "identity.issue", &identity.issue)?;
     let product = ProductIdentity {
         family: family_to_core(identity.family),
+        analysis_center: fixed_text_from_c(
+            fn_name,
+            "identity.analysis_center",
+            &identity.analysis_center,
+        )?
+        .parse()
+        .map_err(|error| map_error(fn_name, error))?,
         publisher: publisher_to_core(identity.publisher),
         solution: solution_to_core(identity.solution_class),
         campaign: campaign_to_core(identity.campaign),
@@ -322,6 +382,15 @@ fn identity_from_c(
             &identity.official_filename,
         )?,
         format: format_to_core(identity.format),
+        format_version: if identity.has_format_version {
+            Some(fixed_text_from_c(
+                fn_name,
+                "identity.format_version",
+                &identity.format_version,
+            )?)
+        } else {
+            None
+        },
         prediction_horizon_days: identity
             .has_prediction_horizon_days
             .then_some(identity.prediction_horizon_days),
@@ -422,6 +491,51 @@ pub unsafe extern "C" fn sidereon_data_product_identity(
                 *out = identity;
                 SidereonStatus::Ok
             }
+            Err(status) => status,
+        }
+    })
+}
+
+/// Copy the stable cache key derived from every exact identity field.
+///
+/// Uses the standard variable-length output contract; output is not
+/// null-terminated.
+///
+/// Safety: `identity` and count pointers must be live; `out` must have
+/// `out_len` writable bytes or be NULL when `out_len` is zero.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_data_product_identity_cache_key(
+    identity: *const SidereonProductIdentity,
+    out: *mut u8,
+    out_len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_data_product_identity_cache_key";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        if let Err(status) = init_copy_counts(FN_NAME, out_written, out_required) {
+            return status;
+        }
+        let identity = match require_ref(identity, FN_NAME, "identity")
+            .and_then(|identity| identity_from_c(FN_NAME, identity))
+        {
+            Ok(identity) => identity,
+            Err(status) => return status,
+        };
+        let key = match identity.key() {
+            Ok(key) => key,
+            Err(error) => return map_error(FN_NAME, error),
+        };
+        match copy_prefix_to_c(
+            FN_NAME,
+            "out",
+            key.as_bytes(),
+            out,
+            out_len,
+            out_written,
+            out_required,
+        ) {
+            Ok(()) => SidereonStatus::Ok,
             Err(status) => status,
         }
     })
@@ -545,11 +659,402 @@ pub unsafe extern "C" fn sidereon_data_distribution_location(
     })
 }
 
+/// Open one exact identity/source cache and acquire its bounded cross-process lock.
+///
+/// `stable_path` names the official product below its identity/source cache
+/// directory. The returned handle owns the lock until
+/// `sidereon_exact_cache_free` is called.
+///
+/// Safety: `stable_path` and `identity` must be readable; `out_cache` must be
+/// writable storage for one handle pointer.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_exact_cache_open(
+    stable_path: *const c_char,
+    identity: *const SidereonProductIdentity,
+    source: SidereonDistributionSource,
+    timeout_ms: u64,
+    out_cache: *mut *mut SidereonExactCache,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_exact_cache_open";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let out = match require_out(out_cache, FN_NAME, "out_cache") {
+            Ok(out) => out,
+            Err(status) => return status,
+        };
+        *out = ptr::null_mut();
+        let stable_path = match parse_bounded_c_string(FN_NAME, "stable_path", stable_path, 4096) {
+            Ok(path) => path,
+            Err(status) => return status,
+        };
+        let identity = match require_ref(identity, FN_NAME, "identity")
+            .and_then(|identity| identity_from_c(FN_NAME, identity))
+        {
+            Ok(identity) => identity,
+            Err(status) => return status,
+        };
+        let cache = match ExactProductCache::new(stable_path, identity, source_to_core(source)) {
+            Ok(cache) => cache,
+            Err(error) => return map_cache_error(FN_NAME, error),
+        };
+        let guard = match cache.lock(Duration::from_millis(timeout_ms)) {
+            Ok(guard) => guard,
+            Err(error) => return map_cache_error(FN_NAME, error),
+        };
+        write_boxed_handle(
+            out,
+            SidereonExactCache {
+                cache,
+                guard: Some(guard),
+            },
+        );
+        SidereonStatus::Ok
+    })
+}
+
+/// Read the current digest-verified immutable cache entry.
+///
+/// A cache miss returns `SIDEREON_STATUS_OK`, writes false to `out_hit`, and
+/// leaves `out_entry` NULL. Corruption, an incomplete entry, or an
+/// identity/source mismatch is an error, never a miss.
+///
+/// Safety: all pointers must be live and writable as documented.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_exact_cache_read(
+    cache: *const SidereonExactCache,
+    out_hit: *mut bool,
+    out_entry: *mut *mut SidereonExactCacheEntry,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_exact_cache_read";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let cache = match require_ref(cache, FN_NAME, "cache") {
+            Ok(cache) => cache,
+            Err(status) => return status,
+        };
+        if cache.guard.is_none() {
+            set_last_error(format!("{FN_NAME}: cache lock is closed"));
+            return SidereonStatus::InvalidArgument;
+        }
+        let hit = match require_out(out_hit, FN_NAME, "out_hit") {
+            Ok(hit) => hit,
+            Err(status) => return status,
+        };
+        let out = match require_out(out_entry, FN_NAME, "out_entry") {
+            Ok(out) => out,
+            Err(status) => return status,
+        };
+        *hit = false;
+        *out = ptr::null_mut();
+        match cache.cache.read() {
+            Ok(None) => SidereonStatus::Ok,
+            Ok(Some(entry)) => {
+                *hit = true;
+                write_boxed_handle(out, SidereonExactCacheEntry { entry });
+                SidereonStatus::Ok
+            }
+            Err(error) => map_cache_error(FN_NAME, error),
+        }
+    })
+}
+
+/// Read the current digest-verified immutable cache entry without acquiring
+/// the writer lock.
+///
+/// This is the read-only counterpart to `sidereon_exact_cache_open`. The
+/// single atomic commit marker ensures a reader observes either the previous
+/// complete entry or the newly committed complete entry while a cooperating
+/// writer publishes. Miss and error behavior matches
+/// `sidereon_exact_cache_read`.
+///
+/// Safety: `stable_path` and `identity` must be readable; `out_hit` and
+/// `out_entry` must be writable storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_exact_cache_read_unlocked(
+    stable_path: *const c_char,
+    identity: *const SidereonProductIdentity,
+    source: SidereonDistributionSource,
+    out_hit: *mut bool,
+    out_entry: *mut *mut SidereonExactCacheEntry,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_exact_cache_read_unlocked";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let hit = match require_out(out_hit, FN_NAME, "out_hit") {
+            Ok(hit) => hit,
+            Err(status) => return status,
+        };
+        let out = match require_out(out_entry, FN_NAME, "out_entry") {
+            Ok(out) => out,
+            Err(status) => return status,
+        };
+        *hit = false;
+        *out = ptr::null_mut();
+        let stable_path = match parse_bounded_c_string(FN_NAME, "stable_path", stable_path, 4096) {
+            Ok(path) => path,
+            Err(status) => return status,
+        };
+        let identity = match require_ref(identity, FN_NAME, "identity")
+            .and_then(|identity| identity_from_c(FN_NAME, identity))
+        {
+            Ok(identity) => identity,
+            Err(status) => return status,
+        };
+        let cache = match ExactProductCache::new(stable_path, identity, source_to_core(source)) {
+            Ok(cache) => cache,
+            Err(error) => return map_cache_error(FN_NAME, error),
+        };
+        match cache.read() {
+            Ok(None) => SidereonStatus::Ok,
+            Ok(Some(entry)) => {
+                *hit = true;
+                write_boxed_handle(out, SidereonExactCacheEntry { entry });
+                SidereonStatus::Ok
+            }
+            Err(error) => map_cache_error(FN_NAME, error),
+        }
+    })
+}
+
+/// Publish validated product, distributor archive, and provenance bytes as one
+/// immutable cache transaction.
+///
+/// Product semantics must be validated before this call. The shared cache
+/// binds the full identity/source and all three byte digests in the commit.
+///
+/// Safety: each byte pointer must reference its declared length; `cache` must
+/// be live; `out_entry` must be writable storage for a handle pointer.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn sidereon_exact_cache_publish(
+    cache: *const SidereonExactCache,
+    product: *const u8,
+    product_len: usize,
+    archive: *const u8,
+    archive_len: usize,
+    provenance: *const u8,
+    provenance_len: usize,
+    out_entry: *mut *mut SidereonExactCacheEntry,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_exact_cache_publish";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let cache = match require_ref(cache, FN_NAME, "cache") {
+            Ok(cache) => cache,
+            Err(status) => return status,
+        };
+        let Some(guard) = cache.guard.as_ref() else {
+            set_last_error(format!("{FN_NAME}: cache lock is closed"));
+            return SidereonStatus::InvalidArgument;
+        };
+        let product = match require_slice(product, product_len, FN_NAME, "product") {
+            Ok(bytes) => bytes,
+            Err(status) => return status,
+        };
+        let archive = match require_slice(archive, archive_len, FN_NAME, "archive") {
+            Ok(bytes) => bytes,
+            Err(status) => return status,
+        };
+        let provenance = match require_slice(provenance, provenance_len, FN_NAME, "provenance") {
+            Ok(bytes) => bytes,
+            Err(status) => return status,
+        };
+        let out = match require_out(out_entry, FN_NAME, "out_entry") {
+            Ok(out) => out,
+            Err(status) => return status,
+        };
+        *out = ptr::null_mut();
+        match cache.cache.publish(guard, product, archive, provenance) {
+            Ok(entry) => {
+                write_boxed_handle(out, SidereonExactCacheEntry { entry });
+                SidereonStatus::Ok
+            }
+            Err(error) => map_cache_error(FN_NAME, error),
+        }
+    })
+}
+
+/// Remove unreferenced transaction artifacts under the held cache lock.
+///
+/// Safety: `cache` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_exact_cache_cleanup(
+    cache: *const SidereonExactCache,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_exact_cache_cleanup";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let cache = match require_ref(cache, FN_NAME, "cache") {
+            Ok(cache) => cache,
+            Err(status) => return status,
+        };
+        let Some(guard) = cache.guard.as_ref() else {
+            set_last_error(format!("{FN_NAME}: cache lock is closed"));
+            return SidereonStatus::InvalidArgument;
+        };
+        match cache.cache.cleanup_abandoned(guard) {
+            Ok(()) => SidereonStatus::Ok,
+            Err(error) => map_cache_error(FN_NAME, error),
+        }
+    })
+}
+
+fn entry_component_bytes(
+    entry: &SidereonExactCacheEntry,
+    component: SidereonExactCacheComponent,
+) -> &[u8] {
+    match component {
+        SidereonExactCacheComponent::Product => &entry.entry.product,
+        SidereonExactCacheComponent::Archive => &entry.entry.archive,
+        SidereonExactCacheComponent::Provenance => &entry.entry.provenance,
+    }
+}
+
+fn entry_component_path(
+    entry: &SidereonExactCacheEntry,
+    component: SidereonExactCacheComponent,
+) -> Vec<u8> {
+    let path = match component {
+        SidereonExactCacheComponent::Product => &entry.entry.product_path,
+        SidereonExactCacheComponent::Archive => &entry.entry.archive_path,
+        SidereonExactCacheComponent::Provenance => &entry.entry.provenance_path,
+    };
+    path.to_string_lossy().as_bytes().to_vec()
+}
+
+/// Copy one authenticated byte component from a verified cache entry.
+///
+/// Uses the standard variable-length output contract; output is not
+/// null-terminated.
+///
+/// Safety: `entry` and count pointers must be live; `out` must have `out_len`
+/// writable bytes or be NULL when `out_len` is zero.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_exact_cache_entry_copy_bytes(
+    entry: *const SidereonExactCacheEntry,
+    component: SidereonExactCacheComponent,
+    out: *mut u8,
+    out_len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_exact_cache_entry_copy_bytes";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        if let Err(status) = init_copy_counts(FN_NAME, out_written, out_required) {
+            return status;
+        }
+        let entry = match require_ref(entry, FN_NAME, "entry") {
+            Ok(entry) => entry,
+            Err(status) => return status,
+        };
+        match copy_prefix_to_c(
+            FN_NAME,
+            "out",
+            entry_component_bytes(entry, component),
+            out,
+            out_len,
+            out_written,
+            out_required,
+        ) {
+            Ok(()) => SidereonStatus::Ok,
+            Err(status) => status,
+        }
+    })
+}
+
+/// Copy one filesystem path from a verified cache entry as UTF-8 bytes.
+///
+/// Uses the standard variable-length output contract; output is not
+/// null-terminated.
+///
+/// Safety: pointer requirements match `sidereon_exact_cache_entry_copy_bytes`.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_exact_cache_entry_copy_path(
+    entry: *const SidereonExactCacheEntry,
+    component: SidereonExactCacheComponent,
+    out: *mut u8,
+    out_len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_exact_cache_entry_copy_path";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        if let Err(status) = init_copy_counts(FN_NAME, out_written, out_required) {
+            return status;
+        }
+        let entry = match require_ref(entry, FN_NAME, "entry") {
+            Ok(entry) => entry,
+            Err(status) => return status,
+        };
+        let path = entry_component_path(entry, component);
+        match copy_prefix_to_c(
+            FN_NAME,
+            "out",
+            &path,
+            out,
+            out_len,
+            out_written,
+            out_required,
+        ) {
+            Ok(()) => SidereonStatus::Ok,
+            Err(status) => status,
+        }
+    })
+}
+
+/// Copy the immutable 32-character transaction identifier from a verified
+/// cache entry.
+///
+/// Uses the standard variable-length output contract; output is not
+/// null-terminated.
+///
+/// Safety: pointer requirements match `sidereon_exact_cache_entry_copy_bytes`.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_exact_cache_entry_copy_id(
+    entry: *const SidereonExactCacheEntry,
+    out: *mut u8,
+    out_len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_exact_cache_entry_copy_id";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        if let Err(status) = init_copy_counts(FN_NAME, out_written, out_required) {
+            return status;
+        }
+        let entry = match require_ref(entry, FN_NAME, "entry") {
+            Ok(entry) => entry,
+            Err(status) => return status,
+        };
+        match copy_prefix_to_c(
+            FN_NAME,
+            "out",
+            entry.entry.entry_id.as_bytes(),
+            out,
+            out_len,
+            out_written,
+            out_required,
+        ) {
+            Ok(()) => SidereonStatus::Ok,
+            Err(status) => status,
+        }
+    })
+}
+
+/// Release an exact-cache entry handle. NULL is a no-op.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_exact_cache_entry_free(entry: *mut SidereonExactCacheEntry) {
+    free_boxed(entry);
+}
+
+/// Release an exact-cache handle and its cross-process lock. NULL is a no-op.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_exact_cache_free(cache: *mut SidereonExactCache) {
+    free_boxed(cache);
+}
+
 #[cfg(test)]
 mod tests {
     use std::ffi::{CStr, CString};
+    use std::fs;
     use std::mem::MaybeUninit;
     use std::ptr;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
 
@@ -574,6 +1079,12 @@ mod tests {
         assert_eq!(identity.publisher, SidereonProductPublisher::Code);
         assert_eq!(identity.solution_class, SidereonSolutionClass::Final);
         assert_eq!(
+            unsafe { CStr::from_ptr(identity.analysis_center.as_ptr()) }
+                .to_str()
+                .unwrap(),
+            "cod"
+        );
+        assert_eq!(
             identity.campaign,
             SidereonProductCampaign::MultiGnssExperiment
         );
@@ -583,6 +1094,34 @@ mod tests {
                 .unwrap(),
             "COD0MGXFIN_20261930000_01D_05M_ORB.SP3"
         );
+        let mut key_required = 0;
+        let mut key_written = 0;
+        assert_eq!(
+            unsafe {
+                sidereon_data_product_identity_cache_key(
+                    &identity,
+                    ptr::null_mut(),
+                    0,
+                    &mut key_written,
+                    &mut key_required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        let mut key = vec![0; key_required];
+        assert_eq!(
+            unsafe {
+                sidereon_data_product_identity_cache_key(
+                    &identity,
+                    key.as_mut_ptr(),
+                    key.len(),
+                    &mut key_written,
+                    &mut key_required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(&key[..key_written], b"cod-final-a91258c21fa4860c34ce");
 
         let mut location = MaybeUninit::<SidereonDistributionLocation>::uninit();
         let status = unsafe {
@@ -608,6 +1147,184 @@ mod tests {
             "https://cddis.nasa.gov/archive/gnss/products/2427/\
 COD0MGXFIN_20261930000_01D_05M_ORB.SP3.gz"
         );
+    }
+
+    #[test]
+    fn c_exact_cache_owns_lock_and_returns_verified_bytes() {
+        let center = CString::new("cod").unwrap();
+        let mut identity = MaybeUninit::<SidereonProductIdentity>::uninit();
+        assert_eq!(
+            unsafe {
+                sidereon_data_product_identity(
+                    center.as_ptr(),
+                    SidereonProductFamily::Sp3,
+                    2026,
+                    7,
+                    12,
+                    ptr::null(),
+                    ptr::null(),
+                    identity.as_mut_ptr(),
+                )
+            },
+            SidereonStatus::Ok
+        );
+        let identity = unsafe { identity.assume_init() };
+        let root = std::env::temp_dir().join(format!(
+            "sidereon-c-exact-cache-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let stable = root.join("COD0MGXFIN_20261930000_01D_05M_ORB.SP3");
+        let stable_c = CString::new(stable.to_string_lossy().as_bytes()).unwrap();
+        let mut cache = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_exact_cache_open(
+                    stable_c.as_ptr(),
+                    &identity,
+                    SidereonDistributionSource::InMemory,
+                    1_000,
+                    &mut cache,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert!(!cache.is_null());
+
+        let mut blocked = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_exact_cache_open(
+                    stable_c.as_ptr(),
+                    &identity,
+                    SidereonDistributionSource::InMemory,
+                    0,
+                    &mut blocked,
+                )
+            },
+            SidereonStatus::Timeout
+        );
+        assert!(blocked.is_null());
+
+        let product = b"validated product";
+        let archive = b"archive";
+        let provenance = b"{\"identity\":\"exact\"}";
+        let mut published = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_exact_cache_publish(
+                    cache,
+                    product.as_ptr(),
+                    product.len(),
+                    archive.as_ptr(),
+                    archive.len(),
+                    provenance.as_ptr(),
+                    provenance.len(),
+                    &mut published,
+                )
+            },
+            SidereonStatus::Ok
+        );
+
+        let mut required = 0;
+        let mut written = 0;
+        assert_eq!(
+            unsafe {
+                sidereon_exact_cache_entry_copy_bytes(
+                    published,
+                    SidereonExactCacheComponent::Product,
+                    ptr::null_mut(),
+                    0,
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        let mut copied = vec![0; required];
+        assert_eq!(
+            unsafe {
+                sidereon_exact_cache_entry_copy_bytes(
+                    published,
+                    SidereonExactCacheComponent::Product,
+                    copied.as_mut_ptr(),
+                    copied.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(&copied[..written], product);
+
+        let mut id = [0_u8; 32];
+        assert_eq!(
+            unsafe {
+                sidereon_exact_cache_entry_copy_id(
+                    published,
+                    id.as_mut_ptr(),
+                    id.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(written, 32);
+        assert!(id
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte)));
+
+        let mut hit = false;
+        let mut read = ptr::null_mut();
+        assert_eq!(
+            unsafe { sidereon_exact_cache_read(cache, &mut hit, &mut read) },
+            SidereonStatus::Ok
+        );
+        assert!(hit);
+        assert!(!read.is_null());
+        unsafe {
+            sidereon_exact_cache_entry_free(read);
+            sidereon_exact_cache_entry_free(published);
+            sidereon_exact_cache_free(cache);
+        }
+
+        let mut unlocked_hit = false;
+        let mut unlocked = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_exact_cache_read_unlocked(
+                    stable_c.as_ptr(),
+                    &identity,
+                    SidereonDistributionSource::InMemory,
+                    &mut unlocked_hit,
+                    &mut unlocked,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert!(unlocked_hit);
+        assert!(!unlocked.is_null());
+        unsafe { sidereon_exact_cache_entry_free(unlocked) };
+
+        let mut reopened = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_exact_cache_open(
+                    stable_c.as_ptr(),
+                    &identity,
+                    SidereonDistributionSource::InMemory,
+                    1_000,
+                    &mut reopened,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        unsafe { sidereon_exact_cache_free(reopened) };
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

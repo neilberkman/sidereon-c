@@ -45,9 +45,11 @@
 #include <stdlib.h>
 
 #define SIDEREON_VERSION_MAJOR 0
-#define SIDEREON_VERSION_MINOR 29
-#define SIDEREON_VERSION_PATCH 2
-#define SIDEREON_VERSION_STRING "0.29.2"
+#define SIDEREON_VERSION_MINOR 30
+#define SIDEREON_VERSION_PATCH 0
+#define SIDEREON_VERSION_STRING "0.30.0"
+
+#define ANALYSIS_CENTER_C_BYTES 32
 
 #define ARCHIVE_FILENAME_C_BYTES 164
 
@@ -56,6 +58,8 @@
 #define BIAS_TEXT_C_BYTES (MAX_BIAS_TEXT_BYTES + 1)
 
 #define DISTRIBUTION_URL_C_BYTES 1024
+
+#define FORMAT_VERSION_C_BYTES 16
 
 #define MAX_BIAS_OBS_BYTES 16
 
@@ -195,6 +199,10 @@ typedef enum SidereonStatus {
      * An internal panic reached the FFI boundary and was contained.
      */
     SIDEREON_STATUS_PANIC = 6,
+    /**
+     * A bounded wait expired before the requested operation could proceed.
+     */
+    SIDEREON_STATUS_TIMEOUT = 7,
 } SidereonStatus;
 
 typedef enum SidereonAlmanacEclipseKind {
@@ -451,6 +459,15 @@ typedef enum SidereonErrorMetricsErrorKind {
      */
     SIDEREON_ERROR_METRICS_ERROR_KIND_ROTATION = 4,
 } SidereonErrorMetricsErrorKind;
+
+/**
+ * Byte/path component of an immutable exact-cache entry.
+ */
+typedef enum SidereonExactCacheComponent {
+    SIDEREON_EXACT_CACHE_COMPONENT_PRODUCT = 0,
+    SIDEREON_EXACT_CACHE_COMPONENT_ARCHIVE = 1,
+    SIDEREON_EXACT_CACHE_COMPONENT_PROVENANCE = 2,
+} SidereonExactCacheComponent;
 
 /**
  * Direction of a Moon elevation threshold crossing.
@@ -2921,6 +2938,22 @@ typedef struct SidereonEgm96FifteenMinuteGeoid SidereonEgm96FifteenMinuteGeoid;
  * sidereon_propagate_state and release with sidereon_ephemeris_free.
  */
 typedef struct SidereonEphemeris SidereonEphemeris;
+
+/**
+ * Lock-owning native exact-product cache transaction.
+ *
+ * Release with `sidereon_exact_cache_free`; releasing it also releases the
+ * cross-process entry lock.
+ */
+typedef struct SidereonExactCache SidereonExactCache;
+
+/**
+ * Immutable digest-verified exact-product cache entry.
+ *
+ * Byte, path, and identifier accessors copy from this handle. Release it with
+ * `sidereon_exact_cache_entry_free` after the required copies are complete.
+ */
+typedef struct SidereonExactCacheEntry SidereonExactCacheEntry;
 
 /**
  * The result of an FDE solve: the surviving receiver solution, the satellites
@@ -5407,6 +5440,7 @@ typedef struct SidereonDataProblem {
  */
 typedef struct SidereonProductIdentity {
     enum SidereonProductFamily family;
+    char analysis_center[ANALYSIS_CENTER_C_BYTES];
     enum SidereonProductPublisher publisher;
     enum SidereonSolutionClass solution_class;
     enum SidereonProductCampaign campaign;
@@ -5420,6 +5454,8 @@ typedef struct SidereonProductIdentity {
     char sample[PRODUCT_TOKEN_C_BYTES];
     char official_filename[OFFICIAL_FILENAME_C_BYTES];
     enum SidereonProductFormat format;
+    bool has_format_version;
+    char format_version[FORMAT_VERSION_C_BYTES];
     bool has_prediction_horizon_days;
     uint8_t prediction_horizon_days;
 } SidereonProductIdentity;
@@ -19801,6 +19837,21 @@ enum SidereonStatus sidereon_data_product_identity(const char *center,
                                                    struct SidereonProductIdentity *out_identity);
 
 /**
+ * Copy the stable cache key derived from every exact identity field.
+ *
+ * Uses the standard variable-length output contract; output is not
+ * null-terminated.
+ *
+ * Safety: `identity` and count pointers must be live; `out` must have
+ * `out_len` writable bytes or be NULL when `out_len` is zero.
+ */
+enum SidereonStatus sidereon_data_product_identity_cache_key(const struct SidereonProductIdentity *identity,
+                                                             uint8_t *out,
+                                                             size_t out_len,
+                                                             size_t *out_written,
+                                                             size_t *out_required);
+
+/**
  * Require available identities to be exactly the declared product set.
  *
  * The expected set must be non-empty. Both inputs reject duplicates; missing
@@ -20614,6 +20665,136 @@ enum SidereonStatus sidereon_ewma_update_power_of_two(double previous,
                                                       double sample,
                                                       uint32_t shift,
                                                       double *out);
+
+/**
+ * Remove unreferenced transaction artifacts under the held cache lock.
+ *
+ * Safety: `cache` must be a live handle.
+ */
+enum SidereonStatus sidereon_exact_cache_cleanup(const struct SidereonExactCache *cache);
+
+/**
+ * Copy one authenticated byte component from a verified cache entry.
+ *
+ * Uses the standard variable-length output contract; output is not
+ * null-terminated.
+ *
+ * Safety: `entry` and count pointers must be live; `out` must have `out_len`
+ * writable bytes or be NULL when `out_len` is zero.
+ */
+enum SidereonStatus sidereon_exact_cache_entry_copy_bytes(const struct SidereonExactCacheEntry *entry,
+                                                          enum SidereonExactCacheComponent component,
+                                                          uint8_t *out,
+                                                          size_t out_len,
+                                                          size_t *out_written,
+                                                          size_t *out_required);
+
+/**
+ * Copy the immutable 32-character transaction identifier from a verified
+ * cache entry.
+ *
+ * Uses the standard variable-length output contract; output is not
+ * null-terminated.
+ *
+ * Safety: pointer requirements match `sidereon_exact_cache_entry_copy_bytes`.
+ */
+enum SidereonStatus sidereon_exact_cache_entry_copy_id(const struct SidereonExactCacheEntry *entry,
+                                                       uint8_t *out,
+                                                       size_t out_len,
+                                                       size_t *out_written,
+                                                       size_t *out_required);
+
+/**
+ * Copy one filesystem path from a verified cache entry as UTF-8 bytes.
+ *
+ * Uses the standard variable-length output contract; output is not
+ * null-terminated.
+ *
+ * Safety: pointer requirements match `sidereon_exact_cache_entry_copy_bytes`.
+ */
+enum SidereonStatus sidereon_exact_cache_entry_copy_path(const struct SidereonExactCacheEntry *entry,
+                                                         enum SidereonExactCacheComponent component,
+                                                         uint8_t *out,
+                                                         size_t out_len,
+                                                         size_t *out_written,
+                                                         size_t *out_required);
+
+/**
+ * Release an exact-cache entry handle. NULL is a no-op.
+ */
+void sidereon_exact_cache_entry_free(struct SidereonExactCacheEntry *entry);
+
+/**
+ * Release an exact-cache handle and its cross-process lock. NULL is a no-op.
+ */
+void sidereon_exact_cache_free(struct SidereonExactCache *cache);
+
+/**
+ * Open one exact identity/source cache and acquire its bounded cross-process lock.
+ *
+ * `stable_path` names the official product below its identity/source cache
+ * directory. The returned handle owns the lock until
+ * `sidereon_exact_cache_free` is called.
+ *
+ * Safety: `stable_path` and `identity` must be readable; `out_cache` must be
+ * writable storage for one handle pointer.
+ */
+enum SidereonStatus sidereon_exact_cache_open(const char *stable_path,
+                                              const struct SidereonProductIdentity *identity,
+                                              enum SidereonDistributionSource source,
+                                              uint64_t timeout_ms,
+                                              struct SidereonExactCache **out_cache);
+
+/**
+ * Publish validated product, distributor archive, and provenance bytes as one
+ * immutable cache transaction.
+ *
+ * Product semantics must be validated before this call. The shared cache
+ * binds the full identity/source and all three byte digests in the commit.
+ *
+ * Safety: each byte pointer must reference its declared length; `cache` must
+ * be live; `out_entry` must be writable storage for a handle pointer.
+ */
+enum SidereonStatus sidereon_exact_cache_publish(const struct SidereonExactCache *cache,
+                                                 const uint8_t *product,
+                                                 size_t product_len,
+                                                 const uint8_t *archive,
+                                                 size_t archive_len,
+                                                 const uint8_t *provenance,
+                                                 size_t provenance_len,
+                                                 struct SidereonExactCacheEntry **out_entry);
+
+/**
+ * Read the current digest-verified immutable cache entry.
+ *
+ * A cache miss returns `SIDEREON_STATUS_OK`, writes false to `out_hit`, and
+ * leaves `out_entry` NULL. Corruption, an incomplete entry, or an
+ * identity/source mismatch is an error, never a miss.
+ *
+ * Safety: all pointers must be live and writable as documented.
+ */
+enum SidereonStatus sidereon_exact_cache_read(const struct SidereonExactCache *cache,
+                                              bool *out_hit,
+                                              struct SidereonExactCacheEntry **out_entry);
+
+/**
+ * Read the current digest-verified immutable cache entry without acquiring
+ * the writer lock.
+ *
+ * This is the read-only counterpart to `sidereon_exact_cache_open`. The
+ * single atomic commit marker ensures a reader observes either the previous
+ * complete entry or the newly committed complete entry while a cooperating
+ * writer publishes. Miss and error behavior matches
+ * `sidereon_exact_cache_read`.
+ *
+ * Safety: `stable_path` and `identity` must be readable; `out_hit` and
+ * `out_entry` must be writable storage.
+ */
+enum SidereonStatus sidereon_exact_cache_read_unlocked(const char *stable_path,
+                                                       const struct SidereonProductIdentity *identity,
+                                                       enum SidereonDistributionSource source,
+                                                       bool *out_hit,
+                                                       struct SidereonExactCacheEntry **out_entry);
 
 /**
  * Fill *out_options with the default FDE options: unit weights, the engine
