@@ -3693,6 +3693,132 @@ static int exercise_constellation_surface(void) {
         return fail("sidereon_constellation_build", 1);
     }
 
+    /* Explicit-time NAVCEN assessment. The active PRN 7 FCSTDV starts at
+     * 2026-07-24 01:15 UTC and ends at 13:15 UTC. */
+    const int64_t forecast_before_us = INT64_C(1784855640000000);
+    const int64_t forecast_start_us = INT64_C(1784855700000000);
+    const int64_t forecast_end_us = INT64_C(1784898900000000);
+    SidereonNavcenAssessments *assessments = NULL;
+    if (sidereon_navcen_parse_at(CONSTELLATION_NAVCEN_FORECAST_HTML,
+                                 CONSTELLATION_NAVCEN_FORECAST_HTML_LEN, forecast_start_us,
+                                 &assessments) != SIDEREON_STATUS_OK ||
+        assessments == NULL) {
+        sidereon_constellation_free(catalog);
+        return fail("sidereon_navcen_parse_at", 1);
+    }
+    size_t assessment_count = 0;
+    if (sidereon_navcen_assessment_count(assessments, &assessment_count) !=
+            SIDEREON_STATUS_OK ||
+        assessment_count != 6) {
+        sidereon_navcen_assessments_free(assessments);
+        sidereon_constellation_free(catalog);
+        return fail("sidereon_navcen_assessment_count", 1);
+    }
+    SidereonNavcenAssessment malformed, forecast, inactive_forecast, decom, unusable, unusufn;
+    if (sidereon_navcen_assessment(assessments, 0, &malformed) != SIDEREON_STATUS_OK ||
+        malformed.prn != 4 || !malformed.usable ||
+        malformed.timing != SIDEREON_NAVCEN_TIMING_UNPARSEABLE ||
+        sidereon_navcen_assessment(assessments, 1, &forecast) != SIDEREON_STATUS_OK ||
+        forecast.prn != 7 || forecast.usable ||
+        forecast.timing != SIDEREON_NAVCEN_TIMING_PARSED ||
+        !forecast.effective_start_present || forecast.effective_start_unix_us != forecast_start_us ||
+        !forecast.effective_end_present || forecast.effective_end_unix_us != forecast_end_us ||
+        sidereon_navcen_assessment(assessments, 2, &inactive_forecast) != SIDEREON_STATUS_OK ||
+        inactive_forecast.prn != 8 || !inactive_forecast.usable ||
+        inactive_forecast.active_nanu ||
+        inactive_forecast.timing != SIDEREON_NAVCEN_TIMING_PARSED ||
+        sidereon_navcen_assessment(assessments, 3, &decom) != SIDEREON_STATUS_OK ||
+        decom.prn != 13 || decom.usable ||
+        decom.timing != SIDEREON_NAVCEN_TIMING_NOT_APPLICABLE ||
+        sidereon_navcen_assessment(assessments, 4, &unusable) != SIDEREON_STATUS_OK ||
+        unusable.prn != 19 || unusable.usable ||
+        unusable.timing != SIDEREON_NAVCEN_TIMING_NOT_APPLICABLE ||
+        sidereon_navcen_assessment(assessments, 5, &unusufn) != SIDEREON_STATUS_OK ||
+        unusufn.prn != 20 || unusufn.usable ||
+        unusufn.timing != SIDEREON_NAVCEN_TIMING_NOT_APPLICABLE) {
+        sidereon_navcen_assessments_free(assessments);
+        sidereon_constellation_free(catalog);
+        return fail("time-aware NAVCEN assessment values", 1);
+    }
+    size_t text_written = 123, text_required = 123;
+    if (sidereon_navcen_assessment_nanu_type(assessments, 1, NULL, 0, &text_written,
+                                             &text_required) != SIDEREON_STATUS_OK ||
+        text_written != 0 || text_required != 6) {
+        sidereon_navcen_assessments_free(assessments);
+        sidereon_constellation_free(catalog);
+        return fail("NAVCEN NANU type size", 1);
+    }
+    uint8_t nanu_type[6];
+    if (sidereon_navcen_assessment_nanu_type(assessments, 1, nanu_type, sizeof(nanu_type),
+                                             &text_written, &text_required) != SIDEREON_STATUS_OK ||
+        text_written != 6 || memcmp(nanu_type, "FCSTDV", 6) != 0) {
+        sidereon_navcen_assessments_free(assessments);
+        sidereon_constellation_free(catalog);
+        return fail("NAVCEN NANU type bytes", 1);
+    }
+    sidereon_navcen_assessments_free(assessments);
+
+    for (size_t i = 0; i < 2; i++) {
+        int64_t evaluation_us = i == 0 ? forecast_before_us : forecast_end_us;
+        assessments = NULL;
+        if (sidereon_navcen_parse_at(CONSTELLATION_NAVCEN_FORECAST_HTML,
+                                     CONSTELLATION_NAVCEN_FORECAST_HTML_LEN, evaluation_us,
+                                     &assessments) != SIDEREON_STATUS_OK ||
+            sidereon_navcen_assessment(assessments, 1, &forecast) != SIDEREON_STATUS_OK ||
+            !forecast.usable) {
+            sidereon_navcen_assessments_free(assessments);
+            sidereon_constellation_free(catalog);
+            return fail("forecast must be usable before start and at end", 1);
+        }
+        sidereon_navcen_assessments_free(assessments);
+    }
+
+    static const uint8_t merge_forecast_html[] =
+        "<table><tr>"
+        "<td class=\"views-field-field-gps-prn\">19</td>"
+        "<td class=\"views-field-field-gps-svn\">59</td>"
+        "<td class=\"views-field-field-gps-con-block-type\">IIR</td>"
+        "<td class=\"views-field-field-nanu-outage-start-date\">24 JUL 2026</td>"
+        "<td class=\"views-field-field-nanu-type\">FCSTDV</td>"
+        "<td class=\"views-field-field-nanu-subject\">"
+        "SVN59 (PRN19) FORECAST OUTAGE JDAY 205/0115 - JDAY 205/1315</td>"
+        "<td class=\"nanu-active-check\">1</td>"
+        "</tr></table>";
+    SidereonConstellation *time_aware_catalog = NULL;
+    if (sidereon_constellation_build_at(
+            SIDEREON_GNSS_SYSTEM_GPS, CONSTELLATION_GPS_OPS_JSON,
+            CONSTELLATION_GPS_OPS_JSON_LEN, merge_forecast_html,
+            sizeof(merge_forecast_html) - 1, forecast_start_us, &time_aware_catalog) !=
+            SIDEREON_STATUS_OK ||
+        time_aware_catalog == NULL) {
+        sidereon_constellation_free(catalog);
+        return fail("sidereon_constellation_build_at", 1);
+    }
+    SidereonConstellationRecord timed_prn19;
+    if (sidereon_constellation_record(time_aware_catalog, 3, &timed_prn19) !=
+            SIDEREON_STATUS_OK ||
+        timed_prn19.prn != 19 || timed_prn19.usable) {
+        sidereon_constellation_free(time_aware_catalog);
+        sidereon_constellation_free(catalog);
+        return fail("sidereon_constellation_build_at merged usability", 1);
+    }
+    sidereon_constellation_free(time_aware_catalog);
+
+    time_aware_catalog = NULL;
+    if (sidereon_constellation_build_at(
+            SIDEREON_GNSS_SYSTEM_GPS, CONSTELLATION_GPS_OPS_JSON,
+            CONSTELLATION_GPS_OPS_JSON_LEN, merge_forecast_html,
+            sizeof(merge_forecast_html) - 1, forecast_end_us, &time_aware_catalog) !=
+            SIDEREON_STATUS_OK ||
+        sidereon_constellation_record(time_aware_catalog, 3, &timed_prn19) !=
+            SIDEREON_STATUS_OK ||
+        timed_prn19.prn != 19 || !timed_prn19.usable) {
+        sidereon_constellation_free(time_aware_catalog);
+        sidereon_constellation_free(catalog);
+        return fail("sidereon_constellation_build_at forecast end", 1);
+    }
+    sidereon_constellation_free(time_aware_catalog);
+
     size_t record_count = 0;
     if (sidereon_constellation_record_count(catalog, &record_count) != SIDEREON_STATUS_OK ||
         record_count != 4) {

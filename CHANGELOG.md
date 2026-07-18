@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Adds `sidereon_navcen_parse_at` with owned assessment metadata and NANU
+  provenance accessors, plus `sidereon_constellation_build_at`, for explicit UTC
+  NAVCEN usability evaluation. Parsed forecast intervals are half-open;
+  malformed timing is reported and does not invent an outage.
+- The time-aware path recognizes active `UNUSUFN` notices as immediately
+  unusable while retaining the legacy entry point's historical behavior.
+- Keeps `sidereon_constellation_build` ABI and clock-free behavior unchanged.
+
 ## 0.31.2 - 2026-07-16
 
 - Returns the complete merged-SP3 identity through an owned result handle,

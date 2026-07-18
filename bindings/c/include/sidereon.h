@@ -550,6 +550,24 @@ typedef enum SidereonRtkIntegerStatus {
 } SidereonRtkIntegerStatus;
 
 /**
+ * NAVCEN forecast interval provenance.
+ */
+typedef enum SidereonNavcenTiming {
+    /**
+     * NANU type does not carry a bounded forecast outage interval.
+     */
+    SIDEREON_NAVCEN_TIMING_NOT_APPLICABLE = 0,
+    /**
+     * A complete bounded UTC interval was parsed.
+     */
+    SIDEREON_NAVCEN_TIMING_PARSED = 1,
+    /**
+     * Forecast timing was incomplete, malformed, or contradictory.
+     */
+    SIDEREON_NAVCEN_TIMING_UNPARSEABLE = 2,
+} SidereonNavcenTiming;
+
+/**
  * Terminal status of a PPP float or fixed least-squares solve.
  */
 typedef enum SidereonPppSolveStatus {
@@ -3051,6 +3069,12 @@ typedef struct SidereonMmapTerrain SidereonMmapTerrain;
  * sidereon_moving_baseline_solution_free.
  */
 typedef struct SidereonMovingBaselineSolution SidereonMovingBaselineSolution;
+
+/**
+ * Time-aware NAVCEN assessments. Create with sidereon_navcen_parse_at and
+ * release with sidereon_navcen_assessments_free.
+ */
+typedef struct SidereonNavcenAssessments SidereonNavcenAssessments;
 
 typedef struct SidereonNmeaAccumulator SidereonNmeaAccumulator;
 
@@ -9457,6 +9481,62 @@ typedef struct SidereonMovingBaselineEpochSummary {
      */
     struct SidereonRtkFixedMetadata fixed;
 } SidereonMovingBaselineEpochSummary;
+
+/**
+ * Fixed-width metadata for one time-aware NAVCEN assessment. Read the NANU
+ * type, subject, and cleaned Outage Start text through the matching string
+ * accessors.
+ */
+typedef struct SidereonNavcenAssessment {
+    /**
+     * GNSS system (GPS).
+     */
+    enum SidereonGnssSystem system;
+    /**
+     * Within-system PRN.
+     */
+    uint16_t prn;
+    /**
+     * Whether svn is present.
+     */
+    bool svn_present;
+    /**
+     * Space vehicle number when svn_present is true.
+     */
+    uint16_t svn;
+    /**
+     * Usability at evaluated_at_unix_us.
+     */
+    bool usable;
+    /**
+     * Whether the NAVCEN row carried an active NANU.
+     */
+    bool active_nanu;
+    /**
+     * Explicit UTC evaluation instant in Unix microseconds.
+     */
+    int64_t evaluated_at_unix_us;
+    /**
+     * Forecast timing provenance.
+     */
+    enum SidereonNavcenTiming timing;
+    /**
+     * Whether effective_start_unix_us is present.
+     */
+    bool effective_start_present;
+    /**
+     * Inclusive parsed interval start in Unix microseconds.
+     */
+    int64_t effective_start_unix_us;
+    /**
+     * Whether effective_end_unix_us is present.
+     */
+    bool effective_end_present;
+    /**
+     * Exclusive parsed interval end in Unix microseconds.
+     */
+    int64_t effective_end_unix_us;
+} SidereonNavcenAssessment;
 
 /**
  * Receiver/satellite ray geometry and epoch for a full NeQuick-G evaluation,
@@ -19290,6 +19370,28 @@ enum SidereonStatus sidereon_constellation_build(uint32_t system,
                                                  struct SidereonConstellation **out_catalog);
 
 /**
+ * Build a merged GNSS identity catalog with NAVCEN usability evaluated at an
+ * explicit UTC Unix-microsecond instant. Active bounded forecasts affect the
+ * catalog only on their parsed half-open interval. An ambiguous forecast is
+ * retained by sidereon_navcen_parse_at but does not disable the satellite.
+ *
+ * This is the time-aware companion to sidereon_constellation_build; the legacy
+ * entry point retains its historical clock-free behavior. Release the returned
+ * catalog with sidereon_constellation_free.
+ *
+ * Safety: omm_json must point to omm_len readable bytes; navcen_html must point
+ * to navcen_len readable bytes or be NULL when navcen_len is 0; out_catalog must
+ * point to storage for a SidereonConstellation*.
+ */
+enum SidereonStatus sidereon_constellation_build_at(uint32_t system,
+                                                    const uint8_t *omm_json,
+                                                    size_t omm_len,
+                                                    const uint8_t *navcen_html,
+                                                    size_t navcen_len,
+                                                    int64_t evaluated_at_unix_us,
+                                                    struct SidereonConstellation **out_catalog);
+
+/**
  * Compare two catalogs by system and PRN. Delegates to
  * sidereon_core::constellation::diff.
  *
@@ -23481,6 +23583,79 @@ enum SidereonStatus sidereon_moving_baseline_solution_epoch_count(const struct S
  * Safety: solution must be a handle from sidereon_solve_moving_baseline or NULL.
  */
 void sidereon_moving_baseline_solution_free(struct SidereonMovingBaselineSolution *solution);
+
+/**
+ * Copy fixed metadata for one NAVCEN assessment by PRN-sorted index.
+ *
+ * Safety: assessments must be a live handle; out_assessment must point to a
+ * SidereonNavcenAssessment.
+ */
+enum SidereonStatus sidereon_navcen_assessment(const struct SidereonNavcenAssessments *assessments,
+                                               size_t index,
+                                               struct SidereonNavcenAssessment *out_assessment);
+
+/**
+ * Write the number of parsed NAVCEN assessments to out_count.
+ *
+ * Safety: assessments must be a live handle; out_count must point to size_t.
+ */
+enum SidereonStatus sidereon_navcen_assessment_count(const struct SidereonNavcenAssessments *assessments,
+                                                     size_t *out_count);
+
+/**
+ * Copy the NANU subject for one assessment. An absent field has required
+ * length zero. Output is not null-terminated.
+ */
+enum SidereonStatus sidereon_navcen_assessment_nanu_subject(const struct SidereonNavcenAssessments *assessments,
+                                                            size_t index,
+                                                            uint8_t *out,
+                                                            size_t out_len,
+                                                            size_t *out_written,
+                                                            size_t *out_required);
+
+/**
+ * Copy the NANU type for one assessment. An absent field has required length
+ * zero. Output is not null-terminated.
+ */
+enum SidereonStatus sidereon_navcen_assessment_nanu_type(const struct SidereonNavcenAssessments *assessments,
+                                                         size_t index,
+                                                         uint8_t *out,
+                                                         size_t out_len,
+                                                         size_t *out_written,
+                                                         size_t *out_required);
+
+/**
+ * Copy the cleaned Outage Start text for one assessment. Duplicate cells are
+ * joined with " | ". An absent field has required length zero. Output is not
+ * null-terminated.
+ */
+enum SidereonStatus sidereon_navcen_assessment_outage_start(const struct SidereonNavcenAssessments *assessments,
+                                                            size_t index,
+                                                            uint8_t *out,
+                                                            size_t out_len,
+                                                            size_t *out_written,
+                                                            size_t *out_required);
+
+/**
+ * Release a NAVCEN assessment handle. Passing NULL is a no-op.
+ *
+ * Safety: assessments must be NULL or a live handle from
+ * sidereon_navcen_parse_at that has not already been freed.
+ */
+void sidereon_navcen_assessments_free(struct SidereonNavcenAssessments *assessments);
+
+/**
+ * Parse NAVCEN status HTML and evaluate every row at explicit UTC Unix
+ * microseconds. On success writes an owned assessment handle to out_assessments;
+ * release it with sidereon_navcen_assessments_free.
+ *
+ * Safety: navcen_html must point to navcen_len readable bytes; out_assessments
+ * must point to storage for a SidereonNavcenAssessments*.
+ */
+enum SidereonStatus sidereon_navcen_parse_at(const uint8_t *navcen_html,
+                                             size_t navcen_len,
+                                             int64_t evaluated_at_unix_us,
+                                             struct SidereonNavcenAssessments **out_assessments);
 
 /**
  * Full NeQuick-G slant ionospheric group delay (positive metres) on

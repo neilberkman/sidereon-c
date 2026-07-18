@@ -6,6 +6,56 @@ pub struct SidereonConstellation {
     pub(crate) records: Vec<ConstRecord>,
 }
 
+/// Time-aware NAVCEN assessments. Create with sidereon_navcen_parse_at and
+/// release with sidereon_navcen_assessments_free.
+pub struct SidereonNavcenAssessments {
+    pub(crate) assessments: Vec<ConstNavcenAssessment>,
+}
+
+/// NAVCEN forecast interval provenance.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonNavcenTiming {
+    /// NANU type does not carry a bounded forecast outage interval.
+    NotApplicable = 0,
+    /// A complete bounded UTC interval was parsed.
+    Parsed = 1,
+    /// Forecast timing was incomplete, malformed, or contradictory.
+    Unparseable = 2,
+}
+
+/// Fixed-width metadata for one time-aware NAVCEN assessment. Read the NANU
+/// type, subject, and cleaned Outage Start text through the matching string
+/// accessors.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonNavcenAssessment {
+    /// GNSS system (GPS).
+    pub system: SidereonGnssSystem,
+    /// Within-system PRN.
+    pub prn: u16,
+    /// Whether svn is present.
+    pub svn_present: bool,
+    /// Space vehicle number when svn_present is true.
+    pub svn: u16,
+    /// Usability at evaluated_at_unix_us.
+    pub usable: bool,
+    /// Whether the NAVCEN row carried an active NANU.
+    pub active_nanu: bool,
+    /// Explicit UTC evaluation instant in Unix microseconds.
+    pub evaluated_at_unix_us: i64,
+    /// Forecast timing provenance.
+    pub timing: SidereonNavcenTiming,
+    /// Whether effective_start_unix_us is present.
+    pub effective_start_present: bool,
+    /// Inclusive parsed interval start in Unix microseconds.
+    pub effective_start_unix_us: i64,
+    /// Whether effective_end_unix_us is present.
+    pub effective_end_present: bool,
+    /// Exclusive parsed interval end in Unix microseconds.
+    pub effective_end_unix_us: i64,
+}
+
 /// A constellation catalog validation report. Create with
 /// sidereon_constellation_validate or
 /// sidereon_constellation_validate_against_sp3_ids and release with
@@ -147,6 +197,271 @@ pub unsafe extern "C" fn sidereon_constellation_build(
             write_boxed_handle(out_catalog, SidereonConstellation { records });
             SidereonStatus::Ok
         },
+    )
+}
+
+/// Build a merged GNSS identity catalog with NAVCEN usability evaluated at an
+/// explicit UTC Unix-microsecond instant. Active bounded forecasts affect the
+/// catalog only on their parsed half-open interval. An ambiguous forecast is
+/// retained by sidereon_navcen_parse_at but does not disable the satellite.
+///
+/// This is the time-aware companion to sidereon_constellation_build; the legacy
+/// entry point retains its historical clock-free behavior. Release the returned
+/// catalog with sidereon_constellation_free.
+///
+/// Safety: omm_json must point to omm_len readable bytes; navcen_html must point
+/// to navcen_len readable bytes or be NULL when navcen_len is 0; out_catalog must
+/// point to storage for a SidereonConstellation*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_constellation_build_at(
+    system: u32,
+    omm_json: *const u8,
+    omm_len: usize,
+    navcen_html: *const u8,
+    navcen_len: usize,
+    evaluated_at_unix_us: i64,
+    out_catalog: *mut *mut SidereonConstellation,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_constellation_build_at",
+        SidereonStatus::Panic,
+        || {
+            let out_catalog = c_try!(require_out(
+                out_catalog,
+                "sidereon_constellation_build_at",
+                "out_catalog"
+            ));
+            *out_catalog = ptr::null_mut();
+            let system = c_try!(gnss_system_from_c_code(
+                "sidereon_constellation_build_at",
+                "system",
+                system
+            ));
+            let omm_bytes = c_try!(require_slice(
+                omm_json,
+                omm_len,
+                "sidereon_constellation_build_at",
+                "omm_json"
+            ));
+            let omm_text = match str::from_utf8(omm_bytes) {
+                Ok(text) => text,
+                Err(_) => {
+                    set_last_error(
+                        "sidereon_constellation_build_at: omm_json is not valid UTF-8".to_string(),
+                    );
+                    return SidereonStatus::InvalidToken;
+                }
+            };
+            let omm_array = match parse_omm_json_array(omm_text) {
+                Ok(omm_array) => omm_array,
+                Err(err) => {
+                    set_last_error(format!("sidereon_constellation_build_at: {err}"));
+                    return SidereonStatus::InvalidArgument;
+                }
+            };
+            let mut records = match from_celestrak_omm(system, &omm_array.omms) {
+                Ok(records) => records,
+                Err(err) => {
+                    set_last_error(format!("sidereon_constellation_build_at: {err}"));
+                    return SidereonStatus::InvalidArgument;
+                }
+            };
+            if navcen_len > 0 {
+                let navcen_bytes = c_try!(require_slice(
+                    navcen_html,
+                    navcen_len,
+                    "sidereon_constellation_build_at",
+                    "navcen_html"
+                ));
+                let assessments = match parse_navcen_at(
+                    navcen_bytes,
+                    UtcInstant::from_unix_microseconds(evaluated_at_unix_us),
+                ) {
+                    Ok(assessments) => assessments,
+                    Err(err) => {
+                        set_last_error(format!("sidereon_constellation_build_at: {err}"));
+                        return SidereonStatus::InvalidArgument;
+                    }
+                };
+                records = merge_navcen_at(&records, &assessments);
+            }
+            write_boxed_handle(out_catalog, SidereonConstellation { records });
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Parse NAVCEN status HTML and evaluate every row at explicit UTC Unix
+/// microseconds. On success writes an owned assessment handle to out_assessments;
+/// release it with sidereon_navcen_assessments_free.
+///
+/// Safety: navcen_html must point to navcen_len readable bytes; out_assessments
+/// must point to storage for a SidereonNavcenAssessments*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_navcen_parse_at(
+    navcen_html: *const u8,
+    navcen_len: usize,
+    evaluated_at_unix_us: i64,
+    out_assessments: *mut *mut SidereonNavcenAssessments,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_navcen_parse_at", SidereonStatus::Panic, || {
+        let out_assessments = c_try!(require_out(
+            out_assessments,
+            "sidereon_navcen_parse_at",
+            "out_assessments"
+        ));
+        *out_assessments = ptr::null_mut();
+        let navcen_bytes = c_try!(require_slice(
+            navcen_html,
+            navcen_len,
+            "sidereon_navcen_parse_at",
+            "navcen_html"
+        ));
+        let assessments = match parse_navcen_at(
+            navcen_bytes,
+            UtcInstant::from_unix_microseconds(evaluated_at_unix_us),
+        ) {
+            Ok(assessments) => assessments,
+            Err(err) => {
+                set_last_error(format!("sidereon_navcen_parse_at: {err}"));
+                return SidereonStatus::InvalidArgument;
+            }
+        };
+        write_boxed_handle(out_assessments, SidereonNavcenAssessments { assessments });
+        SidereonStatus::Ok
+    })
+}
+
+/// Write the number of parsed NAVCEN assessments to out_count.
+///
+/// Safety: assessments must be a live handle; out_count must point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_navcen_assessment_count(
+    assessments: *const SidereonNavcenAssessments,
+    out_count: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_navcen_assessment_count",
+        SidereonStatus::Panic,
+        || {
+            let out_count = c_try!(require_out(
+                out_count,
+                "sidereon_navcen_assessment_count",
+                "out_count"
+            ));
+            *out_count = 0;
+            let assessments = c_try!(require_ref(
+                assessments,
+                "sidereon_navcen_assessment_count",
+                "assessments"
+            ));
+            *out_count = assessments.assessments.len();
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy fixed metadata for one NAVCEN assessment by PRN-sorted index.
+///
+/// Safety: assessments must be a live handle; out_assessment must point to a
+/// SidereonNavcenAssessment.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_navcen_assessment(
+    assessments: *const SidereonNavcenAssessments,
+    index: usize,
+    out_assessment: *mut SidereonNavcenAssessment,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_navcen_assessment", SidereonStatus::Panic, || {
+        let out_assessment = c_try!(require_out(
+            out_assessment,
+            "sidereon_navcen_assessment",
+            "out_assessment"
+        ));
+        *out_assessment = empty_navcen_assessment();
+        let assessments = c_try!(require_ref(
+            assessments,
+            "sidereon_navcen_assessment",
+            "assessments"
+        ));
+        let Some(assessment) = assessments.assessments.get(index) else {
+            set_last_error(format!(
+                "sidereon_navcen_assessment: index {index} out of range ({} assessments)",
+                assessments.assessments.len()
+            ));
+            return SidereonStatus::InvalidArgument;
+        };
+        *out_assessment = navcen_assessment_to_c(assessment);
+        SidereonStatus::Ok
+    })
+}
+
+/// Copy the NANU type for one assessment. An absent field has required length
+/// zero. Output is not null-terminated.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_navcen_assessment_nanu_type(
+    assessments: *const SidereonNavcenAssessments,
+    index: usize,
+    out: *mut u8,
+    out_len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    navcen_assessment_text(
+        "sidereon_navcen_assessment_nanu_type",
+        assessments,
+        index,
+        out,
+        out_len,
+        out_written,
+        out_required,
+        |assessment| assessment.status.nanu_type.as_deref(),
+    )
+}
+
+/// Copy the NANU subject for one assessment. An absent field has required
+/// length zero. Output is not null-terminated.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_navcen_assessment_nanu_subject(
+    assessments: *const SidereonNavcenAssessments,
+    index: usize,
+    out: *mut u8,
+    out_len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    navcen_assessment_text(
+        "sidereon_navcen_assessment_nanu_subject",
+        assessments,
+        index,
+        out,
+        out_len,
+        out_written,
+        out_required,
+        |assessment| assessment.status.nanu_subject.as_deref(),
+    )
+}
+
+/// Copy the cleaned Outage Start text for one assessment. Duplicate cells are
+/// joined with " | ". An absent field has required length zero. Output is not
+/// null-terminated.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_navcen_assessment_outage_start(
+    assessments: *const SidereonNavcenAssessments,
+    index: usize,
+    out: *mut u8,
+    out_len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    navcen_assessment_text(
+        "sidereon_navcen_assessment_outage_start",
+        assessments,
+        index,
+        out,
+        out_len,
+        out_written,
+        out_required,
+        |assessment| assessment.outage_start.as_deref(),
     )
 }
 
@@ -1457,6 +1772,19 @@ pub unsafe extern "C" fn sidereon_constellation_diff_free(diff: *mut SidereonCon
     });
 }
 
+/// Release a NAVCEN assessment handle. Passing NULL is a no-op.
+///
+/// Safety: assessments must be NULL or a live handle from
+/// sidereon_navcen_parse_at that has not already been freed.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_navcen_assessments_free(
+    assessments: *mut SidereonNavcenAssessments,
+) {
+    ffi_boundary("sidereon_navcen_assessments_free", (), || {
+        free_boxed(assessments);
+    });
+}
+
 /// Release a constellation catalog handle from sidereon_constellation_build.
 /// Passing NULL is a no-op.
 ///
@@ -1636,6 +1964,80 @@ unsafe fn constellation_copy_sp3_change_text(
         copy_out.out_required,
     ));
     SidereonStatus::Ok
+}
+
+fn empty_navcen_assessment() -> SidereonNavcenAssessment {
+    SidereonNavcenAssessment {
+        system: SidereonGnssSystem::Gps,
+        prn: 0,
+        svn_present: false,
+        svn: 0,
+        usable: false,
+        active_nanu: false,
+        evaluated_at_unix_us: 0,
+        timing: SidereonNavcenTiming::NotApplicable,
+        effective_start_present: false,
+        effective_start_unix_us: 0,
+        effective_end_present: false,
+        effective_end_unix_us: 0,
+    }
+}
+
+fn navcen_assessment_to_c(assessment: &ConstNavcenAssessment) -> SidereonNavcenAssessment {
+    let (timing, start, end) = match assessment.timing {
+        NavcenTiming::NotApplicable => (SidereonNavcenTiming::NotApplicable, None, None),
+        NavcenTiming::Unparseable => (SidereonNavcenTiming::Unparseable, None, None),
+        NavcenTiming::Parsed(interval) => (
+            SidereonNavcenTiming::Parsed,
+            Some(interval.start_utc.unix_microseconds()),
+            Some(interval.end_utc.unix_microseconds()),
+        ),
+    };
+    SidereonNavcenAssessment {
+        system: gnss_system_to_c(assessment.status.system),
+        prn: assessment.status.prn,
+        svn_present: assessment.status.svn.is_some(),
+        svn: assessment.status.svn.unwrap_or(0),
+        usable: assessment.status.usable,
+        active_nanu: assessment.status.active_nanu,
+        evaluated_at_unix_us: assessment.evaluated_at_utc.unix_microseconds(),
+        timing,
+        effective_start_present: start.is_some(),
+        effective_start_unix_us: start.unwrap_or(0),
+        effective_end_present: end.is_some(),
+        effective_end_unix_us: end.unwrap_or(0),
+    }
+}
+
+unsafe fn navcen_assessment_text<'a>(
+    fn_name: &'static str,
+    assessments: *const SidereonNavcenAssessments,
+    index: usize,
+    out: *mut u8,
+    out_len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+    select: impl Fn(&'a ConstNavcenAssessment) -> Option<&'a str>,
+) -> SidereonStatus {
+    ffi_boundary(fn_name, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(fn_name, out_written, out_required));
+        let assessments = c_try!(require_ref(assessments, fn_name, "assessments"));
+        let Some(assessment) = assessments.assessments.get(index) else {
+            set_last_error(format!("{fn_name}: index {index} out of range"));
+            return SidereonStatus::InvalidArgument;
+        };
+        let text = select(assessment).unwrap_or("");
+        c_try!(copy_prefix_to_c(
+            fn_name,
+            "out",
+            text.as_bytes(),
+            out,
+            out_len,
+            out_written,
+            out_required,
+        ));
+        SidereonStatus::Ok
+    })
 }
 
 impl SidereonConstellationConstants {
