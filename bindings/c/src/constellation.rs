@@ -410,10 +410,12 @@ pub unsafe extern "C" fn sidereon_navcen_assessment_nanu_type(
         "sidereon_navcen_assessment_nanu_type",
         assessments,
         index,
-        out,
-        out_len,
-        out_written,
-        out_required,
+        ByteCopyOut {
+            out,
+            out_len,
+            out_written,
+            out_required,
+        },
         |assessment| assessment.status.nanu_type.as_deref(),
     )
 }
@@ -433,10 +435,12 @@ pub unsafe extern "C" fn sidereon_navcen_assessment_nanu_subject(
         "sidereon_navcen_assessment_nanu_subject",
         assessments,
         index,
-        out,
-        out_len,
-        out_written,
-        out_required,
+        ByteCopyOut {
+            out,
+            out_len,
+            out_written,
+            out_required,
+        },
         |assessment| assessment.status.nanu_subject.as_deref(),
     )
 }
@@ -457,10 +461,12 @@ pub unsafe extern "C" fn sidereon_navcen_assessment_outage_start(
         "sidereon_navcen_assessment_outage_start",
         assessments,
         index,
-        out,
-        out_len,
-        out_written,
-        out_required,
+        ByteCopyOut {
+            out,
+            out_len,
+            out_written,
+            out_required,
+        },
         |assessment| assessment.outage_start.as_deref(),
     )
 }
@@ -2013,14 +2019,15 @@ unsafe fn navcen_assessment_text<'a>(
     fn_name: &'static str,
     assessments: *const SidereonNavcenAssessments,
     index: usize,
-    out: *mut u8,
-    out_len: usize,
-    out_written: *mut usize,
-    out_required: *mut usize,
+    copy_out: ByteCopyOut,
     select: impl Fn(&'a ConstNavcenAssessment) -> Option<&'a str>,
 ) -> SidereonStatus {
     ffi_boundary(fn_name, SidereonStatus::Panic, || {
-        c_try!(init_copy_counts(fn_name, out_written, out_required));
+        c_try!(init_copy_counts(
+            fn_name,
+            copy_out.out_written,
+            copy_out.out_required
+        ));
         let assessments = c_try!(require_ref(assessments, fn_name, "assessments"));
         let Some(assessment) = assessments.assessments.get(index) else {
             set_last_error(format!("{fn_name}: index {index} out of range"));
@@ -2031,10 +2038,10 @@ unsafe fn navcen_assessment_text<'a>(
             fn_name,
             "out",
             text.as_bytes(),
-            out,
-            out_len,
-            out_written,
-            out_required,
+            copy_out.out,
+            copy_out.out_len,
+            copy_out.out_written,
+            copy_out.out_required,
         ));
         SidereonStatus::Ok
     })

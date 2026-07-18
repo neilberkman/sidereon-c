@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.32.0 - 2026-07-18
+
 - Adds `sidereon_navcen_parse_at` with owned assessment metadata and NANU
   provenance accessors, plus `sidereon_constellation_build_at`, for explicit UTC
   NAVCEN usability evaluation. Parsed forecast intervals are half-open;
@@ -9,6 +11,7 @@
 - The time-aware path recognizes active `UNUSUFN` notices as immediately
   unusable while retaining the legacy entry point's historical behavior.
 - Keeps `sidereon_constellation_build` ABI and clock-free behavior unchanged.
+- Builds against `sidereon` and `sidereon-core` 0.32.0.
 
 ## 0.31.2 - 2026-07-16
 
