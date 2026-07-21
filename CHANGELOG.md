@@ -2,8 +2,11 @@
 
 ## Unreleased
 
-## 0.33.0 - 2026-07-20
+## 0.33.1 - 2026-07-20
 
+- CI now regenerates and compares the public header, then compiles, links, and
+  runs the focused 0.33 data-distribution and exact-SP3 C ABI programs on Linux
+  and macOS.
 - Adds date-aware IGS combined-final SP3 identities and CDDIS locations across
   the legacy `.sp3.Z` and current long-filename `.SP3.gz` eras, plus current
   direct-BKG locations, while preserving IGS broadcast-navigation derivation.
@@ -21,8 +24,9 @@
   inclusive coverage reporting, and accessors for the declared line-1 epoch
   count and start. The legacy `sidereon_sp3_load` remains permissive.
 - Inherits product-specific CODE HTTPS routes and fail-closed rejection of
-  unsupported center/product combinations from the 0.33.0 core.
-- Builds against `sidereon` and `sidereon-core` 0.33.0.
+  unsupported center/product combinations from the 0.33.1 core.
+- Builds against `sidereon` and `sidereon-core` 0.33.1 and
+  `trust-region-least-squares` 0.9.2.
 
 ## 0.32.0 - 2026-07-18
 

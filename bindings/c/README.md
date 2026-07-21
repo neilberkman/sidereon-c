@@ -151,3 +151,7 @@ solver coupling:
 binding reproduces the engine reference position bit-exact:
 
     ./tests/run_smoke.sh
+
+CI runs `tests/run_ci_smoke.sh` on Linux and macOS. It compares regenerated and
+committed headers byte-for-byte, then compiles, links, and executes the focused
+data-distribution and exact-SP3 ABI programs using only repository fixtures.
