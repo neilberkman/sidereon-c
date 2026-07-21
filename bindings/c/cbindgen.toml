@@ -57,9 +57,9 @@ usize_is_size_t = true
 after_includes = """
 
 #define SIDEREON_VERSION_MAJOR 0
-#define SIDEREON_VERSION_MINOR 33
-#define SIDEREON_VERSION_PATCH 1
-#define SIDEREON_VERSION_STRING "0.33.1\""""
+#define SIDEREON_VERSION_MINOR 34
+#define SIDEREON_VERSION_PATCH 0
+#define SIDEREON_VERSION_STRING "0.34.0\""""
 
 [enum]
 # Idiomatic C enum constants: SidereonStatus::Ok -> SIDEREON_STATUS_OK.
@@ -75,6 +75,8 @@ include = [
     "SidereonProductFormat",
     "SidereonDistributionSource",
     "SidereonArchiveCompression",
+    "SidereonSp3ContentStartConvention",
+    "SidereonProductSample",
     "SidereonProductIdentity",
     "SidereonDistributionLocation",
     "SidereonExactCacheComponent",

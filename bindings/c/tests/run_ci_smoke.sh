@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Deterministic CI gate for the generated public header and the 0.33 C ABI.
+# Deterministic CI gate for the generated public header and current C ABI.
 # The exhaustive run_smoke.sh remains available locally; this focused gate uses
 # only fixtures committed to this repository so it can run on every CI host.
 set -euo pipefail
@@ -13,6 +13,8 @@ cargo build --release
 target_dir="$(cargo metadata --format-version 1 --quiet \
     | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
 lib_dir="${target_dir}/release"
+python3 "${here}/gen_sp3_terminal_record_fixture.py" \
+    --output "${target_dir}/sp3_terminal_record_fixture.h"
 generated_header="$(mktemp "${TMPDIR:-/tmp}/sidereon-header.XXXXXX")"
 trap 'rm -f "${generated_header}"' EXIT
 
@@ -35,6 +37,7 @@ cc -std=c11 -Wall -Wextra -Werror \
 
 cc -std=c11 -Wall -Wextra -Werror \
     -I"${binding_root}/include" \
+    -I"${target_dir}" \
     "${here}/sp3_exact_smoke.c" \
     -L"${lib_dir}" \
     -lsidereon \

@@ -1,6 +1,7 @@
 #include "sidereon.h"
 
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 static void fill_digest(char output[SP3_ARTIFACT_SHA256_C_BYTES], char digit) {
@@ -66,7 +67,65 @@ static int sample_for_date_equals(
         memcmp(sample, expected, expected_len) == 0;
 }
 
-static int catalog_033_checks(void) {
+static int supported_samples_equal(
+    const char *center,
+    uint32_t family,
+    int32_t year,
+    uint8_t month,
+    uint8_t day,
+    const char *issue,
+    const char *const *expected,
+    size_t expected_count) {
+    size_t written = 99;
+    size_t required = 99;
+    if (sidereon_data_supported_samples(
+            center, family, year, month, day, issue, NULL, 0, &written,
+            &required) != SIDEREON_STATUS_OK ||
+        written != 0 || required != expected_count) {
+        return 0;
+    }
+    if (expected_count == 0) {
+        return 1;
+    }
+
+    struct SidereonProductSample *samples =
+        calloc(expected_count, sizeof(struct SidereonProductSample));
+    if (samples == NULL ||
+        sidereon_data_supported_samples(
+            center, family, year, month, day, issue, samples, expected_count,
+            &written, &required) != SIDEREON_STATUS_OK ||
+        written != expected_count || required != expected_count) {
+        free(samples);
+        return 0;
+    }
+    for (size_t index = 0; index < expected_count; ++index) {
+        if (strcmp(samples[index].token, expected[index]) != 0) {
+            free(samples);
+            return 0;
+        }
+    }
+    free(samples);
+    return 1;
+}
+
+static int content_start_equals(
+    const char *center,
+    int32_t year,
+    uint8_t month,
+    uint8_t day,
+    const char *issue,
+    enum SidereonSp3ContentStartConvention expected_convention,
+    int64_t expected_offset_s) {
+    enum SidereonSp3ContentStartConvention convention =
+        SIDEREON_SP3_CONTENT_START_CONVENTION_FILENAME_EPOCH;
+    int64_t offset_s = 1;
+    return sidereon_data_sp3_content_start_convention(
+               center, year, month, day, issue, &convention, &offset_s) ==
+               SIDEREON_STATUS_OK &&
+        convention == expected_convention && offset_s == expected_offset_s;
+}
+
+static int catalog_checks(void) {
     enum SidereonSolutionClass solution = SIDEREON_SOLUTION_CLASS_RAPID;
     if (sidereon_data_product_solution_class(
             "igs", SIDEREON_PRODUCT_FAMILY_SP3, &solution) != SIDEREON_STATUS_OK ||
@@ -101,6 +160,130 @@ static int catalog_033_checks(void) {
         !sample_for_date_equals(
             "gfz_ult", SIDEREON_PRODUCT_FAMILY_SP3, 2021, 5, 16, "05M")) {
         return 81;
+    }
+
+    static const char *sample_05m[] = {"05M"};
+    static const char *sample_15m[] = {"15M"};
+    static const char *sample_15m_05m[] = {"15M", "05M"};
+    static const char *sample_30s[] = {"30S"};
+    static const char *sample_01h[] = {"01H"};
+    static const char *sample_01d[] = {"01D"};
+    if (!supported_samples_equal(
+            "esa", SIDEREON_PRODUCT_FAMILY_SP3, 2026, 6, 15, NULL,
+            sample_05m, 1) ||
+        !supported_samples_equal(
+            "gfz", SIDEREON_PRODUCT_FAMILY_SP3, 2021, 5, 17, NULL,
+            sample_15m, 1) ||
+        !supported_samples_equal(
+            "gfz", SIDEREON_PRODUCT_FAMILY_SP3, 2021, 5, 18, NULL,
+            sample_05m, 1) ||
+        !supported_samples_equal(
+            "esa_ult", SIDEREON_PRODUCT_FAMILY_SP3, 2025, 2, 2, "0600",
+            sample_15m, 1) ||
+        !supported_samples_equal(
+            "esa_ult", SIDEREON_PRODUCT_FAMILY_SP3, 2025, 2, 2, "1200",
+            sample_05m, 1) ||
+        !supported_samples_equal(
+            "gfz_ult", SIDEREON_PRODUCT_FAMILY_SP3, 2021, 5, 15, "0000",
+            sample_15m_05m, 2) ||
+        !supported_samples_equal(
+            "gfz_ult", SIDEREON_PRODUCT_FAMILY_SP3, 2021, 5, 15, "2100",
+            sample_15m, 1) ||
+        !supported_samples_equal(
+            "cod", SIDEREON_PRODUCT_FAMILY_RINEX_CLOCK, 2026, 6, 15, NULL,
+            sample_30s, 1) ||
+        !supported_samples_equal(
+            "cod", SIDEREON_PRODUCT_FAMILY_IONEX, 2026, 6, 15, NULL,
+            sample_01h, 1) ||
+        !supported_samples_equal(
+            "igs", SIDEREON_PRODUCT_FAMILY_RINEX_NAVIGATION, 2026, 6, 15,
+            NULL, sample_01d, 1)) {
+        return 90;
+    }
+
+    struct SidereonProductSample too_small[1];
+    size_t samples_written = 99;
+    size_t samples_required = 99;
+    if (sidereon_data_supported_samples(
+            "gfz_ult", SIDEREON_PRODUCT_FAMILY_SP3, 2021, 5, 15, "0000",
+            too_small, 1, &samples_written, &samples_required) !=
+            SIDEREON_STATUS_INVALID_ARGUMENT ||
+        samples_written != 0 || samples_required != 2 ||
+        sidereon_data_supported_samples(
+            "gfz_ult", SIDEREON_PRODUCT_FAMILY_SP3, 2021, 5, 15, "0130",
+            NULL, 0, &samples_written, &samples_required) !=
+            SIDEREON_STATUS_INVALID_ARGUMENT ||
+        samples_written != 0 || samples_required != 0) {
+        return 91;
+    }
+
+    static const char *gfz_issues[] = {
+        "0000", "0300", "0600", "0900", "1200", "1500", "1800", "2100",
+    };
+    static const enum SidereonSp3ContentStartConvention day_7[] = {
+        SIDEREON_SP3_CONTENT_START_CONVENTION_FILENAME_EPOCH,
+        SIDEREON_SP3_CONTENT_START_CONVENTION_FILENAME_EPOCH_MINUS_ONE_DAY,
+        SIDEREON_SP3_CONTENT_START_CONVENTION_FILENAME_EPOCH_MINUS_ONE_DAY,
+        SIDEREON_SP3_CONTENT_START_CONVENTION_FILENAME_EPOCH_MINUS_ONE_DAY,
+        SIDEREON_SP3_CONTENT_START_CONVENTION_FILENAME_EPOCH_MINUS_ONE_DAY,
+        SIDEREON_SP3_CONTENT_START_CONVENTION_FILENAME_EPOCH_MINUS_ONE_DAY,
+        SIDEREON_SP3_CONTENT_START_CONVENTION_FILENAME_EPOCH_MINUS_ONE_DAY,
+        SIDEREON_SP3_CONTENT_START_CONVENTION_FILENAME_EPOCH_MINUS_ONE_DAY,
+    };
+    static const enum SidereonSp3ContentStartConvention day_8[] = {
+        SIDEREON_SP3_CONTENT_START_CONVENTION_FILENAME_EPOCH,
+        SIDEREON_SP3_CONTENT_START_CONVENTION_FILENAME_EPOCH_MINUS_ONE_DAY,
+        SIDEREON_SP3_CONTENT_START_CONVENTION_FILENAME_EPOCH_MINUS_ONE_DAY,
+        SIDEREON_SP3_CONTENT_START_CONVENTION_FILENAME_EPOCH,
+        SIDEREON_SP3_CONTENT_START_CONVENTION_FILENAME_EPOCH,
+        SIDEREON_SP3_CONTENT_START_CONVENTION_FILENAME_EPOCH,
+        SIDEREON_SP3_CONTENT_START_CONVENTION_FILENAME_EPOCH,
+        SIDEREON_SP3_CONTENT_START_CONVENTION_FILENAME_EPOCH,
+    };
+    if (!content_start_equals(
+            "gfz_ult", 2022, 9, 6, "2100",
+            SIDEREON_SP3_CONTENT_START_CONVENTION_FILENAME_EPOCH_MINUS_ONE_DAY,
+            -86400) ||
+        !content_start_equals(
+            "gfz_ult", 2022, 9, 9, "0000",
+            SIDEREON_SP3_CONTENT_START_CONVENTION_FILENAME_EPOCH, 0) ||
+        !content_start_equals(
+            "igs", 2022, 9, 7, NULL,
+            SIDEREON_SP3_CONTENT_START_CONVENTION_FILENAME_EPOCH, 0)) {
+        return 87;
+    }
+    for (size_t index = 0; index < 8; ++index) {
+        if (!content_start_equals(
+                "gfz_ult", 2022, 9, 7, gfz_issues[index], day_7[index],
+                day_7[index] ==
+                        SIDEREON_SP3_CONTENT_START_CONVENTION_FILENAME_EPOCH
+                    ? 0
+                    : -86400) ||
+            !content_start_equals(
+                "gfz_ult", 2022, 9, 8, gfz_issues[index], day_8[index],
+                day_8[index] ==
+                        SIDEREON_SP3_CONTENT_START_CONVENTION_FILENAME_EPOCH
+                    ? 0
+                    : -86400)) {
+            return 88;
+        }
+    }
+    enum SidereonSp3ContentStartConvention invalid_convention =
+        SIDEREON_SP3_CONTENT_START_CONVENTION_FILENAME_EPOCH_MINUS_ONE_DAY;
+    int64_t invalid_offset = -1;
+    if (sidereon_data_sp3_content_start_convention(
+            "gfz_ult", 2022, 9, 7, "0130", &invalid_convention,
+            &invalid_offset) != SIDEREON_STATUS_INVALID_ARGUMENT ||
+        invalid_convention !=
+            SIDEREON_SP3_CONTENT_START_CONVENTION_FILENAME_EPOCH ||
+        invalid_offset != 0 ||
+        sidereon_data_sp3_content_start_convention(
+            "gfz", 2022, 9, 7, "0000", &invalid_convention,
+            &invalid_offset) != SIDEREON_STATUS_INVALID_ARGUMENT ||
+        sidereon_data_sp3_content_start_convention(
+            "gfz_ult", 2022, 9, 7, NULL, &invalid_convention,
+            &invalid_offset) != SIDEREON_STATUS_INVALID_ARGUMENT) {
+        return 89;
     }
 
     struct SidereonProductIdentity legacy;
@@ -255,6 +438,24 @@ static int catalog_033_checks(void) {
             "0600", &legacy) != SIDEREON_STATUS_OK ||
         strcmp(legacy.sample, "05M") != 0) {
         return 84;
+    }
+
+    if (sidereon_data_product_identity(
+            "esa", SIDEREON_PRODUCT_FAMILY_SP3, 2026, 6, 15, "15M", NULL,
+            &legacy) != SIDEREON_STATUS_INVALID_ARGUMENT ||
+        sidereon_data_product_identity(
+            "gfz", SIDEREON_PRODUCT_FAMILY_SP3, 2021, 5, 17, "05M", NULL,
+            &legacy) != SIDEREON_STATUS_INVALID_ARGUMENT ||
+        sidereon_data_product_identity(
+            "esa_ult", SIDEREON_PRODUCT_FAMILY_SP3, 2025, 2, 2, "05M",
+            "0600", &legacy) != SIDEREON_STATUS_INVALID_ARGUMENT ||
+        sidereon_data_product_identity(
+            "gfz_ult", SIDEREON_PRODUCT_FAMILY_SP3, 2021, 5, 15, "05M",
+            "2100", &legacy) != SIDEREON_STATUS_INVALID_ARGUMENT ||
+        sidereon_data_product_identity(
+            "gfz_ult", SIDEREON_PRODUCT_FAMILY_SP3, 2021, 5, 15, "05M",
+            "0000", &legacy) != SIDEREON_STATUS_OK) {
+        return 92;
     }
 
     if (sidereon_data_distribution_location(
@@ -772,7 +973,7 @@ static int merge_input_identity_checks(void) {
 }
 
 int main(void) {
-    int catalog = catalog_033_checks();
+    int catalog = catalog_checks();
     if (catalog != 0) {
         return catalog;
     }
@@ -794,6 +995,22 @@ int main(void) {
         &identity);
     if (status != SIDEREON_STATUS_OK) {
         return 1;
+    }
+
+    invalid_identity = identity;
+    strcpy(invalid_identity.span, "02D");
+    char *span_token = strstr(invalid_identity.official_filename, "_01D_");
+    if (span_token == NULL) {
+        return 65;
+    }
+    memcpy(span_token, "_02D_", 5);
+    size_t invalid_key_written = 99;
+    size_t invalid_key_required = 99;
+    if (sidereon_data_product_identity_cache_key(
+            &invalid_identity, NULL, 0, &invalid_key_written,
+            &invalid_key_required) != SIDEREON_STATUS_INVALID_ARGUMENT ||
+        invalid_key_written != 0 || invalid_key_required != 0) {
+        return 65;
     }
 
     struct SidereonDistributionLocation invalid_location;

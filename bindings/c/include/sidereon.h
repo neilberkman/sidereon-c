@@ -45,9 +45,9 @@
 #include <stdlib.h>
 
 #define SIDEREON_VERSION_MAJOR 0
-#define SIDEREON_VERSION_MINOR 33
-#define SIDEREON_VERSION_PATCH 1
-#define SIDEREON_VERSION_STRING "0.33.1"
+#define SIDEREON_VERSION_MINOR 34
+#define SIDEREON_VERSION_PATCH 0
+#define SIDEREON_VERSION_STRING "0.34.0"
 
 #define ANALYSIS_CENTER_C_BYTES 32
 
@@ -386,6 +386,24 @@ typedef enum SidereonSolutionClass {
     SIDEREON_SOLUTION_CLASS_PREDICTED = 3,
     SIDEREON_SOLUTION_CLASS_BROADCAST = 4,
 } SidereonSolutionClass;
+
+/**
+ * Cataloged relationship between an SP3 filename epoch and its first content
+ * epoch.
+ *
+ * This is archive metadata, not a value inferred from product bytes. New
+ * variants may be appended in later ABI revisions.
+ */
+typedef enum SidereonSp3ContentStartConvention {
+    /**
+     * The first content epoch equals the epoch encoded by the filename.
+     */
+    SIDEREON_SP3_CONTENT_START_CONVENTION_FILENAME_EPOCH = 0,
+    /**
+     * The first content epoch is exactly 24 hours before the filename epoch.
+     */
+    SIDEREON_SP3_CONTENT_START_CONVENTION_FILENAME_EPOCH_MINUS_ONE_DAY = 1,
+} SidereonSp3ContentStartConvention;
 
 /**
  * Eclipse status, mirroring sidereon_core::astro::events::eclipse::EclipseStatus.
@@ -5552,6 +5570,18 @@ typedef struct SidereonProductIdentity {
     uint8_t has_prediction_horizon_days;
     uint8_t prediction_horizon_days;
 } SidereonProductIdentity;
+
+/**
+ * One catalog-supported product sampling token.
+ *
+ * `token` is null-terminated. Its storage uses the same documented product-
+ * token bound as identity `sample`, `span`, and `issue` fields. Retrieve an
+ * exact number of these records with `sidereon_data_supported_samples`'s
+ * standard caller-buffer/count contract.
+ */
+typedef struct SidereonProductSample {
+    char token[PRODUCT_TOKEN_C_BYTES];
+} SidereonProductSample;
 
 /**
  * Space-weather inputs used by the drag model.
@@ -20124,6 +20154,59 @@ enum SidereonStatus sidereon_data_product_identity_cache_key(const struct Sidere
 enum SidereonStatus sidereon_data_product_solution_class(const char *center,
                                                          uint32_t family,
                                                          enum SidereonSolutionClass *out_solution_class);
+
+/**
+ * Return the cataloged relationship between an SP3 filename epoch and its
+ * first content epoch.
+ *
+ * `issue` follows the product catalog rules: it is required for ultra-rapid
+ * centers, must name a published issue, and must be NULL for product lines
+ * without issue times. The signed offset is added to the filename epoch to
+ * obtain the required first content epoch. Both outputs describe the same
+ * catalog result.
+ *
+ * Safety: `center` must reference a null-terminated UTF-8 string; a non-NULL
+ * `issue` must do the same; both output pointers must reference writable
+ * storage.
+ */
+enum SidereonStatus sidereon_data_sp3_content_start_convention(const char *center,
+                                                               int32_t year,
+                                                               uint8_t month,
+                                                               uint8_t day,
+                                                               const char *issue,
+                                                               enum SidereonSp3ContentStartConvention *out_convention,
+                                                               int64_t *out_content_start_offset_s);
+
+/**
+ * Copy every officially cataloged sampling token for a product date and issue.
+ *
+ * This is the complete date- and issue-aware catalog query used by product
+ * constructors. `out_len`, `out_written`, and `out_required` count
+ * `SidereonProductSample` records, not bytes. Pass `(NULL, 0)` to obtain the
+ * exact required count before allocating; no caller-selected token width is
+ * involved.
+ *
+ * For issue-based product lines, a NULL `issue` selects `0000`, matching
+ * `sidereon_data_default_sample_for_date`. Product construction still requires
+ * an explicit issue. Product lines without issues reject a non-NULL issue.
+ *
+ * `family` is one SidereonProductFamily_* value encoded as uint32_t.
+ *
+ * Safety: `center` must reference a null-terminated UTF-8 string; a non-NULL
+ * `issue` must do the same; `out` must reference `out_len` writable records,
+ * or may be NULL when `out_len` is zero; both count pointers must reference
+ * writable size_t values.
+ */
+enum SidereonStatus sidereon_data_supported_samples(const char *center,
+                                                    uint32_t family,
+                                                    int32_t year,
+                                                    uint8_t month,
+                                                    uint8_t day,
+                                                    const char *issue,
+                                                    struct SidereonProductSample *out,
+                                                    size_t out_len,
+                                                    size_t *out_written,
+                                                    size_t *out_required);
 
 /**
  * Require available identities to be exactly the declared product set.

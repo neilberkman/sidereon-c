@@ -89,6 +89,19 @@ SidereonSolutionClass solution_class;
 status = sidereon_data_product_solution_class(
     "igs", SIDEREON_PRODUCT_FAMILY_SP3, &solution_class
 );  /* FINAL; IGS RINEX_NAVIGATION is BROADCAST */
+
+SidereonSp3ContentStartConvention start_convention;
+int64_t start_offset_s;
+status = sidereon_data_sp3_content_start_convention(
+    "gfz_ult", 2022, 9, 7, "0300", &start_convention, &start_offset_s
+);  /* FILENAME_EPOCH_MINUS_ONE_DAY; -86400 */
+
+size_t sample_count;
+size_t sample_written;
+status = sidereon_data_supported_samples(
+    "gfz_ult", SIDEREON_PRODUCT_FAMILY_SP3, 2021, 5, 15, "0000",
+    NULL, 0, &sample_written, &sample_count
+);  /* sample_count == 2; allocate exactly that many records, then call again */
 ```
 
 `identity.official_filename` is the exact decompressed standard-product name.
@@ -104,8 +117,17 @@ IGS combined-final SP3 identity is date-aware: historical CDDIS locations use
 locations use the long filename and gzip. Historical direct-BKG layout is not
 modeled and is rejected rather than guessed. `sidereon_data_default_sample_for_date`
 returns the published cadence for a specific date, including GFZ rapid SP3's
-2021 change from `15M` to `05M`. `sidereon_data_product_solution_class`
+2021 change from `15M` to `05M`. `sidereon_data_supported_samples` reports the
+complete date- and issue-aware set via a two-call caller-buffer/count contract;
+the GFZ ultra-rapid overlap above returns `15M` and `05M`, while its `2100`
+issue returns only `15M`. Product constructors reject any cadence outside that
+set. `sidereon_data_product_solution_class`
 distinguishes the IGS final-SP3 and broadcast-navigation product families.
+`sidereon_data_sp3_content_start_convention` reports the cataloged relationship
+between an SP3 filename epoch and its required first content epoch. It validates
+ultra-rapid issues strictly and returns both the typed convention and signed
+seconds offset; exact requests built from identities apply the same catalog fact
+without allowing a caller override.
 
 Product derivation is bounded by the publicly evidenced eras: ESA final
 SP3/clock starts 2014-01-05, GFZ rapid SP3/clock starts 2020-05-13, GFZ

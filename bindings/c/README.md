@@ -102,8 +102,16 @@ legacy `sidereon_sp3_load` remains the permissive general parser; use
 `sidereon_sp3_declared_epoch_count` and
 `sidereon_sp3_declared_start_j2000_seconds` to inspect its line-1 evidence.
 
-The data catalog also exposes `sidereon_data_product_solution_class` and
-`sidereon_data_default_sample_for_date`. Historical IGS final CDDIS locations
+The data catalog also exposes `sidereon_data_product_solution_class`,
+`sidereon_data_default_sample_for_date`, `sidereon_data_supported_samples`, and
+`sidereon_data_sp3_content_start_convention`. The content-start query returns a
+typed convention plus the signed seconds added to the filename epoch, validates
+ultra-rapid issues strictly, and is the same catalog fact inherited by exact
+requests built from identities. The supported-samples query uses the standard
+`(NULL, 0)` size query followed by a caller-allocated array of
+`SidereonProductSample` records; its exact count and null-terminated tokens
+report all cataloged cadences for the selected date and issue. Product
+constructors enforce that same set. Historical IGS final CDDIS locations
 report Unix `.Z` compression through the appended
 `SIDEREON_ARCHIVE_COMPRESSION_UNIX_COMPRESS` value; prior enum values are
 unchanged. Historical direct-BKG layout is not modeled and is rejected rather

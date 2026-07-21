@@ -125,8 +125,11 @@ echo "== running data_distribution_smoke program =="
 
 echo "== compiling sp3_exact_smoke program =="
 sp3_exact_out="${target_dir}/sp3_exact_smoke"
+python3 "${here}/gen_sp3_terminal_record_fixture.py" \
+    --output "${target_dir}/sp3_terminal_record_fixture.h"
 cc -std=c11 -Wall -Wextra -Werror \
     -I"${binding_root}/include" \
+    -I"${target_dir}" \
     "${here}/sp3_exact_smoke.c" \
     -L"${lib_dir}" \
     -lsidereon \

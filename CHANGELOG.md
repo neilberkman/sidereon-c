@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+## 0.34.0 - 2026-07-21
+
+- Adds `sidereon_data_supported_samples`, exposing the core's complete date-
+  and issue-aware cadence set through the standard caller-buffer/count
+  contract. Product constructors enforce the same set, including the GFZ
+  ultra-rapid overlap and ESA ultra-rapid issue transition.
+- Adds `sidereon_data_sp3_content_start_convention`, returning a typed
+  filename/content epoch relationship and signed offset with strict issue
+  validation. Historical GFZ ultra-rapid identity-derived exact requests now
+  inherit the cataloged one-day content-start offset, including across a GPS
+  week boundary.
+- Exact SP3 loading now inherits the core's complete-record terminal
+  validation: standards-compatible ASCII-space padding and LF/CRLF endings are
+  accepted, while malformed, missing, premature, or followed-by-data `EOF`
+  records still fail closed. The generated C fixture drives the shared
+  cross-interface corpus through `sidereon_sp3_load_exact`; the ABI and
+  numerical behavior are unchanged.
+- Caller-built exact identities now reject a span that is syntactically valid
+  but not cataloged for that product family. This is an integrity-policy change
+  only; the C ABI and numerical calculations are unchanged.
+- Builds against `sidereon` and `sidereon-core` 0.34.0.
+
 ## 0.33.1 - 2026-07-20
 
 - CI now regenerates and compares the public header, then compiles, links, and

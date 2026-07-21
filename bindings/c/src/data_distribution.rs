@@ -11,6 +11,7 @@ use std::time::Duration;
 use sidereon_core::data::{
     self as core_data, AnalysisCenter, ArchiveCompression, DistributionSource, ProductCampaign,
     ProductDate, ProductFormat, ProductIdentity, ProductPublisher, ProductType, SolutionClass,
+    Sp3ContentStartConvention,
 };
 use sidereon_core::exact_cache::{
     CommittedExactCacheEntry, ExactCacheError, ExactCacheGuard, ExactProductCache,
@@ -100,6 +101,32 @@ pub enum SidereonArchiveCompression {
     /// Appended in ABI version 0.33.0; the existing numeric values are
     /// unchanged.
     UnixCompress = 2,
+}
+
+/// Cataloged relationship between an SP3 filename epoch and its first content
+/// epoch.
+///
+/// This is archive metadata, not a value inferred from product bytes. New
+/// variants may be appended in later ABI revisions.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SidereonSp3ContentStartConvention {
+    /// The first content epoch equals the epoch encoded by the filename.
+    FilenameEpoch = 0,
+    /// The first content epoch is exactly 24 hours before the filename epoch.
+    FilenameEpochMinusOneDay = 1,
+}
+
+/// One catalog-supported product sampling token.
+///
+/// `token` is null-terminated. Its storage uses the same documented product-
+/// token bound as identity `sample`, `span`, and `issue` fields. Retrieve an
+/// exact number of these records with `sidereon_data_supported_samples`'s
+/// standard caller-buffer/count contract.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonProductSample {
+    pub token: [c_char; PRODUCT_TOKEN_C_BYTES],
 }
 
 /// Exact product identity, independent of distributor.
@@ -382,6 +409,22 @@ fn compression_from_core(value: ArchiveCompression) -> SidereonArchiveCompressio
     }
 }
 
+fn sp3_content_start_from_core(
+    value: Sp3ContentStartConvention,
+) -> Option<SidereonSp3ContentStartConvention> {
+    match value {
+        Sp3ContentStartConvention::FilenameEpoch => {
+            Some(SidereonSp3ContentStartConvention::FilenameEpoch)
+        }
+        Sp3ContentStartConvention::FilenameEpochMinusOneDay => {
+            Some(SidereonSp3ContentStartConvention::FilenameEpochMinusOneDay)
+        }
+        // The core enum is non-exhaustive. An interface release must add an
+        // explicit C discriminant before it can expose any future convention.
+        _ => None,
+    }
+}
+
 pub(super) fn identity_to_c(
     fn_name: &str,
     identity: &ProductIdentity,
@@ -641,6 +684,164 @@ pub unsafe extern "C" fn sidereon_data_default_sample_for_date(
         ) {
             Ok(()) => SidereonStatus::Ok,
             Err(status) => status,
+        }
+    })
+}
+
+/// Copy every officially cataloged sampling token for a product date and issue.
+///
+/// This is the complete date- and issue-aware catalog query used by product
+/// constructors. `out_len`, `out_written`, and `out_required` count
+/// `SidereonProductSample` records, not bytes. Pass `(NULL, 0)` to obtain the
+/// exact required count before allocating; no caller-selected token width is
+/// involved.
+///
+/// For issue-based product lines, a NULL `issue` selects `0000`, matching
+/// `sidereon_data_default_sample_for_date`. Product construction still requires
+/// an explicit issue. Product lines without issues reject a non-NULL issue.
+///
+/// `family` is one SidereonProductFamily_* value encoded as uint32_t.
+///
+/// Safety: `center` must reference a null-terminated UTF-8 string; a non-NULL
+/// `issue` must do the same; `out` must reference `out_len` writable records,
+/// or may be NULL when `out_len` is zero; both count pointers must reference
+/// writable size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_data_supported_samples(
+    center: *const c_char,
+    family: u32,
+    year: i32,
+    month: u8,
+    day: u8,
+    issue: *const c_char,
+    out: *mut SidereonProductSample,
+    out_len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_data_supported_samples";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        if let Err(status) = init_copy_counts(FN_NAME, out_written, out_required) {
+            return status;
+        }
+        let center = match center_from_c(FN_NAME, "center", center) {
+            Ok(center) => center,
+            Err(status) => return status,
+        };
+        let family = match family_from_c(FN_NAME, "family", family) {
+            Ok(family) => family,
+            Err(status) => return status,
+        };
+        let date = match ProductDate::new(year, month, day) {
+            Ok(date) => date,
+            Err(error) => return map_error(FN_NAME, error),
+        };
+        let issue = if issue.is_null() {
+            None
+        } else {
+            match parse_bounded_c_string(FN_NAME, "issue", issue, PRODUCT_TOKEN_C_BYTES) {
+                Ok(issue) => Some(issue),
+                Err(status) => return status,
+            }
+        };
+        let samples = match core_data::supported_samples(center, family, date, issue.as_deref()) {
+            Ok(samples) => samples,
+            Err(error) => return map_error(FN_NAME, error),
+        };
+        let samples = match samples
+            .iter()
+            .map(|sample| {
+                fixed_text(FN_NAME, "sample", sample).map(|token| SidereonProductSample { token })
+            })
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(samples) => samples,
+            Err(status) => return status,
+        };
+        match copy_prefix_to_c(
+            FN_NAME,
+            "out",
+            &samples,
+            out,
+            out_len,
+            out_written,
+            out_required,
+        ) {
+            Ok(()) => SidereonStatus::Ok,
+            Err(status) => status,
+        }
+    })
+}
+
+/// Return the cataloged relationship between an SP3 filename epoch and its
+/// first content epoch.
+///
+/// `issue` follows the product catalog rules: it is required for ultra-rapid
+/// centers, must name a published issue, and must be NULL for product lines
+/// without issue times. The signed offset is added to the filename epoch to
+/// obtain the required first content epoch. Both outputs describe the same
+/// catalog result.
+///
+/// Safety: `center` must reference a null-terminated UTF-8 string; a non-NULL
+/// `issue` must do the same; both output pointers must reference writable
+/// storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_data_sp3_content_start_convention(
+    center: *const c_char,
+    year: i32,
+    month: u8,
+    day: u8,
+    issue: *const c_char,
+    out_convention: *mut SidereonSp3ContentStartConvention,
+    out_content_start_offset_s: *mut i64,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_data_sp3_content_start_convention";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let out_convention = match require_out(out_convention, FN_NAME, "out_convention") {
+            Ok(out) => out,
+            Err(status) => return status,
+        };
+        let out_offset = match require_out(
+            out_content_start_offset_s,
+            FN_NAME,
+            "out_content_start_offset_s",
+        ) {
+            Ok(out) => out,
+            Err(status) => return status,
+        };
+        *out_convention = SidereonSp3ContentStartConvention::FilenameEpoch;
+        *out_offset = 0;
+
+        let center = match center_from_c(FN_NAME, "center", center) {
+            Ok(center) => center,
+            Err(status) => return status,
+        };
+        let date = match ProductDate::new(year, month, day) {
+            Ok(date) => date,
+            Err(error) => return map_error(FN_NAME, error),
+        };
+        let issue = if issue.is_null() {
+            None
+        } else {
+            match parse_bounded_c_string(FN_NAME, "issue", issue, PRODUCT_TOKEN_C_BYTES) {
+                Ok(issue) => Some(issue),
+                Err(status) => return status,
+            }
+        };
+
+        match core_data::sp3_content_start_convention(center, date, issue.as_deref()) {
+            Ok(convention) => {
+                let Some(c_convention) = sp3_content_start_from_core(convention) else {
+                    set_last_error(format!(
+                        "{FN_NAME}: the core returned a content-start convention not exposed by this C ABI"
+                    ));
+                    return SidereonStatus::InvalidArgument;
+                };
+                *out_convention = c_convention;
+                *out_offset = convention.content_start_offset_s();
+                SidereonStatus::Ok
+            }
+            Err(error) => map_error(FN_NAME, error),
         }
     })
 }
