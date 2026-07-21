@@ -95,6 +95,11 @@ pub enum SidereonDistributionSource {
 pub enum SidereonArchiveCompression {
     None = 0,
     Gzip = 1,
+    /// Historical Unix-compress transport with a `.Z` suffix.
+    ///
+    /// Appended in ABI version 0.33.0; the existing numeric values are
+    /// unchanged.
+    UnixCompress = 2,
 }
 
 /// Exact product identity, independent of distributor.
@@ -262,6 +267,9 @@ pub(super) fn compression_from_c(
     match value {
         value if value == SidereonArchiveCompression::None as u32 => Ok(ArchiveCompression::None),
         value if value == SidereonArchiveCompression::Gzip as u32 => Ok(ArchiveCompression::Gzip),
+        value if value == SidereonArchiveCompression::UnixCompress as u32 => {
+            Ok(ArchiveCompression::UnixCompress)
+        }
         _ => Err(invalid_discriminant(fn_name, label, value)),
     }
 }
@@ -370,6 +378,7 @@ fn compression_from_core(value: ArchiveCompression) -> SidereonArchiveCompressio
     match value {
         ArchiveCompression::None => SidereonArchiveCompression::None,
         ArchiveCompression::Gzip => SidereonArchiveCompression::Gzip,
+        ArchiveCompression::UnixCompress => SidereonArchiveCompression::UnixCompress,
     }
 }
 
@@ -497,15 +506,23 @@ struct ProductInputs {
     issue: *const c_char,
 }
 
+unsafe fn center_from_c(
+    fn_name: &str,
+    label: &str,
+    center: *const c_char,
+) -> Result<AnalysisCenter, SidereonStatus> {
+    let center = parse_bounded_c_string(fn_name, label, center, ANALYSIS_CENTER_C_BYTES)?;
+    AnalysisCenter::from_code(&center).ok_or_else(|| {
+        set_last_error(format!("{fn_name}: unknown analysis center {center:?}"));
+        SidereonStatus::InvalidArgument
+    })
+}
+
 unsafe fn product_spec(
     fn_name: &str,
     input: ProductInputs,
 ) -> Result<core_data::ProductSpec, SidereonStatus> {
-    let center = parse_bounded_c_string(fn_name, "center", input.center, 32)?;
-    let center = AnalysisCenter::from_code(&center).ok_or_else(|| {
-        set_last_error(format!("{fn_name}: unknown analysis center {center:?}"));
-        SidereonStatus::InvalidArgument
-    })?;
+    let center = center_from_c(fn_name, "center", input.center)?;
     let date = ProductDate::new(input.year, input.month, input.day)
         .map_err(|error| map_error(fn_name, error))?;
     let sample = if input.sample.is_null() {
@@ -523,13 +540,119 @@ unsafe fn product_spec(
         .map_err(|error| map_error(fn_name, error))
 }
 
+/// Resolve the solution class for one supported center/product family.
+///
+/// Unlike the legacy center-wide classification, this reports IGS combined
+/// final SP3 as `SIDEREON_SOLUTION_CLASS_FINAL` while preserving
+/// `SIDEREON_SOLUTION_CLASS_BROADCAST` for IGS broadcast navigation.
+/// Unsupported center/product combinations fail before acquisition.
+///
+/// `family` is one SidereonProductFamily_* value encoded as uint32_t.
+///
+/// Safety: `center` must reference a null-terminated UTF-8 string and
+/// `out_solution_class` must reference writable storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_data_product_solution_class(
+    center: *const c_char,
+    family: u32,
+    out_solution_class: *mut SidereonSolutionClass,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_data_product_solution_class";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let out = match require_out(out_solution_class, FN_NAME, "out_solution_class") {
+            Ok(out) => out,
+            Err(status) => return status,
+        };
+        *out = SidereonSolutionClass::Final;
+        let center = match center_from_c(FN_NAME, "center", center) {
+            Ok(center) => center,
+            Err(status) => return status,
+        };
+        let family = match family_from_c(FN_NAME, "family", family) {
+            Ok(family) => family,
+            Err(status) => return status,
+        };
+        match core_data::product_solution_class(center, family) {
+            Ok(solution) => {
+                *out = solution_from_core(solution);
+                SidereonStatus::Ok
+            }
+            Err(error) => map_error(FN_NAME, error),
+        }
+    })
+}
+
+/// Copy the published default sampling token for a center/product/date.
+///
+/// This is the date-aware catalog query. It preserves historical cadence
+/// transitions such as GFZ rapid SP3 changing from `15M` to `05M` on
+/// 2021-05-18 and GFZ ultra-rapid changing on 2021-05-16. On ESA ultra-rapid's
+/// issue-level transition date, this query reports the `0000`/start-of-day
+/// default; product identity derivation also considers the requested issue.
+/// The output uses the standard variable-length byte contract and is not
+/// null-terminated.
+///
+/// `family` is one SidereonProductFamily_* value encoded as uint32_t.
+///
+/// Safety: `center` must reference a null-terminated UTF-8 string; `out` must
+/// reference `out_len` writable bytes, or may be NULL when `out_len` is zero;
+/// the count pointers must reference writable size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_data_default_sample_for_date(
+    center: *const c_char,
+    family: u32,
+    year: i32,
+    month: u8,
+    day: u8,
+    out: *mut u8,
+    out_len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_data_default_sample_for_date";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        if let Err(status) = init_copy_counts(FN_NAME, out_written, out_required) {
+            return status;
+        }
+        let center = match center_from_c(FN_NAME, "center", center) {
+            Ok(center) => center,
+            Err(status) => return status,
+        };
+        let family = match family_from_c(FN_NAME, "family", family) {
+            Ok(family) => family,
+            Err(status) => return status,
+        };
+        let date = match ProductDate::new(year, month, day) {
+            Ok(date) => date,
+            Err(error) => return map_error(FN_NAME, error),
+        };
+        let sample = match core_data::default_sample_for_date(center, family, date) {
+            Ok(sample) => sample,
+            Err(error) => return map_error(FN_NAME, error),
+        };
+        match copy_prefix_to_c(
+            FN_NAME,
+            "out",
+            sample.as_bytes(),
+            out,
+            out_len,
+            out_written,
+            out_required,
+        ) {
+            Ok(()) => SidereonStatus::Ok,
+            Err(status) => status,
+        }
+    })
+}
+
 /// Resolve an exact catalog product identity independently from distributor.
 ///
 /// `family` is one of SidereonProductFamily_* encoded as uint32_t. Invalid
 /// values fail closed with SIDEREON_STATUS_INVALID_ARGUMENT.
 ///
-/// `sample` may be NULL to use the catalog default. `issue` may be NULL only
-/// for product lines that do not require an ultra-rapid issue.
+/// `sample` may be NULL to use the catalog default, including issue-aware
+/// ultra-rapid transitions. `issue` may be NULL only for product lines that do
+/// not require an ultra-rapid issue.
 ///
 /// Safety: non-null text pointers must reference null-terminated UTF-8 strings;
 /// `out_identity` must reference writable storage.

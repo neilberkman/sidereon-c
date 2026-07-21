@@ -234,7 +234,7 @@ pub unsafe extern "C" fn sidereon_dted_terrain_height_m_with_options(
 /// Query many terrain points using the same mutable DTED tile cache. Points are
 /// longitude-first `(lon_deg, lat_deg)` pairs. Each successful result carries an
 /// orthometric height in meters. Per-point lookup failures are written into
-/// out[i].status and do not fail the whole call.
+/// `out[i].status` and do not fail the whole call.
 ///
 /// Safety: terrain must be a live handle; points points to count
 /// SidereonLonLatDeg values; options must point to SidereonDtedLookupOptions;

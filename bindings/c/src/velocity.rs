@@ -87,7 +87,8 @@ pub unsafe extern "C" fn sidereon_velocity_options_init(
 /// `options` may be NULL for the engine defaults. At least four usable
 /// satellites are required.
 ///
-/// Safety: sp3 must be a live handle from sidereon_sp3_load or sidereon_sp3_merge;
+/// Safety: sp3 must be a live handle from sidereon_sp3_load,
+/// sidereon_sp3_load_exact, or sidereon_sp3_merge;
 /// observations must point to count entries (each with a valid sat_id);
 /// receiver_ecef_m must point to three readable doubles; options must be NULL or
 /// point to a SidereonVelocityOptions; out_solution must point to storage for a

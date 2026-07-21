@@ -92,6 +92,29 @@ a `SidereonDop` of geometry scalars. Free every handle with its `_free`
 function. See `include/sidereon.h` for the full surface and per-function safety
 notes.
 
+For exact acquired products, construct an owned request with
+`sidereon_sp3_exact_request_new` or
+`sidereon_sp3_exact_request_from_identity`, then call
+`sidereon_sp3_load_exact`. Success reports whether the regular epoch grid uses
+the half-open or inclusive boundary representation. Header/identity, cadence,
+span, structure, and grid mismatches fail without returning an SP3 handle. The
+legacy `sidereon_sp3_load` remains the permissive general parser; use
+`sidereon_sp3_declared_epoch_count` and
+`sidereon_sp3_declared_start_j2000_seconds` to inspect its line-1 evidence.
+
+The data catalog also exposes `sidereon_data_product_solution_class` and
+`sidereon_data_default_sample_for_date`. Historical IGS final CDDIS locations
+report Unix `.Z` compression through the appended
+`SIDEREON_ARCHIVE_COMPRESSION_UNIX_COMPRESS` value; prior enum values are
+unchanged. Historical direct-BKG layout is not modeled and is rejected rather
+than guessed. Catalog derivation fails before the evidenced ESA-final
+SP3/clock, GFZ-rapid SP3/clock, IGS-ultra, CODE-ultra, ESA-ultra, and GFZ-ultra
+starts. It preserves the historical GFZ-ultra cadence change and ESA-ultra
+issue-level transition, and rejects unmodeled pre-week-2238 CDDIS long-name
+SP3/IONEX locations while retaining the separately modeled legacy IGS final
+`.sp3.Z` family. ESA `ESA0MGNFIN` final SP3 remains direct-only rather than
+being substituted with another CDDIS product.
+
 ## Integrity
 
 The direct post-solve integrity APIs are available without ephemeris handles or

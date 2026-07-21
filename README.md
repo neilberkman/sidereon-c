@@ -84,6 +84,11 @@ status = sidereon_data_distribution_location(
 const SidereonProductIdentity expected[] = {identity};
 const SidereonProductIdentity available[] = {identity};
 status = sidereon_data_validate_exact_product_set(expected, 1, available, 1);
+
+SidereonSolutionClass solution_class;
+status = sidereon_data_product_solution_class(
+    "igs", SIDEREON_PRODUCT_FAMILY_SP3, &solution_class
+);  /* FINAL; IGS RINEX_NAVIGATION is BROADCAST */
 ```
 
 `identity.official_filename` is the exact decompressed standard-product name.
@@ -92,6 +97,26 @@ transport compression. Switching from CDDIS to the direct location cannot
 change publisher, solution class, campaign, issue, date, cadence, family, or
 format. Unsupported combinations return `SIDEREON_STATUS_INVALID_ARGUMENT` and
 the typed core detail through `sidereon_last_error_message`.
+
+IGS combined-final SP3 identity is date-aware: historical CDDIS locations use
+`igs<week><day>.sp3.Z` with
+`SIDEREON_ARCHIVE_COMPRESSION_UNIX_COMPRESS`, while current CDDIS and direct-BKG
+locations use the long filename and gzip. Historical direct-BKG layout is not
+modeled and is rejected rather than guessed. `sidereon_data_default_sample_for_date`
+returns the published cadence for a specific date, including GFZ rapid SP3's
+2021 change from `15M` to `05M`. `sidereon_data_product_solution_class`
+distinguishes the IGS final-SP3 and broadcast-navigation product families.
+
+Product derivation is bounded by the publicly evidenced eras: ESA final
+SP3/clock starts 2014-01-05, GFZ rapid SP3/clock starts 2020-05-13, GFZ
+ultra-rapid starts 2020-10-06, ESA ultra-rapid starts 2022-10-04, and IGS and
+CODE ultra-rapid long names start with GPS week 2238. GFZ ultra-rapid defaults
+change from `15M` to `05M` on 2021-05-16. ESA ultra-rapid defaults are `15M`
+through the 2025-02-02 `0600` issue and `05M` from the `1200` issue; the
+date-only query reports the start-of-day (`0000`) default. CDDIS rejects
+unmodeled pre-week-2238 long-name SP3/IONEX locations; the modeled legacy IGS
+final `.sp3.Z` family remains available. ESA `ESA0MGNFIN` final SP3 is
+direct-only because the catalog does not substitute a different CDDIS family.
 
 The exact-set gate rejects an empty declaration, duplicates, missing products,
 and undeclared products. It compares all identity fields, so same-filename
@@ -113,7 +138,8 @@ metadata fields. Use the usual NULL/zero first call to query the stable-ID
 buffer length.
 
 The C interface deliberately leaves HTTP, Earthdata credentials, retries, and
-product-format validation to the caller. After validation,
+transport decompression to the caller. It exposes exact SP3 validation below;
+validation of other product formats remains caller-managed. After validation,
 `sidereon_exact_cache_open` acquires the bounded native writer lock;
 `sidereon_exact_cache_publish` commits product, archive, and provenance bytes
 as one immutable transaction. Locked and unlocked reads return only a complete
@@ -123,10 +149,38 @@ paths, and immutable transaction identifier. Use
 `sidereon_data_product_identity_cache_key` when constructing a portable cache
 layout.
 
+HTTP and credentials remain caller-managed, but exact SP3 content validation is
+available before publication to a cache or downstream use:
+
+```c
+SidereonExactSp3Request *request = NULL;
+SidereonSp3 *sp3 = NULL;
+SidereonExactSp3Coverage coverage;
+
+status = sidereon_sp3_exact_request_from_identity(&identity, &request);
+if (status == SIDEREON_STATUS_OK) {
+    status = sidereon_sp3_load_exact(bytes, byte_count, request, &sp3, &coverage);
+}
+sidereon_sp3_exact_request_free(request);
+/* ... use sp3 only after SIDEREON_STATUS_OK ... */
+sidereon_sp3_free(sp3);
+```
+
+The exact gate checks the requested cadence and span against the SP3 header and
+regular parsed epoch grid, accepts the specified half-open and inclusive
+boundary forms, binds catalog identities to their official producing agency,
+and treats malformed or mismatched bytes as a terminal error. The existing
+`sidereon_sp3_load` remains the permissive general reader. Its raw
+`sidereon_sp3_declared_epoch_count` and
+`sidereon_sp3_declared_start_j2000_seconds` accessors expose the independent
+line-1 evidence used by exact validation.
+
 For CDDIS, send caller-managed credentials only to
 NASA's documented hosts, remove URL queries from logs/provenance, reject HTML
-success bodies, validate gzip completion and content length, and parse the
-result with `sidereon_sp3_load` or `sidereon_ionex_load`. NASA's public access
+success bodies, validate content length and the advertised transport compression
+(`gzip` or historical Unix-compress), and parse the result with
+`sidereon_sp3_load_exact` (or the general `sidereon_sp3_load`) or
+`sidereon_ionex_load`. NASA's public access
 documentation is at
 [CDDIS archive access](https://www.earthdata.nasa.gov/centers/cddis-daac/archive-access)
 and [Earthdata Login data access](https://urs.earthdata.nasa.gov/documentation/for_users/data_access/curl_and_wget).

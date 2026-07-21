@@ -1,14 +1,39 @@
 use super::*;
-use sidereon_core::data::{ArchiveCompression, DistributionSource};
+use sidereon_core::data::{ArchiveCompression, DistributionSource, ProductDate};
+use sidereon_core::ephemeris::{
+    parse_exact_sp3 as core_parse_exact_sp3, validate_exact_sp3 as core_validate_exact_sp3,
+    ExactSp3Coverage as CoreExactSp3Coverage, ExactSp3Request as CoreExactSp3Request,
+    ExactSp3ValidationError,
+};
 
 const SP3_FRAME_LABEL_MAX_BYTES: usize = 64;
 pub const SP3_ARTIFACT_SHA256_C_BYTES: usize = 65;
 pub const SP3_ARTIFACT_FILENAME_C_BYTES: usize = 160;
 
 /// A parsed SP3 precise-ephemeris product. Opaque to C. Create with
-/// sidereon_sp3_load or sidereon_sp3_merge and release with sidereon_sp3_free.
+/// sidereon_sp3_load, sidereon_sp3_load_exact, or sidereon_sp3_merge and
+/// release with sidereon_sp3_free.
 pub struct SidereonSp3 {
     pub(crate) inner: Sp3,
+}
+
+/// Validated, source-independent requirements for one exact SP3 product.
+///
+/// Create with `sidereon_sp3_exact_request_new` or
+/// `sidereon_sp3_exact_request_from_identity` and release with
+/// `sidereon_sp3_exact_request_free`.
+pub struct SidereonExactSp3Request {
+    inner: CoreExactSp3Request,
+}
+
+/// Which regular epoch-grid boundary representation an exact SP3 used.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SidereonExactSp3Coverage {
+    /// The declared boundary is excluded.
+    HalfOpen = 0,
+    /// The declared boundary epoch is present.
+    Inclusive = 1,
 }
 
 /// An SP3 merge audit report. Opaque to C. Create with sidereon_sp3_merge and
@@ -378,6 +403,175 @@ pub struct SidereonSp3AgreementSummary {
     pub clock_max_s: f64,
 }
 
+fn exact_sp3_coverage_to_c(coverage: CoreExactSp3Coverage) -> SidereonExactSp3Coverage {
+    match coverage {
+        CoreExactSp3Coverage::HalfOpen => SidereonExactSp3Coverage::HalfOpen,
+        CoreExactSp3Coverage::Inclusive => SidereonExactSp3Coverage::Inclusive,
+    }
+}
+
+fn map_exact_sp3_error(fn_name: &str, error: ExactSp3ValidationError) -> SidereonStatus {
+    let status = if matches!(error, ExactSp3ValidationError::Parse(_)) {
+        SidereonStatus::Sp3Parse
+    } else {
+        SidereonStatus::InvalidArgument
+    };
+    set_last_error(format!("{fn_name}: {error}"));
+    status
+}
+
+/// Create a validated source-independent exact-SP3 request.
+///
+/// `issue` may be NULL for midnight or point to an `HHMM` token. `span` and
+/// `sample` must be non-null IGS period tokens. `expected_agency` may be NULL;
+/// when present it must be the one-to-four-character upper-case agency field
+/// required from SP3 header line 1. This constructor does not constrain an SP3
+/// revision; use `sidereon_sp3_exact_request_from_identity` to inherit both the
+/// catalog identity's format revision and official producing agency.
+///
+/// Safety: each non-null text pointer must reference a null-terminated UTF-8
+/// string and `out_request` must reference writable handle storage. On success
+/// the caller owns the returned request.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sp3_exact_request_new(
+    year: i32,
+    month: u8,
+    day: u8,
+    issue: *const c_char,
+    span: *const c_char,
+    sample: *const c_char,
+    expected_agency: *const c_char,
+    out_request: *mut *mut SidereonExactSp3Request,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_sp3_exact_request_new";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let out_request = c_try!(require_out(out_request, FN_NAME, "out_request"));
+        *out_request = ptr::null_mut();
+        let date = c_try!(ProductDate::new(year, month, day).map_err(|error| {
+            set_last_error(format!("{FN_NAME}: {error}"));
+            SidereonStatus::InvalidArgument
+        }));
+        let issue = if issue.is_null() {
+            None
+        } else {
+            Some(c_try!(parse_bounded_c_string(FN_NAME, "issue", issue, 16)))
+        };
+        let span = c_try!(parse_bounded_c_string(FN_NAME, "span", span, 16));
+        let sample = c_try!(parse_bounded_c_string(FN_NAME, "sample", sample, 16));
+        let mut request = c_try!(
+            CoreExactSp3Request::new(date, issue.as_deref(), &span, &sample)
+                .map_err(|error| map_exact_sp3_error(FN_NAME, error))
+        );
+        if !expected_agency.is_null() {
+            let agency = c_try!(parse_bounded_c_string(
+                FN_NAME,
+                "expected_agency",
+                expected_agency,
+                8,
+            ));
+            request = c_try!(request
+                .with_expected_agency(&agency)
+                .map_err(|error| map_exact_sp3_error(FN_NAME, error)));
+        }
+        write_boxed_handle(out_request, SidereonExactSp3Request { inner: request });
+        SidereonStatus::Ok
+    })
+}
+
+/// Create an exact-SP3 request from a complete catalog identity.
+///
+/// The core validates every identity field, requires the SP3 family, and binds
+/// the request to the identity's date, issue, span, cadence, optional format
+/// revision, and official producing-agency code.
+///
+/// Safety: `identity` must reference a live `SidereonProductIdentity` and
+/// `out_request` must reference writable handle storage. On success the caller
+/// owns the returned request.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sp3_exact_request_from_identity(
+    identity: *const SidereonProductIdentity,
+    out_request: *mut *mut SidereonExactSp3Request,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_sp3_exact_request_from_identity";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let out_request = c_try!(require_out(out_request, FN_NAME, "out_request"));
+        *out_request = ptr::null_mut();
+        let identity = c_try!(require_ref(identity, FN_NAME, "identity")
+            .and_then(|identity| data_distribution::identity_from_c(FN_NAME, identity)));
+        let request = c_try!(CoreExactSp3Request::from_identity(&identity)
+            .map_err(|error| map_exact_sp3_error(FN_NAME, error)));
+        write_boxed_handle(out_request, SidereonExactSp3Request { inner: request });
+        SidereonStatus::Ok
+    })
+}
+
+/// Release an exact-SP3 request handle. NULL is accepted.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sp3_exact_request_free(request: *mut SidereonExactSp3Request) {
+    free_boxed(request);
+}
+
+/// Parse and validate bytes as one exact SP3 request.
+///
+/// The request supplies the trusted cadence and span. The core requires a
+/// regular grid, matching header cadence/count/start metadata and identity,
+/// mandatory SP3 structure, and either the half-open or inclusive boundary
+/// representation. Any content-integrity failure is terminal and no handle is
+/// returned.
+///
+/// Safety: `data` must reference `len` readable bytes; `request` must be a live
+/// exact-request handle; both output pointers must reference writable storage.
+/// On success the caller owns `*out_sp3`.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sp3_load_exact(
+    data: *const u8,
+    len: usize,
+    request: *const SidereonExactSp3Request,
+    out_sp3: *mut *mut SidereonSp3,
+    out_coverage: *mut SidereonExactSp3Coverage,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_sp3_load_exact";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let out_sp3 = c_try!(require_out(out_sp3, FN_NAME, "out_sp3"));
+        *out_sp3 = ptr::null_mut();
+        let out_coverage = c_try!(require_out(out_coverage, FN_NAME, "out_coverage"));
+        *out_coverage = SidereonExactSp3Coverage::HalfOpen;
+        let request = c_try!(require_ref(request, FN_NAME, "request"));
+        let bytes = c_try!(require_slice(data, len, FN_NAME, "data"));
+        let (inner, coverage) = c_try!(core_parse_exact_sp3(bytes, &request.inner)
+            .map_err(|error| map_exact_sp3_error(FN_NAME, error)));
+        write_boxed_handle(out_sp3, SidereonSp3 { inner });
+        *out_coverage = exact_sp3_coverage_to_c(coverage);
+        SidereonStatus::Ok
+    })
+}
+
+/// Validate an already parsed SP3 product against an exact request.
+///
+/// This applies the same integrity gate as `sidereon_sp3_load_exact` without
+/// reparsing the original byte stream.
+///
+/// Safety: `sp3` and `request` must be live handles and `out_coverage` must
+/// reference writable storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sp3_validate_exact(
+    sp3: *const SidereonSp3,
+    request: *const SidereonExactSp3Request,
+    out_coverage: *mut SidereonExactSp3Coverage,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_sp3_validate_exact";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let out_coverage = c_try!(require_out(out_coverage, FN_NAME, "out_coverage"));
+        *out_coverage = SidereonExactSp3Coverage::HalfOpen;
+        let sp3 = c_try!(require_ref(sp3, FN_NAME, "sp3"));
+        let request = c_try!(require_ref(request, FN_NAME, "request"));
+        let coverage = c_try!(core_validate_exact_sp3(&sp3.inner, &request.inner)
+            .map_err(|error| map_exact_sp3_error(FN_NAME, error)));
+        *out_coverage = exact_sp3_coverage_to_c(coverage);
+        SidereonStatus::Ok
+    })
+}
+
 /// Parse an SP3-c or SP3-d byte buffer into a precise-ephemeris product. On
 /// success writes a newly owned handle to *out_sp3. Release it with
 /// sidereon_sp3_free.
@@ -404,8 +598,7 @@ pub unsafe extern "C" fn sidereon_sp3_load(
 
 /// Write the number of epochs in the product to *out_count.
 ///
-/// Safety: sp3 must be a handle from sidereon_sp3_load or sidereon_sp3_merge
-/// that has not been freed; out_count must point to a size_t.
+/// Safety: sp3 must be a live SP3 handle; out_count must point to a size_t.
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_sp3_epoch_count(
     sp3: *const SidereonSp3,
@@ -420,6 +613,59 @@ pub unsafe extern "C" fn sidereon_sp3_epoch_count(
         *out_count = 0;
         let sp3 = c_try!(require_ref(sp3, "sidereon_sp3_epoch_count", "sp3"));
         *out_count = sp3.inner.epoch_count();
+        SidereonStatus::Ok
+    })
+}
+
+/// Write the epoch count declared on SP3 header line 1.
+///
+/// This may differ from `sidereon_sp3_epoch_count` for a truncated product
+/// accepted by the deliberately permissive base parser. Exact validation
+/// requires the declared and parsed counts to agree.
+///
+/// Safety: `sp3` must be a live handle and `out_count` must reference writable
+/// uint64_t storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sp3_declared_epoch_count(
+    sp3: *const SidereonSp3,
+    out_count: *mut u64,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_sp3_declared_epoch_count";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let out_count = c_try!(require_out(out_count, FN_NAME, "out_count"));
+        *out_count = 0;
+        let sp3 = c_try!(require_ref(sp3, FN_NAME, "sp3"));
+        *out_count = sp3.inner.declared_epoch_count();
+        SidereonStatus::Ok
+    })
+}
+
+/// Read the start epoch declared on SP3 header line 1 as J2000 seconds in the
+/// product time scale.
+///
+/// The permissive parser represents a malformed line-1 civil epoch as absent.
+/// Exact validation requires it to be present and equal both the request and
+/// first parsed epoch. `out_present` is exactly 0 or 1; `out_seconds` is zero
+/// when the field is absent.
+///
+/// Safety: `sp3` must be a live handle and both output pointers must reference
+/// writable storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sp3_declared_start_j2000_seconds(
+    sp3: *const SidereonSp3,
+    out_present: *mut u8,
+    out_seconds: *mut f64,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_sp3_declared_start_j2000_seconds";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let out_present = c_try!(require_out(out_present, FN_NAME, "out_present"));
+        *out_present = 0;
+        let out_seconds = c_try!(require_out(out_seconds, FN_NAME, "out_seconds"));
+        *out_seconds = 0.0;
+        let sp3 = c_try!(require_ref(sp3, FN_NAME, "sp3"));
+        let declared = sp3.inner.declared_start_j2000_s();
+        *out_present = u8::from(declared.is_some());
+        *out_seconds = declared.unwrap_or(0.0);
         SidereonStatus::Ok
     })
 }
@@ -1587,12 +1833,12 @@ pub unsafe extern "C" fn sidereon_sp3_merge_report_free(report: *mut SidereonSp3
 }
 
 /// Release an SP3 handle. Null is a no-op. A non-null handle must come from
-/// sidereon_sp3_load or sidereon_sp3_merge and must be freed exactly once with
-/// this function.
+/// sidereon_sp3_load, sidereon_sp3_load_exact, or sidereon_sp3_merge and must
+/// be freed exactly once with this function.
 ///
-/// Safety: sp3 must be NULL or a live handle from sidereon_sp3_load or
-/// sidereon_sp3_merge. Passing a handle after it has already been freed is
-/// invalid.
+/// Safety: sp3 must be NULL or a live handle from sidereon_sp3_load,
+/// sidereon_sp3_load_exact, or sidereon_sp3_merge. Passing a handle after it
+/// has already been freed is invalid.
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_sp3_free(sp3: *mut SidereonSp3) {
     ffi_boundary("sidereon_sp3_free", (), || {
@@ -2049,7 +2295,7 @@ pub unsafe extern "C" fn sidereon_sp3_ephemeris_sample(
 }
 
 /// Predict geometric ranges for many (satellite, receiver, epoch) requests from a
-/// loaded SP3 product in one call, writing out[i] for requests[i]. Delegates to
+/// loaded SP3 product in one call, writing `out[i]` for `requests[i]`. Delegates to
 /// sidereon_core::observables::predict_ranges. options may be NULL for the engine
 /// defaults.
 ///
@@ -2292,6 +2538,7 @@ fn sp3_artifact_identity_to_c(
         compression: match artifact.compression {
             ArchiveCompression::None => SidereonArchiveCompression::None as u32,
             ArchiveCompression::Gzip => SidereonArchiveCompression::Gzip as u32,
+            ArchiveCompression::UnixCompress => SidereonArchiveCompression::UnixCompress as u32,
         },
     })
 }
@@ -2781,5 +3028,24 @@ fn require_nonnegative_finite(
             "{fn_name}: {arg_name} must be non-negative and finite"
         ));
         Err(SidereonStatus::InvalidArgument)
+    }
+}
+
+#[cfg(test)]
+mod exact_sp3_c_tests {
+    use super::*;
+
+    #[test]
+    fn exact_coverage_discriminants_and_mapping_are_stable() {
+        assert_eq!(SidereonExactSp3Coverage::HalfOpen as u32, 0);
+        assert_eq!(SidereonExactSp3Coverage::Inclusive as u32, 1);
+        assert_eq!(
+            exact_sp3_coverage_to_c(CoreExactSp3Coverage::HalfOpen),
+            SidereonExactSp3Coverage::HalfOpen
+        );
+        assert_eq!(
+            exact_sp3_coverage_to_c(CoreExactSp3Coverage::Inclusive),
+            SidereonExactSp3Coverage::Inclusive
+        );
     }
 }

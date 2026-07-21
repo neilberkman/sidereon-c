@@ -290,7 +290,8 @@ pub unsafe extern "C" fn sidereon_mmap_terrain_orthometric_height_m_with_options
 }
 
 /// Query many terrain points as orthometric heights H in metres. Points are
-/// longitude, latitude degrees. Per-point failures are written into out[i].status.
+/// longitude, latitude degrees. Per-point failures are written into
+/// `out[i].status`.
 ///
 /// Safety: terrain must be a live handle; points must point to count
 /// SidereonLonLatDeg values; options must point to SidereonDtedLookupOptions;
@@ -359,7 +360,7 @@ pub unsafe extern "C" fn sidereon_mmap_terrain_height_batch(
 
 /// Query many terrain points as typed orthometric heights H in metres. Points
 /// are longitude, latitude degrees. Per-point failures are written into
-/// out[i].status.
+/// `out[i].status`.
 ///
 /// Safety: terrain must be a live handle; points must point to count
 /// SidereonLonLatDeg values; options must point to SidereonDtedLookupOptions;

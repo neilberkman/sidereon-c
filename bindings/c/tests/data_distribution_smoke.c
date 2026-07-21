@@ -48,6 +48,338 @@ static int stable_id_equals(
         memcmp(value, expected, written) == 0;
 }
 
+static int sample_for_date_equals(
+    const char *center,
+    uint32_t family,
+    int32_t year,
+    uint8_t month,
+    uint8_t day,
+    const char *expected) {
+    uint8_t sample[16];
+    size_t written = 99;
+    size_t required = 99;
+    size_t expected_len = strlen(expected);
+    return sidereon_data_default_sample_for_date(
+               center, family, year, month, day, sample, sizeof(sample), &written,
+               &required) == SIDEREON_STATUS_OK &&
+        written == expected_len && required == expected_len &&
+        memcmp(sample, expected, expected_len) == 0;
+}
+
+static int catalog_033_checks(void) {
+    enum SidereonSolutionClass solution = SIDEREON_SOLUTION_CLASS_RAPID;
+    if (sidereon_data_product_solution_class(
+            "igs", SIDEREON_PRODUCT_FAMILY_SP3, &solution) != SIDEREON_STATUS_OK ||
+        solution != SIDEREON_SOLUTION_CLASS_FINAL ||
+        sidereon_data_product_solution_class(
+            "igs", SIDEREON_PRODUCT_FAMILY_RINEX_NAVIGATION, &solution) !=
+            SIDEREON_STATUS_OK ||
+        solution != SIDEREON_SOLUTION_CLASS_BROADCAST ||
+        sidereon_data_product_solution_class(
+            "igs", SIDEREON_PRODUCT_FAMILY_RINEX_CLOCK, &solution) !=
+            SIDEREON_STATUS_INVALID_ARGUMENT) {
+        return 70;
+    }
+
+    if (!sample_for_date_equals(
+            "gfz", SIDEREON_PRODUCT_FAMILY_SP3, 2021, 5, 17, "15M") ||
+        !sample_for_date_equals(
+            "gfz", SIDEREON_PRODUCT_FAMILY_SP3, 2021, 5, 18, "05M") ||
+        !sample_for_date_equals(
+            "gfz", SIDEREON_PRODUCT_FAMILY_SP3, 2026, 7, 19, "05M")) {
+        return 71;
+    }
+
+    if (!sample_for_date_equals(
+            "esa_ult", SIDEREON_PRODUCT_FAMILY_SP3, 2024, 9, 3, "15M") ||
+        !sample_for_date_equals(
+            "esa_ult", SIDEREON_PRODUCT_FAMILY_SP3, 2025, 2, 2, "15M") ||
+        !sample_for_date_equals(
+            "esa_ult", SIDEREON_PRODUCT_FAMILY_SP3, 2025, 2, 3, "05M") ||
+        !sample_for_date_equals(
+            "gfz_ult", SIDEREON_PRODUCT_FAMILY_SP3, 2021, 5, 15, "15M") ||
+        !sample_for_date_equals(
+            "gfz_ult", SIDEREON_PRODUCT_FAMILY_SP3, 2021, 5, 16, "05M")) {
+        return 81;
+    }
+
+    struct SidereonProductIdentity legacy;
+    struct SidereonDistributionLocation location;
+    if (sidereon_data_product_identity(
+            "igs", SIDEREON_PRODUCT_FAMILY_SP3, 2022, 11, 26, NULL, NULL,
+            &legacy) != SIDEREON_STATUS_OK ||
+        strcmp(legacy.official_filename, "igs22376.sp3") != 0 ||
+        legacy.solution_class != SIDEREON_SOLUTION_CLASS_FINAL ||
+        sidereon_data_distribution_location(
+            "igs", SIDEREON_PRODUCT_FAMILY_SP3, 2022, 11, 26, NULL, NULL,
+            SIDEREON_DISTRIBUTION_SOURCE_NASA_CDDIS, &location) !=
+            SIDEREON_STATUS_OK ||
+        location.compression != SIDEREON_ARCHIVE_COMPRESSION_UNIX_COMPRESS ||
+        strcmp(location.archive_filename, "igs22376.sp3.Z") != 0 ||
+        strcmp(
+            location.original_url,
+            "https://cddis.nasa.gov/archive/gnss/products/2237/igs22376.sp3.Z") !=
+            0 ||
+        sidereon_data_distribution_location(
+            "igs", SIDEREON_PRODUCT_FAMILY_SP3, 2022, 11, 26, NULL, NULL,
+            SIDEREON_DISTRIBUTION_SOURCE_DIRECT, &location) !=
+            SIDEREON_STATUS_INVALID_ARGUMENT) {
+        return 72;
+    }
+
+    struct SidereonProductIdentity current;
+    if (sidereon_data_product_identity(
+            "igs", SIDEREON_PRODUCT_FAMILY_SP3, 2022, 11, 27, NULL, NULL,
+            &current) != SIDEREON_STATUS_OK ||
+        strcmp(
+            current.official_filename,
+            "IGS0OPSFIN_20223310000_01D_15M_ORB.SP3") != 0 ||
+        sidereon_data_distribution_location(
+            "igs", SIDEREON_PRODUCT_FAMILY_SP3, 2022, 11, 27, NULL, NULL,
+            SIDEREON_DISTRIBUTION_SOURCE_DIRECT, &location) != SIDEREON_STATUS_OK ||
+        location.compression != SIDEREON_ARCHIVE_COMPRESSION_GZIP ||
+        strcmp(
+            location.original_url,
+            "https://igs.bkg.bund.de/root_ftp/IGS/products/2238/"
+            "IGS0OPSFIN_20223310000_01D_15M_ORB.SP3.gz") != 0 ||
+        sidereon_data_distribution_location(
+            "igs", SIDEREON_PRODUCT_FAMILY_SP3, 2022, 11, 27, NULL, NULL,
+            SIDEREON_DISTRIBUTION_SOURCE_NASA_CDDIS, &location) !=
+            SIDEREON_STATUS_OK ||
+        location.compression != SIDEREON_ARCHIVE_COMPRESSION_GZIP ||
+        strcmp(
+            location.original_url,
+            "https://cddis.nasa.gov/archive/gnss/products/2238/"
+            "IGS0OPSFIN_20223310000_01D_15M_ORB.SP3.gz") != 0) {
+        return 73;
+    }
+
+    if (sidereon_data_product_identity(
+            "igs", SIDEREON_PRODUCT_FAMILY_SP3, 1994, 1, 2, NULL, NULL,
+            &legacy) != SIDEREON_STATUS_OK ||
+        strcmp(legacy.official_filename, "igs07300.sp3") != 0 ||
+        sidereon_data_distribution_location(
+            "igs", SIDEREON_PRODUCT_FAMILY_SP3, 1994, 1, 2, NULL, NULL,
+            SIDEREON_DISTRIBUTION_SOURCE_NASA_CDDIS, &location) !=
+            SIDEREON_STATUS_OK ||
+        strcmp(
+            location.original_url,
+            "https://cddis.nasa.gov/archive/gnss/products/0730/igs07300.sp3.Z") !=
+            0 ||
+        sidereon_data_product_identity(
+            "igs", SIDEREON_PRODUCT_FAMILY_SP3, 1994, 1, 1, NULL, NULL,
+            &legacy) != SIDEREON_STATUS_INVALID_ARGUMENT) {
+        return 74;
+    }
+
+    if (sidereon_data_product_identity(
+            "esa", SIDEREON_PRODUCT_FAMILY_SP3, 2014, 1, 4, NULL, NULL,
+            &legacy) != SIDEREON_STATUS_INVALID_ARGUMENT ||
+        sidereon_data_product_identity(
+            "esa", SIDEREON_PRODUCT_FAMILY_SP3, 2014, 1, 5, NULL, NULL,
+            &legacy) != SIDEREON_STATUS_OK ||
+        strcmp(
+            legacy.official_filename,
+            "ESA0MGNFIN_20140050000_01D_05M_ORB.SP3") != 0 ||
+        sidereon_data_product_identity(
+            "gfz", SIDEREON_PRODUCT_FAMILY_SP3, 2020, 5, 12, NULL, NULL,
+            &legacy) != SIDEREON_STATUS_INVALID_ARGUMENT ||
+        sidereon_data_product_identity(
+            "gfz", SIDEREON_PRODUCT_FAMILY_SP3, 2020, 5, 13, NULL, NULL,
+            &legacy) != SIDEREON_STATUS_OK ||
+        strcmp(legacy.sample, "15M") != 0 ||
+        sidereon_data_product_identity(
+            "esa", SIDEREON_PRODUCT_FAMILY_RINEX_CLOCK, 2014, 1, 4, NULL,
+            NULL, &legacy) != SIDEREON_STATUS_INVALID_ARGUMENT ||
+        sidereon_data_product_identity(
+            "esa", SIDEREON_PRODUCT_FAMILY_RINEX_CLOCK, 2014, 1, 5, NULL,
+            NULL, &legacy) != SIDEREON_STATUS_OK ||
+        sidereon_data_product_identity(
+            "gfz", SIDEREON_PRODUCT_FAMILY_RINEX_CLOCK, 2020, 5, 12, NULL,
+            NULL, &legacy) != SIDEREON_STATUS_INVALID_ARGUMENT ||
+        sidereon_data_product_identity(
+            "gfz", SIDEREON_PRODUCT_FAMILY_RINEX_CLOCK, 2020, 5, 13, NULL,
+            NULL, &legacy) != SIDEREON_STATUS_OK) {
+        return 82;
+    }
+
+    if (sidereon_data_product_identity(
+            "igs_ult", SIDEREON_PRODUCT_FAMILY_SP3, 2022, 11, 26, NULL,
+            "0600", &legacy) != SIDEREON_STATUS_INVALID_ARGUMENT ||
+        sidereon_data_product_identity(
+            "igs_ult", SIDEREON_PRODUCT_FAMILY_SP3, 2022, 11, 27, NULL,
+            "0600", &legacy) != SIDEREON_STATUS_OK ||
+        strcmp(legacy.sample, "15M") != 0 ||
+        sidereon_data_product_identity(
+            "cod_ult", SIDEREON_PRODUCT_FAMILY_SP3, 2022, 11, 26, NULL,
+            "0000", &legacy) != SIDEREON_STATUS_INVALID_ARGUMENT ||
+        sidereon_data_product_identity(
+            "cod_ult", SIDEREON_PRODUCT_FAMILY_SP3, 2022, 11, 27, NULL,
+            "0000", &legacy) != SIDEREON_STATUS_OK ||
+        strcmp(legacy.sample, "05M") != 0 ||
+        sidereon_data_product_identity(
+            "esa_ult", SIDEREON_PRODUCT_FAMILY_SP3, 2022, 10, 3, NULL,
+            "0600", &legacy) != SIDEREON_STATUS_INVALID_ARGUMENT ||
+        sidereon_data_product_identity(
+            "esa_ult", SIDEREON_PRODUCT_FAMILY_SP3, 2022, 10, 4, NULL,
+            "0600", &legacy) != SIDEREON_STATUS_OK ||
+        strcmp(legacy.sample, "15M") != 0 ||
+        sidereon_data_product_identity(
+            "gfz_ult", SIDEREON_PRODUCT_FAMILY_SP3, 2020, 10, 5, NULL,
+            "0600", &legacy) != SIDEREON_STATUS_INVALID_ARGUMENT ||
+        sidereon_data_product_identity(
+            "gfz_ult", SIDEREON_PRODUCT_FAMILY_SP3, 2020, 10, 6, NULL,
+            "0600", &legacy) != SIDEREON_STATUS_OK ||
+        strcmp(legacy.sample, "15M") != 0) {
+        return 83;
+    }
+
+    if (sidereon_data_product_identity(
+            "esa_ult", SIDEREON_PRODUCT_FAMILY_SP3, 2024, 9, 3, NULL,
+            "0600", &legacy) != SIDEREON_STATUS_OK ||
+        strcmp(legacy.sample, "15M") != 0 ||
+        sidereon_data_product_identity(
+            "esa_ult", SIDEREON_PRODUCT_FAMILY_SP3, 2025, 2, 2, NULL,
+            "0600", &legacy) != SIDEREON_STATUS_OK ||
+        strcmp(legacy.sample, "15M") != 0 ||
+        sidereon_data_product_identity(
+            "esa_ult", SIDEREON_PRODUCT_FAMILY_SP3, 2025, 2, 2, NULL,
+            "1200", &legacy) != SIDEREON_STATUS_OK ||
+        strcmp(legacy.sample, "05M") != 0 ||
+        sidereon_data_product_identity(
+            "gfz_ult", SIDEREON_PRODUCT_FAMILY_SP3, 2021, 5, 15, NULL,
+            "0600", &legacy) != SIDEREON_STATUS_OK ||
+        strcmp(legacy.sample, "15M") != 0 ||
+        sidereon_data_product_identity(
+            "gfz_ult", SIDEREON_PRODUCT_FAMILY_SP3, 2021, 5, 16, NULL,
+            "0600", &legacy) != SIDEREON_STATUS_OK ||
+        strcmp(legacy.sample, "05M") != 0) {
+        return 84;
+    }
+
+    if (sidereon_data_distribution_location(
+            "esa", SIDEREON_PRODUCT_FAMILY_SP3, 2020, 6, 24, NULL, NULL,
+            SIDEREON_DISTRIBUTION_SOURCE_DIRECT, &location) !=
+            SIDEREON_STATUS_OK ||
+        sidereon_data_distribution_location(
+            "esa", SIDEREON_PRODUCT_FAMILY_SP3, 2020, 6, 24, NULL, NULL,
+            SIDEREON_DISTRIBUTION_SOURCE_NASA_CDDIS, &location) !=
+            SIDEREON_STATUS_INVALID_ARGUMENT ||
+        sidereon_data_distribution_location(
+            "gfz", SIDEREON_PRODUCT_FAMILY_SP3, 2020, 6, 24, NULL, NULL,
+            SIDEREON_DISTRIBUTION_SOURCE_DIRECT, &location) !=
+            SIDEREON_STATUS_OK ||
+        sidereon_data_distribution_location(
+            "gfz", SIDEREON_PRODUCT_FAMILY_SP3, 2020, 6, 24, NULL, NULL,
+            SIDEREON_DISTRIBUTION_SOURCE_NASA_CDDIS, &location) !=
+            SIDEREON_STATUS_INVALID_ARGUMENT ||
+        sidereon_data_distribution_location(
+            "cod_ult", SIDEREON_PRODUCT_FAMILY_SP3, 2022, 11, 26, NULL,
+            "0000", SIDEREON_DISTRIBUTION_SOURCE_DIRECT, &location) !=
+            SIDEREON_STATUS_INVALID_ARGUMENT ||
+        sidereon_data_distribution_location(
+            "esa_ult", SIDEREON_PRODUCT_FAMILY_SP3, 2022, 10, 4, NULL,
+            "0600", SIDEREON_DISTRIBUTION_SOURCE_DIRECT, &location) !=
+            SIDEREON_STATUS_OK ||
+        sidereon_data_distribution_location(
+            "esa_ult", SIDEREON_PRODUCT_FAMILY_SP3, 2022, 10, 4, NULL,
+            "0600", SIDEREON_DISTRIBUTION_SOURCE_NASA_CDDIS, &location) !=
+            SIDEREON_STATUS_INVALID_ARGUMENT ||
+        sidereon_data_distribution_location(
+            "gfz_ult", SIDEREON_PRODUCT_FAMILY_SP3, 2020, 10, 6, NULL,
+            "0600", SIDEREON_DISTRIBUTION_SOURCE_DIRECT, &location) !=
+            SIDEREON_STATUS_OK ||
+        sidereon_data_distribution_location(
+            "gfz_ult", SIDEREON_PRODUCT_FAMILY_SP3, 2020, 10, 6, NULL,
+            "0600", SIDEREON_DISTRIBUTION_SOURCE_NASA_CDDIS, &location) !=
+            SIDEREON_STATUS_INVALID_ARGUMENT ||
+        sidereon_data_distribution_location(
+            "igs", SIDEREON_PRODUCT_FAMILY_SP3, 2020, 6, 24, NULL, NULL,
+            SIDEREON_DISTRIBUTION_SOURCE_NASA_CDDIS, &location) !=
+            SIDEREON_STATUS_OK ||
+        location.compression != SIDEREON_ARCHIVE_COMPRESSION_UNIX_COMPRESS ||
+        sidereon_data_distribution_location(
+            "esa", SIDEREON_PRODUCT_FAMILY_SP3, 2024, 6, 24, NULL, NULL,
+            SIDEREON_DISTRIBUTION_SOURCE_NASA_CDDIS, &location) !=
+            SIDEREON_STATUS_INVALID_ARGUMENT) {
+        return 85;
+    }
+
+    struct SidereonProductIdentity nav;
+    if (sidereon_data_product_identity(
+            "igs", SIDEREON_PRODUCT_FAMILY_RINEX_NAVIGATION, 2020, 6, 25, NULL,
+            NULL, &nav) != SIDEREON_STATUS_OK ||
+        nav.solution_class != SIDEREON_SOLUTION_CLASS_BROADCAST ||
+        strcmp(nav.official_filename, "BRDC00WRD_R_20201770000_01D_MN.rnx") != 0 ||
+        sidereon_data_distribution_location(
+            "igs", SIDEREON_PRODUCT_FAMILY_RINEX_NAVIGATION, 2020, 6, 25, NULL,
+            NULL, SIDEREON_DISTRIBUTION_SOURCE_DIRECT, &location) !=
+            SIDEREON_STATUS_OK ||
+        strcmp(
+            location.original_url,
+            "https://igs.bkg.bund.de/root_ftp/IGS/BRDC/2020/177/"
+            "BRDC00WRD_R_20201770000_01D_MN.rnx.gz") != 0) {
+        return 75;
+    }
+
+    const uint32_t code_families[] = {
+        SIDEREON_PRODUCT_FAMILY_SP3,
+        SIDEREON_PRODUCT_FAMILY_RINEX_CLOCK,
+        SIDEREON_PRODUCT_FAMILY_IONEX,
+    };
+    const char *code_urls[] = {
+        "https://www.aiub.unibe.ch/download/CODE_MGEX/CODE/2026/"
+        "COD0MGXFIN_20261200000_01D_05M_ORB.SP3.gz",
+        "https://www.aiub.unibe.ch/download/CODE_MGEX/CODE/2026/"
+        "COD0MGXFIN_20261200000_01D_30S_CLK.CLK.gz",
+        "https://www.aiub.unibe.ch/download/CODE/2026/"
+        "COD0OPSFIN_20261200000_01D_01H_GIM.INX.gz",
+    };
+    for (size_t index = 0; index < 3; ++index) {
+        if (sidereon_data_distribution_location(
+                "cod", code_families[index], 2026, 4, 30, NULL, NULL,
+                SIDEREON_DISTRIBUTION_SOURCE_DIRECT, &location) !=
+                SIDEREON_STATUS_OK ||
+            strcmp(location.original_url, code_urls[index]) != 0) {
+            return 76;
+        }
+        if (sidereon_data_product_identity(
+                "cod", code_families[index], 2022, 11, 26, NULL, NULL,
+                &legacy) != SIDEREON_STATUS_INVALID_ARGUMENT) {
+            return 77;
+        }
+    }
+    if (sidereon_data_distribution_location(
+            "cod_rap", SIDEREON_PRODUCT_FAMILY_IONEX, 2026, 4, 30, NULL, NULL,
+            SIDEREON_DISTRIBUTION_SOURCE_DIRECT, &location) != SIDEREON_STATUS_OK ||
+        strcmp(
+            location.original_url,
+            "https://www.aiub.unibe.ch/download/CODE/"
+            "COD0OPSRAP_20261200000_01D_01H_GIM.INX.gz") != 0 ||
+        sidereon_data_product_identity(
+            "cod_rap", SIDEREON_PRODUCT_FAMILY_SP3, 2026, 4, 30, NULL, NULL,
+            &legacy) != SIDEREON_STATUS_INVALID_ARGUMENT) {
+        return 78;
+    }
+
+    if (sidereon_data_distribution_location(
+            "esa", SIDEREON_PRODUCT_FAMILY_IONEX, 2022, 11, 26, NULL, NULL,
+            SIDEREON_DISTRIBUTION_SOURCE_NASA_CDDIS, &location) !=
+            SIDEREON_STATUS_INVALID_ARGUMENT ||
+        sidereon_data_distribution_location(
+            "esa", SIDEREON_PRODUCT_FAMILY_IONEX, 2024, 6, 24, NULL, NULL,
+            SIDEREON_DISTRIBUTION_SOURCE_NASA_CDDIS, &location) !=
+            SIDEREON_STATUS_OK ||
+        strcmp(
+            location.original_url,
+            "https://cddis.nasa.gov/archive/gnss/products/ionex/2024/176/"
+            "ESA0OPSFIN_20241760000_01D_02H_GIM.INX.gz") != 0) {
+        return 86;
+    }
+
+    return 0;
+}
+
 static int merge_input_identity_checks(void) {
     struct SidereonProductIdentity first_identity;
     struct SidereonProductIdentity second_identity;
@@ -69,6 +401,32 @@ static int merge_input_identity_checks(void) {
     if (sidereon_sp3_merge_options_init(&options) != SIDEREON_STATUS_OK) {
         return 10;
     }
+
+    struct SidereonProductIdentity legacy_identity;
+    struct SidereonSp3ArtifactIdentity legacy_artifact;
+    struct SidereonSp3ArtifactIdentity legacy_canonical;
+    struct SidereonSp3MergeInputIdentity *legacy_merge_identity = NULL;
+    if (sidereon_data_product_identity(
+            "igs", SIDEREON_PRODUCT_FAMILY_SP3, 2022, 11, 26, NULL, NULL,
+            &legacy_identity) != SIDEREON_STATUS_OK) {
+        return 79;
+    }
+    artifact_from_identity(&legacy_artifact, &legacy_identity, 'a');
+    legacy_artifact.distribution_source = SIDEREON_DISTRIBUTION_SOURCE_NASA_CDDIS;
+    legacy_artifact.compression = SIDEREON_ARCHIVE_COMPRESSION_UNIX_COMPRESS;
+    if (sidereon_sp3_merge_input_identity(
+            &legacy_artifact, 1, &options, &legacy_merge_identity) !=
+            SIDEREON_STATUS_OK ||
+        legacy_merge_identity == NULL ||
+        sidereon_sp3_merge_input_identity_contributor(
+            legacy_merge_identity, 0, &legacy_canonical) != SIDEREON_STATUS_OK ||
+        legacy_canonical.compression !=
+            SIDEREON_ARCHIVE_COMPRESSION_UNIX_COMPRESS) {
+        sidereon_sp3_merge_input_identity_free(legacy_merge_identity);
+        return 80;
+    }
+    sidereon_sp3_merge_input_identity_free(legacy_merge_identity);
+
     const uint32_t systems[] = {
         SIDEREON_GNSS_SYSTEM_GPS,
         SIDEREON_GNSS_SYSTEM_GALILEO,
@@ -414,6 +772,10 @@ static int merge_input_identity_checks(void) {
 }
 
 int main(void) {
+    int catalog = catalog_033_checks();
+    if (catalog != 0) {
+        return catalog;
+    }
     struct SidereonProductIdentity identity;
     struct SidereonProductIdentity invalid_identity;
     if (sidereon_data_product_identity(

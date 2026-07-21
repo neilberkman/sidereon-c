@@ -219,7 +219,7 @@ pub struct SidereonSatellitePass {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct SidereonVisibleSatellite {
-    /// Null-terminated caller-supplied satellite id (the matching ids[i] passed
+    /// Null-terminated caller-supplied satellite id (the matching `ids[i]` passed
     /// to sidereon_visible_from_satellites). That input is bounded to at most
     /// MAX_VISIBLE_ID_BYTES (64) bytes, so it always fits this buffer without
     /// truncation. The buffer length is VISIBLE_ID_C_BYTES (MAX_VISIBLE_ID_BYTES
@@ -1641,8 +1641,8 @@ pub struct SidereonGroundTrack {
 /// Find the satellites of a constellation visible above min_elevation_deg from a
 /// ground station at one UTC unix-microsecond instant. tles is an array of count
 /// live TLE handles (each carrying its own opsmode from sidereon_tle_load); ids
-/// is a parallel array of count null-terminated C strings, where ids[i] labels
-/// tles[i] and becomes the result's catalog_number. Each id must be a non-empty
+/// is a parallel array of count null-terminated C strings, where `ids[i]` labels
+/// `tles[i]` and becomes the result's catalog_number. Each id must be a non-empty
 /// string of 1..=64 bytes (MAX_VISIBLE_ID_BYTES, excluding the NUL terminator);
 /// an empty id, or one not NUL-terminated within 64 bytes, yields
 /// SIDEREON_STATUS_INVALID_ARGUMENT, matching the other id-accepting entry

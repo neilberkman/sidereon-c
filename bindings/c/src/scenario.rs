@@ -237,7 +237,8 @@ pub unsafe extern "C" fn sidereon_scenario_simulate_json_with_ionex(
 /// parsed SP3 product declared by the scenario constellation.
 ///
 /// Safety: data must point to len readable UTF-8 bytes; sp3 must be a live
-/// handle from sidereon_sp3_load or sidereon_sp3_merge; out_simulation must
+/// handle from sidereon_sp3_load, sidereon_sp3_load_exact, or
+/// sidereon_sp3_merge; out_simulation must
 /// point to storage for a SidereonScenarioSimulation*.
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_scenario_simulate_json_with_sp3(

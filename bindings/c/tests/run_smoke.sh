@@ -86,7 +86,7 @@ echo "== regenerating header =="
 cbindgen --quiet --config cbindgen.toml --crate sidereon-c --output include/sidereon.h
 
 echo "== checking header docs =="
-grep -Fq "sidereon_sp3_load or sidereon_sp3_merge" include/sidereon.h
+grep -Fq "sidereon_sp3_load, sidereon_sp3_load_exact, or sidereon_sp3_merge" include/sidereon.h
 grep -Fq "sidereon_solve_spp_v2 and release with sidereon_spp_solution_free" include/sidereon.h
 grep -Fq "sidereon_solve_spp or sidereon_solve_spp_v2 and must be freed exactly once" include/sidereon.h
 grep -Fq "with sidereon_spk_load and release with sidereon_spk_free" include/sidereon.h
@@ -122,6 +122,20 @@ cc -std=c11 -Wall -Wextra -Werror \
 
 echo "== running data_distribution_smoke program =="
 "${data_distribution_out}"
+
+echo "== compiling sp3_exact_smoke program =="
+sp3_exact_out="${target_dir}/sp3_exact_smoke"
+cc -std=c11 -Wall -Wextra -Werror \
+    -I"${binding_root}/include" \
+    "${here}/sp3_exact_smoke.c" \
+    -L"${lib_dir}" \
+    -lsidereon \
+    -Wl,-rpath,"${lib_dir}" \
+    -lm \
+    -o "${sp3_exact_out}"
+
+echo "== running sp3_exact_smoke program =="
+"${sp3_exact_out}" "${sp3_path}" "${sp3_surface_path}"
 
 # Focused exercise for the parity-gap closes (lenient OMM, standalone LAMBDA, and
 # the SP3 merge agreement metric). Built and run with the same warnings-as-errors.

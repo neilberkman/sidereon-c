@@ -5,7 +5,7 @@
  * @brief C ABI for the sidereon positioning engine.
  *
  * Ownership and threading:
- * sidereon_sp3_load, sidereon_sp3_merge, sidereon_solve_spp,
+ * sidereon_sp3_load, sidereon_sp3_load_exact, sidereon_sp3_merge, sidereon_solve_spp,
  * sidereon_solve_spp_v2, sidereon_solve_rtk_float,
  * sidereon_solve_rtk_fixed, sidereon_solve_ppp_float, and
  * sidereon_solve_ppp_fixed, plus the TLE, propagation, pass-list, batch, and
@@ -45,9 +45,9 @@
 #include <stdlib.h>
 
 #define SIDEREON_VERSION_MAJOR 0
-#define SIDEREON_VERSION_MINOR 32
+#define SIDEREON_VERSION_MINOR 33
 #define SIDEREON_VERSION_PATCH 0
-#define SIDEREON_VERSION_STRING "0.32.0"
+#define SIDEREON_VERSION_STRING "0.33.0"
 
 #define ANALYSIS_CENTER_C_BYTES 32
 
@@ -367,7 +367,25 @@ typedef enum SidereonDistributionSource {
 typedef enum SidereonArchiveCompression {
     SIDEREON_ARCHIVE_COMPRESSION_NONE = 0,
     SIDEREON_ARCHIVE_COMPRESSION_GZIP = 1,
+    /**
+     * Historical Unix-compress transport with a `.Z` suffix.
+     *
+     * Appended in ABI version 0.33.0; the existing numeric values are
+     * unchanged.
+     */
+    SIDEREON_ARCHIVE_COMPRESSION_UNIX_COMPRESS = 2,
 } SidereonArchiveCompression;
+
+/**
+ * Public product solution class.
+ */
+typedef enum SidereonSolutionClass {
+    SIDEREON_SOLUTION_CLASS_FINAL = 0,
+    SIDEREON_SOLUTION_CLASS_RAPID = 1,
+    SIDEREON_SOLUTION_CLASS_ULTRA_RAPID = 2,
+    SIDEREON_SOLUTION_CLASS_PREDICTED = 3,
+    SIDEREON_SOLUTION_CLASS_BROADCAST = 4,
+} SidereonSolutionClass;
 
 /**
  * Eclipse status, mirroring sidereon_core::astro::events::eclipse::EclipseStatus.
@@ -965,6 +983,20 @@ typedef enum SidereonFixSourceKind {
 } SidereonFixSourceKind;
 
 /**
+ * Which regular epoch-grid boundary representation an exact SP3 used.
+ */
+typedef enum SidereonExactSp3Coverage {
+    /**
+     * The declared boundary is excluded.
+     */
+    SIDEREON_EXACT_SP3_COVERAGE_HALF_OPEN = 0,
+    /**
+     * The declared boundary epoch is present.
+     */
+    SIDEREON_EXACT_SP3_COVERAGE_INCLUSIVE = 1,
+} SidereonExactSp3Coverage;
+
+/**
  * Method used to reconcile one SP3 source coordinate label.
  */
 typedef enum SidereonSp3FrameReconciliationMethod {
@@ -1118,17 +1150,6 @@ typedef enum SidereonProductPublisher {
     SIDEREON_PRODUCT_PUBLISHER_ESA = 2,
     SIDEREON_PRODUCT_PUBLISHER_GFZ = 3,
 } SidereonProductPublisher;
-
-/**
- * Public product solution class.
- */
-typedef enum SidereonSolutionClass {
-    SIDEREON_SOLUTION_CLASS_FINAL = 0,
-    SIDEREON_SOLUTION_CLASS_RAPID = 1,
-    SIDEREON_SOLUTION_CLASS_ULTRA_RAPID = 2,
-    SIDEREON_SOLUTION_CLASS_PREDICTED = 3,
-    SIDEREON_SOLUTION_CLASS_BROADCAST = 4,
-} SidereonSolutionClass;
 
 /**
  * Public campaign token encoded by the official filename.
@@ -2978,6 +2999,15 @@ typedef struct SidereonExactCache SidereonExactCache;
 typedef struct SidereonExactCacheEntry SidereonExactCacheEntry;
 
 /**
+ * Validated, source-independent requirements for one exact SP3 product.
+ *
+ * Create with `sidereon_sp3_exact_request_new` or
+ * `sidereon_sp3_exact_request_from_identity` and release with
+ * `sidereon_sp3_exact_request_free`.
+ */
+typedef struct SidereonExactSp3Request SidereonExactSp3Request;
+
+/**
  * The result of an FDE solve: the surviving receiver solution, the satellites
  * excluded in exclusion order, and the exclusion count. Opaque to C. Create
  * with sidereon_fde_solve_spp or sidereon_fde_solve_broadcast and release with
@@ -3413,7 +3443,8 @@ typedef struct SidereonSourcedSolution SidereonSourcedSolution;
 
 /**
  * A parsed SP3 precise-ephemeris product. Opaque to C. Create with
- * sidereon_sp3_load or sidereon_sp3_merge and release with sidereon_sp3_free.
+ * sidereon_sp3_load, sidereon_sp3_load_exact, or sidereon_sp3_merge and
+ * release with sidereon_sp3_free.
  */
 typedef struct SidereonSp3 SidereonSp3;
 
@@ -17940,7 +17971,7 @@ typedef struct SidereonUt1CoverageInfo {
  */
 typedef struct SidereonVisibleSatellite {
     /**
-     * Null-terminated caller-supplied satellite id (the matching ids[i] passed
+     * Null-terminated caller-supplied satellite id (the matching `ids[i]` passed
      * to sidereon_visible_from_satellites). That input is bounded to at most
      * MAX_VISIBLE_ID_BYTES (64) bytes, so it always fits this buffer without
      * truncation. The buffer length is VISIBLE_ID_C_BYTES (MAX_VISIBLE_ID_BYTES
@@ -19981,6 +20012,33 @@ enum SidereonStatus sidereon_cw_stm(double mean_motion_rad_s,
 enum SidereonStatus sidereon_cycle_slip_options_init(struct SidereonCycleSlipOptions *out_options);
 
 /**
+ * Copy the published default sampling token for a center/product/date.
+ *
+ * This is the date-aware catalog query. It preserves historical cadence
+ * transitions such as GFZ rapid SP3 changing from `15M` to `05M` on
+ * 2021-05-18 and GFZ ultra-rapid changing on 2021-05-16. On ESA ultra-rapid's
+ * issue-level transition date, this query reports the `0000`/start-of-day
+ * default; product identity derivation also considers the requested issue.
+ * The output uses the standard variable-length byte contract and is not
+ * null-terminated.
+ *
+ * `family` is one SidereonProductFamily_* value encoded as uint32_t.
+ *
+ * Safety: `center` must reference a null-terminated UTF-8 string; `out` must
+ * reference `out_len` writable bytes, or may be NULL when `out_len` is zero;
+ * the count pointers must reference writable size_t values.
+ */
+enum SidereonStatus sidereon_data_default_sample_for_date(const char *center,
+                                                          uint32_t family,
+                                                          int32_t year,
+                                                          uint8_t month,
+                                                          uint8_t day,
+                                                          uint8_t *out,
+                                                          size_t out_len,
+                                                          size_t *out_written,
+                                                          size_t *out_required);
+
+/**
  * Resolve one explicit distributor for an exact catalog product.
  *
  * This function performs no network or file IO. `original_url` is absent for
@@ -20019,8 +20077,9 @@ enum SidereonStatus sidereon_data_problem_init(uint32_t kind,
  * `family` is one of SidereonProductFamily_* encoded as uint32_t. Invalid
  * values fail closed with SIDEREON_STATUS_INVALID_ARGUMENT.
  *
- * `sample` may be NULL to use the catalog default. `issue` may be NULL only
- * for product lines that do not require an ultra-rapid issue.
+ * `sample` may be NULL to use the catalog default, including issue-aware
+ * ultra-rapid transitions. `issue` may be NULL only for product lines that do
+ * not require an ultra-rapid issue.
  *
  * Safety: non-null text pointers must reference null-terminated UTF-8 strings;
  * `out_identity` must reference writable storage.
@@ -20048,6 +20107,23 @@ enum SidereonStatus sidereon_data_product_identity_cache_key(const struct Sidere
                                                              size_t out_len,
                                                              size_t *out_written,
                                                              size_t *out_required);
+
+/**
+ * Resolve the solution class for one supported center/product family.
+ *
+ * Unlike the legacy center-wide classification, this reports IGS combined
+ * final SP3 as `SIDEREON_SOLUTION_CLASS_FINAL` while preserving
+ * `SIDEREON_SOLUTION_CLASS_BROADCAST` for IGS broadcast navigation.
+ * Unsupported center/product combinations fail before acquisition.
+ *
+ * `family` is one SidereonProductFamily_* value encoded as uint32_t.
+ *
+ * Safety: `center` must reference a null-terminated UTF-8 string and
+ * `out_solution_class` must reference writable storage.
+ */
+enum SidereonStatus sidereon_data_product_solution_class(const char *center,
+                                                         uint32_t family,
+                                                         enum SidereonSolutionClass *out_solution_class);
 
 /**
  * Require available identities to be exactly the declared product set.
@@ -20399,7 +20475,7 @@ void sidereon_dted_terrain_free(struct SidereonDtedTerrain *terrain);
  * Query many terrain points using the same mutable DTED tile cache. Points are
  * longitude-first `(lon_deg, lat_deg)` pairs. Each successful result carries an
  * orthometric height in meters. Per-point lookup failures are written into
- * out[i].status and do not fail the whole call.
+ * `out[i].status` and do not fail the whole call.
  *
  * Safety: terrain must be a live handle; points points to count
  * SidereonLonLatDeg values; options must point to SidereonDtedLookupOptions;
@@ -23386,7 +23462,8 @@ enum SidereonStatus sidereon_mmap_terrain_from_vec(const uint8_t *bytes,
 
 /**
  * Query many terrain points as orthometric heights H in metres. Points are
- * longitude, latitude degrees. Per-point failures are written into out[i].status.
+ * longitude, latitude degrees. Per-point failures are written into
+ * `out[i].status`.
  *
  * Safety: terrain must be a live handle; points must point to count
  * SidereonLonLatDeg values; options must point to SidereonDtedLookupOptions;
@@ -23428,7 +23505,7 @@ enum SidereonStatus sidereon_mmap_terrain_height_m_with_options(struct SidereonM
 /**
  * Query many terrain points as typed orthometric heights H in metres. Points
  * are longitude, latitude degrees. Per-point failures are written into
- * out[i].status.
+ * `out[i].status`.
  *
  * Safety: terrain must be a live handle; points must point to count
  * SidereonLonLatDeg values; options must point to SidereonDtedLookupOptions;
@@ -28560,7 +28637,8 @@ enum SidereonStatus sidereon_scenario_simulate_json_with_ionex(const uint8_t *da
  * parsed SP3 product declared by the scenario constellation.
  *
  * Safety: data must point to len readable UTF-8 bytes; sp3 must be a live
- * handle from sidereon_sp3_load or sidereon_sp3_merge; out_simulation must
+ * handle from sidereon_sp3_load, sidereon_sp3_load_exact, or
+ * sidereon_sp3_merge; out_simulation must
  * point to storage for a SidereonScenarioSimulation*.
  */
 enum SidereonStatus sidereon_scenario_simulate_json_with_sp3(const uint8_t *data,
@@ -29911,7 +29989,8 @@ enum SidereonStatus sidereon_solve_static_rtk_arc(const struct SidereonRtkArcEpo
  * `options` may be NULL for the engine defaults. At least four usable
  * satellites are required.
  *
- * Safety: sp3 must be a live handle from sidereon_sp3_load or sidereon_sp3_merge;
+ * Safety: sp3 must be a live handle from sidereon_sp3_load,
+ * sidereon_sp3_load_exact, or sidereon_sp3_merge;
  * observations must point to count entries (each with a valid sat_id);
  * receiver_ecef_m must point to three readable doubles; options must be NULL or
  * point to a SidereonVelocityOptions; out_solution must point to storage for a
@@ -30169,6 +30248,35 @@ enum SidereonStatus sidereon_sp3_clock_reference_offsets(const struct SidereonSp
                                                          size_t *out_required);
 
 /**
+ * Write the epoch count declared on SP3 header line 1.
+ *
+ * This may differ from `sidereon_sp3_epoch_count` for a truncated product
+ * accepted by the deliberately permissive base parser. Exact validation
+ * requires the declared and parsed counts to agree.
+ *
+ * Safety: `sp3` must be a live handle and `out_count` must reference writable
+ * uint64_t storage.
+ */
+enum SidereonStatus sidereon_sp3_declared_epoch_count(const struct SidereonSp3 *sp3,
+                                                      uint64_t *out_count);
+
+/**
+ * Read the start epoch declared on SP3 header line 1 as J2000 seconds in the
+ * product time scale.
+ *
+ * The permissive parser represents a malformed line-1 civil epoch as absent.
+ * Exact validation requires it to be present and equal both the request and
+ * first parsed epoch. `out_present` is exactly 0 or 1; `out_seconds` is zero
+ * when the field is absent.
+ *
+ * Safety: `sp3` must be a live handle and both output pointers must reference
+ * writable storage.
+ */
+enum SidereonStatus sidereon_sp3_declared_start_j2000_seconds(const struct SidereonSp3 *sp3,
+                                                              uint8_t *out_present,
+                                                              double *out_seconds);
+
+/**
  * Evaluate emission-epoch states, clocks, and media delays from a loaded SP3
  * product in one call. Output arrays are index-aligned with satellites.
  *
@@ -30215,8 +30323,7 @@ enum SidereonStatus sidereon_sp3_ephemeris_sample(const struct SidereonSp3 *sp3,
 /**
  * Write the number of epochs in the product to *out_count.
  *
- * Safety: sp3 must be a handle from sidereon_sp3_load or sidereon_sp3_merge
- * that has not been freed; out_count must point to a size_t.
+ * Safety: sp3 must be a live SP3 handle; out_count must point to a size_t.
  */
 enum SidereonStatus sidereon_sp3_epoch_count(const struct SidereonSp3 *sp3, size_t *out_count);
 
@@ -30246,13 +30353,55 @@ enum SidereonStatus sidereon_sp3_epochs_j2000_seconds(const struct SidereonSp3 *
                                                       size_t *out_required);
 
 /**
- * Release an SP3 handle. Null is a no-op. A non-null handle must come from
- * sidereon_sp3_load or sidereon_sp3_merge and must be freed exactly once with
- * this function.
+ * Release an exact-SP3 request handle. NULL is accepted.
+ */
+void sidereon_sp3_exact_request_free(struct SidereonExactSp3Request *request);
+
+/**
+ * Create an exact-SP3 request from a complete catalog identity.
  *
- * Safety: sp3 must be NULL or a live handle from sidereon_sp3_load or
- * sidereon_sp3_merge. Passing a handle after it has already been freed is
- * invalid.
+ * The core validates every identity field, requires the SP3 family, and binds
+ * the request to the identity's date, issue, span, cadence, optional format
+ * revision, and official producing-agency code.
+ *
+ * Safety: `identity` must reference a live `SidereonProductIdentity` and
+ * `out_request` must reference writable handle storage. On success the caller
+ * owns the returned request.
+ */
+enum SidereonStatus sidereon_sp3_exact_request_from_identity(const struct SidereonProductIdentity *identity,
+                                                             struct SidereonExactSp3Request **out_request);
+
+/**
+ * Create a validated source-independent exact-SP3 request.
+ *
+ * `issue` may be NULL for midnight or point to an `HHMM` token. `span` and
+ * `sample` must be non-null IGS period tokens. `expected_agency` may be NULL;
+ * when present it must be the one-to-four-character upper-case agency field
+ * required from SP3 header line 1. This constructor does not constrain an SP3
+ * revision; use `sidereon_sp3_exact_request_from_identity` to inherit both the
+ * catalog identity's format revision and official producing agency.
+ *
+ * Safety: each non-null text pointer must reference a null-terminated UTF-8
+ * string and `out_request` must reference writable handle storage. On success
+ * the caller owns the returned request.
+ */
+enum SidereonStatus sidereon_sp3_exact_request_new(int32_t year,
+                                                   uint8_t month,
+                                                   uint8_t day,
+                                                   const char *issue,
+                                                   const char *span,
+                                                   const char *sample,
+                                                   const char *expected_agency,
+                                                   struct SidereonExactSp3Request **out_request);
+
+/**
+ * Release an SP3 handle. Null is a no-op. A non-null handle must come from
+ * sidereon_sp3_load, sidereon_sp3_load_exact, or sidereon_sp3_merge and must
+ * be freed exactly once with this function.
+ *
+ * Safety: sp3 must be NULL or a live handle from sidereon_sp3_load,
+ * sidereon_sp3_load_exact, or sidereon_sp3_merge. Passing a handle after it
+ * has already been freed is invalid.
  */
 void sidereon_sp3_free(struct SidereonSp3 *sp3);
 
@@ -30357,6 +30506,25 @@ enum SidereonStatus sidereon_sp3_interpolate(const struct SidereonSp3 *sp3,
 enum SidereonStatus sidereon_sp3_load(const uint8_t *data,
                                       size_t len,
                                       struct SidereonSp3 **out_sp3);
+
+/**
+ * Parse and validate bytes as one exact SP3 request.
+ *
+ * The request supplies the trusted cadence and span. The core requires a
+ * regular grid, matching header cadence/count/start metadata and identity,
+ * mandatory SP3 structure, and either the half-open or inclusive boundary
+ * representation. Any content-integrity failure is terminal and no handle is
+ * returned.
+ *
+ * Safety: `data` must reference `len` readable bytes; `request` must be a live
+ * exact-request handle; both output pointers must reference writable storage.
+ * On success the caller owns `*out_sp3`.
+ */
+enum SidereonStatus sidereon_sp3_load_exact(const uint8_t *data,
+                                            size_t len,
+                                            const struct SidereonExactSp3Request *request,
+                                            struct SidereonSp3 **out_sp3,
+                                            enum SidereonExactSp3Coverage *out_coverage);
 
 /**
  * Merge SP3 products using the engine consensus merge path. On success writes
@@ -30736,7 +30904,7 @@ enum SidereonStatus sidereon_sp3_precise_interpolant_artifact_bytes(const struct
 
 /**
  * Predict geometric ranges for many (satellite, receiver, epoch) requests from a
- * loaded SP3 product in one call, writing out[i] for requests[i]. Delegates to
+ * loaded SP3 product in one call, writing `out[i]` for `requests[i]`. Delegates to
  * sidereon_core::observables::predict_ranges. options may be NULL for the engine
  * defaults.
  *
@@ -30802,6 +30970,19 @@ enum SidereonStatus sidereon_sp3_to_sp3_text(const struct SidereonSp3 *sp3,
                                              size_t len,
                                              size_t *out_written,
                                              size_t *out_required);
+
+/**
+ * Validate an already parsed SP3 product against an exact request.
+ *
+ * This applies the same integrity gate as `sidereon_sp3_load_exact` without
+ * reparsing the original byte stream.
+ *
+ * Safety: `sp3` and `request` must be live handles and `out_coverage` must
+ * reference writable storage.
+ */
+enum SidereonStatus sidereon_sp3_validate_exact(const struct SidereonSp3 *sp3,
+                                                const struct SidereonExactSp3Request *request,
+                                                enum SidereonExactSp3Coverage *out_coverage);
 
 /**
  * Fill *out_weather with the core default quiet-Sun drag inputs.
@@ -32956,8 +33137,8 @@ enum SidereonStatus sidereon_vertical_datum_label(uint32_t datum,
  * Find the satellites of a constellation visible above min_elevation_deg from a
  * ground station at one UTC unix-microsecond instant. tles is an array of count
  * live TLE handles (each carrying its own opsmode from sidereon_tle_load); ids
- * is a parallel array of count null-terminated C strings, where ids[i] labels
- * tles[i] and becomes the result's catalog_number. Each id must be a non-empty
+ * is a parallel array of count null-terminated C strings, where `ids[i]` labels
+ * `tles[i]` and becomes the result's catalog_number. Each id must be a non-empty
  * string of 1..=64 bytes (MAX_VISIBLE_ID_BYTES, excluding the NUL terminator);
  * an empty id, or one not NUL-terminated within 64 bytes, yields
  * SIDEREON_STATUS_INVALID_ARGUMENT, matching the other id-accepting entry

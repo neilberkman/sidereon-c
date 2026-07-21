@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+## 0.33.0 - 2026-07-20
+
+- Adds date-aware IGS combined-final SP3 identities and CDDIS locations across
+  the legacy `.sp3.Z` and current long-filename `.SP3.gz` eras, plus current
+  direct-BKG locations, while preserving IGS broadcast-navigation derivation.
+  Historical direct-BKG layout remains explicitly unsupported.
+- Appends `SIDEREON_ARCHIVE_COMPRESSION_UNIX_COMPRESS` without changing the
+  existing archive-compression discriminants.
+- Adds product-aware solution classification and date-aware default-cadence
+  queries, including the published GFZ rapid and ultra-rapid cadence changes
+  and the issue-sensitive ESA ultra-rapid transition.
+- Rejects SP3/clock dates before each evidenced family start, including the
+  CODE ultra long-name boundary, and rejects unmodeled pre-week-2238 CDDIS
+  long-name SP3/IONEX locations. ESA `ESA0MGNFIN` final SP3 remains direct-only
+  instead of being substituted at CDDIS.
+- Adds owned exact-SP3 requests, exact parse/validation with half-open or
+  inclusive coverage reporting, and accessors for the declared line-1 epoch
+  count and start. The legacy `sidereon_sp3_load` remains permissive.
+- Inherits product-specific CODE HTTPS routes and fail-closed rejection of
+  unsupported center/product combinations from the 0.33.0 core.
+- Builds against `sidereon` and `sidereon-core` 0.33.0.
+
 ## 0.32.0 - 2026-07-18
 
 - Adds `sidereon_navcen_parse_at` with owned assessment metadata and NANU
