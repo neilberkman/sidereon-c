@@ -552,7 +552,7 @@ compiles a suite of C programs against it, and runs them on committed reference
 fixtures, asserting the binding reproduces the engine's reference numbers
 bit-exact. CI also runs `bindings/c/tests/run_ci_smoke.sh` on Linux and macOS;
 that network-free gate checks the committed header byte-for-byte and executes
-the focused data-distribution and exact-SP3 ABI programs.
+the focused data-distribution, exact-SP3, and RINEX observation-QC ABI programs.
 
 ## Other interfaces
 

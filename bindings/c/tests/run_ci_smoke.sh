@@ -47,3 +47,14 @@ cc -std=c11 -Wall -Wextra -Werror \
 "${target_dir}/sp3_exact_smoke_ci" \
     "${here}/fixtures/sp3/GRG0MGXFIN_20201760000_01D_15M_ORB.SP3" \
     "${here}/fixtures/sp3/IGS0OPSFIN_20261200945_02H30M_15M_ORB.SP3"
+
+cc -std=c11 -Wall -Wextra -Werror \
+    -I"${binding_root}/include" \
+    "${here}/rinex_qc_interval_smoke.c" \
+    -L"${lib_dir}" \
+    -lsidereon \
+    -Wl,-rpath,"${lib_dir}" \
+    -lm \
+    -o "${target_dir}/rinex_qc_interval_smoke_ci"
+"${target_dir}/rinex_qc_interval_smoke_ci" \
+    "${here}/fixtures/obs/ESBC00DNK_R_20201770000_01D_30S_MO_trim.rnx"
