@@ -706,15 +706,11 @@ pub unsafe extern "C" fn sidereon_data_newest_published_product_json(
         };
         // Listing bodies are bounded by the largest recorded surface (AIUB's
         // whole-tree CSV, ~41 MiB); 64 MiB matches the scoreboard's cap.
-        let body = match parse_bounded_c_string(
-            FN_NAME,
-            "listing_body",
-            listing_body,
-            64 * 1024 * 1024,
-        ) {
-            Ok(body) => body,
-            Err(status) => return status,
-        };
+        let body =
+            match parse_bounded_c_string(FN_NAME, "listing_body", listing_body, 64 * 1024 * 1024) {
+                Ok(body) => body,
+                Err(status) => return status,
+            };
         let objects = match core_data::parse_archive_listing(&body) {
             Ok(objects) => objects,
             Err(error) => return map_error(FN_NAME, error),
@@ -801,8 +797,7 @@ pub unsafe extern "C" fn sidereon_data_predicted_ionex_line_candidates_json(
             Ok(date) => date,
             Err(error) => return map_error(FN_NAME, error),
         };
-        let candidates = match core_data::predicted_ionex_line_candidates(date, sample.as_deref())
-        {
+        let candidates = match core_data::predicted_ionex_line_candidates(date, sample.as_deref()) {
             Ok(candidates) => candidates,
             Err(error) => return map_error(FN_NAME, error),
         };
