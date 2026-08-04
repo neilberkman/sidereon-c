@@ -47,6 +47,8 @@ pub enum SidereonProductPublisher {
     Code = 1,
     Esa = 2,
     Gfz = 3,
+    /// Wuhan University IGS Analysis Center (`WUM`).
+    Whu = 4,
 }
 
 /// Public product solution class.
@@ -58,6 +60,8 @@ pub enum SidereonSolutionClass {
     UltraRapid = 2,
     Predicted = 3,
     Broadcast = 4,
+    /// Near-real-time product line, published on an hourly rhythm.
+    NearRealTime = 5,
 }
 
 /// Public campaign token encoded by the official filename.
@@ -311,6 +315,7 @@ fn publisher_from_c(
         value if value == SidereonProductPublisher::Code as u32 => Ok(ProductPublisher::Code),
         value if value == SidereonProductPublisher::Esa as u32 => Ok(ProductPublisher::Esa),
         value if value == SidereonProductPublisher::Gfz as u32 => Ok(ProductPublisher::Gfz),
+        value if value == SidereonProductPublisher::Whu as u32 => Ok(ProductPublisher::Whu),
         _ => Err(invalid_discriminant(fn_name, label, value)),
     }
 }
@@ -326,6 +331,9 @@ fn solution_from_c(
         value if value == SidereonSolutionClass::UltraRapid as u32 => Ok(SolutionClass::UltraRapid),
         value if value == SidereonSolutionClass::Predicted as u32 => Ok(SolutionClass::Predicted),
         value if value == SidereonSolutionClass::Broadcast as u32 => Ok(SolutionClass::Broadcast),
+        value if value == SidereonSolutionClass::NearRealTime as u32 => {
+            Ok(SolutionClass::NearRealTime)
+        }
         _ => Err(invalid_discriminant(fn_name, label, value)),
     }
 }
@@ -370,6 +378,7 @@ fn publisher_from_core(value: ProductPublisher) -> SidereonProductPublisher {
         ProductPublisher::Code => SidereonProductPublisher::Code,
         ProductPublisher::Esa => SidereonProductPublisher::Esa,
         ProductPublisher::Gfz => SidereonProductPublisher::Gfz,
+        ProductPublisher::Whu => SidereonProductPublisher::Whu,
     }
 }
 
@@ -380,6 +389,7 @@ fn solution_from_core(value: SolutionClass) -> SidereonSolutionClass {
         SolutionClass::UltraRapid => SidereonSolutionClass::UltraRapid,
         SolutionClass::Predicted => SidereonSolutionClass::Predicted,
         SolutionClass::Broadcast => SidereonSolutionClass::Broadcast,
+        SolutionClass::NearRealTime => SidereonSolutionClass::NearRealTime,
     }
 }
 
@@ -594,6 +604,249 @@ unsafe fn product_spec(
 ///
 /// Safety: `center` must reference a null-terminated UTF-8 string and
 /// `out_solution_class` must reference writable storage.
+/// Copy the bounded archive listing URLs answering "newest published issue"
+/// for one center + product family, as a JSON array of strings.
+///
+/// At most two URLs, newest directory first (or one whole-tree listing);
+/// never a polling loop. The output uses the standard variable-length byte
+/// contract and is not null-terminated.
+///
+/// Safety: `center` must reference a null-terminated UTF-8 string; `out` must
+/// reference `out_len` writable bytes, or may be NULL when `out_len` is zero;
+/// the count pointers must reference writable size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_data_publication_listing_urls_json(
+    center: *const c_char,
+    family: u32,
+    year: i32,
+    month: u8,
+    day: u8,
+    out: *mut u8,
+    out_len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_data_publication_listing_urls_json";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        if let Err(status) = init_copy_counts(FN_NAME, out_written, out_required) {
+            return status;
+        }
+        let center = match center_from_c(FN_NAME, "center", center) {
+            Ok(center) => center,
+            Err(status) => return status,
+        };
+        let family = match family_from_c(FN_NAME, "family", family) {
+            Ok(family) => family,
+            Err(status) => return status,
+        };
+        let date = match ProductDate::new(year, month, day) {
+            Ok(date) => date,
+            Err(error) => return map_error(FN_NAME, error),
+        };
+        let urls = match core_data::publication_listing_urls(center, family, date) {
+            Ok(urls) => urls,
+            Err(error) => return map_error(FN_NAME, error),
+        };
+        let json = match serde_json::to_string(&urls) {
+            Ok(json) => json,
+            Err(error) => return map_error(FN_NAME, error),
+        };
+        match copy_prefix_to_c(
+            FN_NAME,
+            "out",
+            json.as_bytes(),
+            out,
+            out_len,
+            out_written,
+            out_required,
+        ) {
+            Ok(()) => SidereonStatus::Ok,
+            Err(status) => status,
+        }
+    })
+}
+
+/// Parse an archive listing body and copy the newest published issue of one
+/// center + product family as a JSON object, or JSON `null` when the listing
+/// is readable but holds no object of the line.
+///
+/// Listing dialect detection is closed: a body that fits none of the
+/// recognized listing surfaces is an error status, never an empty result -
+/// a silent empty parse would be indistinguishable from "nothing
+/// published". The JSON object carries `date` (`YYYY-MM-DD`), `issue`
+/// (`HHMM`), `filename`, and `observed_at` (the archive-reported
+/// modification text, verbatim, or `null`).
+///
+/// Safety: `center` and `listing_body` must reference null-terminated UTF-8
+/// strings; `out` must reference `out_len` writable bytes, or may be NULL
+/// when `out_len` is zero; the count pointers must reference writable size_t
+/// values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_data_newest_published_product_json(
+    center: *const c_char,
+    family: u32,
+    listing_body: *const c_char,
+    out: *mut u8,
+    out_len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_data_newest_published_product_json";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        if let Err(status) = init_copy_counts(FN_NAME, out_written, out_required) {
+            return status;
+        }
+        let center = match center_from_c(FN_NAME, "center", center) {
+            Ok(center) => center,
+            Err(status) => return status,
+        };
+        let family = match family_from_c(FN_NAME, "family", family) {
+            Ok(family) => family,
+            Err(status) => return status,
+        };
+        // Listing bodies are bounded by the largest recorded surface (AIUB's
+        // whole-tree CSV, ~41 MiB); 64 MiB matches the scoreboard's cap.
+        let body = match parse_bounded_c_string(
+            FN_NAME,
+            "listing_body",
+            listing_body,
+            64 * 1024 * 1024,
+        ) {
+            Ok(body) => body,
+            Err(status) => return status,
+        };
+        let objects = match core_data::parse_archive_listing(&body) {
+            Ok(objects) => objects,
+            Err(error) => return map_error(FN_NAME, error),
+        };
+        let newest = match core_data::newest_published_product(center, family, &objects) {
+            Ok(newest) => newest,
+            Err(error) => return map_error(FN_NAME, error),
+        };
+        let json = match newest {
+            None => "null".to_string(),
+            Some(product) => {
+                let value = serde_json::json!({
+                    "date": format!(
+                        "{:04}-{:02}-{:02}",
+                        product.date.year, product.date.month, product.date.day
+                    ),
+                    "issue": product.issue,
+                    "filename": product.filename,
+                    "observed_at": product.observed_at,
+                });
+                match serde_json::to_string(&value) {
+                    Ok(json) => json,
+                    Err(error) => return map_error(FN_NAME, error),
+                }
+            }
+        };
+        match copy_prefix_to_c(
+            FN_NAME,
+            "out",
+            json.as_bytes(),
+            out,
+            out_len,
+            out_written,
+            out_required,
+        ) {
+            Ok(()) => SidereonStatus::Ok,
+            Err(status) => status,
+        }
+    })
+}
+
+/// Copy the ordered cross-line candidates for one predicted IONEX map date
+/// as a JSON array.
+///
+/// Both CODE predicted lines publish the same official filename for a map
+/// date, but the two-day line is produced a day earlier, so `cod_prd2` is
+/// routinely published while `cod_prd1` is still absent when CODE runs
+/// behind. Candidates are ordered `cod_prd1` first, all cover the SAME map
+/// date (never a neighboring day's map), and each keeps its own line
+/// identity so resolved provenance names the line actually served. Each
+/// element carries `center`, `date`, `sample`, `issue`, `filename`, and
+/// `url`. The walk is opt-in; single-line requests keep their fail-closed
+/// behavior.
+///
+/// Safety: a non-NULL `sample` must reference a null-terminated UTF-8
+/// string; `out` must reference `out_len` writable bytes, or may be NULL
+/// when `out_len` is zero; the count pointers must reference writable size_t
+/// values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_data_predicted_ionex_line_candidates_json(
+    year: i32,
+    month: u8,
+    day: u8,
+    sample: *const c_char,
+    out: *mut u8,
+    out_len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_data_predicted_ionex_line_candidates_json";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        if let Err(status) = init_copy_counts(FN_NAME, out_written, out_required) {
+            return status;
+        }
+        let sample = if sample.is_null() {
+            None
+        } else {
+            match parse_bounded_c_string(FN_NAME, "sample", sample, PRODUCT_TOKEN_C_BYTES) {
+                Ok(sample) => Some(sample),
+                Err(status) => return status,
+            }
+        };
+        let date = match ProductDate::new(year, month, day) {
+            Ok(date) => date,
+            Err(error) => return map_error(FN_NAME, error),
+        };
+        let candidates = match core_data::predicted_ionex_line_candidates(date, sample.as_deref())
+        {
+            Ok(candidates) => candidates,
+            Err(error) => return map_error(FN_NAME, error),
+        };
+        let mut rows = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            let filename = match candidate.canonical_filename() {
+                Ok(filename) => filename,
+                Err(error) => return map_error(FN_NAME, error),
+            };
+            let url = match candidate.archive_url() {
+                Ok(url) => url,
+                Err(error) => return map_error(FN_NAME, error),
+            };
+            rows.push(serde_json::json!({
+                "center": candidate.center.code(),
+                "date": format!(
+                    "{:04}-{:02}-{:02}",
+                    candidate.date.year, candidate.date.month, candidate.date.day
+                ),
+                "sample": candidate.sample,
+                "issue": candidate.issue,
+                "filename": filename,
+                "url": url,
+            }));
+        }
+        let json = match serde_json::to_string(&rows) {
+            Ok(json) => json,
+            Err(error) => return map_error(FN_NAME, error),
+        };
+        match copy_prefix_to_c(
+            FN_NAME,
+            "out",
+            json.as_bytes(),
+            out,
+            out_len,
+            out_written,
+            out_required,
+        ) {
+            Ok(()) => SidereonStatus::Ok,
+            Err(status) => status,
+        }
+    })
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_data_product_solution_class(
     center: *const c_char,

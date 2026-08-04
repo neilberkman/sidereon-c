@@ -385,6 +385,10 @@ typedef enum SidereonSolutionClass {
     SIDEREON_SOLUTION_CLASS_ULTRA_RAPID = 2,
     SIDEREON_SOLUTION_CLASS_PREDICTED = 3,
     SIDEREON_SOLUTION_CLASS_BROADCAST = 4,
+    /**
+     * Near-real-time product line, published on an hourly rhythm.
+     */
+    SIDEREON_SOLUTION_CLASS_NEAR_REAL_TIME = 5,
 } SidereonSolutionClass;
 
 /**
@@ -1167,6 +1171,10 @@ typedef enum SidereonProductPublisher {
     SIDEREON_PRODUCT_PUBLISHER_CODE = 1,
     SIDEREON_PRODUCT_PUBLISHER_ESA = 2,
     SIDEREON_PRODUCT_PUBLISHER_GFZ = 3,
+    /**
+     * Wuhan University IGS Analysis Center (`WUM`).
+     */
+    SIDEREON_PRODUCT_PUBLISHER_WHU = 4,
 } SidereonProductPublisher;
 
 /**
@@ -20090,6 +20098,59 @@ enum SidereonStatus sidereon_data_distribution_location(const char *center,
                                                         struct SidereonDistributionLocation *out_location);
 
 /**
+ * Parse an archive listing body and copy the newest published issue of one
+ * center + product family as a JSON object, or JSON `null` when the listing
+ * is readable but holds no object of the line.
+ *
+ * Listing dialect detection is closed: a body that fits none of the
+ * recognized listing surfaces is an error status, never an empty result -
+ * a silent empty parse would be indistinguishable from "nothing
+ * published". The JSON object carries `date` (`YYYY-MM-DD`), `issue`
+ * (`HHMM`), `filename`, and `observed_at` (the archive-reported
+ * modification text, verbatim, or `null`).
+ *
+ * Safety: `center` and `listing_body` must reference null-terminated UTF-8
+ * strings; `out` must reference `out_len` writable bytes, or may be NULL
+ * when `out_len` is zero; the count pointers must reference writable size_t
+ * values.
+ */
+enum SidereonStatus sidereon_data_newest_published_product_json(const char *center,
+                                                                uint32_t family,
+                                                                const char *listing_body,
+                                                                uint8_t *out,
+                                                                size_t out_len,
+                                                                size_t *out_written,
+                                                                size_t *out_required);
+
+/**
+ * Copy the ordered cross-line candidates for one predicted IONEX map date
+ * as a JSON array.
+ *
+ * Both CODE predicted lines publish the same official filename for a map
+ * date, but the two-day line is produced a day earlier, so `cod_prd2` is
+ * routinely published while `cod_prd1` is still absent when CODE runs
+ * behind. Candidates are ordered `cod_prd1` first, all cover the SAME map
+ * date (never a neighboring day's map), and each keeps its own line
+ * identity so resolved provenance names the line actually served. Each
+ * element carries `center`, `date`, `sample`, `issue`, `filename`, and
+ * `url`. The walk is opt-in; single-line requests keep their fail-closed
+ * behavior.
+ *
+ * Safety: a non-NULL `sample` must reference a null-terminated UTF-8
+ * string; `out` must reference `out_len` writable bytes, or may be NULL
+ * when `out_len` is zero; the count pointers must reference writable size_t
+ * values.
+ */
+enum SidereonStatus sidereon_data_predicted_ionex_line_candidates_json(int32_t year,
+                                                                       uint8_t month,
+                                                                       uint8_t day,
+                                                                       const char *sample,
+                                                                       uint8_t *out,
+                                                                       size_t out_len,
+                                                                       size_t *out_written,
+                                                                       size_t *out_required);
+
+/**
  * Populate `*out_problem` with the SciPy `least_squares` defaults for `kind`:
  * linear loss, `f_scale = 1`, unit `x_scale`, default evaluation budget, the
  * SciPy `ftol = xtol = 1e-8` / `gtol = 1e-10` tolerances, and the native
@@ -20138,6 +20199,10 @@ enum SidereonStatus sidereon_data_product_identity_cache_key(const struct Sidere
                                                              size_t *out_written,
                                                              size_t *out_required);
 
+enum SidereonStatus sidereon_data_product_solution_class(const char *center,
+                                                         uint32_t family,
+                                                         enum SidereonSolutionClass *out_solution_class);
+
 /**
  * Resolve the solution class for one supported center/product family.
  *
@@ -20150,10 +20215,26 @@ enum SidereonStatus sidereon_data_product_identity_cache_key(const struct Sidere
  *
  * Safety: `center` must reference a null-terminated UTF-8 string and
  * `out_solution_class` must reference writable storage.
+ * Copy the bounded archive listing URLs answering "newest published issue"
+ * for one center + product family, as a JSON array of strings.
+ *
+ * At most two URLs, newest directory first (or one whole-tree listing);
+ * never a polling loop. The output uses the standard variable-length byte
+ * contract and is not null-terminated.
+ *
+ * Safety: `center` must reference a null-terminated UTF-8 string; `out` must
+ * reference `out_len` writable bytes, or may be NULL when `out_len` is zero;
+ * the count pointers must reference writable size_t values.
  */
-enum SidereonStatus sidereon_data_product_solution_class(const char *center,
-                                                         uint32_t family,
-                                                         enum SidereonSolutionClass *out_solution_class);
+enum SidereonStatus sidereon_data_publication_listing_urls_json(const char *center,
+                                                                uint32_t family,
+                                                                int32_t year,
+                                                                uint8_t month,
+                                                                uint8_t day,
+                                                                uint8_t *out,
+                                                                size_t out_len,
+                                                                size_t *out_written,
+                                                                size_t *out_required);
 
 /**
  * Return the cataloged relationship between an SP3 filename epoch and its

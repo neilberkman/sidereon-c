@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+## 0.36.0 - 2026-08-04
+
+- Adds the publication-lag resilience surface over core 0.36.0:
+  `sidereon_data_predicted_ionex_line_candidates_json` (the opt-in CODE
+  `P1`/`P2` cross-line walk for one map date - never a neighboring day's
+  map, each candidate keeping its own line identity),
+  `sidereon_data_newest_published_product_json` (closed listing-dialect
+  detection: an unrecognizable body is an error status, never an empty
+  result; `observed_at` is the archive-reported modification text,
+  verbatim), and `sidereon_data_publication_listing_urls_json` (bounded, at
+  most two URLs, newest directory first).
+- Adds `SIDEREON_PRODUCT_PUBLISHER_WHU` and
+  `SIDEREON_SOLUTION_CLASS_NEAR_REAL_TIME` for the Wuhan MGEX
+  near-real-time orbit line (`wum_nrt`, hourly `WUM0MGXNRT` 02D/05M over
+  anonymous FTP, archive-verified from 2024-07-03), which flows through the
+  existing catalog surface.
+- Builds against `sidereon` and `sidereon-core` 0.36.0. The positioning and
+  orbit numerical kernels are unchanged.
+
 ## 0.35.0 - 2026-07-24
 
 - RINEX observation QC now treats a source `INTERVAL` of zero as

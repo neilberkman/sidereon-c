@@ -37,6 +37,16 @@ cc -std=c11 -Wall -Wextra -Werror \
 
 cc -std=c11 -Wall -Wextra -Werror \
     -I"${binding_root}/include" \
+    "${here}/publication_resilience_smoke.c" \
+    -L"${lib_dir}" \
+    -lsidereon \
+    -Wl,-rpath,"${lib_dir}" \
+    -lm \
+    -o "${target_dir}/publication_resilience_smoke_ci"
+"${target_dir}/publication_resilience_smoke_ci"
+
+cc -std=c11 -Wall -Wextra -Werror \
+    -I"${binding_root}/include" \
     -I"${target_dir}" \
     "${here}/sp3_exact_smoke.c" \
     -L"${lib_dir}" \
