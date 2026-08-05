@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.36.3 - 2026-08-04
+
+- Builds against `sidereon` and `sidereon-core` 0.36.3:
+  `sidereon_data_newest_published_product_json` accepts AIUB whole-tree CSV
+  listings whose unrelated object paths contain spaces instead of rejecting
+  the entire live listing over one such row. Found by downstream 0.36.1
+  verification. The C ABI is unchanged.
+
 ## 0.36.0 - 2026-08-04
 
 - Adds the publication-lag resilience surface over core 0.36.0:
