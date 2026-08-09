@@ -1,9 +1,10 @@
 use super::*;
 use sidereon_core::data::{ArchiveCompression, DistributionSource, ProductDate};
 use sidereon_core::ephemeris::{
-    parse_exact_sp3 as core_parse_exact_sp3, validate_exact_sp3 as core_validate_exact_sp3,
+    check_continuity, parse_exact_sp3 as core_parse_exact_sp3,
+    validate_exact_sp3 as core_validate_exact_sp3, ContinuityOptions,
     ExactSp3Coverage as CoreExactSp3Coverage, ExactSp3Request as CoreExactSp3Request,
-    ExactSp3ValidationError,
+    ExactSp3ValidationError, OrbitClass, SpeedBound,
 };
 
 const SP3_FRAME_LABEL_MAX_BYTES: usize = 64;
@@ -613,6 +614,70 @@ pub unsafe extern "C" fn sidereon_sp3_epoch_count(
         *out_count = 0;
         let sp3 = c_try!(require_ref(sp3, "sidereon_sp3_epoch_count", "sp3"));
         *out_count = sp3.inner.epoch_count();
+        SidereonStatus::Ok
+    })
+}
+
+/// Attest that the product is physically continuous, writing summary counts.
+///
+/// Two checks run with different jobs: a physical earth-fixed speed gate whose
+/// bound is a true upper bound for the orbit class, so it cannot false-positive
+/// and catches gross corruption; and a hold-out interpolation residual, which
+/// supplies the sensitivity a speed gate structurally cannot (adjacent GNSS MEO
+/// epochs are hundreds of kilometres apart, so a metre-scale splice moves the
+/// implied speed by a fraction of a percent).
+///
+/// `orbit_class` is 0 for MEO GNSS, 1 for geosynchronous, 2 for LEO, or -1 to
+/// disable the speed gate. A negative `residual_tolerance_m` disables the
+/// residual check. `out_defects` receives the number of violations found;
+/// `out_residuals_checked` and `out_residuals_skipped` let a caller tell
+/// "checked and clean" from "not checked". Reports rather than refuses.
+///
+/// Safety: `sp3` must be a live handle and each out pointer must reference
+/// writable storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sp3_check_continuity(
+    sp3: *const SidereonSp3,
+    orbit_class: i32,
+    residual_tolerance_m: f64,
+    out_defects: *mut usize,
+    out_residuals_checked: *mut usize,
+    out_residuals_skipped: *mut usize,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_sp3_check_continuity";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let out_defects = c_try!(require_out(out_defects, FN_NAME, "out_defects"));
+        *out_defects = 0;
+        let out_residuals_checked = c_try!(require_out(
+            out_residuals_checked,
+            FN_NAME,
+            "out_residuals_checked"
+        ));
+        *out_residuals_checked = 0;
+        let out_residuals_skipped = c_try!(require_out(
+            out_residuals_skipped,
+            FN_NAME,
+            "out_residuals_skipped"
+        ));
+        *out_residuals_skipped = 0;
+        let sp3 = c_try!(require_ref(sp3, FN_NAME, "sp3"));
+
+        let speed_bound = match orbit_class {
+            -1 => None,
+            0 => Some(SpeedBound::OrbitClass(OrbitClass::MeoGnss)),
+            1 => Some(SpeedBound::OrbitClass(OrbitClass::Geosynchronous)),
+            2 => Some(SpeedBound::OrbitClass(OrbitClass::Leo)),
+            _ => return SidereonStatus::InvalidArgument,
+        };
+        let options = ContinuityOptions {
+            speed_bound,
+            residual_tolerance_m: (residual_tolerance_m >= 0.0).then_some(residual_tolerance_m),
+        };
+        let report = check_continuity(&sp3.inner.precise_ephemeris_samples(), &options);
+
+        *out_defects = report.defects.len();
+        *out_residuals_checked = report.residuals_checked;
+        *out_residuals_skipped = report.residuals_skipped;
         SidereonStatus::Ok
     })
 }
@@ -2721,6 +2786,12 @@ unsafe fn sp3_merge_options_from_c(
             asserted_equivalent_label_sets,
             helmert: helmert_frame_reconciliation,
         },
+        // Per-epoch provenance and the continuity post-condition are not yet
+        // surfaced on the C merge options; both default to off, which is
+        // exactly the behavior this binding had before they existed. The
+        // standalone check is available as sidereon_sp3_check_continuity.
+        provenance: None,
+        verify_continuity: None,
     })
 }
 

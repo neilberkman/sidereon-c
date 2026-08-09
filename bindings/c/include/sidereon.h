@@ -30394,6 +30394,32 @@ enum SidereonStatus sidereon_sp3_align_clock_reference(const struct SidereonSp3 
                                                        struct SidereonSp3 **out_sp3);
 
 /**
+ * Attest that the product is physically continuous, writing summary counts.
+ *
+ * Two checks run with different jobs: a physical earth-fixed speed gate whose
+ * bound is a true upper bound for the orbit class, so it cannot false-positive
+ * and catches gross corruption; and a hold-out interpolation residual, which
+ * supplies the sensitivity a speed gate structurally cannot (adjacent GNSS MEO
+ * epochs are hundreds of kilometres apart, so a metre-scale splice moves the
+ * implied speed by a fraction of a percent).
+ *
+ * `orbit_class` is 0 for MEO GNSS, 1 for geosynchronous, 2 for LEO, or -1 to
+ * disable the speed gate. A negative `residual_tolerance_m` disables the
+ * residual check. `out_defects` receives the number of violations found;
+ * `out_residuals_checked` and `out_residuals_skipped` let a caller tell
+ * "checked and clean" from "not checked". Reports rather than refuses.
+ *
+ * Safety: `sp3` must be a live handle and each out pointer must reference
+ * writable storage.
+ */
+enum SidereonStatus sidereon_sp3_check_continuity(const struct SidereonSp3 *sp3,
+                                                  int32_t orbit_class,
+                                                  double residual_tolerance_m,
+                                                  size_t *out_defects,
+                                                  size_t *out_residuals_checked,
+                                                  size_t *out_residuals_skipped);
+
+/**
  * Estimate the per-epoch clock-reference offset of `other` relative to
  * `reference`. Delegates to sidereon_core::ephemeris::clock_reference_offset.
  * Uses the variable-length output contract documented at the top of the
