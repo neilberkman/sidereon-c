@@ -38,7 +38,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # shared-key so a tag-triggered release run reuses push CI's cache.
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
       - name: Install pinned cbindgen
         run: cargo install --locked cbindgen --version 0.29.4
       - run: cargo build --workspace --verbose
