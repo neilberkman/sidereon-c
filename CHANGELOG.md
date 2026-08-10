@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.38.0 - 2026-08-09
+
+### Changed
+
+- `sidereon_terrain_store_open_path` and the precise-interpolant path
+  opener now memory-map the file read-only instead of reading it into
+  memory, so opening a 30+ GB terrain store no longer costs its size in
+  process memory. No ABI change: existing callers get this by upgrading.
+
+- Engine pinned to `sidereon-core` 0.38.0 with its `mmap` feature enabled.
+
 ## 0.37.0 - 2026-08-09
 
 ### Added
