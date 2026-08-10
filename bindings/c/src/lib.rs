@@ -332,7 +332,19 @@ use sidereon_core::terrain_store::{
 use sidereon_core::velocity::{
     VelocityError, VelocityObservable, VelocityObservation, VelocitySolution, VelocitySolveOptions,
 };
-use sidereon_core::{Error as CoreError, GnssSatelliteId, GnssSystem};
+use sidereon_core::{
+    DigestProvenance as CoreDigestProvenance, Error as CoreError, GnssSatelliteId, GnssSystem,
+};
+
+/// Provenance of the checksum carried by an opened artifact handle.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonDigestProvenance {
+    /// The binding or core computed and verified the artifact checksum.
+    Verified = 0,
+    /// The caller supplied the checksum and payload hashing has been deferred.
+    Attested = 1,
+}
 
 /// Integer status returned by every fallible entry point. SIDEREON_STATUS_OK
 /// is the only success value; any other value means the call failed and a
@@ -3394,8 +3406,20 @@ fn terrain_store_error_to_c(err: &TerrainStoreError) -> SidereonTerrainStoreErro
             out.expected_checksum64 = *expected;
             out.found_checksum64 = *found;
         }
+        TerrainStoreError::AttestedChecksumMismatch { expected, found } => {
+            out.kind = SidereonTerrainStoreErrorKind::AttestedChecksumMismatch as u32;
+            out.expected_checksum64 = *expected;
+            out.found_checksum64 = *found;
+        }
     }
     out
+}
+
+fn digest_provenance_to_c(value: CoreDigestProvenance) -> SidereonDigestProvenance {
+    match value {
+        CoreDigestProvenance::Verified => SidereonDigestProvenance::Verified,
+        CoreDigestProvenance::Attested => SidereonDigestProvenance::Attested,
+    }
 }
 
 fn terrain_datum_error_to_c(err: &TerrainDatumError) -> SidereonTerrainDatumError {

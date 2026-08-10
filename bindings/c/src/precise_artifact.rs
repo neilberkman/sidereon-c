@@ -2,8 +2,10 @@ use super::*;
 
 /// A memory-mappable precise-ephemeris interpolant artifact reader. Opaque to C.
 /// Create with sidereon_precise_interpolant_artifact_open_owned or
-/// sidereon_precise_interpolant_artifact_open_borrowed and release with
-/// sidereon_precise_interpolant_artifact_free.
+/// sidereon_precise_interpolant_artifact_open_borrowed, or open a file with
+/// sidereon_precise_interpolant_artifact_from_path. A trusted caller can defer
+/// payload hashing with sidereon_precise_interpolant_artifact_from_path_attested.
+/// Release the handle with sidereon_precise_interpolant_artifact_free.
 pub struct SidereonPreciseInterpolantArtifact {
     pub(crate) inner: MmapPreciseEphemerisInterpolant<'static>,
 }
@@ -30,6 +32,8 @@ pub enum SidereonPreciseInterpolantArtifactErrorKind {
     DuplicateSatellite = 7,
     /// File I/O failed in the core artifact reader.
     Io = 8,
+    /// A caller-attested checksum differed from the checksum in the header.
+    AttestedChecksumMismatch = 9,
 }
 
 /// Build memory-mappable precise-interpolant artifact bytes from a loaded SP3
@@ -116,6 +120,108 @@ pub unsafe extern "C" fn sidereon_precise_interpolant_artifact_checksum64(
                 "data"
             ));
             *out_checksum = precise_interpolant_store_checksum64(bytes);
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Open a memory-mappable precise-interpolant artifact from a filesystem path.
+/// File-level and per-satellite payload checksums are verified before the
+/// handle is returned.
+///
+/// Safety: path must be a non-empty UTF-8 C string; out_error and out_artifact
+/// must point to writable storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_precise_interpolant_artifact_from_path(
+    path: *const c_char,
+    out_error: *mut SidereonPreciseInterpolantArtifactErrorKind,
+    out_artifact: *mut *mut SidereonPreciseInterpolantArtifact,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_precise_interpolant_artifact_from_path",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_artifact_error(
+                out_error,
+                SidereonPreciseInterpolantArtifactErrorKind::None
+            ));
+            let out_artifact = c_try!(require_out(
+                out_artifact,
+                "sidereon_precise_interpolant_artifact_from_path",
+                "out_artifact"
+            ));
+            *out_artifact = ptr::null_mut();
+            let path = c_try!(parse_c_string(
+                "sidereon_precise_interpolant_artifact_from_path",
+                "path",
+                path
+            ));
+            let inner =
+                match MmapPreciseEphemerisInterpolant::from_path(std::path::Path::new(&path)) {
+                    Ok(inner) => inner,
+                    Err(err) => {
+                        return map_artifact_error(
+                            "sidereon_precise_interpolant_artifact_from_path",
+                            err,
+                            out_error,
+                        )
+                    }
+                };
+            write_boxed_handle(out_artifact, SidereonPreciseInterpolantArtifact { inner });
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Open a memory-mappable precise-interpolant artifact using a
+/// caller-attested checksum. Header, index, dimension, length, and payload
+/// layout validation still run, but checksum hashing is deferred until
+/// sidereon_precise_interpolant_artifact_verify. The claim must equal the
+/// checksum declared by the artifact header; a mismatch fails closed without
+/// hashing the payload.
+///
+/// Safety: path must be a non-empty UTF-8 C string; out_error and out_artifact
+/// must point to writable storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_precise_interpolant_artifact_from_path_attested(
+    path: *const c_char,
+    claimed_checksum64: u64,
+    out_error: *mut SidereonPreciseInterpolantArtifactErrorKind,
+    out_artifact: *mut *mut SidereonPreciseInterpolantArtifact,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_precise_interpolant_artifact_from_path_attested",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_artifact_error(
+                out_error,
+                SidereonPreciseInterpolantArtifactErrorKind::None
+            ));
+            let out_artifact = c_try!(require_out(
+                out_artifact,
+                "sidereon_precise_interpolant_artifact_from_path_attested",
+                "out_artifact"
+            ));
+            *out_artifact = ptr::null_mut();
+            let path = c_try!(parse_c_string(
+                "sidereon_precise_interpolant_artifact_from_path_attested",
+                "path",
+                path
+            ));
+            let inner = match MmapPreciseEphemerisInterpolant::from_path_attested(
+                std::path::Path::new(&path),
+                claimed_checksum64,
+            ) {
+                Ok(inner) => inner,
+                Err(err) => {
+                    return map_artifact_error(
+                        "sidereon_precise_interpolant_artifact_from_path_attested",
+                        err,
+                        out_error,
+                    )
+                }
+            };
+            write_boxed_handle(out_artifact, SidereonPreciseInterpolantArtifact { inner });
             SidereonStatus::Ok
         },
     )
@@ -257,6 +363,72 @@ pub unsafe extern "C" fn sidereon_precise_interpolant_artifact_handle_checksum64
             ));
             *out_checksum = artifact.inner.checksum64();
             SidereonStatus::Ok
+        },
+    )
+}
+
+/// Return whether the checksum carried by this artifact handle is verified or
+/// caller-attested.
+///
+/// Safety: artifact must be a live handle; out_provenance must point to a
+/// SidereonDigestProvenance.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_precise_interpolant_artifact_digest_provenance(
+    artifact: *const SidereonPreciseInterpolantArtifact,
+    out_provenance: *mut SidereonDigestProvenance,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_precise_interpolant_artifact_digest_provenance",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_provenance,
+                "sidereon_precise_interpolant_artifact_digest_provenance",
+                "out_provenance"
+            ));
+            *out = SidereonDigestProvenance::Verified;
+            let artifact = c_try!(require_ref(
+                artifact,
+                "sidereon_precise_interpolant_artifact_digest_provenance",
+                "artifact"
+            ));
+            *out = digest_provenance_to_c(artifact.inner.digest_provenance());
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Hash and verify file-level and per-satellite payload checksums. Success
+/// changes digest provenance to SIDEREON_DIGEST_PROVENANCE_VERIFIED.
+///
+/// Safety: artifact must be a live mutable handle; out_error must point to
+/// writable storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_precise_interpolant_artifact_verify(
+    artifact: *mut SidereonPreciseInterpolantArtifact,
+    out_error: *mut SidereonPreciseInterpolantArtifactErrorKind,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_precise_interpolant_artifact_verify",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_artifact_error(
+                out_error,
+                SidereonPreciseInterpolantArtifactErrorKind::None
+            ));
+            let artifact = c_try!(require_out(
+                artifact,
+                "sidereon_precise_interpolant_artifact_verify",
+                "artifact"
+            ));
+            match artifact.inner.verify() {
+                Ok(()) => SidereonStatus::Ok,
+                Err(err) => map_artifact_error(
+                    "sidereon_precise_interpolant_artifact_verify",
+                    err,
+                    out_error,
+                ),
+            }
         },
     )
 }
@@ -428,6 +600,9 @@ fn artifact_error_kind(
         | PreciseInterpolantStoreError::SatelliteChecksum { .. } => {
             SidereonPreciseInterpolantArtifactErrorKind::Corrupt
         }
+        PreciseInterpolantStoreError::AttestedChecksumMismatch { .. } => {
+            SidereonPreciseInterpolantArtifactErrorKind::AttestedChecksumMismatch
+        }
     }
 }
 
@@ -491,8 +666,47 @@ fn artifact_sp3_state_to_c(state: &Sp3State) -> SidereonSp3State {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::CString;
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    const HEADER_INDEX_OFFSET_OFFSET: usize = 16;
+    const HEADER_CHECKSUM_OFFSET: usize = 40;
+    const INDEX_POS_KX_OFFSET_OFFSET: usize = 24;
+
+    struct TempArtifact(PathBuf);
+
+    impl TempArtifact {
+        fn write(name: &str, bytes: &[u8]) -> Self {
+            static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "sidereon-c-{name}-{}-{}",
+                std::process::id(),
+                NEXT_ID.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::write(&path, bytes).expect("write temporary precise artifact");
+            Self(path)
+        }
+
+        fn c_path(&self) -> CString {
+            CString::new(self.0.to_string_lossy().as_bytes()).expect("temporary path has no NUL")
+        }
+    }
+
+    impl Drop for TempArtifact {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+
+    fn read_u64(bytes: &[u8], offset: usize) -> u64 {
+        u64::from_le_bytes(
+            bytes[offset..offset + 8]
+                .try_into()
+                .expect("artifact contains u64 field"),
+        )
+    }
 
     fn fixture_sp3() -> Sp3 {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -638,5 +852,209 @@ mod tests {
             error,
             SidereonPreciseInterpolantArtifactErrorKind::Truncated
         );
+    }
+
+    #[test]
+    fn attested_path_open_defers_corrupt_payload_failure_until_verify() {
+        let sp3 = fixture_sp3();
+        let mut bytes = sp3
+            .precise_interpolant_store_bytes()
+            .expect("build precise artifact");
+        let declared = read_u64(&bytes, HEADER_CHECKSUM_OFFSET);
+        let index_offset = read_u64(&bytes, HEADER_INDEX_OFFSET_OFFSET) as usize;
+        let pos_kx_offset = read_u64(&bytes, index_offset + INDEX_POS_KX_OFFSET_OFFSET) as usize;
+        bytes[pos_kx_offset + 1] ^= 1;
+        let artifact_file = TempArtifact::write("corrupt-precise.spi", &bytes);
+        let path = artifact_file.c_path();
+
+        let mut error = SidereonPreciseInterpolantArtifactErrorKind::None;
+        let mut verified = ptr::null_mut();
+        let status = unsafe {
+            sidereon_precise_interpolant_artifact_from_path(
+                path.as_ptr(),
+                &mut error,
+                &mut verified,
+            )
+        };
+        assert_eq!(status, SidereonStatus::InvalidArgument);
+        assert_eq!(error, SidereonPreciseInterpolantArtifactErrorKind::Corrupt);
+        assert!(verified.is_null());
+
+        let mut attested = ptr::null_mut();
+        let status = unsafe {
+            sidereon_precise_interpolant_artifact_from_path_attested(
+                path.as_ptr(),
+                declared,
+                &mut error,
+                &mut attested,
+            )
+        };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert_eq!(error, SidereonPreciseInterpolantArtifactErrorKind::None);
+        assert!(!attested.is_null());
+
+        let mut provenance = SidereonDigestProvenance::Verified;
+        assert_eq!(
+            unsafe {
+                sidereon_precise_interpolant_artifact_digest_provenance(attested, &mut provenance)
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(provenance, SidereonDigestProvenance::Attested);
+        let mut checksum = 0;
+        assert_eq!(
+            unsafe {
+                sidereon_precise_interpolant_artifact_handle_checksum64(attested, &mut checksum)
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(checksum, declared);
+
+        assert_eq!(
+            unsafe { sidereon_precise_interpolant_artifact_verify(attested, &mut error) },
+            SidereonStatus::InvalidArgument
+        );
+        assert_eq!(error, SidereonPreciseInterpolantArtifactErrorKind::Corrupt);
+        assert_eq!(
+            unsafe {
+                sidereon_precise_interpolant_artifact_digest_provenance(attested, &mut provenance)
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(provenance, SidereonDigestProvenance::Attested);
+        unsafe { sidereon_precise_interpolant_artifact_free(attested) };
+    }
+
+    #[test]
+    fn attested_path_claim_mismatch_is_typed_without_a_handle() {
+        let bytes = fixture_sp3()
+            .precise_interpolant_store_bytes()
+            .expect("build precise artifact");
+        let declared = read_u64(&bytes, HEADER_CHECKSUM_OFFSET);
+        let artifact_file = TempArtifact::write("claim-mismatch-precise.spi", &bytes);
+        let path = artifact_file.c_path();
+        let mut error = SidereonPreciseInterpolantArtifactErrorKind::None;
+        let mut artifact = ptr::null_mut();
+
+        let status = unsafe {
+            sidereon_precise_interpolant_artifact_from_path_attested(
+                path.as_ptr(),
+                declared ^ 1,
+                &mut error,
+                &mut artifact,
+            )
+        };
+        assert_eq!(status, SidereonStatus::InvalidArgument);
+        assert_eq!(
+            error,
+            SidereonPreciseInterpolantArtifactErrorKind::AttestedChecksumMismatch
+        );
+        assert!(artifact.is_null());
+    }
+
+    #[test]
+    fn pristine_attested_path_open_matches_verified_and_escalates() {
+        let sp3 = fixture_sp3();
+        let epoch = sp3.epochs_j2000_seconds()[10];
+        let sat_id = sp3.satellites()[0];
+        let bytes = sp3
+            .precise_interpolant_store_bytes()
+            .expect("build precise artifact");
+        let declared = read_u64(&bytes, HEADER_CHECKSUM_OFFSET);
+        let artifact_file = TempArtifact::write("pristine-precise.spi", &bytes);
+        let path = artifact_file.c_path();
+        let sat = CString::new(sat_id.to_string()).expect("satellite token");
+
+        let mut error = SidereonPreciseInterpolantArtifactErrorKind::None;
+        let mut verified = ptr::null_mut();
+        let mut attested = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_precise_interpolant_artifact_from_path(
+                    path.as_ptr(),
+                    &mut error,
+                    &mut verified,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(
+            unsafe {
+                sidereon_precise_interpolant_artifact_from_path_attested(
+                    path.as_ptr(),
+                    declared,
+                    &mut error,
+                    &mut attested,
+                )
+            },
+            SidereonStatus::Ok
+        );
+
+        let mut verified_state = empty_artifact_sp3_state();
+        let mut attested_state = empty_artifact_sp3_state();
+        assert_eq!(
+            unsafe {
+                sidereon_precise_interpolant_artifact_state(
+                    verified,
+                    sat.as_ptr(),
+                    epoch,
+                    &mut verified_state,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(
+            unsafe {
+                sidereon_precise_interpolant_artifact_state(
+                    attested,
+                    sat.as_ptr(),
+                    epoch,
+                    &mut attested_state,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(
+            verified_state.position_m.map(f64::to_bits),
+            attested_state.position_m.map(f64::to_bits)
+        );
+        assert_eq!(
+            verified_state.clock_s.to_bits(),
+            attested_state.clock_s.to_bits()
+        );
+
+        let mut checksum = 0;
+        assert_eq!(
+            unsafe {
+                sidereon_precise_interpolant_artifact_handle_checksum64(attested, &mut checksum)
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(checksum, declared);
+        let mut provenance = SidereonDigestProvenance::Verified;
+        assert_eq!(
+            unsafe {
+                sidereon_precise_interpolant_artifact_digest_provenance(attested, &mut provenance)
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(provenance, SidereonDigestProvenance::Attested);
+        assert_eq!(
+            unsafe { sidereon_precise_interpolant_artifact_verify(attested, &mut error) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(error, SidereonPreciseInterpolantArtifactErrorKind::None);
+        assert_eq!(
+            unsafe {
+                sidereon_precise_interpolant_artifact_digest_provenance(attested, &mut provenance)
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(provenance, SidereonDigestProvenance::Verified);
+
+        unsafe {
+            sidereon_precise_interpolant_artifact_free(verified);
+            sidereon_precise_interpolant_artifact_free(attested);
+        }
     }
 }

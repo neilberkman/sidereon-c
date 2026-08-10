@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.39.0 - 2026-08-10
+
+### Added
+
+- `sidereon_mmap_terrain_from_path_attested`,
+  `sidereon_precise_interpolant_artifact_from_path_attested`, digest
+  provenance accessors, and `_verify` escalation across both mapped
+  artifact readers, mirroring the engine's attested-open contract. The
+  interpolant's claim/header mismatch maps to a typed status. The ABI
+  smoke gate now compiles and runs a C program exercising the new
+  surface.
+
+### Changed
+
+- Engine pinned to `sidereon-core` 0.39.0.
+
 ## 0.38.0 - 2026-08-09
 
 ### Changed

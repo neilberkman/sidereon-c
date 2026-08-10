@@ -121,6 +121,8 @@ pub enum SidereonTerrainStoreErrorKind {
     Checksum = 6,
     /// A DTED input's parsed origin did not match the supplied tile id.
     TileIdMismatch = 7,
+    /// A caller-attested full-store checksum did not match the opened bytes.
+    AttestedChecksumMismatch = 8,
 }
 
 /// Last typed terrain store error for this thread.
@@ -143,9 +145,9 @@ pub struct SidereonTerrainStoreError {
     pub lat_index: i32,
     /// Tile longitude id for duplicate-tile and checksum errors.
     pub lon_index: i32,
-    /// Expected checksum for checksum errors.
+    /// Expected checksum for checksum and attested-checksum errors.
     pub expected_checksum64: u64,
-    /// Computed checksum for checksum errors.
+    /// Computed checksum for checksum and attested-checksum errors.
     pub found_checksum64: u64,
 }
 

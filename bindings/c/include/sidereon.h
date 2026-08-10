@@ -537,6 +537,20 @@ typedef enum SidereonGeofenceErrorKind {
 } SidereonGeofenceErrorKind;
 
 /**
+ * Provenance of the checksum carried by an opened artifact handle.
+ */
+typedef enum SidereonDigestProvenance {
+    /**
+     * The binding or core computed and verified the artifact checksum.
+     */
+    SIDEREON_DIGEST_PROVENANCE_VERIFIED = 0,
+    /**
+     * The caller supplied the checksum and payload hashing has been deferred.
+     */
+    SIDEREON_DIGEST_PROVENANCE_ATTESTED = 1,
+} SidereonDigestProvenance;
+
+/**
  * Terrain store vertical datum. Terrain store postings are orthometric heights.
  */
 typedef enum SidereonVerticalDatum {
@@ -675,6 +689,10 @@ typedef enum SidereonPreciseInterpolantArtifactErrorKind {
      * File I/O failed in the core artifact reader.
      */
     SIDEREON_PRECISE_INTERPOLANT_ARTIFACT_ERROR_KIND_IO = 8,
+    /**
+     * A caller-attested checksum differed from the checksum in the header.
+     */
+    SIDEREON_PRECISE_INTERPOLANT_ARTIFACT_ERROR_KIND_ATTESTED_CHECKSUM_MISMATCH = 9,
 } SidereonPreciseInterpolantArtifactErrorKind;
 
 /**
@@ -1986,6 +2004,10 @@ typedef enum SidereonTerrainStoreErrorKind {
      * A DTED input's parsed origin did not match the supplied tile id.
      */
     SIDEREON_TERRAIN_STORE_ERROR_KIND_TILE_ID_MISMATCH = 7,
+    /**
+     * A caller-attested full-store checksum did not match the opened bytes.
+     */
+    SIDEREON_TERRAIN_STORE_ERROR_KIND_ATTESTED_CHECKSUM_MISMATCH = 8,
 } SidereonTerrainStoreErrorKind;
 
 /**
@@ -3114,8 +3136,10 @@ typedef struct SidereonLookAngles SidereonLookAngles;
 /**
  * Memory-mappable terrain reader backed by terrain store bytes. Create with
  * sidereon_mmap_terrain_from_bytes, sidereon_mmap_terrain_from_vec, or
- * sidereon_mmap_terrain_from_path, and release with sidereon_mmap_terrain_free.
- * Terrain lookups use longitude, latitude degrees and return orthometric height.
+ * sidereon_mmap_terrain_from_path. A trusted caller can defer payload hashing
+ * with sidereon_mmap_terrain_from_path_attested. Release the handle with
+ * sidereon_mmap_terrain_free. Terrain lookups use longitude, latitude degrees
+ * and return orthometric height.
  */
 typedef struct SidereonMmapTerrain SidereonMmapTerrain;
 
@@ -3234,8 +3258,10 @@ typedef struct SidereonPreciseEphemerisSamples SidereonPreciseEphemerisSamples;
 /**
  * A memory-mappable precise-ephemeris interpolant artifact reader. Opaque to C.
  * Create with sidereon_precise_interpolant_artifact_open_owned or
- * sidereon_precise_interpolant_artifact_open_borrowed and release with
- * sidereon_precise_interpolant_artifact_free.
+ * sidereon_precise_interpolant_artifact_open_borrowed, or open a file with
+ * sidereon_precise_interpolant_artifact_from_path. A trusted caller can defer
+ * payload hashing with sidereon_precise_interpolant_artifact_from_path_attested.
+ * Release the handle with sidereon_precise_interpolant_artifact_free.
  */
 typedef struct SidereonPreciseInterpolantArtifact SidereonPreciseInterpolantArtifact;
 
@@ -8870,11 +8896,11 @@ typedef struct SidereonTerrainStoreError {
      */
     int32_t lon_index;
     /**
-     * Expected checksum for checksum errors.
+     * Expected checksum for checksum and attested-checksum errors.
      */
     uint64_t expected_checksum64;
     /**
-     * Computed checksum for checksum errors.
+     * Computed checksum for checksum and attested-checksum errors.
      */
     uint64_t found_checksum64;
 } SidereonTerrainStoreError;
@@ -23540,6 +23566,16 @@ enum SidereonStatus sidereon_mmap_terrain_checksum64(const struct SidereonMmapTe
                                                      uint64_t *out_checksum64);
 
 /**
+ * Return whether the checksum carried by this terrain handle is verified or
+ * caller-attested.
+ *
+ * Safety: terrain must be a live handle; out_provenance must point to a
+ * SidereonDigestProvenance.
+ */
+enum SidereonStatus sidereon_mmap_terrain_digest_provenance(const struct SidereonMmapTerrain *terrain,
+                                                            enum SidereonDigestProvenance *out_provenance);
+
+/**
  * Query one ellipsoidal terrain height h in metres using the embedded EGM96
  * 1-degree geoid grid for h = H + N. Inputs are longitude, latitude degrees.
  *
@@ -23612,6 +23648,19 @@ enum SidereonStatus sidereon_mmap_terrain_from_bytes(const uint8_t *bytes,
  */
 enum SidereonStatus sidereon_mmap_terrain_from_path(const char *path,
                                                     struct SidereonMmapTerrain **out_terrain);
+
+/**
+ * Open a memory-mappable terrain store file using a caller-attested full-store
+ * checksum. Header, index, dimension, length, and tile-bound validation still
+ * run, but tile payload hashing is deferred until sidereon_mmap_terrain_verify.
+ * The claim is returned by sidereon_mmap_terrain_checksum64 until verification.
+ *
+ * Safety: path must be a non-empty UTF-8 C string; out_terrain must point to a
+ * SidereonMmapTerrain*.
+ */
+enum SidereonStatus sidereon_mmap_terrain_from_path_attested(const char *path,
+                                                             uint64_t claimed_checksum64,
+                                                             struct SidereonMmapTerrain **out_terrain);
 
 /**
  * Parse memory-mappable terrain store bytes into an owned reader handle. This
@@ -23734,6 +23783,14 @@ enum SidereonStatus sidereon_mmap_terrain_to_bytes(const struct SidereonMmapTerr
                                                    size_t len,
                                                    size_t *out_written,
                                                    size_t *out_required);
+
+/**
+ * Hash and verify tile payloads and any caller-attested full-store checksum.
+ * Success changes digest provenance to SIDEREON_DIGEST_PROVENANCE_VERIFIED.
+ *
+ * Safety: terrain must be a live mutable handle.
+ */
+enum SidereonStatus sidereon_mmap_terrain_verify(struct SidereonMmapTerrain *terrain);
 
 /**
  * Return the store-level vertical datum. Terrain store postings are orthometric
@@ -25411,12 +25468,50 @@ enum SidereonStatus sidereon_precise_interpolant_artifact_checksum64(const uint8
                                                                      uint64_t *out_checksum);
 
 /**
+ * Return whether the checksum carried by this artifact handle is verified or
+ * caller-attested.
+ *
+ * Safety: artifact must be a live handle; out_provenance must point to a
+ * SidereonDigestProvenance.
+ */
+enum SidereonStatus sidereon_precise_interpolant_artifact_digest_provenance(const struct SidereonPreciseInterpolantArtifact *artifact,
+                                                                            enum SidereonDigestProvenance *out_provenance);
+
+/**
  * Release a precise-interpolant artifact handle. Passing NULL is a no-op.
  *
  * Safety: artifact must be NULL or a live handle from an artifact open function
  * that has not already been freed.
  */
 void sidereon_precise_interpolant_artifact_free(struct SidereonPreciseInterpolantArtifact *artifact);
+
+/**
+ * Open a memory-mappable precise-interpolant artifact from a filesystem path.
+ * File-level and per-satellite payload checksums are verified before the
+ * handle is returned.
+ *
+ * Safety: path must be a non-empty UTF-8 C string; out_error and out_artifact
+ * must point to writable storage.
+ */
+enum SidereonStatus sidereon_precise_interpolant_artifact_from_path(const char *path,
+                                                                    enum SidereonPreciseInterpolantArtifactErrorKind *out_error,
+                                                                    struct SidereonPreciseInterpolantArtifact **out_artifact);
+
+/**
+ * Open a memory-mappable precise-interpolant artifact using a
+ * caller-attested checksum. Header, index, dimension, length, and payload
+ * layout validation still run, but checksum hashing is deferred until
+ * sidereon_precise_interpolant_artifact_verify. The claim must equal the
+ * checksum declared by the artifact header; a mismatch fails closed without
+ * hashing the payload.
+ *
+ * Safety: path must be a non-empty UTF-8 C string; out_error and out_artifact
+ * must point to writable storage.
+ */
+enum SidereonStatus sidereon_precise_interpolant_artifact_from_path_attested(const char *path,
+                                                                             uint64_t claimed_checksum64,
+                                                                             enum SidereonPreciseInterpolantArtifactErrorKind *out_error,
+                                                                             struct SidereonPreciseInterpolantArtifact **out_artifact);
 
 /**
  * Write the checksum of an opened artifact to *out_checksum.
@@ -25473,6 +25568,16 @@ enum SidereonStatus sidereon_precise_interpolant_artifact_state(const struct Sid
                                                                 const char *sat_id,
                                                                 double epoch_j2000_s,
                                                                 struct SidereonSp3State *out_state);
+
+/**
+ * Hash and verify file-level and per-satellite payload checksums. Success
+ * changes digest provenance to SIDEREON_DIGEST_PROVENANCE_VERIFIED.
+ *
+ * Safety: artifact must be a live mutable handle; out_error must point to
+ * writable storage.
+ */
+enum SidereonStatus sidereon_precise_interpolant_artifact_verify(struct SidereonPreciseInterpolantArtifact *artifact,
+                                                                 enum SidereonPreciseInterpolantArtifactErrorKind *out_error);
 
 /**
  * Prepare an ionosphere-free single-frequency RTK arc from dual-frequency input

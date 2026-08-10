@@ -68,6 +68,7 @@ rename_variants = "QualifiedScreamingSnakeCase"
 [export]
 include = [
     "SidereonStatus",
+    "SidereonDigestProvenance",
     "SidereonProductFamily",
     "SidereonProductPublisher",
     "SidereonSolutionClass",
