@@ -2653,6 +2653,11 @@ fn sp3_artifact_identity_from_c(
     })
 }
 
+// clippy suggests replacing the mutate-a-default below with the exhaustive
+// struct literal that MergeOptions's #[non_exhaustive] (core > 0.39.1)
+// forbids downstream. clippy exempts non-exhaustive structs, so this allow is
+// transitional: remove once the engine pin advances past 0.39.1.
+#[allow(clippy::field_reassign_with_default)]
 unsafe fn sp3_merge_options_from_c(
     fn_name: &str,
     options: *const SidereonSp3MergeOptions,
@@ -2772,27 +2777,25 @@ unsafe fn sp3_merge_options_from_c(
         )?
     };
 
-    Ok(MergeOptions {
-        position_tolerance_m: options.position_tolerance_m,
-        clock_tolerance_s: options.clock_tolerance_s,
-        min_agree: options.min_agree,
-        clock_min_common: options.clock_min_common,
-        combine,
-        precedence_scope,
-        outlier_reject,
-        target_epoch_interval_s,
-        systems,
-        frame_reconciliation: Sp3FrameReconciliationOptions {
-            asserted_equivalent_label_sets,
-            helmert: helmert_frame_reconciliation,
-        },
-        // Per-epoch provenance and the continuity post-condition are not yet
-        // surfaced on the C merge options; both default to off, which is
-        // exactly the behavior this binding had before they existed. The
-        // standalone check is available as sidereon_sp3_check_continuity.
-        provenance: None,
-        verify_continuity: None,
-    })
+    // Mutate-a-default rather than a struct literal: MergeOptions is
+    // non-exhaustive, so per-epoch provenance, the continuity post-condition,
+    // and any future option the core learns stay at their defaults (off). The
+    // standalone check is available as sidereon_sp3_check_continuity.
+    let mut merge_options = MergeOptions::default();
+    merge_options.position_tolerance_m = options.position_tolerance_m;
+    merge_options.clock_tolerance_s = options.clock_tolerance_s;
+    merge_options.min_agree = options.min_agree;
+    merge_options.clock_min_common = options.clock_min_common;
+    merge_options.combine = combine;
+    merge_options.precedence_scope = precedence_scope;
+    merge_options.outlier_reject = outlier_reject;
+    merge_options.target_epoch_interval_s = target_epoch_interval_s;
+    merge_options.systems = systems;
+    merge_options.frame_reconciliation = Sp3FrameReconciliationOptions {
+        asserted_equivalent_label_sets,
+        helmert: helmert_frame_reconciliation,
+    };
+    Ok(merge_options)
 }
 
 unsafe fn parse_sp3_asserted_frame_label_sets(
