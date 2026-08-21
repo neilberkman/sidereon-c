@@ -2653,11 +2653,6 @@ fn sp3_artifact_identity_from_c(
     })
 }
 
-// clippy suggests replacing the mutate-a-default below with the exhaustive
-// struct literal that MergeOptions's #[non_exhaustive] (core > 0.39.1)
-// forbids downstream. clippy exempts non-exhaustive structs, so this allow is
-// transitional: remove once the engine pin advances past 0.39.1.
-#[allow(clippy::field_reassign_with_default)]
 unsafe fn sp3_merge_options_from_c(
     fn_name: &str,
     options: *const SidereonSp3MergeOptions,

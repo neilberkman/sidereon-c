@@ -14,12 +14,14 @@ use sidereon_core::data::{
     Sp3ContentStartConvention,
 };
 use sidereon_core::exact_cache::{
-    CommittedExactCacheEntry, ExactCacheError, ExactCacheGuard, ExactProductCache,
+    CommittedExactCacheEntry, ExactCacheError, ExactCacheGuard, ExactCacheOpen, ExactCacheOwner,
+    ExactCacheSingleFlightOptions, ExactProductCache,
 };
 
 use super::{
     copy_prefix_to_c, ffi_boundary, free_boxed, init_copy_counts, parse_bounded_c_string,
-    require_out, require_ref, require_slice, set_last_error, write_boxed_handle, SidereonStatus,
+    require_mut, require_out, require_ref, require_slice, set_last_error, write_boxed_handle,
+    SidereonStatus,
 };
 
 pub const PRODUCT_TOKEN_C_BYTES: usize = 16;
@@ -198,6 +200,49 @@ pub struct SidereonExactCacheEntry {
     entry: CommittedExactCacheEntry,
 }
 
+/// ABI version for SidereonExactCacheSingleFlightOptions.
+pub const SIDEREON_EXACT_CACHE_SINGLE_FLIGHT_OPTIONS_ABI_VERSION: u32 = 1;
+
+/// Bounded timing policy for exact-cache single-flight coordination.
+///
+/// Initialize with `sidereon_exact_cache_single_flight_options_init`, then
+/// override durations as needed. `struct_size` and `abi_version` are checked on
+/// every non-NULL use so incompatible layouts fail instead of using defaults.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonExactCacheSingleFlightOptions {
+    /// Must remain the initialized `sizeof(SidereonExactCacheSingleFlightOptions)`.
+    pub struct_size: u32,
+    /// Must remain SIDEREON_EXACT_CACHE_SINGLE_FLIGHT_OPTIONS_ABI_VERSION.
+    pub abi_version: u32,
+    /// Interval between committed-entry and heartbeat observations.
+    pub poll_interval_ms: u64,
+    /// Interval between automatic owner heartbeat writes.
+    pub heartbeat_interval_ms: u64,
+    /// Continuous no-progress interval required before owner retirement.
+    pub liveness_timeout_ms: u64,
+    /// Maximum total time spent waiting for another owner.
+    pub wait_timeout_ms: u64,
+}
+
+/// Result discriminant written by `sidereon_exact_cache_open_single_flight`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SidereonExactCacheOpenResult {
+    /// `out_entry` owns the verified committed entry; `out_owner` is NULL.
+    Hit = 0,
+    /// `out_owner` owns acquisition; `out_entry` is NULL.
+    Owner = 1,
+}
+
+/// Exclusive right to fetch and publish one single-flight cache miss.
+///
+/// Release with `sidereon_exact_cache_owner_free`. Releasing an unpublished
+/// owner abandons the attempt and best-effort removes its in-flight marker.
+pub struct SidereonExactCacheOwner {
+    owner: Option<ExactCacheOwner>,
+}
+
 /// Byte/path component of an immutable exact-cache entry.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -213,13 +258,57 @@ fn map_error(fn_name: &str, error: impl core::fmt::Display) -> SidereonStatus {
 }
 
 fn map_cache_error(fn_name: &str, error: ExactCacheError) -> SidereonStatus {
-    let status = if matches!(error, ExactCacheError::LockTimeout) {
+    let status = if matches!(
+        error,
+        ExactCacheError::LockTimeout | ExactCacheError::SingleFlightTimeout
+    ) {
         SidereonStatus::Timeout
     } else {
         SidereonStatus::InvalidArgument
     };
     set_last_error(format!("{fn_name}: {error}"));
     status
+}
+
+fn default_single_flight_options() -> SidereonExactCacheSingleFlightOptions {
+    let defaults = ExactCacheSingleFlightOptions::default();
+    SidereonExactCacheSingleFlightOptions {
+        struct_size: std::mem::size_of::<SidereonExactCacheSingleFlightOptions>() as u32,
+        abi_version: SIDEREON_EXACT_CACHE_SINGLE_FLIGHT_OPTIONS_ABI_VERSION,
+        poll_interval_ms: defaults.poll_interval.as_millis() as u64,
+        heartbeat_interval_ms: defaults.heartbeat_interval.as_millis() as u64,
+        liveness_timeout_ms: defaults.liveness_timeout.as_millis() as u64,
+        wait_timeout_ms: defaults.wait_timeout.as_millis() as u64,
+    }
+}
+
+unsafe fn single_flight_options_from_c(
+    fn_name: &str,
+    options: *const SidereonExactCacheSingleFlightOptions,
+) -> Result<ExactCacheSingleFlightOptions, SidereonStatus> {
+    let Some(options) = options.as_ref() else {
+        return Ok(ExactCacheSingleFlightOptions::default());
+    };
+    let expected_size = std::mem::size_of::<SidereonExactCacheSingleFlightOptions>();
+    if options.struct_size as usize != expected_size {
+        set_last_error(format!(
+            "{fn_name}: options struct_size must be {expected_size}"
+        ));
+        return Err(SidereonStatus::InvalidArgument);
+    }
+    if options.abi_version != SIDEREON_EXACT_CACHE_SINGLE_FLIGHT_OPTIONS_ABI_VERSION {
+        set_last_error(format!(
+            "{fn_name}: unsupported options abi_version {}",
+            options.abi_version
+        ));
+        return Err(SidereonStatus::InvalidArgument);
+    }
+    Ok(ExactCacheSingleFlightOptions {
+        poll_interval: Duration::from_millis(options.poll_interval_ms),
+        heartbeat_interval: Duration::from_millis(options.heartbeat_interval_ms),
+        liveness_timeout: Duration::from_millis(options.liveness_timeout_ms),
+        wait_timeout: Duration::from_millis(options.wait_timeout_ms),
+    })
 }
 
 pub(super) fn fixed_text<const N: usize>(
@@ -1325,6 +1414,209 @@ pub unsafe extern "C" fn sidereon_data_distribution_location(
     })
 }
 
+/// Initialize exact-cache single-flight options with the engine defaults.
+///
+/// The defaults are a 50 ms poll interval, 5 s heartbeat interval, 30 s
+/// liveness timeout, and 30 minute total wait timeout. This also initializes
+/// the required `struct_size` and `abi_version` guards.
+///
+/// Safety: `out_options` must point to writable storage for one
+/// SidereonExactCacheSingleFlightOptions.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_exact_cache_single_flight_options_init(
+    out_options: *mut SidereonExactCacheSingleFlightOptions,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_exact_cache_single_flight_options_init";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let out = match require_out(out_options, FN_NAME, "out_options") {
+            Ok(out) => out,
+            Err(status) => return status,
+        };
+        *out = default_single_flight_options();
+        SidereonStatus::Ok
+    })
+}
+
+/// Open one exact identity/source cache with bounded single-flight coordination.
+///
+/// A successful call writes either Hit and one owned `out_entry`, or Owner and
+/// one owned `out_owner`; the other handle output remains NULL. Only an owner
+/// should fetch and validate bytes. Acquisition waiting, owner liveness, and
+/// every filesystem transition are performed by the Rust engine.
+///
+/// `source` is one SidereonDistributionSource_* value encoded as uint32_t.
+/// `options` may be NULL for engine defaults. A non-NULL options struct must
+/// have been initialized by `sidereon_exact_cache_single_flight_options_init`.
+/// A live owner that does not publish before `wait_timeout_ms` produces
+/// SIDEREON_STATUS_TIMEOUT and does not grant ownership to this caller.
+///
+/// Safety: `stable_path` and `identity` must be readable; all three output
+/// pointers must reference writable storage.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn sidereon_exact_cache_open_single_flight(
+    stable_path: *const c_char,
+    identity: *const SidereonProductIdentity,
+    source: u32,
+    options: *const SidereonExactCacheSingleFlightOptions,
+    out_result: *mut SidereonExactCacheOpenResult,
+    out_entry: *mut *mut SidereonExactCacheEntry,
+    out_owner: *mut *mut SidereonExactCacheOwner,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_exact_cache_open_single_flight";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        if !out_result.is_null() {
+            *out_result = SidereonExactCacheOpenResult::Hit;
+        }
+        if !out_entry.is_null() {
+            *out_entry = ptr::null_mut();
+        }
+        if !out_owner.is_null() {
+            *out_owner = ptr::null_mut();
+        }
+        let result = match require_out(out_result, FN_NAME, "out_result") {
+            Ok(result) => result,
+            Err(status) => return status,
+        };
+        let entry_out = match require_out(out_entry, FN_NAME, "out_entry") {
+            Ok(out) => out,
+            Err(status) => return status,
+        };
+        let owner_out = match require_out(out_owner, FN_NAME, "out_owner") {
+            Ok(out) => out,
+            Err(status) => return status,
+        };
+        let stable_path = match parse_bounded_c_string(FN_NAME, "stable_path", stable_path, 4096) {
+            Ok(path) => path,
+            Err(status) => return status,
+        };
+        let identity = match require_ref(identity, FN_NAME, "identity")
+            .and_then(|identity| identity_from_c(FN_NAME, identity))
+        {
+            Ok(identity) => identity,
+            Err(status) => return status,
+        };
+        let source = match source_from_c(FN_NAME, "source", source) {
+            Ok(source) => source,
+            Err(status) => return status,
+        };
+        let options = match single_flight_options_from_c(FN_NAME, options) {
+            Ok(options) => options,
+            Err(status) => return status,
+        };
+        let cache = match ExactProductCache::new(stable_path, identity, source) {
+            Ok(cache) => cache,
+            Err(error) => return map_cache_error(FN_NAME, error),
+        };
+        match cache.open_single_flight(options) {
+            Ok(ExactCacheOpen::Hit(entry)) => {
+                *result = SidereonExactCacheOpenResult::Hit;
+                write_boxed_handle(entry_out, SidereonExactCacheEntry { entry });
+                SidereonStatus::Ok
+            }
+            Ok(ExactCacheOpen::Owner(owner)) => {
+                *result = SidereonExactCacheOpenResult::Owner;
+                write_boxed_handle(owner_out, SidereonExactCacheOwner { owner: Some(owner) });
+                SidereonStatus::Ok
+            }
+            Err(error) => map_cache_error(FN_NAME, error),
+        }
+    })
+}
+
+/// Refresh one single-flight owner's liveness heartbeat immediately.
+///
+/// Safety: `owner` must be a live, unpublished owner handle.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_exact_cache_owner_heartbeat(
+    owner: *const SidereonExactCacheOwner,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_exact_cache_owner_heartbeat";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let owner = match require_ref(owner, FN_NAME, "owner") {
+            Ok(owner) => owner,
+            Err(status) => return status,
+        };
+        let Some(owner) = owner.owner.as_ref() else {
+            set_last_error(format!("{FN_NAME}: owner is closed"));
+            return SidereonStatus::InvalidArgument;
+        };
+        match owner.heartbeat() {
+            Ok(()) => SidereonStatus::Ok,
+            Err(error) => map_cache_error(FN_NAME, error),
+        }
+    })
+}
+
+/// Publish validated bytes and close one single-flight owner.
+///
+/// Product semantics must be validated before this call. Once the core publish
+/// attempt begins the owner is closed, including when the core reports an
+/// error. The caller must still release the owner allocation with
+/// `sidereon_exact_cache_owner_free` and owns the returned entry on success.
+/// C argument-validation failures leave the owner open for a corrected call.
+///
+/// Safety: each byte pointer must reference its declared length; `owner` must
+/// be a live handle; `out_entry` must be writable storage for one handle
+/// pointer.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn sidereon_exact_cache_owner_publish(
+    owner: *mut SidereonExactCacheOwner,
+    product: *const u8,
+    product_len: usize,
+    archive: *const u8,
+    archive_len: usize,
+    provenance: *const u8,
+    provenance_len: usize,
+    out_entry: *mut *mut SidereonExactCacheEntry,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_exact_cache_owner_publish";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let out = match require_out(out_entry, FN_NAME, "out_entry") {
+            Ok(out) => out,
+            Err(status) => return status,
+        };
+        *out = ptr::null_mut();
+        let product = match require_slice(product, product_len, FN_NAME, "product") {
+            Ok(bytes) => bytes,
+            Err(status) => return status,
+        };
+        let archive = match require_slice(archive, archive_len, FN_NAME, "archive") {
+            Ok(bytes) => bytes,
+            Err(status) => return status,
+        };
+        let provenance = match require_slice(provenance, provenance_len, FN_NAME, "provenance") {
+            Ok(bytes) => bytes,
+            Err(status) => return status,
+        };
+        let owner = match require_mut(owner, FN_NAME, "owner") {
+            Ok(owner) => owner,
+            Err(status) => return status,
+        };
+        let Some(owner) = owner.owner.take() else {
+            set_last_error(format!("{FN_NAME}: owner is closed"));
+            return SidereonStatus::InvalidArgument;
+        };
+        match owner.publish(product, archive, provenance) {
+            Ok(entry) => {
+                write_boxed_handle(out, SidereonExactCacheEntry { entry });
+                SidereonStatus::Ok
+            }
+            Err(error) => map_cache_error(FN_NAME, error),
+        }
+    })
+}
+
+/// Release a single-flight owner handle. NULL is a no-op.
+///
+/// Releasing an unpublished owner abandons acquisition and best-effort removes
+/// its in-flight marker.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_exact_cache_owner_free(owner: *mut SidereonExactCacheOwner) {
+    free_boxed(owner);
+}
+
 /// Open one exact identity/source cache and acquire its bounded cross-process lock.
 ///
 /// `source` is one SidereonDistributionSource_* value encoded as uint32_t.
@@ -1767,6 +2059,41 @@ mod tests {
 
     use super::*;
 
+    fn exact_cache_test_identity() -> SidereonProductIdentity {
+        let center = CString::new("cod").unwrap();
+        let mut identity = MaybeUninit::<SidereonProductIdentity>::uninit();
+        assert_eq!(
+            unsafe {
+                sidereon_data_product_identity(
+                    center.as_ptr(),
+                    SidereonProductFamily::Sp3 as u32,
+                    2026,
+                    7,
+                    12,
+                    ptr::null(),
+                    ptr::null(),
+                    identity.as_mut_ptr(),
+                )
+            },
+            SidereonStatus::Ok
+        );
+        unsafe { identity.assume_init() }
+    }
+
+    fn exact_cache_test_paths(label: &str) -> (std::path::PathBuf, CString) {
+        let root = std::env::temp_dir().join(format!(
+            "sidereon-c-{label}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let stable = root.join("COD0MGXFIN_20261930000_01D_05M_ORB.SP3");
+        let stable_c = CString::new(stable.to_string_lossy().as_bytes()).unwrap();
+        (root, stable_c)
+    }
+
     #[test]
     fn exact_identity_and_cddis_path_match_the_core() {
         let center = CString::new("cod").unwrap();
@@ -2034,6 +2361,301 @@ COD0MGXFIN_20261930000_01D_05M_ORB.SP3.gz"
         );
         unsafe { sidereon_exact_cache_free(reopened) };
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn c_exact_cache_single_flight_hit_skips_fetch_stub() {
+        let identity = exact_cache_test_identity();
+        let (root, stable_c) = exact_cache_test_paths("single-flight-hit");
+        let product = b"precommitted validated product";
+        let archive = b"precommitted archive";
+        let provenance = b"{\"identity\":\"precommitted\"}";
+
+        let mut cache = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_exact_cache_open(
+                    stable_c.as_ptr(),
+                    &identity,
+                    SidereonDistributionSource::InMemory as u32,
+                    1_000,
+                    &mut cache,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        let mut committed = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_exact_cache_publish(
+                    cache,
+                    product.as_ptr(),
+                    product.len(),
+                    archive.as_ptr(),
+                    archive.len(),
+                    provenance.as_ptr(),
+                    provenance.len(),
+                    &mut committed,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        unsafe {
+            sidereon_exact_cache_entry_free(committed);
+            sidereon_exact_cache_free(cache);
+        }
+
+        let mut options = MaybeUninit::<SidereonExactCacheSingleFlightOptions>::uninit();
+        assert_eq!(
+            unsafe { sidereon_exact_cache_single_flight_options_init(options.as_mut_ptr()) },
+            SidereonStatus::Ok
+        );
+        let options = unsafe { options.assume_init() };
+        let mut result = SidereonExactCacheOpenResult::Owner;
+        let mut entry = ptr::null_mut();
+        let mut owner = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_exact_cache_open_single_flight(
+                    stable_c.as_ptr(),
+                    &identity,
+                    SidereonDistributionSource::InMemory as u32,
+                    &options,
+                    &mut result,
+                    &mut entry,
+                    &mut owner,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        let mut fetch_stub_calls = 0;
+        if result == SidereonExactCacheOpenResult::Owner {
+            let fetch_stub = |calls: &mut usize| *calls += 1;
+            fetch_stub(&mut fetch_stub_calls);
+        }
+        assert_eq!(result, SidereonExactCacheOpenResult::Hit);
+        assert_eq!(fetch_stub_calls, 0);
+        assert!(!entry.is_null());
+        assert!(owner.is_null());
+
+        let mut written = 0;
+        let mut required = 0;
+        let mut copied = vec![0; product.len()];
+        assert_eq!(
+            unsafe {
+                sidereon_exact_cache_entry_copy_bytes(
+                    entry,
+                    SidereonExactCacheComponent::Product as u32,
+                    copied.as_mut_ptr(),
+                    copied.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(&copied[..written], product);
+        unsafe { sidereon_exact_cache_entry_free(entry) };
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn c_exact_cache_single_flight_owner_publishes_then_opens_as_hit() {
+        let identity = exact_cache_test_identity();
+        let (root, stable_c) = exact_cache_test_paths("single-flight-owner");
+        let options = default_single_flight_options();
+        let mut result = SidereonExactCacheOpenResult::Hit;
+        let mut entry = ptr::null_mut();
+        let mut owner = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_exact_cache_open_single_flight(
+                    stable_c.as_ptr(),
+                    &identity,
+                    SidereonDistributionSource::InMemory as u32,
+                    &options,
+                    &mut result,
+                    &mut entry,
+                    &mut owner,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(result, SidereonExactCacheOpenResult::Owner);
+        assert!(entry.is_null());
+        assert!(!owner.is_null());
+        assert_eq!(
+            unsafe { sidereon_exact_cache_owner_heartbeat(owner) },
+            SidereonStatus::Ok
+        );
+
+        let product = b"single-flight validated product";
+        let archive = b"single-flight archive";
+        let provenance = b"{\"identity\":\"single-flight\"}";
+        let mut published = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_exact_cache_owner_publish(
+                    owner,
+                    product.as_ptr(),
+                    product.len(),
+                    archive.as_ptr(),
+                    archive.len(),
+                    provenance.as_ptr(),
+                    provenance.len(),
+                    &mut published,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert!(!published.is_null());
+        assert_eq!(
+            unsafe { sidereon_exact_cache_owner_heartbeat(owner) },
+            SidereonStatus::InvalidArgument
+        );
+        unsafe {
+            sidereon_exact_cache_owner_free(owner);
+            sidereon_exact_cache_entry_free(published);
+        }
+
+        result = SidereonExactCacheOpenResult::Owner;
+        entry = ptr::null_mut();
+        owner = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_exact_cache_open_single_flight(
+                    stable_c.as_ptr(),
+                    &identity,
+                    SidereonDistributionSource::InMemory as u32,
+                    &options,
+                    &mut result,
+                    &mut entry,
+                    &mut owner,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(result, SidereonExactCacheOpenResult::Hit);
+        assert!(!entry.is_null());
+        assert!(owner.is_null());
+        unsafe { sidereon_exact_cache_entry_free(entry) };
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn c_exact_cache_single_flight_maps_live_owner_wait_timeout() {
+        let identity = exact_cache_test_identity();
+        let (root, stable_c) = exact_cache_test_paths("single-flight-timeout");
+        let mut owner_options = default_single_flight_options();
+        owner_options.poll_interval_ms = 1;
+        owner_options.heartbeat_interval_ms = 5;
+        owner_options.liveness_timeout_ms = 200;
+        owner_options.wait_timeout_ms = 1_000;
+
+        let mut result = SidereonExactCacheOpenResult::Hit;
+        let mut entry = ptr::null_mut();
+        let mut owner = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_exact_cache_open_single_flight(
+                    stable_c.as_ptr(),
+                    &identity,
+                    SidereonDistributionSource::InMemory as u32,
+                    &owner_options,
+                    &mut result,
+                    &mut entry,
+                    &mut owner,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(result, SidereonExactCacheOpenResult::Owner);
+
+        let mut waiter_options = owner_options;
+        waiter_options.wait_timeout_ms = 20;
+        let mut waiter_result = SidereonExactCacheOpenResult::Owner;
+        let mut waiter_entry = ptr::dangling_mut::<SidereonExactCacheEntry>();
+        let mut waiter_owner = ptr::dangling_mut::<SidereonExactCacheOwner>();
+        assert_eq!(
+            unsafe {
+                sidereon_exact_cache_open_single_flight(
+                    stable_c.as_ptr(),
+                    &identity,
+                    SidereonDistributionSource::InMemory as u32,
+                    &waiter_options,
+                    &mut waiter_result,
+                    &mut waiter_entry,
+                    &mut waiter_owner,
+                )
+            },
+            SidereonStatus::Timeout
+        );
+        assert_eq!(waiter_result, SidereonExactCacheOpenResult::Hit);
+        assert!(waiter_entry.is_null());
+        assert!(waiter_owner.is_null());
+
+        unsafe { sidereon_exact_cache_owner_free(owner) };
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn c_exact_cache_single_flight_rejects_invalid_options_without_fallback() {
+        let identity = exact_cache_test_identity();
+        let (root, stable_c) = exact_cache_test_paths("single-flight-options");
+        let defaults = default_single_flight_options();
+
+        for options in [
+            SidereonExactCacheSingleFlightOptions {
+                poll_interval_ms: 0,
+                ..defaults
+            },
+            SidereonExactCacheSingleFlightOptions {
+                heartbeat_interval_ms: 0,
+                ..defaults
+            },
+            SidereonExactCacheSingleFlightOptions {
+                liveness_timeout_ms: 0,
+                ..defaults
+            },
+            SidereonExactCacheSingleFlightOptions {
+                wait_timeout_ms: 0,
+                ..defaults
+            },
+            SidereonExactCacheSingleFlightOptions {
+                heartbeat_interval_ms: defaults.liveness_timeout_ms,
+                ..defaults
+            },
+            SidereonExactCacheSingleFlightOptions {
+                struct_size: 0,
+                ..defaults
+            },
+            SidereonExactCacheSingleFlightOptions {
+                abi_version: u32::MAX,
+                ..defaults
+            },
+        ] {
+            let mut result = SidereonExactCacheOpenResult::Owner;
+            let mut entry = ptr::dangling_mut::<SidereonExactCacheEntry>();
+            let mut owner = ptr::dangling_mut::<SidereonExactCacheOwner>();
+            assert_eq!(
+                unsafe {
+                    sidereon_exact_cache_open_single_flight(
+                        stable_c.as_ptr(),
+                        &identity,
+                        SidereonDistributionSource::InMemory as u32,
+                        &options,
+                        &mut result,
+                        &mut entry,
+                        &mut owner,
+                    )
+                },
+                SidereonStatus::InvalidArgument
+            );
+            assert_eq!(result, SidereonExactCacheOpenResult::Hit);
+            assert!(entry.is_null());
+            assert!(owner.is_null());
+        }
+        assert!(!root.exists());
     }
 
     #[test]

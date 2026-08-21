@@ -92,6 +92,11 @@
 #define SIDEREON_ATMOSPHERE_AP_ARRAY_LEN 7
 
 /**
+ * ABI version for SidereonExactCacheSingleFlightOptions.
+ */
+#define SIDEREON_EXACT_CACHE_SINGLE_FLIGHT_OPTIONS_ABI_VERSION 1
+
+/**
  * Bit length of a single LNAV subframe (IS-GPS-200 Section 20.3.2). Each encode
  * output buffer and each decode input must hold exactly this many bytes (one
  * 0/1 bit per byte, most significant first).
@@ -452,6 +457,20 @@ typedef enum SidereonErrorMetricsErrorKind {
      */
     SIDEREON_ERROR_METRICS_ERROR_KIND_ROTATION = 4,
 } SidereonErrorMetricsErrorKind;
+
+/**
+ * Result discriminant written by `sidereon_exact_cache_open_single_flight`.
+ */
+typedef enum SidereonExactCacheOpenResult {
+    /**
+     * `out_entry` owns the verified committed entry; `out_owner` is NULL.
+     */
+    SIDEREON_EXACT_CACHE_OPEN_RESULT_HIT = 0,
+    /**
+     * `out_owner` owns acquisition; `out_entry` is NULL.
+     */
+    SIDEREON_EXACT_CACHE_OPEN_RESULT_OWNER = 1,
+} SidereonExactCacheOpenResult;
 
 /**
  * Direction of a Moon elevation threshold crossing.
@@ -3045,6 +3064,14 @@ typedef struct SidereonExactCache SidereonExactCache;
  * `sidereon_exact_cache_entry_free` after the required copies are complete.
  */
 typedef struct SidereonExactCacheEntry SidereonExactCacheEntry;
+
+/**
+ * Exclusive right to fetch and publish one single-flight cache miss.
+ *
+ * Release with `sidereon_exact_cache_owner_free`. Releasing an unpublished
+ * owner abandons the attempt and best-effort removes its in-flight marker.
+ */
+typedef struct SidereonExactCacheOwner SidereonExactCacheOwner;
 
 /**
  * Validated, source-independent requirements for one exact SP3 product.
@@ -6397,6 +6424,40 @@ typedef struct SidereonDecayEstimate {
      */
     double reentry_altitude_km;
 } SidereonDecayEstimate;
+
+/**
+ * Bounded timing policy for exact-cache single-flight coordination.
+ *
+ * Initialize with `sidereon_exact_cache_single_flight_options_init`, then
+ * override durations as needed. `struct_size` and `abi_version` are checked on
+ * every non-NULL use so incompatible layouts fail instead of using defaults.
+ */
+typedef struct SidereonExactCacheSingleFlightOptions {
+    /**
+     * Must remain the initialized `sizeof(SidereonExactCacheSingleFlightOptions)`.
+     */
+    uint32_t struct_size;
+    /**
+     * Must remain SIDEREON_EXACT_CACHE_SINGLE_FLIGHT_OPTIONS_ABI_VERSION.
+     */
+    uint32_t abi_version;
+    /**
+     * Interval between committed-entry and heartbeat observations.
+     */
+    uint64_t poll_interval_ms;
+    /**
+     * Interval between automatic owner heartbeat writes.
+     */
+    uint64_t heartbeat_interval_ms;
+    /**
+     * Continuous no-progress interval required before owner retirement.
+     */
+    uint64_t liveness_timeout_ms;
+    /**
+     * Maximum total time spent waiting for another owner.
+     */
+    uint64_t wait_timeout_ms;
+} SidereonExactCacheSingleFlightOptions;
 
 /**
  * One RAIM per-satellite inverse-variance weight for an FDE solve. Supplied as
@@ -21214,6 +21275,68 @@ enum SidereonStatus sidereon_exact_cache_open(const char *stable_path,
                                               struct SidereonExactCache **out_cache);
 
 /**
+ * Open one exact identity/source cache with bounded single-flight coordination.
+ *
+ * A successful call writes either Hit and one owned `out_entry`, or Owner and
+ * one owned `out_owner`; the other handle output remains NULL. Only an owner
+ * should fetch and validate bytes. Acquisition waiting, owner liveness, and
+ * every filesystem transition are performed by the Rust engine.
+ *
+ * `source` is one SidereonDistributionSource_* value encoded as uint32_t.
+ * `options` may be NULL for engine defaults. A non-NULL options struct must
+ * have been initialized by `sidereon_exact_cache_single_flight_options_init`.
+ * A live owner that does not publish before `wait_timeout_ms` produces
+ * SIDEREON_STATUS_TIMEOUT and does not grant ownership to this caller.
+ *
+ * Safety: `stable_path` and `identity` must be readable; all three output
+ * pointers must reference writable storage.
+ */
+enum SidereonStatus sidereon_exact_cache_open_single_flight(const char *stable_path,
+                                                            const struct SidereonProductIdentity *identity,
+                                                            uint32_t source,
+                                                            const struct SidereonExactCacheSingleFlightOptions *options,
+                                                            enum SidereonExactCacheOpenResult *out_result,
+                                                            struct SidereonExactCacheEntry **out_entry,
+                                                            struct SidereonExactCacheOwner **out_owner);
+
+/**
+ * Release a single-flight owner handle. NULL is a no-op.
+ *
+ * Releasing an unpublished owner abandons acquisition and best-effort removes
+ * its in-flight marker.
+ */
+void sidereon_exact_cache_owner_free(struct SidereonExactCacheOwner *owner);
+
+/**
+ * Refresh one single-flight owner's liveness heartbeat immediately.
+ *
+ * Safety: `owner` must be a live, unpublished owner handle.
+ */
+enum SidereonStatus sidereon_exact_cache_owner_heartbeat(const struct SidereonExactCacheOwner *owner);
+
+/**
+ * Publish validated bytes and close one single-flight owner.
+ *
+ * Product semantics must be validated before this call. Once the core publish
+ * attempt begins the owner is closed, including when the core reports an
+ * error. The caller must still release the owner allocation with
+ * `sidereon_exact_cache_owner_free` and owns the returned entry on success.
+ * C argument-validation failures leave the owner open for a corrected call.
+ *
+ * Safety: each byte pointer must reference its declared length; `owner` must
+ * be a live handle; `out_entry` must be writable storage for one handle
+ * pointer.
+ */
+enum SidereonStatus sidereon_exact_cache_owner_publish(struct SidereonExactCacheOwner *owner,
+                                                       const uint8_t *product,
+                                                       size_t product_len,
+                                                       const uint8_t *archive,
+                                                       size_t archive_len,
+                                                       const uint8_t *provenance,
+                                                       size_t provenance_len,
+                                                       struct SidereonExactCacheEntry **out_entry);
+
+/**
  * Publish validated product, distributor archive, and provenance bytes as one
  * immutable cache transaction.
  *
@@ -21264,6 +21387,18 @@ enum SidereonStatus sidereon_exact_cache_read_unlocked(const char *stable_path,
                                                        uint32_t source,
                                                        bool *out_hit,
                                                        struct SidereonExactCacheEntry **out_entry);
+
+/**
+ * Initialize exact-cache single-flight options with the engine defaults.
+ *
+ * The defaults are a 50 ms poll interval, 5 s heartbeat interval, 30 s
+ * liveness timeout, and 30 minute total wait timeout. This also initializes
+ * the required `struct_size` and `abi_version` guards.
+ *
+ * Safety: `out_options` must point to writable storage for one
+ * SidereonExactCacheSingleFlightOptions.
+ */
+enum SidereonStatus sidereon_exact_cache_single_flight_options_init(struct SidereonExactCacheSingleFlightOptions *out_options);
 
 /**
  * Fill *out_options with the default FDE options: unit weights, the engine

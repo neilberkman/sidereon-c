@@ -37,6 +37,16 @@ cc -std=c11 -Wall -Wextra -Werror \
 
 cc -std=c11 -Wall -Wextra -Werror \
     -I"${binding_root}/include" \
+    "${here}/exact_cache_single_flight_surface_smoke.c" \
+    -L"${lib_dir}" \
+    -lsidereon \
+    -Wl,-rpath,"${lib_dir}" \
+    -lm \
+    -o "${target_dir}/exact_cache_single_flight_surface_smoke_ci"
+"${target_dir}/exact_cache_single_flight_surface_smoke_ci"
+
+cc -std=c11 -Wall -Wextra -Werror \
+    -I"${binding_root}/include" \
     "${here}/data_distribution_smoke.c" \
     -L"${lib_dir}" \
     -lsidereon \
