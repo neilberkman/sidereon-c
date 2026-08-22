@@ -1311,9 +1311,9 @@ fn trls_backend_from_c(
 fn map_trls_error(fn_name: &str, err: TrfError) -> SidereonStatus {
     set_last_error(format!("{fn_name}: {err}"));
     match err {
-        TrfError::NonFiniteInitialResidual | TrfError::InvalidSvdOutput(_) | TrfError::Svd(_) => {
-            SidereonStatus::Solve
-        }
+        TrfError::NonFiniteInitialResidual
+        | TrfError::InvalidSvdOutput(_)
+        | TrfError::Backend(_) => SidereonStatus::Solve,
         _ => SidereonStatus::InvalidArgument,
     }
 }
