@@ -88,3 +88,14 @@ cc -std=c11 -Wall -Wextra -Werror \
     -o "${target_dir}/rinex_qc_interval_smoke_ci"
 "${target_dir}/rinex_qc_interval_smoke_ci" \
     "${here}/fixtures/obs/ESBC00DNK_R_20201770000_01D_30S_MO_trim.rnx"
+
+cc -std=c11 -Wall -Wextra -Werror \
+    -I"${binding_root}/include" \
+    "${here}/window_continuity_smoke.c" \
+    -L"${lib_dir}" \
+    -lsidereon \
+    -Wl,-rpath,"${lib_dir}" \
+    -lm \
+    -o "${target_dir}/window_continuity_smoke_ci"
+"${target_dir}/window_continuity_smoke_ci" \
+    "${here}/fixtures/sp3/COD0MGXFIN_20201770000_01D_05M_ORB.SP3"

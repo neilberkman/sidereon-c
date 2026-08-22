@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use sidereon_core::data::{
     self as core_data, AnalysisCenter, ArchiveCompression, DistributionSource, ProductCampaign,
-    ProductDate, ProductFormat, ProductIdentity, ProductPublisher, ProductType, SolutionClass,
-    Sp3ContentStartConvention,
+    ProductDate, ProductDateTime, ProductFormat, ProductIdentity, ProductPublisher, ProductType,
+    SolutionClass, Sp3ContentStartConvention,
 };
 use sidereon_core::exact_cache::{
     CommittedExactCacheEntry, ExactCacheError, ExactCacheGuard, ExactCacheOpen, ExactCacheOwner,
@@ -560,6 +560,40 @@ pub(super) fn identity_to_c(
     })
 }
 
+fn product_identity_json(identity: &ProductIdentity) -> serde_json::Value {
+    serde_json::json!({
+        "family": identity.family.code(),
+        "analysis_center": identity.analysis_center.code(),
+        "publisher": identity.publisher.code(),
+        "solution_class": identity.solution.code(),
+        "campaign": identity.campaign.code(),
+        "filename_version": identity.version,
+        "date": format!(
+            "{:04}-{:02}-{:02}",
+            identity.date.year, identity.date.month, identity.date.day
+        ),
+        "issue": identity.issue.as_deref().unwrap_or(""),
+        "span": identity.span,
+        "sample": identity.sample,
+        "official_filename": identity.official_filename,
+        "format": identity.format.code(),
+        "format_version": identity.format_version,
+        "prediction_horizon_days": identity.prediction_horizon_days,
+    })
+}
+
+fn nominal_coverage_interval_json(
+    interval: Option<core_data::NominalCoverageInterval>,
+) -> serde_json::Value {
+    match interval {
+        Some(interval) => serde_json::json!({
+            "from": interval.from.to_string(),
+            "until": interval.until.to_string(),
+        }),
+        None => serde_json::Value::Null,
+    }
+}
+
 pub(super) fn fixed_text_from_c<const N: usize>(
     fn_name: &str,
     label: &str,
@@ -680,6 +714,88 @@ unsafe fn product_spec(
     let family = family_from_c(fn_name, "family", input.family)?;
     core_data::product(center, family, date, sample.as_deref(), issue.as_deref())
         .map_err(|error| map_error(fn_name, error))
+}
+
+/// Return the next catalog issue nominally due at or after a UTC instant as a
+/// JSON object.
+///
+/// This is a pure catalog query and performs no archive access. The object
+/// contains the exact product `identity`, its UTC `due_at`, and half-open
+/// `covers.observed` / `covers.predicted` UTC intervals (each nullable).
+/// `family` is one SidereonProductFamily_* value encoded as uint32_t.
+///
+/// Uses the standard variable-length byte-output contract; JSON bytes are not
+/// null-terminated.
+///
+/// Safety: `center` must reference a null-terminated UTF-8 string; `out` must
+/// reference `out_len` writable bytes, or be NULL when `out_len` is zero; both
+/// count pointers must reference writable size_t values.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn sidereon_data_next_issue_due_json(
+    center: *const c_char,
+    family: u32,
+    year: i32,
+    month: u8,
+    day: u8,
+    hour: u8,
+    minute: u8,
+    second: u8,
+    out: *mut u8,
+    out_len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_data_next_issue_due_json";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        if let Err(status) = init_copy_counts(FN_NAME, out_written, out_required) {
+            return status;
+        }
+        let center = match center_from_c(FN_NAME, "center", center) {
+            Ok(center) => center,
+            Err(status) => return status,
+        };
+        let family = match family_from_c(FN_NAME, "family", family) {
+            Ok(family) => family,
+            Err(status) => return status,
+        };
+        let date = match ProductDate::new(year, month, day) {
+            Ok(date) => date,
+            Err(error) => return map_error(FN_NAME, error),
+        };
+        let now = match ProductDateTime::new(date, hour, minute, second) {
+            Ok(now) => now,
+            Err(error) => return map_error(FN_NAME, error),
+        };
+        let issue = match core_data::next_issue_due(center, family, now) {
+            Ok(issue) => issue,
+            Err(error) => return map_error(FN_NAME, error),
+        };
+        let value = serde_json::json!({
+            "identity": product_identity_json(&issue.identity),
+            "due_at": issue.due_at.to_string(),
+            "covers": {
+                "observed": nominal_coverage_interval_json(issue.covers.observed),
+                "predicted": nominal_coverage_interval_json(issue.covers.predicted),
+            },
+        });
+        let json = match serde_json::to_vec(&value) {
+            Ok(json) => json,
+            Err(error) => return map_error(FN_NAME, error),
+        };
+        match copy_prefix_to_c(
+            FN_NAME,
+            "out",
+            &json,
+            out,
+            out_len,
+            out_written,
+            out_required,
+        ) {
+            Ok(()) => SidereonStatus::Ok,
+            Err(status) => status,
+        }
+    })
 }
 
 /// Resolve the solution class for one supported center/product family.
@@ -2731,5 +2847,103 @@ COD0OPSPRD_20270010000_01D_01H_GIM.INX.gz",
                 expected
             );
         }
+    }
+
+    #[test]
+    fn c_next_issue_due_maps_identity_due_time_and_split_coverage() {
+        let center = CString::new("igs_ult").unwrap();
+        let mut written = usize::MAX;
+        let mut required = usize::MAX;
+        assert_eq!(
+            unsafe {
+                sidereon_data_next_issue_due_json(
+                    center.as_ptr(),
+                    SidereonProductFamily::Sp3 as u32,
+                    2026,
+                    8,
+                    4,
+                    2,
+                    59,
+                    59,
+                    ptr::null_mut(),
+                    0,
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(written, 0);
+        assert!(required > 0);
+
+        let mut bytes = vec![0_u8; required];
+        assert_eq!(
+            unsafe {
+                sidereon_data_next_issue_due_json(
+                    center.as_ptr(),
+                    SidereonProductFamily::Sp3 as u32,
+                    2026,
+                    8,
+                    4,
+                    2,
+                    59,
+                    59,
+                    bytes.as_mut_ptr(),
+                    bytes.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(written, required);
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes[..written]).expect("nominal issue JSON");
+        assert_eq!(value["identity"]["family"], "sp3");
+        assert_eq!(value["identity"]["analysis_center"], "igs_ult");
+        assert_eq!(value["identity"]["date"], "2026-08-03");
+        assert_eq!(value["identity"]["issue"], "0000");
+        assert_eq!(value["due_at"], "2026-08-04T03:00:00Z");
+        assert_eq!(
+            value["covers"]["observed"],
+            serde_json::json!({
+                "from": "2026-08-03T00:00:00Z",
+                "until": "2026-08-04T00:00:00Z",
+            })
+        );
+        assert_eq!(
+            value["covers"]["predicted"],
+            serde_json::json!({
+                "from": "2026-08-04T00:00:00Z",
+                "until": "2026-08-05T00:00:00Z",
+            })
+        );
+    }
+
+    #[test]
+    fn c_next_issue_due_rejects_unsupported_schedule() {
+        let center = CString::new("wum_nrt").unwrap();
+        let mut written = usize::MAX;
+        let mut required = usize::MAX;
+        assert_eq!(
+            unsafe {
+                sidereon_data_next_issue_due_json(
+                    center.as_ptr(),
+                    SidereonProductFamily::Sp3 as u32,
+                    2026,
+                    8,
+                    4,
+                    0,
+                    0,
+                    0,
+                    ptr::null_mut(),
+                    0,
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+        assert_eq!((written, required), (0, 0));
     }
 }

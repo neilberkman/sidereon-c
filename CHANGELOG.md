@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.0.0 - 2026-08-21
+
+Sidereon 1.0.0 across every interface; additions arrive without breaking
+existing callers from here.
+
+### Added
+
+- Exact-cache single-flight opens over the C ABI: options struct, open
+  discriminant, opaque owner heartbeat/publish/release, typed timeout.
+- Window-scoped continuity verdicts (`sidereon_sp3_stencil_extent`,
+  verdict JSON queries) and `sidereon_data_next_issue_due_json`.
+
+### Changed
+
+- Engine pinned to `sidereon-core` 1.0.0.
+
 ## 0.39.1 - 2026-08-11
 
 ### Fixed

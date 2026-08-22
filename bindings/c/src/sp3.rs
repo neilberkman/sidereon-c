@@ -2,9 +2,10 @@ use super::*;
 use sidereon_core::data::{ArchiveCompression, DistributionSource, ProductDate};
 use sidereon_core::ephemeris::{
     check_continuity, parse_exact_sp3 as core_parse_exact_sp3,
-    validate_exact_sp3 as core_validate_exact_sp3, ContinuityOptions,
-    ExactSp3Coverage as CoreExactSp3Coverage, ExactSp3Request as CoreExactSp3Request,
-    ExactSp3ValidationError, OrbitClass, SpeedBound,
+    validate_exact_sp3 as core_validate_exact_sp3, ContinuityDefect, ContinuityOptions,
+    EpochWindow, ExactSp3Coverage as CoreExactSp3Coverage, ExactSp3Request as CoreExactSp3Request,
+    ExactSp3ValidationError, MergeContinuityViolation, OrbitClass, SpeedBound, StencilExtent,
+    WindowContinuityDecision, WindowContinuityVerdict,
 };
 
 const SP3_FRAME_LABEL_MAX_BYTES: usize = 64;
@@ -662,22 +663,100 @@ pub unsafe extern "C" fn sidereon_sp3_check_continuity(
         *out_residuals_skipped = 0;
         let sp3 = c_try!(require_ref(sp3, FN_NAME, "sp3"));
 
-        let speed_bound = match orbit_class {
-            -1 => None,
-            0 => Some(SpeedBound::OrbitClass(OrbitClass::MeoGnss)),
-            1 => Some(SpeedBound::OrbitClass(OrbitClass::Geosynchronous)),
-            2 => Some(SpeedBound::OrbitClass(OrbitClass::Leo)),
-            _ => return SidereonStatus::InvalidArgument,
-        };
-        let options = ContinuityOptions {
-            speed_bound,
-            residual_tolerance_m: (residual_tolerance_m >= 0.0).then_some(residual_tolerance_m),
-        };
+        let options = c_try!(continuity_options_from_c(
+            FN_NAME,
+            orbit_class,
+            residual_tolerance_m
+        ));
         let report = check_continuity(&sp3.inner.precise_ephemeris_samples(), &options);
 
         *out_defects = report.defects.len();
         *out_residuals_checked = report.residuals_checked;
         *out_residuals_skipped = report.residuals_skipped;
+        SidereonStatus::Ok
+    })
+}
+
+/// Write the time reach of the SP3 position interpolator before and after a
+/// query, in seconds.
+///
+/// The core derives both values from this product's declared epoch interval and
+/// interpolation-node count. The caller never supplies a stencil duration.
+///
+/// Safety: `sp3` must be a live handle and both output pointers must reference
+/// writable doubles.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sp3_stencil_extent(
+    sp3: *const SidereonSp3,
+    out_before_s: *mut f64,
+    out_after_s: *mut f64,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_sp3_stencil_extent";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let out_before_s = c_try!(require_out(out_before_s, FN_NAME, "out_before_s"));
+        *out_before_s = 0.0;
+        let out_after_s = c_try!(require_out(out_after_s, FN_NAME, "out_after_s"));
+        *out_after_s = 0.0;
+        let sp3 = c_try!(require_ref(sp3, FN_NAME, "sp3"));
+        let stencil = c_try!(StencilExtent::for_sp3(&sp3.inner)
+            .map_err(|error| map_sp3_argument_error(FN_NAME, error)));
+        *out_before_s = stencil.before_s();
+        *out_after_s = stencil.after_s();
+        SidereonStatus::Ok
+    })
+}
+
+/// Decide whether product-wide continuity findings can influence an inclusive
+/// evaluation window through this product's derived interpolation stencil.
+///
+/// The JSON object contains `decision` (`"accept"` or `"refuse"`), `accepted`,
+/// the influencing defect and splice arrays, and the complete defect and splice
+/// arrays. Standalone checks always have empty splice arrays. `orbit_class` and
+/// `residual_tolerance_m` use the same selectors as
+/// `sidereon_sp3_check_continuity`.
+///
+/// Uses the standard variable-length byte-output contract; JSON bytes are not
+/// null-terminated.
+///
+/// Safety: `sp3` must be a live handle; `out` must reference `out_len` writable
+/// bytes, or be NULL when `out_len` is zero; both count pointers must reference
+/// writable size_t values.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn sidereon_sp3_continuity_verdict_json(
+    sp3: *const SidereonSp3,
+    orbit_class: i32,
+    residual_tolerance_m: f64,
+    from_j2000_s: f64,
+    through_j2000_s: f64,
+    out: *mut u8,
+    out_len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_sp3_continuity_verdict_json";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(FN_NAME, out_written, out_required));
+        let sp3 = c_try!(require_ref(sp3, FN_NAME, "sp3"));
+        let options = c_try!(continuity_options_from_c(
+            FN_NAME,
+            orbit_class,
+            residual_tolerance_m
+        ));
+        let window = c_try!(EpochWindow::new(from_j2000_s, through_j2000_s)
+            .map_err(|error| map_sp3_argument_error(FN_NAME, error)));
+        let stencil = c_try!(StencilExtent::for_sp3(&sp3.inner)
+            .map_err(|error| map_sp3_argument_error(FN_NAME, error)));
+        let report = check_continuity(&sp3.inner.precise_ephemeris_samples(), &options);
+        let value = window_continuity_verdict_json(report.verdict_for_window(window, stencil));
+        c_try!(copy_json_value_to_c(
+            FN_NAME,
+            &value,
+            out,
+            out_len,
+            out_written,
+            out_required
+        ));
         SidereonStatus::Ok
     })
 }
@@ -1425,6 +1504,59 @@ pub unsafe extern "C" fn sidereon_sp3_merge(
         });
         *out_sp3 = Box::into_raw(sp3_handle);
         *out_report = Box::into_raw(report_handle);
+        SidereonStatus::Ok
+    })
+}
+
+/// Decide whether an optional merge continuity post-condition can influence an
+/// inclusive evaluation window through the merged product's derived stencil.
+///
+/// The result is the same JSON object returned by
+/// `sidereon_sp3_continuity_verdict_json`, or JSON `null` when continuity
+/// verification was not requested for the merge. The `merged` handle supplies
+/// the epoch interval and grid origin; no caller-provided stencil value is
+/// accepted.
+///
+/// Uses the standard variable-length byte-output contract; JSON bytes are not
+/// null-terminated.
+///
+/// Safety: `report` and `merged` must be live handles; `out` must reference
+/// `out_len` writable bytes, or be NULL when `out_len` is zero; both count
+/// pointers must reference writable size_t values.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn sidereon_sp3_merge_report_continuity_verdict_json(
+    report: *const SidereonSp3MergeReport,
+    merged: *const SidereonSp3,
+    from_j2000_s: f64,
+    through_j2000_s: f64,
+    out: *mut u8,
+    out_len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_sp3_merge_report_continuity_verdict_json";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(FN_NAME, out_written, out_required));
+        let report = c_try!(require_ref(report, FN_NAME, "report"));
+        let merged = c_try!(require_ref(merged, FN_NAME, "merged"));
+        let window = c_try!(EpochWindow::new(from_j2000_s, through_j2000_s)
+            .map_err(|error| map_sp3_argument_error(FN_NAME, error)));
+        let stencil = c_try!(StencilExtent::for_sp3(&merged.inner)
+            .map_err(|error| map_sp3_argument_error(FN_NAME, error)));
+        let value = report
+            .inner
+            .continuity_verdict_for_window(window, stencil)
+            .map(window_continuity_verdict_json)
+            .unwrap_or(serde_json::Value::Null);
+        c_try!(copy_json_value_to_c(
+            FN_NAME,
+            &value,
+            out,
+            out_len,
+            out_written,
+            out_required
+        ));
         SidereonStatus::Ok
     })
 }
@@ -2479,6 +2611,143 @@ pub unsafe extern "C" fn sidereon_sp3_observable_states_at_shared_j2000_s(
     )
 }
 
+fn continuity_options_from_c(
+    fn_name: &str,
+    orbit_class: i32,
+    residual_tolerance_m: f64,
+) -> Result<ContinuityOptions, SidereonStatus> {
+    let speed_bound = match orbit_class {
+        -1 => None,
+        0 => Some(SpeedBound::OrbitClass(OrbitClass::MeoGnss)),
+        1 => Some(SpeedBound::OrbitClass(OrbitClass::Geosynchronous)),
+        2 => Some(SpeedBound::OrbitClass(OrbitClass::Leo)),
+        _ => {
+            set_last_error(format!("{fn_name}: orbit_class must be -1, 0, 1, or 2"));
+            return Err(SidereonStatus::InvalidArgument);
+        }
+    };
+    Ok(ContinuityOptions {
+        speed_bound,
+        residual_tolerance_m: (residual_tolerance_m >= 0.0).then_some(residual_tolerance_m),
+    })
+}
+
+fn continuity_defect_json(defect: &ContinuityDefect) -> serde_json::Value {
+    let (kind, from_j2000_s, to_j2000_s, magnitude, bound) = match defect {
+        ContinuityDefect::DuplicateEpoch {
+            epoch_j2000_s,
+            occurrences,
+            ..
+        } => (
+            "duplicate_epoch",
+            Some(*epoch_j2000_s),
+            Some(*epoch_j2000_s),
+            Some(*occurrences as f64),
+            None,
+        ),
+        ContinuityDefect::SingleSampleSeries { .. } => {
+            ("single_sample_series", None, None, None, None)
+        }
+        ContinuityDefect::SpeedBound {
+            from_j2000_s,
+            to_j2000_s,
+            implied_speed_m_s,
+            bound_m_s,
+            ..
+        } => (
+            "speed_bound",
+            Some(*from_j2000_s),
+            Some(*to_j2000_s),
+            Some(*implied_speed_m_s),
+            Some(*bound_m_s),
+        ),
+        ContinuityDefect::HoldOutResidual {
+            preceding_j2000_s,
+            epoch_j2000_s,
+            residual_m,
+            tolerance_m,
+            ..
+        } => (
+            "hold_out_residual",
+            Some(*preceding_j2000_s),
+            Some(*epoch_j2000_s),
+            Some(*residual_m),
+            Some(*tolerance_m),
+        ),
+    };
+    serde_json::json!({
+        "kind": kind,
+        "satellite": defect.satellite().to_string(),
+        "from_j2000_s": from_j2000_s,
+        "to_j2000_s": to_j2000_s,
+        "magnitude": magnitude,
+        "bound": bound,
+    })
+}
+
+fn merge_continuity_violation_json(violation: &MergeContinuityViolation) -> serde_json::Value {
+    serde_json::json!({
+        "defect": continuity_defect_json(&violation.defect),
+        "from_sources": violation.from_sources,
+        "to_sources": violation.to_sources,
+        "crosses_contributors": violation.crosses_contributors,
+    })
+}
+
+fn window_continuity_verdict_json(verdict: WindowContinuityVerdict<'_>) -> serde_json::Value {
+    let decision = match verdict.decision {
+        WindowContinuityDecision::Accept => "accept",
+        WindowContinuityDecision::Refuse => "refuse",
+    };
+    serde_json::json!({
+        "decision": decision,
+        "accepted": verdict.accepted(),
+        "influencing_defects": verdict
+            .influencing_defects
+            .into_iter()
+            .map(continuity_defect_json)
+            .collect::<Vec<_>>(),
+        "influencing_splices": verdict
+            .influencing_splices
+            .into_iter()
+            .map(merge_continuity_violation_json)
+            .collect::<Vec<_>>(),
+        "all_defects": verdict
+            .all_defects
+            .iter()
+            .map(continuity_defect_json)
+            .collect::<Vec<_>>(),
+        "all_splices": verdict
+            .all_splices
+            .into_iter()
+            .map(merge_continuity_violation_json)
+            .collect::<Vec<_>>(),
+    })
+}
+
+unsafe fn copy_json_value_to_c(
+    fn_name: &str,
+    value: &serde_json::Value,
+    out: *mut u8,
+    out_len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> Result<(), SidereonStatus> {
+    let json = serde_json::to_vec(value).map_err(|error| {
+        set_last_error(format!("{fn_name}: failed to serialize JSON: {error}"));
+        SidereonStatus::InvalidArgument
+    })?;
+    copy_prefix_to_c(
+        fn_name,
+        "out",
+        &json,
+        out,
+        out_len,
+        out_written,
+        out_required,
+    )
+}
+
 fn map_sp3_argument_error(fn_name: &str, err: CoreError) -> SidereonStatus {
     set_last_error(format!("{fn_name}: {err}"));
     match err {
@@ -3116,5 +3385,279 @@ mod exact_sp3_c_tests {
             exact_sp3_coverage_to_c(CoreExactSp3Coverage::Inclusive),
             SidereonExactSp3Coverage::Inclusive
         );
+    }
+}
+
+#[cfg(test)]
+mod window_continuity_c_tests {
+    use std::ptr;
+
+    use super::*;
+
+    fn product_with_seam_jump() -> (SidereonSp3, Vec<f64>, f64) {
+        let product = Sp3::parse(include_bytes!(
+            "../tests/fixtures/sp3/COD0MGXFIN_20201770000_01D_05M_ORB.SP3"
+        ))
+        .expect("parse established C SP3 fixture");
+        let mut epoch_index = -1_i32;
+        let mut shifted = 0_usize;
+        let mut changed = String::new();
+        for source_line in product.to_sp3_string().lines() {
+            let mut line = source_line.to_string();
+            if line.starts_with("* ") {
+                epoch_index += 1;
+            } else if epoch_index >= 145 && line.starts_with("PG01") {
+                let x_km = line[4..18].trim().parse::<f64>().expect("G01 x value");
+                line.replace_range(4..18, &format!("{:14.6}", x_km + 3_000.0));
+                shifted += 1;
+            }
+            changed.push_str(&line);
+            changed.push('\n');
+        }
+        assert!(shifted > 0);
+
+        let inner = Sp3::parse(changed.as_bytes()).expect("parse seam-injected fixture");
+        let epochs = inner.epochs_j2000_seconds();
+        let seam = epochs[144];
+        (SidereonSp3 { inner }, epochs, seam)
+    }
+
+    fn verdict_json(
+        sp3: &SidereonSp3,
+        from_j2000_s: f64,
+        through_j2000_s: f64,
+    ) -> serde_json::Value {
+        let mut written = usize::MAX;
+        let mut required = usize::MAX;
+        assert_eq!(
+            unsafe {
+                sidereon_sp3_continuity_verdict_json(
+                    sp3,
+                    0,
+                    -1.0,
+                    from_j2000_s,
+                    through_j2000_s,
+                    ptr::null_mut(),
+                    0,
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(written, 0);
+        assert!(required > 0);
+
+        let mut bytes = vec![0_u8; required];
+        assert_eq!(
+            unsafe {
+                sidereon_sp3_continuity_verdict_json(
+                    sp3,
+                    0,
+                    -1.0,
+                    from_j2000_s,
+                    through_j2000_s,
+                    bytes.as_mut_ptr(),
+                    bytes.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(written, required);
+        serde_json::from_slice(&bytes[..written]).expect("verdict JSON")
+    }
+
+    fn merge_verdict_json(
+        report: &SidereonSp3MergeReport,
+        merged: &SidereonSp3,
+        from_j2000_s: f64,
+        through_j2000_s: f64,
+    ) -> serde_json::Value {
+        let mut written = usize::MAX;
+        let mut required = usize::MAX;
+        assert_eq!(
+            unsafe {
+                sidereon_sp3_merge_report_continuity_verdict_json(
+                    report,
+                    merged,
+                    from_j2000_s,
+                    through_j2000_s,
+                    ptr::null_mut(),
+                    0,
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(written, 0);
+        assert!(required > 0);
+
+        let mut bytes = vec![0_u8; required];
+        assert_eq!(
+            unsafe {
+                sidereon_sp3_merge_report_continuity_verdict_json(
+                    report,
+                    merged,
+                    from_j2000_s,
+                    through_j2000_s,
+                    bytes.as_mut_ptr(),
+                    bytes.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(written, required);
+        serde_json::from_slice(&bytes[..written]).expect("merge verdict JSON")
+    }
+
+    #[test]
+    fn c_window_mapping_covers_inside_straddling_and_stencil_boundary_cases() {
+        let (sp3, epochs, seam) = product_with_seam_jump();
+        let mut before_s = f64::NAN;
+        let mut after_s = f64::NAN;
+        assert_eq!(
+            unsafe { sidereon_sp3_stencil_extent(&sp3, &mut before_s, &mut after_s) },
+            SidereonStatus::Ok
+        );
+        assert_eq!((before_s, after_s), (1_500.0, 1_500.0));
+
+        let inside = verdict_json(&sp3, epochs[24], epochs[72]);
+        assert_eq!(inside["decision"], "accept");
+        assert_eq!(inside["accepted"], true);
+        assert_eq!(inside["influencing_defects"], serde_json::json!([]));
+        assert_eq!(inside["influencing_splices"], serde_json::json!([]));
+        assert_eq!(inside["all_splices"], serde_json::json!([]));
+        let all_defects = inside["all_defects"].as_array().expect("all defects");
+        assert_eq!(all_defects.len(), 1);
+        assert_eq!(all_defects[0]["kind"], "speed_bound");
+        assert_eq!(all_defects[0]["satellite"], "G01");
+        assert_eq!(all_defects[0]["from_j2000_s"], seam);
+        assert_eq!(all_defects[0]["to_j2000_s"], seam + 300.0);
+
+        let straddling = verdict_json(&sp3, seam - 600.0, seam + 600.0);
+        assert_eq!(straddling["decision"], "refuse");
+        assert_eq!(straddling["accepted"], false);
+        assert_eq!(straddling["influencing_defects"], straddling["all_defects"]);
+
+        let reaches_seam = verdict_json(&sp3, seam - 7_200.0, seam - after_s);
+        assert_eq!(reaches_seam["decision"], "refuse");
+        assert_eq!(
+            reaches_seam["influencing_defects"]
+                .as_array()
+                .expect("influencing defects")
+                .len(),
+            1
+        );
+
+        let misses_seam = verdict_json(&sp3, seam - 7_200.0, seam - after_s - 0.001);
+        assert_eq!(misses_seam["decision"], "accept");
+        assert_eq!(misses_seam["influencing_defects"], serde_json::json!([]));
+        assert_eq!(
+            misses_seam["all_defects"]
+                .as_array()
+                .expect("all defects")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn c_merge_window_mapping_retains_influencing_and_global_splices() {
+        let (sp3, _, seam) = product_with_seam_jump();
+        let mut options = MergeOptions::default();
+        options.min_agree = 1;
+        options.clock_min_common = 1;
+        let (merged_inner, mut report_inner) =
+            merge(&[sp3.inner], &options).expect("merge established fixture");
+        let sat = merged_inner.satellites()[0];
+        let defect = ContinuityDefect::SpeedBound {
+            sat,
+            from_j2000_s: seam,
+            to_j2000_s: seam + 300.0,
+            interval_s: 300.0,
+            displacement_m: 3_000_000.0,
+            implied_speed_m_s: 10_000.0,
+            bound_m_s: 6_000.0,
+        };
+        report_inner.continuity = Some(sidereon_core::ephemeris::MergeContinuityReport {
+            report: sidereon_core::ephemeris::ContinuityReport {
+                defects: vec![defect.clone()],
+                ..sidereon_core::ephemeris::ContinuityReport::default()
+            },
+            violations: vec![MergeContinuityViolation {
+                defect,
+                from_sources: vec![0],
+                to_sources: vec![1],
+                crosses_contributors: true,
+            }],
+        });
+        let epoch_agreement = report_inner.per_epoch_agreement();
+        let report = SidereonSp3MergeReport {
+            inner: report_inner,
+            epoch_agreement,
+        };
+        let merged = SidereonSp3 {
+            inner: merged_inner,
+        };
+
+        let verdict = merge_verdict_json(&report, &merged, seam - 600.0, seam + 600.0);
+        assert_eq!(verdict["decision"], "refuse");
+        assert_eq!(verdict["accepted"], false);
+        assert_eq!(verdict["influencing_defects"], verdict["all_defects"]);
+        assert_eq!(verdict["influencing_splices"], verdict["all_splices"]);
+        let splice = &verdict["influencing_splices"][0];
+        assert_eq!(splice["defect"]["kind"], "speed_bound");
+        assert_eq!(splice["from_sources"], serde_json::json!([0]));
+        assert_eq!(splice["to_sources"], serde_json::json!([1]));
+        assert_eq!(splice["crosses_contributors"], true);
+    }
+
+    #[test]
+    fn c_window_mapping_rejects_invalid_window_and_selector() {
+        let (sp3, epochs, _) = product_with_seam_jump();
+        let mut written = usize::MAX;
+        let mut required = usize::MAX;
+        assert_eq!(
+            unsafe {
+                sidereon_sp3_continuity_verdict_json(
+                    &sp3,
+                    0,
+                    -1.0,
+                    epochs[1],
+                    epochs[0],
+                    ptr::null_mut(),
+                    0,
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+        assert_eq!((written, required), (0, 0));
+
+        written = usize::MAX;
+        required = usize::MAX;
+        assert_eq!(
+            unsafe {
+                sidereon_sp3_continuity_verdict_json(
+                    &sp3,
+                    99,
+                    -1.0,
+                    epochs[0],
+                    epochs[1],
+                    ptr::null_mut(),
+                    0,
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+        assert_eq!((written, required), (0, 0));
     }
 }

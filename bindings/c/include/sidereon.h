@@ -20210,6 +20210,35 @@ enum SidereonStatus sidereon_data_newest_published_product_json(const char *cent
                                                                 size_t *out_required);
 
 /**
+ * Return the next catalog issue nominally due at or after a UTC instant as a
+ * JSON object.
+ *
+ * This is a pure catalog query and performs no archive access. The object
+ * contains the exact product `identity`, its UTC `due_at`, and half-open
+ * `covers.observed` / `covers.predicted` UTC intervals (each nullable).
+ * `family` is one SidereonProductFamily_* value encoded as uint32_t.
+ *
+ * Uses the standard variable-length byte-output contract; JSON bytes are not
+ * null-terminated.
+ *
+ * Safety: `center` must reference a null-terminated UTF-8 string; `out` must
+ * reference `out_len` writable bytes, or be NULL when `out_len` is zero; both
+ * count pointers must reference writable size_t values.
+ */
+enum SidereonStatus sidereon_data_next_issue_due_json(const char *center,
+                                                      uint32_t family,
+                                                      int32_t year,
+                                                      uint8_t month,
+                                                      uint8_t day,
+                                                      uint8_t hour,
+                                                      uint8_t minute,
+                                                      uint8_t second,
+                                                      uint8_t *out,
+                                                      size_t out_len,
+                                                      size_t *out_written,
+                                                      size_t *out_required);
+
+/**
  * Copy the ordered cross-line candidates for one predicted IONEX map date
  * as a JSON array.
  *
@@ -30678,6 +30707,33 @@ enum SidereonStatus sidereon_sp3_clock_reference_offsets(const struct SidereonSp
                                                          size_t *out_required);
 
 /**
+ * Decide whether product-wide continuity findings can influence an inclusive
+ * evaluation window through this product's derived interpolation stencil.
+ *
+ * The JSON object contains `decision` (`"accept"` or `"refuse"`), `accepted`,
+ * the influencing defect and splice arrays, and the complete defect and splice
+ * arrays. Standalone checks always have empty splice arrays. `orbit_class` and
+ * `residual_tolerance_m` use the same selectors as
+ * `sidereon_sp3_check_continuity`.
+ *
+ * Uses the standard variable-length byte-output contract; JSON bytes are not
+ * null-terminated.
+ *
+ * Safety: `sp3` must be a live handle; `out` must reference `out_len` writable
+ * bytes, or be NULL when `out_len` is zero; both count pointers must reference
+ * writable size_t values.
+ */
+enum SidereonStatus sidereon_sp3_continuity_verdict_json(const struct SidereonSp3 *sp3,
+                                                         int32_t orbit_class,
+                                                         double residual_tolerance_m,
+                                                         double from_j2000_s,
+                                                         double through_j2000_s,
+                                                         uint8_t *out,
+                                                         size_t out_len,
+                                                         size_t *out_written,
+                                                         size_t *out_required);
+
+/**
  * Write the epoch count declared on SP3 header line 1.
  *
  * This may differ from `sidereon_sp3_epoch_count` for a truncated product
@@ -31062,6 +31118,32 @@ enum SidereonStatus sidereon_sp3_merge_report_agreement_summary(const struct Sid
                                                                 struct SidereonSp3AgreementSummary *out_summary);
 
 /**
+ * Decide whether an optional merge continuity post-condition can influence an
+ * inclusive evaluation window through the merged product's derived stencil.
+ *
+ * The result is the same JSON object returned by
+ * `sidereon_sp3_continuity_verdict_json`, or JSON `null` when continuity
+ * verification was not requested for the merge. The `merged` handle supplies
+ * the epoch interval and grid origin; no caller-provided stencil value is
+ * accepted.
+ *
+ * Uses the standard variable-length byte-output contract; JSON bytes are not
+ * null-terminated.
+ *
+ * Safety: `report` and `merged` must be live handles; `out` must reference
+ * `out_len` writable bytes, or be NULL when `out_len` is zero; both count
+ * pointers must reference writable size_t values.
+ */
+enum SidereonStatus sidereon_sp3_merge_report_continuity_verdict_json(const struct SidereonSp3MergeReport *report,
+                                                                      const struct SidereonSp3 *merged,
+                                                                      double from_j2000_s,
+                                                                      double through_j2000_s,
+                                                                      uint8_t *out,
+                                                                      size_t out_len,
+                                                                      size_t *out_written,
+                                                                      size_t *out_required);
+
+/**
  * Copy one per-epoch agreement entry (by zero-based output-epoch index) into
  * *out_agreement. Fails with SIDEREON_STATUS_INVALID_ARGUMENT if index is out of
  * range (see sidereon_sp3_merge_report_epoch_agreement_count).
@@ -31385,6 +31467,20 @@ enum SidereonStatus sidereon_sp3_state(const struct SidereonSp3 *sp3,
                                        const char *sat_id,
                                        size_t epoch_index,
                                        struct SidereonSp3State *out_state);
+
+/**
+ * Write the time reach of the SP3 position interpolator before and after a
+ * query, in seconds.
+ *
+ * The core derives both values from this product's declared epoch interval and
+ * interpolation-node count. The caller never supplies a stencil duration.
+ *
+ * Safety: `sp3` must be a live handle and both output pointers must reference
+ * writable doubles.
+ */
+enum SidereonStatus sidereon_sp3_stencil_extent(const struct SidereonSp3 *sp3,
+                                                double *out_before_s,
+                                                double *out_after_s);
 
 /**
  * Export the product as SP3 text bytes. The output is not null-terminated.
