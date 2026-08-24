@@ -84,6 +84,21 @@ existing callers from here.
 
 ## Unreleased
 
+### Added
+
+- `sidereon_locate_source_with` can skip per-sensor leave-one-out influence
+  solves while preserving every other source-solution output bit-for-bit; the
+  existing `sidereon_locate_source` continues to include influence diagnostics.
+- `sidereon_closed_form_initial_guess` names the source-localization seed
+  accurately. `sidereon_chan_ho_initial_guess` remains exported as a deprecated
+  alias.
+
+### Changed
+
+- Source-sensor influence scores are
+  `max(abs(residual_s), abs(leave_one_out_residual_s)) / timing_sigma_s`;
+  robust downweighting is represented only by `loss_weight`.
+
 ## 0.36.3 - 2026-08-04
 
 - Builds against `sidereon` and `sidereon-core` 0.36.3:

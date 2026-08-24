@@ -4286,14 +4286,15 @@ use sidereon_core::estimation as core_estimation;
 // --- 0.13 source localization ----------------------------------------------
 
 use sidereon_core::source_localization::{
-    chan_ho_initial_guess as core_chan_ho_initial_guess, locate_source as core_locate_source,
+    closed_form_initial_guess as core_closed_form_initial_guess,
+    locate_source as core_locate_source, locate_source_with as core_locate_source_with,
     source_crlb as core_source_crlb, source_dop as core_source_dop, Loss as SourceLossInner,
     Sensor as CoreSourceSensor, SourceCovariance as CoreSourceCovariance,
     SourceCrlb as CoreSourceCrlb, SourceInitialGuess as CoreSourceInitialGuess,
     SourceLocalizationError as CoreSourceLocalizationError,
-    SourceLocateOptions as CoreSourceLocateOptions, SourceResidual as CoreSourceResidual,
-    SourceSensorInfluence as CoreSourceSensorInfluence, SourceSolution as CoreSourceSolution,
-    SourceSolveMode as CoreSourceSolveMode,
+    SourceLocateConfig as CoreSourceLocateConfig, SourceLocateOptions as CoreSourceLocateOptions,
+    SourceResidual as CoreSourceResidual, SourceSensorInfluence as CoreSourceSensorInfluence,
+    SourceSolution as CoreSourceSolution, SourceSolveMode as CoreSourceSolveMode,
 };
 
 fn zero_vec3_from_slice(values: &[f64]) -> [f64; 3] {

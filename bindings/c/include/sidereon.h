@@ -9270,8 +9270,8 @@ typedef struct SidereonLnavOptions {
 } SidereonLnavOptions;
 
 /**
- * Options for sidereon_locate_source. Initialize with
- * sidereon_source_locate_options_init for the core defaults.
+ * Options for sidereon_locate_source and sidereon_locate_source_with.
+ * Initialize with sidereon_source_locate_options_init for the core defaults.
  */
 typedef struct SidereonSourceLocateOptions {
     /**
@@ -16418,7 +16418,8 @@ typedef struct SidereonSourceSensorInfluence {
      */
     double loss_weight;
     /**
-     * Normalized diagnostic score. Larger means poorer fit.
+     * max(abs(residual_s), abs(leave_one_out_residual_s)) / timing_sigma_s.
+     * Robust downweighting is represented only by loss_weight.
      */
     double score;
 } SidereonSourceSensorInfluence;
@@ -19095,7 +19096,8 @@ enum SidereonStatus sidereon_cfar_ca_threshold(size_t searched_cells,
                                                double *out_threshold);
 
 /**
- * Compute the closed-form source-localization initial guess.
+ * Deprecated: use sidereon_closed_form_initial_guess. Computes the same
+ * closed-form source-localization initial guess.
  *
  * Safety: sensors and arrival_times_s point to sensor_count entries; out_guess
  * must point to a SidereonSourceInitialGuess.
@@ -19366,6 +19368,20 @@ enum SidereonStatus sidereon_clock_time_deviation(const struct SidereonAllanSamp
                                                   size_t len,
                                                   size_t *out_written,
                                                   size_t *out_required);
+
+/**
+ * Compute the closed-form source-localization initial guess.
+ *
+ * Safety: sensors and arrival_times_s point to sensor_count entries; out_guess
+ * must point to a SidereonSourceInitialGuess.
+ */
+enum SidereonStatus sidereon_closed_form_initial_guess(const struct SidereonSourceSensor *sensors,
+                                                       size_t sensor_count,
+                                                       const double *arrival_times_s,
+                                                       double propagation_speed_m_s,
+                                                       uint32_t mode,
+                                                       size_t reference_sensor,
+                                                       struct SidereonSourceInitialGuess *out_guess);
 
 enum SidereonStatus sidereon_cnav_ura_ned_m(const struct SidereonCnavParameters *params,
                                             uint32_t query_week,
@@ -23630,7 +23646,9 @@ enum SidereonStatus sidereon_lnav_encode(const struct SidereonLnavParams *params
  * Locate a source from sensor arrival times. Sensor positions are caller-owned
  * 2D or 3D Cartesian coordinates in meters. Arrival times are seconds, and
  * propagation_speed_m_s is meters per second. options may be NULL for defaults.
- * On success writes a newly owned handle to *out_solution.
+ * This legacy entry point always computes per-sensor influence diagnostics and
+ * is equivalent to sidereon_locate_source_with with include_influence true. On
+ * success writes a newly owned handle to *out_solution.
  *
  * Safety: sensors and arrival_times_s point to sensor_count entries or NULL
  * when sensor_count is 0; options is NULL or points to options; out_solution
@@ -23642,6 +23660,25 @@ enum SidereonStatus sidereon_locate_source(const struct SidereonSourceSensor *se
                                            double propagation_speed_m_s,
                                            const struct SidereonSourceLocateOptions *options,
                                            struct SidereonSourceSolution **out_solution);
+
+/**
+ * Locate a source from sensor arrival times, optionally omitting influence
+ * diagnostics. This has the same contract as sidereon_locate_source. When
+ * include_influence is false, the per-sensor leave-one-out solves are skipped
+ * and the solution's influence list is empty; all other output is bit-identical
+ * to sidereon_locate_source.
+ *
+ * Safety: sensors and arrival_times_s point to sensor_count entries or NULL
+ * when sensor_count is 0; options is NULL or points to options; out_solution
+ * points to storage for a SidereonSourceSolution*.
+ */
+enum SidereonStatus sidereon_locate_source_with(const struct SidereonSourceSensor *sensors,
+                                                size_t sensor_count,
+                                                const double *arrival_times_s,
+                                                double propagation_speed_m_s,
+                                                const struct SidereonSourceLocateOptions *options,
+                                                bool include_influence,
+                                                struct SidereonSourceSolution **out_solution);
 
 /**
  * Write the number of epochs in a look-angle arc to *out_count.
@@ -30541,7 +30578,8 @@ enum SidereonStatus sidereon_source_solution_covariance(const struct SidereonSou
 /**
  * Release a source-localization solution handle. Null is a no-op.
  *
- * Safety: solution must be NULL or a live handle from sidereon_locate_source.
+ * Safety: solution must be NULL or a live handle from sidereon_locate_source or
+ * sidereon_locate_source_with.
  */
 void sidereon_source_solution_free(struct SidereonSourceSolution *solution);
 

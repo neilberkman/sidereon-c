@@ -49,8 +49,8 @@ pub struct SidereonSourceSensor {
     pub propagation_speed_m_s: f64,
 }
 
-/// Options for sidereon_locate_source. Initialize with
-/// sidereon_source_locate_options_init for the core defaults.
+/// Options for sidereon_locate_source and sidereon_locate_source_with.
+/// Initialize with sidereon_source_locate_options_init for the core defaults.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct SidereonSourceLocateOptions {
@@ -154,7 +154,8 @@ pub struct SidereonSourceSensorInfluence {
     pub origin_time_delta_s: f64,
     /// First-derivative loss weight for the full residual.
     pub loss_weight: f64,
-    /// Normalized diagnostic score. Larger means poorer fit.
+    /// max(abs(residual_s), abs(leave_one_out_residual_s)) / timing_sigma_s.
+    /// Robust downweighting is represented only by loss_weight.
     pub score: f64,
 }
 
@@ -248,7 +249,9 @@ pub unsafe extern "C" fn sidereon_source_locate_options_init(
 /// Locate a source from sensor arrival times. Sensor positions are caller-owned
 /// 2D or 3D Cartesian coordinates in meters. Arrival times are seconds, and
 /// propagation_speed_m_s is meters per second. options may be NULL for defaults.
-/// On success writes a newly owned handle to *out_solution.
+/// This legacy entry point always computes per-sensor influence diagnostics and
+/// is equivalent to sidereon_locate_source_with with include_influence true. On
+/// success writes a newly owned handle to *out_solution.
 ///
 /// Safety: sensors and arrival_times_s point to sensor_count entries or NULL
 /// when sensor_count is 0; options is NULL or points to options; out_solution
@@ -291,7 +294,144 @@ pub unsafe extern "C" fn sidereon_locate_source(
     })
 }
 
+/// Locate a source from sensor arrival times, optionally omitting influence
+/// diagnostics. This has the same contract as sidereon_locate_source. When
+/// include_influence is false, the per-sensor leave-one-out solves are skipped
+/// and the solution's influence list is empty; all other output is bit-identical
+/// to sidereon_locate_source.
+///
+/// Safety: sensors and arrival_times_s point to sensor_count entries or NULL
+/// when sensor_count is 0; options is NULL or points to options; out_solution
+/// points to storage for a SidereonSourceSolution*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_locate_source_with(
+    sensors: *const SidereonSourceSensor,
+    sensor_count: usize,
+    arrival_times_s: *const f64,
+    propagation_speed_m_s: f64,
+    options: *const SidereonSourceLocateOptions,
+    include_influence: bool,
+    out_solution: *mut *mut SidereonSourceSolution,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_locate_source_with", SidereonStatus::Panic, || {
+        let out_solution = c_try!(require_out(
+            out_solution,
+            "sidereon_locate_source_with",
+            "out_solution"
+        ));
+        *out_solution = ptr::null_mut();
+        let parsed_sensors = c_try!(source_sensors_from_c(
+            "sidereon_locate_source_with",
+            sensors,
+            sensor_count
+        ));
+        let arrivals = c_try!(require_slice(
+            arrival_times_s,
+            sensor_count,
+            "sidereon_locate_source_with",
+            "arrival_times_s"
+        ));
+        let options = c_try!(source_options_from_c(
+            "sidereon_locate_source_with",
+            options
+        ));
+        let mut config = CoreSourceLocateConfig::default();
+        config.options = options;
+        config.include_influence = include_influence;
+        match core_locate_source_with(&parsed_sensors, arrivals, propagation_speed_m_s, &config) {
+            Ok(inner) => {
+                write_boxed_handle(out_solution, SidereonSourceSolution { inner });
+                SidereonStatus::Ok
+            }
+            Err(err) => map_source_localization_error("sidereon_locate_source_with", err),
+        }
+    })
+}
+
+struct SourceInitialGuessCall {
+    sensors: *const SidereonSourceSensor,
+    sensor_count: usize,
+    arrival_times_s: *const f64,
+    propagation_speed_m_s: f64,
+    mode: u32,
+    reference_sensor: usize,
+    out_guess: *mut SidereonSourceInitialGuess,
+}
+
+unsafe fn source_initial_guess_impl(
+    fn_name: &'static str,
+    call: SourceInitialGuessCall,
+) -> SidereonStatus {
+    ffi_boundary(fn_name, SidereonStatus::Panic, || {
+        let out_guess = c_try!(require_out(call.out_guess, fn_name, "out_guess"));
+        *out_guess = SidereonSourceInitialGuess {
+            dimension: 0,
+            position_m: [0.0; 3],
+            has_origin_time_s: false,
+            origin_time_s: 0.0,
+            residual_rms_s: 0.0,
+        };
+        let parsed_sensors = c_try!(source_sensors_from_c(
+            fn_name,
+            call.sensors,
+            call.sensor_count
+        ));
+        let arrivals = c_try!(require_slice(
+            call.arrival_times_s,
+            call.sensor_count,
+            fn_name,
+            "arrival_times_s"
+        ));
+        let mode = c_try!(source_solve_mode_from_c(
+            fn_name,
+            call.mode,
+            call.reference_sensor
+        ));
+        match core_closed_form_initial_guess(
+            &parsed_sensors,
+            arrivals,
+            call.propagation_speed_m_s,
+            mode,
+        ) {
+            Ok(guess) => {
+                *out_guess = source_initial_guess_to_c(&guess);
+                SidereonStatus::Ok
+            }
+            Err(err) => map_source_localization_error(fn_name, err),
+        }
+    })
+}
+
 /// Compute the closed-form source-localization initial guess.
+///
+/// Safety: sensors and arrival_times_s point to sensor_count entries; out_guess
+/// must point to a SidereonSourceInitialGuess.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_closed_form_initial_guess(
+    sensors: *const SidereonSourceSensor,
+    sensor_count: usize,
+    arrival_times_s: *const f64,
+    propagation_speed_m_s: f64,
+    mode: u32,
+    reference_sensor: usize,
+    out_guess: *mut SidereonSourceInitialGuess,
+) -> SidereonStatus {
+    source_initial_guess_impl(
+        "sidereon_closed_form_initial_guess",
+        SourceInitialGuessCall {
+            sensors,
+            sensor_count,
+            arrival_times_s,
+            propagation_speed_m_s,
+            mode,
+            reference_sensor,
+            out_guess,
+        },
+    )
+}
+
+/// Deprecated: use sidereon_closed_form_initial_guess. Computes the same
+/// closed-form source-localization initial guess.
 ///
 /// Safety: sensors and arrival_times_s point to sensor_count entries; out_guess
 /// must point to a SidereonSourceInitialGuess.
@@ -305,46 +445,16 @@ pub unsafe extern "C" fn sidereon_chan_ho_initial_guess(
     reference_sensor: usize,
     out_guess: *mut SidereonSourceInitialGuess,
 ) -> SidereonStatus {
-    ffi_boundary(
+    source_initial_guess_impl(
         "sidereon_chan_ho_initial_guess",
-        SidereonStatus::Panic,
-        || {
-            let out_guess = c_try!(require_out(
-                out_guess,
-                "sidereon_chan_ho_initial_guess",
-                "out_guess"
-            ));
-            *out_guess = SidereonSourceInitialGuess {
-                dimension: 0,
-                position_m: [0.0; 3],
-                has_origin_time_s: false,
-                origin_time_s: 0.0,
-                residual_rms_s: 0.0,
-            };
-            let parsed_sensors = c_try!(source_sensors_from_c(
-                "sidereon_chan_ho_initial_guess",
-                sensors,
-                sensor_count
-            ));
-            let arrivals = c_try!(require_slice(
-                arrival_times_s,
-                sensor_count,
-                "sidereon_chan_ho_initial_guess",
-                "arrival_times_s"
-            ));
-            let mode = c_try!(source_solve_mode_from_c(
-                "sidereon_chan_ho_initial_guess",
-                mode,
-                reference_sensor
-            ));
-            match core_chan_ho_initial_guess(&parsed_sensors, arrivals, propagation_speed_m_s, mode)
-            {
-                Ok(guess) => {
-                    *out_guess = source_initial_guess_to_c(&guess);
-                    SidereonStatus::Ok
-                }
-                Err(err) => map_source_localization_error("sidereon_chan_ho_initial_guess", err),
-            }
+        SourceInitialGuessCall {
+            sensors,
+            sensor_count,
+            arrival_times_s,
+            propagation_speed_m_s,
+            mode,
+            reference_sensor,
+            out_guess,
         },
     )
 }
@@ -597,7 +707,8 @@ pub unsafe extern "C" fn sidereon_source_solution_influences(
 
 /// Release a source-localization solution handle. Null is a no-op.
 ///
-/// Safety: solution must be NULL or a live handle from sidereon_locate_source.
+/// Safety: solution must be NULL or a live handle from sidereon_locate_source or
+/// sidereon_locate_source_with.
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_source_solution_free(solution: *mut SidereonSourceSolution) {
     ffi_boundary("sidereon_source_solution_free", (), || {
@@ -803,5 +914,270 @@ fn source_solve_mode_from_c(
             set_last_error(format!("{fn_name}: invalid source solve mode"));
             Err(SidereonStatus::InvalidArgument)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::mem::MaybeUninit;
+
+    fn arrivals(
+        sensors: &[SidereonSourceSensor],
+        source_m: &[f64],
+        origin_time_s: f64,
+        propagation_speed_m_s: f64,
+    ) -> Vec<f64> {
+        sensors
+            .iter()
+            .map(|sensor| {
+                let distance_m = sensor.position_m[..sensor.dimension]
+                    .iter()
+                    .zip(source_m)
+                    .map(|(&sensor_coordinate, &source_coordinate)| {
+                        (source_coordinate - sensor_coordinate).powi(2)
+                    })
+                    .sum::<f64>()
+                    .sqrt();
+                origin_time_s + distance_m / propagation_speed_m_s
+            })
+            .collect()
+    }
+
+    fn default_options() -> SidereonSourceLocateOptions {
+        let mut options = MaybeUninit::uninit();
+        assert_eq!(
+            unsafe { sidereon_source_locate_options_init(options.as_mut_ptr()) },
+            SidereonStatus::Ok
+        );
+        unsafe { options.assume_init() }
+    }
+
+    fn solution_summary(solution: *const SidereonSourceSolution) -> SidereonSourceSolutionSummary {
+        let mut summary = MaybeUninit::uninit();
+        assert_eq!(
+            unsafe { sidereon_source_solution_summary(solution, summary.as_mut_ptr()) },
+            SidereonStatus::Ok
+        );
+        unsafe { summary.assume_init() }
+    }
+
+    fn assert_position_and_origin_bits_equal(
+        actual: &SidereonSourceSolutionSummary,
+        expected: &SidereonSourceSolutionSummary,
+    ) {
+        assert_eq!(actual.dimension, expected.dimension);
+        for (actual, expected) in actual.position_m.iter().zip(expected.position_m) {
+            assert_eq!(actual.to_bits(), expected.to_bits());
+        }
+        assert_eq!(actual.has_origin_time_s, expected.has_origin_time_s);
+        assert_eq!(
+            actual.origin_time_s.to_bits(),
+            expected.origin_time_s.to_bits()
+        );
+    }
+
+    #[test]
+    fn locate_source_with_controls_influence_without_changing_solution_bits() {
+        let sensors = [
+            SidereonSourceSensor {
+                dimension: 3,
+                position_m: [0.0, 0.0, 0.0],
+                has_propagation_speed_m_s: false,
+                propagation_speed_m_s: 0.0,
+            },
+            SidereonSourceSensor {
+                dimension: 3,
+                position_m: [1200.0, 0.0, 0.0],
+                has_propagation_speed_m_s: false,
+                propagation_speed_m_s: 0.0,
+            },
+            SidereonSourceSensor {
+                dimension: 3,
+                position_m: [0.0, 900.0, 0.0],
+                has_propagation_speed_m_s: false,
+                propagation_speed_m_s: 0.0,
+            },
+            SidereonSourceSensor {
+                dimension: 3,
+                position_m: [0.0, 0.0, 700.0],
+                has_propagation_speed_m_s: false,
+                propagation_speed_m_s: 0.0,
+            },
+            SidereonSourceSensor {
+                dimension: 3,
+                position_m: [1100.0, 800.0, 600.0],
+                has_propagation_speed_m_s: false,
+                propagation_speed_m_s: 0.0,
+            },
+        ];
+        let speed = 343.0;
+        let mut times = arrivals(&sensors, &[320.0, 260.0, 180.0], 12.5, speed);
+        for (time, noise) in times
+            .iter_mut()
+            .zip([0.00031, -0.00022, 0.00017, -0.00008, 0.00041])
+        {
+            *time += noise;
+        }
+        let mut options = default_options();
+        options.timing_sigma_s = 0.001;
+
+        let mut legacy_solution = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_locate_source(
+                    sensors.as_ptr(),
+                    sensors.len(),
+                    times.as_ptr(),
+                    speed,
+                    &options,
+                    &mut legacy_solution,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        let mut explicit_solution = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_locate_source_with(
+                    sensors.as_ptr(),
+                    sensors.len(),
+                    times.as_ptr(),
+                    speed,
+                    &options,
+                    true,
+                    &mut explicit_solution,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        let mut lean_solution = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_locate_source_with(
+                    sensors.as_ptr(),
+                    sensors.len(),
+                    times.as_ptr(),
+                    speed,
+                    &options,
+                    false,
+                    &mut lean_solution,
+                )
+            },
+            SidereonStatus::Ok
+        );
+
+        let legacy_summary = solution_summary(legacy_solution);
+        let explicit_summary = solution_summary(explicit_solution);
+        let lean_summary = solution_summary(lean_solution);
+        assert_eq!(legacy_summary.influence_count, sensors.len());
+        assert_eq!(explicit_summary.influence_count, sensors.len());
+        assert_eq!(lean_summary.influence_count, 0);
+        assert_position_and_origin_bits_equal(&explicit_summary, &legacy_summary);
+        assert_position_and_origin_bits_equal(&lean_summary, &legacy_summary);
+
+        let mut written = usize::MAX;
+        let mut required = usize::MAX;
+        assert_eq!(
+            unsafe {
+                sidereon_source_solution_influences(
+                    lean_solution,
+                    ptr::null_mut(),
+                    0,
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!((written, required), (0, 0));
+
+        unsafe {
+            sidereon_source_solution_free(lean_solution);
+            sidereon_source_solution_free(explicit_solution);
+            sidereon_source_solution_free(legacy_solution);
+        }
+    }
+
+    #[test]
+    fn initializer_exports_agree_on_clean_2d_toa_seed() {
+        let sensors = [
+            SidereonSourceSensor {
+                dimension: 2,
+                position_m: [0.0, 0.0, 0.0],
+                has_propagation_speed_m_s: false,
+                propagation_speed_m_s: 0.0,
+            },
+            SidereonSourceSensor {
+                dimension: 2,
+                position_m: [700.0, 0.0, 0.0],
+                has_propagation_speed_m_s: false,
+                propagation_speed_m_s: 0.0,
+            },
+            SidereonSourceSensor {
+                dimension: 2,
+                position_m: [0.0, 600.0, 0.0],
+                has_propagation_speed_m_s: false,
+                propagation_speed_m_s: 0.0,
+            },
+            SidereonSourceSensor {
+                dimension: 2,
+                position_m: [650.0, 550.0, 0.0],
+                has_propagation_speed_m_s: false,
+                propagation_speed_m_s: 0.0,
+            },
+        ];
+        let times = arrivals(&sensors, &[210.0, 170.0], 2.75, 343.0);
+        let mut closed_form = MaybeUninit::uninit();
+        assert_eq!(
+            unsafe {
+                sidereon_closed_form_initial_guess(
+                    sensors.as_ptr(),
+                    sensors.len(),
+                    times.as_ptr(),
+                    343.0,
+                    SidereonSourceSolveMode::Toa as u32,
+                    0,
+                    closed_form.as_mut_ptr(),
+                )
+            },
+            SidereonStatus::Ok
+        );
+        let closed_form = unsafe { closed_form.assume_init() };
+        let mut deprecated = MaybeUninit::uninit();
+        assert_eq!(
+            unsafe {
+                sidereon_chan_ho_initial_guess(
+                    sensors.as_ptr(),
+                    sensors.len(),
+                    times.as_ptr(),
+                    343.0,
+                    SidereonSourceSolveMode::Toa as u32,
+                    0,
+                    deprecated.as_mut_ptr(),
+                )
+            },
+            SidereonStatus::Ok
+        );
+        let deprecated = unsafe { deprecated.assume_init() };
+
+        assert_eq!(closed_form.dimension, 2);
+        assert!(closed_form.has_origin_time_s);
+        assert!((closed_form.position_m[0] - 210.0).abs() < 1.0e-8);
+        assert!((closed_form.position_m[1] - 170.0).abs() < 1.0e-8);
+        assert!((closed_form.origin_time_s - 2.75).abs() < 1.0e-10);
+        assert_eq!(closed_form.dimension, deprecated.dimension);
+        assert_eq!(closed_form.has_origin_time_s, deprecated.has_origin_time_s);
+        for (closed_form, deprecated) in closed_form.position_m.iter().zip(deprecated.position_m) {
+            assert_eq!(closed_form.to_bits(), deprecated.to_bits());
+        }
+        assert_eq!(
+            closed_form.origin_time_s.to_bits(),
+            deprecated.origin_time_s.to_bits()
+        );
+        assert_eq!(
+            closed_form.residual_rms_s.to_bits(),
+            deprecated.residual_rms_s.to_bits()
+        );
     }
 }

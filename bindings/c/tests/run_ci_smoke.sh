@@ -27,6 +27,16 @@ fi
 
 cc -std=c11 -Wall -Wextra -Werror \
     -I"${binding_root}/include" \
+    "${here}/source_localization_1_1_smoke.c" \
+    -L"${lib_dir}" \
+    -lsidereon \
+    -Wl,-rpath,"${lib_dir}" \
+    -lm \
+    -o "${target_dir}/source_localization_1_1_smoke_ci"
+"${target_dir}/source_localization_1_1_smoke_ci"
+
+cc -std=c11 -Wall -Wextra -Werror \
+    -I"${binding_root}/include" \
     "${here}/attested_open_surface_smoke.c" \
     -L"${lib_dir}" \
     -lsidereon \
