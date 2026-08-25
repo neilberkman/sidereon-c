@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- The committed header's `SIDEREON_VERSION_MAJOR/MINOR/PATCH/STRING` macros
+  still said 0.35.0 while `sidereon_version` and `sidereon_version_string`
+  reported the crate version. They now agree, and the CI smoke gate checks
+  them on every host. No API changes.
+
 ## 1.1.0 - 2026-08-24
 
 ### Added

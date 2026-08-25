@@ -56,10 +56,10 @@ usize_is_size_t = true
 # sidereon_version / sidereon_version_string accessors.
 after_includes = """
 
-#define SIDEREON_VERSION_MAJOR 0
-#define SIDEREON_VERSION_MINOR 35
+#define SIDEREON_VERSION_MAJOR 1
+#define SIDEREON_VERSION_MINOR 1
 #define SIDEREON_VERSION_PATCH 0
-#define SIDEREON_VERSION_STRING "0.35.0\""""
+#define SIDEREON_VERSION_STRING "1.1.0\""""
 
 [enum]
 # Idiomatic C enum constants: SidereonStatus::Ok -> SIDEREON_STATUS_OK.
