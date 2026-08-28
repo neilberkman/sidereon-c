@@ -119,3 +119,39 @@ cc -std=c11 -Wall -Wextra -Werror \
     -o "${target_dir}/window_continuity_smoke_ci"
 "${target_dir}/window_continuity_smoke_ci" \
     "${here}/fixtures/sp3/COD0MGXFIN_20201770000_01D_05M_ORB.SP3"
+
+cc -std=c11 -Wall -Wextra -Werror \
+    -I"${binding_root}/include" \
+    "${here}/fixed_policy_smoke.c" \
+    -L"${lib_dir}" \
+    -lsidereon \
+    -Wl,-rpath,"${lib_dir}" \
+    -lm \
+    -o "${target_dir}/fixed_policy_smoke_ci"
+"${target_dir}/fixed_policy_smoke_ci"
+
+cc -std=c11 -Wall -Wextra -Werror \
+    -I"${binding_root}/include" \
+    "${here}/rinex_nav_clock_smoke.c" \
+    -L"${lib_dir}" \
+    -lsidereon \
+    -Wl,-rpath,"${lib_dir}" \
+    -lm \
+    -o "${target_dir}/rinex_nav_clock_smoke_ci"
+"${target_dir}/rinex_nav_clock_smoke_ci" \
+    "${here}/fixtures/nav/ESBC00DNK_R_20201770000_01D_MN.rnx" \
+    "${here}/fixtures/clk/synthetic_rinex_clock.clk"
+
+cc -std=c11 -Wall -Wextra -Werror \
+    -I"${binding_root}/include" \
+    "${here}/rinex_rtk_dted_smoke.c" \
+    -L"${lib_dir}" \
+    -lsidereon \
+    -Wl,-rpath,"${lib_dir}" \
+    -lm \
+    -o "${target_dir}/rinex_rtk_dted_smoke_ci"
+"${target_dir}/rinex_rtk_dted_smoke_ci" \
+    "${here}/fixtures/sp3/GBM0MGXRAP_20201770000_01D_05M_ORB_120epoch.sp3" \
+    "${here}/fixtures/obs/WTZR00DEU_R_20201770000_01D_30S_MO_120epoch.rnx" \
+    "${here}/fixtures/obs/WTZZ00DEU_R_20201770000_01D_30S_MO_120epoch.rnx" \
+    "${here}/fixtures/dted/tiles"

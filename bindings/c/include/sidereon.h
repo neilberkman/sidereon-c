@@ -8,11 +8,28 @@
  * sidereon_sp3_load, sidereon_sp3_load_exact, sidereon_sp3_merge, sidereon_solve_spp,
  * sidereon_solve_spp_v2, sidereon_solve_rtk_float,
  * sidereon_solve_rtk_fixed, sidereon_solve_ppp_float, and
- * sidereon_solve_ppp_fixed, plus the TLE, propagation, pass-list, batch, and
- * ephemeris creation functions, transfer a newly allocated opaque handle to
- * the caller through an out-parameter. Release each non-null handle exactly
- * once with its matching _free function. Passing NULL to a _free function is a
- * no-op.
+ * sidereon_solve_ppp_fixed, plus the TLE, propagation, pass-list, batch,
+ * ephemeris, NAV, RINEX clock, SBAS log, and RINEX RTK creation functions,
+ * transfer a newly allocated opaque handle to the caller through an
+ * out-parameter. In particular, sidereon_broadcast_ephemeris_parse_nav and
+ * sidereon_broadcast_ephemeris_load_nav return SidereonBroadcastEphemeris
+ * handles released by sidereon_broadcast_ephemeris_free;
+ * sidereon_parse_rinex_nav_lenient and sidereon_parse_rinex_nav_records return
+ * handles released by sidereon_nav_parse_free and
+ * sidereon_rinex_nav_records_free respectively. The
+ * sidereon_parse_rinex_glonass_records handle retains representable state
+ * vectors and separately inspectable skipped extended-slot tokens, and is
+ * released by sidereon_rinex_glonass_records_free; and
+ * sidereon_rinex_clock_parse, sidereon_rinex_clock_parse_lossy,
+ * sidereon_rinex_clock_series, and sidereon_rinex_clock_series_for return
+ * handles released by sidereon_rinex_clock_free or
+ * sidereon_rinex_clock_series_free as appropriate. The SBAS log parsers return
+ * SidereonSbasLogBlocks released by sidereon_sbas_log_blocks_free, while the
+ * RINEX RTK builders return SidereonRtkRinexArc or
+ * SidereonRtkRinexDualFrequencyArc released by
+ * sidereon_rtk_rinex_arc_free or sidereon_rtk_rinex_dual_frequency_arc_free.
+ * Release each non-null handle exactly once with its matching _free function.
+ * Passing NULL to a _free function is a no-op.
  * Last-error storage is thread-local. Opaque handles are read-only shareable
  * after creation, but any concurrent _free invalidates the handle and any
  * borrowed pointers.
@@ -413,6 +430,76 @@ typedef enum SidereonSp3ContentStartConvention {
      */
     SIDEREON_SP3_CONTENT_START_CONVENTION_FILENAME_EPOCH_MINUS_ONE_DAY = 1,
 } SidereonSp3ContentStartConvention;
+
+/**
+ * A GNSS carrier band, mirroring sidereon_core::frequencies::CarrierBand.
+ */
+typedef enum SidereonCarrierBand {
+    /**
+     * GPS/QZSS L1.
+     */
+    SIDEREON_CARRIER_BAND_L1 = 0,
+    /**
+     * GPS/QZSS L2.
+     */
+    SIDEREON_CARRIER_BAND_L2 = 1,
+    /**
+     * GPS/QZSS/Galileo L5/E5a.
+     */
+    SIDEREON_CARRIER_BAND_L5 = 2,
+    /**
+     * Galileo E1.
+     */
+    SIDEREON_CARRIER_BAND_E1 = 3,
+    /**
+     * Galileo E5a.
+     */
+    SIDEREON_CARRIER_BAND_E5A = 4,
+    /**
+     * Galileo E5b.
+     */
+    SIDEREON_CARRIER_BAND_E5B = 5,
+    /**
+     * Galileo E5 (E5a+E5b).
+     */
+    SIDEREON_CARRIER_BAND_E5 = 6,
+    /**
+     * Galileo E6.
+     */
+    SIDEREON_CARRIER_BAND_E6 = 7,
+    /**
+     * BeiDou B1C.
+     */
+    SIDEREON_CARRIER_BAND_B1C = 8,
+    /**
+     * BeiDou B1I.
+     */
+    SIDEREON_CARRIER_BAND_B1I = 9,
+    /**
+     * BeiDou B2a.
+     */
+    SIDEREON_CARRIER_BAND_B2A = 10,
+    /**
+     * BeiDou B2b.
+     */
+    SIDEREON_CARRIER_BAND_B2B = 11,
+    /**
+     * BeiDou B2.
+     */
+    SIDEREON_CARRIER_BAND_B2 = 12,
+    /**
+     * BeiDou B3I.
+     */
+    SIDEREON_CARRIER_BAND_B3I = 13,
+    /**
+     * GLONASS G1.
+     */
+    SIDEREON_CARRIER_BAND_G1 = 14,
+    /**
+     * GLONASS G2.
+     */
+    SIDEREON_CARRIER_BAND_G2 = 15,
+} SidereonCarrierBand;
 
 /**
  * Eclipse status, mirroring sidereon_core::astro::events::eclipse::EclipseStatus.
@@ -1544,76 +1631,6 @@ typedef enum SidereonReducedOrbitFrame {
 } SidereonReducedOrbitFrame;
 
 /**
- * A GNSS carrier band, mirroring sidereon_core::frequencies::CarrierBand.
- */
-typedef enum SidereonCarrierBand {
-    /**
-     * GPS/QZSS L1.
-     */
-    SIDEREON_CARRIER_BAND_L1 = 0,
-    /**
-     * GPS/QZSS L2.
-     */
-    SIDEREON_CARRIER_BAND_L2 = 1,
-    /**
-     * GPS/QZSS/Galileo L5/E5a.
-     */
-    SIDEREON_CARRIER_BAND_L5 = 2,
-    /**
-     * Galileo E1.
-     */
-    SIDEREON_CARRIER_BAND_E1 = 3,
-    /**
-     * Galileo E5a.
-     */
-    SIDEREON_CARRIER_BAND_E5A = 4,
-    /**
-     * Galileo E5b.
-     */
-    SIDEREON_CARRIER_BAND_E5B = 5,
-    /**
-     * Galileo E5 (E5a+E5b).
-     */
-    SIDEREON_CARRIER_BAND_E5 = 6,
-    /**
-     * Galileo E6.
-     */
-    SIDEREON_CARRIER_BAND_E6 = 7,
-    /**
-     * BeiDou B1C.
-     */
-    SIDEREON_CARRIER_BAND_B1C = 8,
-    /**
-     * BeiDou B1I.
-     */
-    SIDEREON_CARRIER_BAND_B1I = 9,
-    /**
-     * BeiDou B2a.
-     */
-    SIDEREON_CARRIER_BAND_B2A = 10,
-    /**
-     * BeiDou B2b.
-     */
-    SIDEREON_CARRIER_BAND_B2B = 11,
-    /**
-     * BeiDou B2.
-     */
-    SIDEREON_CARRIER_BAND_B2 = 12,
-    /**
-     * BeiDou B3I.
-     */
-    SIDEREON_CARRIER_BAND_B3I = 13,
-    /**
-     * GLONASS G1.
-     */
-    SIDEREON_CARRIER_BAND_G1 = 14,
-    /**
-     * GLONASS G2.
-     */
-    SIDEREON_CARRIER_BAND_G2 = 15,
-} SidereonCarrierBand;
-
-/**
  * Error-state update algorithm used by a GNSS/INS fusion filter.
  */
 typedef enum SidereonFusionFilterKind {
@@ -1909,6 +1926,20 @@ typedef enum SidereonCdmStringField {
      */
     SIDEREON_CDM_STRING_FIELD_OBJECT2_NAME = 8,
 } SidereonCdmStringField;
+
+/**
+ * Representation tag for a scale-tagged RINEX clock instant.
+ */
+typedef enum SidereonRinexClockInstantRepresentation {
+    /**
+     * The instant is represented by `jd_whole` plus `jd_fraction`.
+     */
+    SIDEREON_RINEX_CLOCK_INSTANT_REPRESENTATION_JULIAN_DATE = 0,
+    /**
+     * The instant is represented by the signed 128-bit nanosecond pair.
+     */
+    SIDEREON_RINEX_CLOCK_INSTANT_REPRESENTATION_NANOS = 1,
+} SidereonRinexClockInstantRepresentation;
 
 /**
  * Geometric classification of a two-body orbit, mirroring
@@ -2984,6 +3015,12 @@ typedef struct SidereonBroadcastEphemeris SidereonBroadcastEphemeris;
 typedef struct SidereonCdm SidereonCdm;
 
 /**
+ * An owned per-satellite RINEX clock series. Samples remain valid until this
+ * handle is released.
+ */
+typedef struct SidereonClockSeries SidereonClockSeries;
+
+/**
  * A merged GNSS constellation identity catalog. Create with
  * sidereon_constellation_build and release with sidereon_constellation_free.
  */
@@ -3324,7 +3361,24 @@ typedef struct SidereonReliabilityReport SidereonReliabilityReport;
  */
 typedef struct SidereonRinexClock SidereonRinexClock;
 
+/**
+ * Owned list of representable parsed GLONASS RINEX state-vector records and
+ * separately inspectable skipped extended-slot diagnostics.
+ */
+typedef struct SidereonRinexGlonassRecords SidereonRinexGlonassRecords;
+
 typedef struct SidereonRinexLintReport SidereonRinexLintReport;
+
+/**
+ * A lenient RINEX NAV parse result. The owned handle retains both successfully
+ * parsed records and the core parser's skipped block diagnostics.
+ */
+typedef struct SidereonRinexNavParse SidereonRinexNavParse;
+
+/**
+ * Owned list of full, pre-filter RINEX NAV broadcast records.
+ */
+typedef struct SidereonRinexNavRecords SidereonRinexNavRecords;
 
 /**
  * A parsed RINEX 3 observation product. Create with sidereon_rinex_obs_parse and
@@ -3402,6 +3456,23 @@ typedef struct SidereonRtkFloatSolution SidereonRtkFloatSolution;
 typedef struct SidereonRtkIonosphereFreeArcSolution SidereonRtkIonosphereFreeArcSolution;
 
 /**
+ * A single-frequency RTK arc built from paired RINEX observations and an SP3
+ * ephemeris. Opaque to C. Create with sidereon_build_rinex_rtk_arc, read with
+ * the sidereon_rtk_rinex_arc_* accessors, and release with
+ * sidereon_rtk_rinex_arc_free.
+ */
+typedef struct SidereonRtkRinexArc SidereonRtkRinexArc;
+
+/**
+ * A dual-frequency RTK arc built from paired RINEX observations and an SP3
+ * ephemeris. Opaque to C. Create with
+ * sidereon_build_dual_frequency_rinex_rtk_arc, read with the
+ * sidereon_rtk_rinex_dual_frequency_arc_* accessors, and release with
+ * sidereon_rtk_rinex_dual_frequency_arc_free.
+ */
+typedef struct SidereonRtkRinexDualFrequencyArc SidereonRtkRinexDualFrequencyArc;
+
+/**
  * A solved static RTK arc. Opaque to C. Create with
  * sidereon_solve_static_rtk_arc; read with the
  * sidereon_rtk_static_arc_solution_* accessors; release with
@@ -3471,6 +3542,12 @@ typedef struct SidereonSatelliteConstellationPasses SidereonSatelliteConstellati
 typedef struct SidereonSbasBlock SidereonSbasBlock;
 
 typedef struct SidereonSbasCorrectionStore SidereonSbasCorrectionStore;
+
+/**
+ * Owned timestamped SBAS text-log blocks returned by the EMS or RTKLIB
+ * parsers. Payloads remain valid until this handle is freed.
+ */
+typedef struct SidereonSbasLogBlocks SidereonSbasLogBlocks;
 
 /**
  * Synthetic scenario simulation output. Create with
@@ -4466,6 +4543,120 @@ typedef struct SidereonEmissionMediaOptions {
     const struct SidereonIonex *ionex;
 } SidereonEmissionMediaOptions;
 
+/**
+ * One GLONASS slot-to-FDMA-channel entry from a broadcast store.
+ */
+typedef struct SidereonFrequencyChannel {
+    /**
+     * GLONASS slot/PRN number.
+     */
+    uint8_t slot;
+    /**
+     * FDMA channel number.
+     */
+    int8_t channel;
+} SidereonFrequencyChannel;
+
+/**
+ * One GLONASS RINEX state-vector broadcast record.
+ */
+typedef struct SidereonGlonassRecord {
+    /**
+     * Transmitting satellite token.
+     */
+    struct SidereonSatelliteToken sat_id;
+    /**
+     * Reference epoch, seconds past J2000 in UTC.
+     */
+    double toe_utc_j2000_s;
+    /**
+     * ECEF position, meters.
+     */
+    double pos_m[3];
+    /**
+     * ECEF velocity, meters/second.
+     */
+    double vel_m_s[3];
+    /**
+     * ECEF acceleration, meters/second².
+     */
+    double acc_m_s2[3];
+    /**
+     * Broadcast clock bias, seconds.
+     */
+    double clk_bias;
+    /**
+     * Relative frequency offset.
+     */
+    double gamma_n;
+    /**
+     * Satellite health word.
+     */
+    double sv_health;
+    /**
+     * FDMA frequency-channel number.
+     */
+    int32_t freq_channel;
+} SidereonGlonassRecord;
+
+/**
+ * One optional Klobuchar alpha/beta coefficient set.
+ */
+typedef struct SidereonKlobucharAlphaBeta {
+    /**
+     * Whether the coefficient set is present.
+     */
+    bool present;
+    /**
+     * Alpha coefficients a0..a3.
+     */
+    double alpha[4];
+    /**
+     * Beta coefficients b0..b3.
+     */
+    double beta[4];
+} SidereonKlobucharAlphaBeta;
+
+/**
+ * One optional Galileo NeQuick-G coefficient set.
+ */
+typedef struct SidereonGalileoNequickCoeffs {
+    /**
+     * Whether the coefficient set is present.
+     */
+    bool present;
+    /**
+     * Constant effective-ionisation coefficient.
+     */
+    double ai0;
+    /**
+     * Linear MODIP coefficient.
+     */
+    double ai1;
+    /**
+     * Quadratic MODIP coefficient.
+     */
+    double ai2;
+} SidereonGalileoNequickCoeffs;
+
+/**
+ * Broadcast ionosphere-correction header values.
+ */
+typedef struct SidereonIonoCorrections {
+    /**
+     * GPS Klobuchar coefficients.
+     */
+    struct SidereonKlobucharAlphaBeta gps;
+    /**
+     * BeiDou Klobuchar coefficients.
+     */
+    struct SidereonKlobucharAlphaBeta beidou;
+    /**
+     * Galileo NeQuick-G coefficients.
+     */
+    struct SidereonGalileoNequickCoeffs galileo;
+} SidereonIonoCorrections;
+
 typedef struct SidereonCnavParameters {
     bool present;
     double adot_m_s;
@@ -4498,6 +4689,332 @@ typedef struct SidereonBroadcastRecordInfo {
     double default_group_delay_s;
     struct SidereonCnavParameters cnav;
 } SidereonBroadcastRecordInfo;
+
+/**
+ * GNSS week and time-of-week value.
+ */
+typedef struct SidereonGnssWeekTow {
+    /**
+     * Time scale code, one of SidereonTimeScale.
+     */
+    uint32_t system;
+    /**
+     * Week number.
+     */
+    uint32_t week;
+    /**
+     * Seconds of week.
+     */
+    double tow_s;
+} SidereonGnssWeekTow;
+
+/**
+ * Broadcast Keplerian orbital elements (SI units; radians; toe_sow in seconds
+ * of week), mirroring sidereon_core::ephemeris::KeplerianElements.
+ */
+typedef struct SidereonKeplerianElements {
+    /**
+     * Square root of the semi-major axis (sqrt(m)).
+     */
+    double sqrt_a;
+    /**
+     * Eccentricity (dimensionless).
+     */
+    double e;
+    /**
+     * Mean anomaly at reference time (rad).
+     */
+    double m0;
+    /**
+     * Mean motion difference (rad/s).
+     */
+    double delta_n;
+    /**
+     * Longitude of ascending node at weekly epoch (rad).
+     */
+    double omega0;
+    /**
+     * Inclination at reference time (rad).
+     */
+    double i0;
+    /**
+     * Argument of perigee (rad).
+     */
+    double omega;
+    /**
+     * Rate of right ascension (rad/s).
+     */
+    double omega_dot;
+    /**
+     * Rate of inclination (rad/s).
+     */
+    double idot;
+    /**
+     * Latitude argument cosine correction (rad).
+     */
+    double cuc;
+    /**
+     * Latitude argument sine correction (rad).
+     */
+    double cus;
+    /**
+     * Orbit radius cosine correction (m).
+     */
+    double crc;
+    /**
+     * Orbit radius sine correction (m).
+     */
+    double crs;
+    /**
+     * Inclination cosine correction (rad).
+     */
+    double cic;
+    /**
+     * Inclination sine correction (rad).
+     */
+    double cis;
+    /**
+     * Ephemeris reference time, seconds of week.
+     */
+    double toe_sow;
+} SidereonKeplerianElements;
+
+/**
+ * Broadcast satellite-clock polynomial about toc_sow, mirroring
+ * sidereon_core::ephemeris::ClockPolynomial.
+ */
+typedef struct SidereonClockPolynomial {
+    /**
+     * Clock bias (s).
+     */
+    double af0;
+    /**
+     * Clock drift (s/s).
+     */
+    double af1;
+    /**
+     * Clock drift rate (s/s^2).
+     */
+    double af2;
+    /**
+     * Clock reference time, seconds of week.
+     */
+    double toc_sow;
+} SidereonClockPolynomial;
+
+/**
+ * All optional group-delay fields carried by one broadcast navigation record.
+ * A `has_*` flag distinguishes an absent header/record field from a zero
+ * delay. This is the lossless value form used by the raw NAV list routes.
+ */
+typedef struct SidereonBroadcastGroupDelays {
+    /**
+     * Whether `gps_tgd_s` is present.
+     */
+    bool has_gps_tgd_s;
+    /**
+     * GPS LNAV TGD, seconds.
+     */
+    double gps_tgd_s;
+    /**
+     * Whether `galileo_bgd_e5a_e1_s` is present.
+     */
+    bool has_galileo_bgd_e5a_e1_s;
+    /**
+     * Galileo BGD E5a/E1, seconds.
+     */
+    double galileo_bgd_e5a_e1_s;
+    /**
+     * Whether `galileo_bgd_e5b_e1_s` is present.
+     */
+    bool has_galileo_bgd_e5b_e1_s;
+    /**
+     * Galileo BGD E5b/E1, seconds.
+     */
+    double galileo_bgd_e5b_e1_s;
+    /**
+     * Whether `beidou_tgd1_s` is present.
+     */
+    bool has_beidou_tgd1_s;
+    /**
+     * BeiDou TGD1, seconds.
+     */
+    double beidou_tgd1_s;
+    /**
+     * Whether `beidou_tgd2_s` is present.
+     */
+    bool has_beidou_tgd2_s;
+    /**
+     * BeiDou TGD2, seconds.
+     */
+    double beidou_tgd2_s;
+    /**
+     * Whether `cnav_isc_l1ca_s` is present.
+     */
+    bool has_cnav_isc_l1ca_s;
+    /**
+     * GPS/QZSS CNAV ISC for L1 C/A, seconds.
+     */
+    double cnav_isc_l1ca_s;
+    /**
+     * Whether `cnav_isc_l2c_s` is present.
+     */
+    bool has_cnav_isc_l2c_s;
+    /**
+     * GPS/QZSS CNAV ISC for L2C, seconds.
+     */
+    double cnav_isc_l2c_s;
+    /**
+     * Whether `cnav_isc_l5i5_s` is present.
+     */
+    bool has_cnav_isc_l5i5_s;
+    /**
+     * GPS/QZSS CNAV ISC for L5 I5, seconds.
+     */
+    double cnav_isc_l5i5_s;
+    /**
+     * Whether `cnav_isc_l5q5_s` is present.
+     */
+    bool has_cnav_isc_l5q5_s;
+    /**
+     * GPS/QZSS CNAV ISC for L5 Q5, seconds.
+     */
+    double cnav_isc_l5q5_s;
+    /**
+     * Whether `cnav_isc_l1cd_s` is present.
+     */
+    bool has_cnav_isc_l1cd_s;
+    /**
+     * GPS/QZSS CNAV-2 ISC for L1C data, seconds.
+     */
+    double cnav_isc_l1cd_s;
+    /**
+     * Whether `cnav_isc_l1cp_s` is present.
+     */
+    bool has_cnav_isc_l1cp_s;
+    /**
+     * GPS/QZSS CNAV-2 ISC for L1C pilot, seconds.
+     */
+    double cnav_isc_l1cp_s;
+} SidereonBroadcastGroupDelays;
+
+/**
+ * Complete CNAV/CNAV-2 extension carried by a broadcast record.
+ */
+typedef struct SidereonBroadcastCnavParameters {
+    /**
+     * Whether this record has a CNAV extension.
+     */
+    bool present;
+    /**
+     * Semi-major axis rate ADOT (m/s).
+     */
+    double adot_m_s;
+    /**
+     * Rate of change of mean motion, rad/s².
+     */
+    double delta_n0_dot_rad_s2;
+    /**
+     * Scale of `top`.
+     */
+    struct SidereonGnssWeekTow top;
+    /**
+     * Delta URA ED index.
+     */
+    int8_t ura_ed_index;
+    /**
+     * Nominal URA NED0 index.
+     */
+    int8_t ura_ned0_index;
+    /**
+     * Nominal URA NED1 index.
+     */
+    uint8_t ura_ned1_index;
+    /**
+     * Nominal URA NED2 index.
+     */
+    uint8_t ura_ned2_index;
+    /**
+     * Transmission time, seconds of week.
+     */
+    double transmission_time_sow;
+    /**
+     * Whether `flags` is present.
+     */
+    bool has_flags;
+    /**
+     * CNAV flags when present.
+     */
+    uint32_t flags;
+} SidereonBroadcastCnavParameters;
+
+/**
+ * Complete broadcast navigation record. The scale is carried by `toe`,
+ * `toc`, and (when present) the CNAV `top` value; optional fields use explicit
+ * presence flags.
+ */
+typedef struct SidereonBroadcastRecord {
+    /**
+     * Transmitting satellite token.
+     */
+    struct SidereonSatelliteToken sat_id;
+    /**
+     * Navigation message as SidereonNavMessage.
+     */
+    uint32_t message;
+    /**
+     * Native issue-of-data value.
+     */
+    uint32_t issue;
+    /**
+     * Message carrying the issue value, as SidereonNavMessage.
+     */
+    uint32_t issue_message;
+    /**
+     * Native broadcast week number.
+     */
+    uint32_t week;
+    /**
+     * Scale-tagged ephemeris reference epoch.
+     */
+    struct SidereonGnssWeekTow toe;
+    /**
+     * Scale-tagged clock reference epoch.
+     */
+    struct SidereonGnssWeekTow toc;
+    /**
+     * Complete Keplerian orbit fields.
+     */
+    struct SidereonKeplerianElements elements;
+    /**
+     * Complete clock polynomial fields.
+     */
+    struct SidereonClockPolynomial clock;
+    /**
+     * Complete optional group-delay fields.
+     */
+    struct SidereonBroadcastGroupDelays group_delays;
+    /**
+     * Complete optional CNAV fields.
+     */
+    struct SidereonBroadcastCnavParameters cnav;
+    /**
+     * Satellite health word.
+     */
+    double sv_health;
+    /**
+     * Signal-in-space accuracy, meters.
+     */
+    double sv_accuracy_m;
+    /**
+     * Whether `fit_interval_s` is present.
+     */
+    bool has_fit_interval_s;
+    /**
+     * GPS curve-fit interval, seconds, when present.
+     */
+    double fit_interval_s;
+} SidereonBroadcastRecord;
 
 typedef struct SidereonEphemerisSampleRow {
     struct SidereonSatelliteToken sat_id;
@@ -4602,29 +5119,6 @@ typedef struct SidereonPredictRequest {
 } SidereonPredictRequest;
 
 /**
- * Broadcast satellite-clock polynomial about toc_sow, mirroring
- * sidereon_core::ephemeris::ClockPolynomial.
- */
-typedef struct SidereonClockPolynomial {
-    /**
-     * Clock bias (s).
-     */
-    double af0;
-    /**
-     * Clock drift (s/s).
-     */
-    double af1;
-    /**
-     * Clock drift rate (s/s^2).
-     */
-    double af2;
-    /**
-     * Clock reference time, seconds of week.
-     */
-    double toc_sow;
-} SidereonClockPolynomial;
-
-/**
  * Constellation physical constants, mirroring
  * sidereon_core::ephemeris::ConstellationConstants.
  */
@@ -4642,77 +5136,6 @@ typedef struct SidereonConstellationConstants {
      */
     double dtr_f;
 } SidereonConstellationConstants;
-
-/**
- * Broadcast Keplerian orbital elements (SI units; radians; toe_sow in seconds
- * of week), mirroring sidereon_core::ephemeris::KeplerianElements.
- */
-typedef struct SidereonKeplerianElements {
-    /**
-     * Square root of the semi-major axis (sqrt(m)).
-     */
-    double sqrt_a;
-    /**
-     * Eccentricity (dimensionless).
-     */
-    double e;
-    /**
-     * Mean anomaly at reference time (rad).
-     */
-    double m0;
-    /**
-     * Mean motion difference (rad/s).
-     */
-    double delta_n;
-    /**
-     * Longitude of ascending node at weekly epoch (rad).
-     */
-    double omega0;
-    /**
-     * Inclination at reference time (rad).
-     */
-    double i0;
-    /**
-     * Argument of perigee (rad).
-     */
-    double omega;
-    /**
-     * Rate of right ascension (rad/s).
-     */
-    double omega_dot;
-    /**
-     * Rate of inclination (rad/s).
-     */
-    double idot;
-    /**
-     * Latitude argument cosine correction (rad).
-     */
-    double cuc;
-    /**
-     * Latitude argument sine correction (rad).
-     */
-    double cus;
-    /**
-     * Orbit radius cosine correction (m).
-     */
-    double crc;
-    /**
-     * Orbit radius sine correction (m).
-     */
-    double crs;
-    /**
-     * Inclination cosine correction (rad).
-     */
-    double cic;
-    /**
-     * Inclination sine correction (rad).
-     */
-    double cis;
-    /**
-     * Ephemeris reference time, seconds of week.
-     */
-    double toe_sow;
-} SidereonKeplerianElements;
 
 /**
  * The satellite clock offset, split into components, mirroring
@@ -4858,6 +5281,112 @@ typedef struct SidereonSatelliteState {
      */
     struct SidereonClockOffset clock;
 } SidereonSatelliteState;
+
+/**
+ * One RINEX dual-frequency code/carrier selection.
+ */
+typedef struct SidereonRtkRinexDualSignalPair {
+    /**
+     * GNSS system as SidereonGnssSystem.
+     */
+    uint32_t system;
+    /**
+     * Null-terminated band-1 code observable, e.g. C1C.
+     */
+    char code1_observable[RINEX_OBS_CODE_C_BYTES];
+    /**
+     * Null-terminated band-1 carrier observable, e.g. L1C.
+     */
+    char phase1_observable[RINEX_OBS_CODE_C_BYTES];
+    /**
+     * Null-terminated band-2 code observable, e.g. C2W.
+     */
+    char code2_observable[RINEX_OBS_CODE_C_BYTES];
+    /**
+     * Null-terminated band-2 carrier observable, e.g. L2W.
+     */
+    char phase2_observable[RINEX_OBS_CODE_C_BYTES];
+} SidereonRtkRinexDualSignalPair;
+
+/**
+ * Options for building dual-frequency RTK arcs from paired RINEX OBS files.
+ * Initialize with sidereon_rtk_rinex_dual_arc_options_init.
+ */
+typedef struct SidereonRtkRinexDualArcOptions {
+    /**
+     * Optional array of signal pairs. A zero count uses GPS C1C/L1C + C2W/L2W.
+     */
+    const struct SidereonRtkRinexDualSignalPair *signal_pairs;
+    /**
+     * Number of signal pairs.
+     */
+    size_t signal_pair_count;
+    /**
+     * Whether max_epochs carries a value.
+     */
+    bool has_max_epochs;
+    /**
+     * Optional cap on base epochs considered, in file order.
+     */
+    size_t max_epochs;
+    /**
+     * Minimum common satellites with observations and ephemeris in an epoch.
+     */
+    size_t min_common_satellites;
+    /**
+     * Fill prediction_time_s in generated arc epochs.
+     */
+    bool include_prediction_time;
+} SidereonRtkRinexDualArcOptions;
+
+/**
+ * One RINEX code/carrier pair used to build a single-frequency RTK arc.
+ */
+typedef struct SidereonRtkRinexSignalPair {
+    /**
+     * GNSS system as SidereonGnssSystem.
+     */
+    uint32_t system;
+    /**
+     * Null-terminated RINEX code observable, e.g. C1C.
+     */
+    char code_observable[RINEX_OBS_CODE_C_BYTES];
+    /**
+     * Null-terminated RINEX carrier observable, e.g. L1C.
+     */
+    char phase_observable[RINEX_OBS_CODE_C_BYTES];
+} SidereonRtkRinexSignalPair;
+
+/**
+ * Options for building single-frequency RTK arcs from paired RINEX OBS files.
+ * Initialize with sidereon_rtk_rinex_arc_options_init.
+ */
+typedef struct SidereonRtkRinexArcOptions {
+    /**
+     * Optional array of signal pairs. A zero count uses the GPS C1C/L1C default.
+     */
+    const struct SidereonRtkRinexSignalPair *signal_pairs;
+    /**
+     * Number of signal pairs.
+     */
+    size_t signal_pair_count;
+    /**
+     * Whether max_epochs carries a value.
+     */
+    bool has_max_epochs;
+    /**
+     * Optional cap on base epochs considered, in file order.
+     */
+    size_t max_epochs;
+    /**
+     * Minimum common satellites with observations and ephemeris in an epoch.
+     */
+    size_t min_common_satellites;
+    /**
+     * Fill prediction_time_s in generated arc epochs.
+     */
+    bool include_prediction_time;
+} SidereonRtkRinexArcOptions;
 
 /**
  * A source-localization sensor position. position_m stores 2D or 3D Cartesian
@@ -5388,6 +5917,20 @@ typedef struct SidereonCovarianceMatrix6 {
     double values[6][6];
 } SidereonCovarianceMatrix6;
 
+/**
+ * Results of validating a six-by-six covariance matrix.
+ */
+typedef struct SidereonCovariance6Validation {
+    /**
+     * Whether the validated matrix is symmetric.
+     */
+    bool symmetric;
+    /**
+     * Whether the validated matrix is positive semidefinite.
+     */
+    bool positive_semidefinite;
+} SidereonCovariance6Validation;
+
 typedef struct SidereonCovarianceNode {
     struct SidereonCartesianState state;
     struct SidereonCovarianceMatrix6 covariance;
@@ -5749,6 +6292,20 @@ typedef struct SidereonDecayConfig {
      */
     uint32_t max_scan_samples;
 } SidereonDecayConfig;
+
+/**
+ * A standard two-carrier ionosphere-free pair.
+ */
+typedef struct SidereonCarrierPair {
+    /**
+     * First carrier band in the affine combination.
+     */
+    enum SidereonCarrierBand band1;
+    /**
+     * Second carrier band in the affine combination.
+     */
+    enum SidereonCarrierBand band2;
+} SidereonCarrierPair;
 
 /**
  * One epoch of single-satellite dual-frequency observables for arc smoothing.
@@ -6199,6 +6756,36 @@ typedef struct SidereonDtedHeightResult {
      */
     double height_m;
 } SidereonDtedHeightResult;
+
+/**
+ * Integer terrain tile id used by explicit DTED tile-list store builders.
+ */
+typedef struct SidereonTerrainTileId {
+    /**
+     * Integer latitude tile id, e.g. 36 for a tile covering 36..37 degrees.
+     */
+    int32_t lat_index;
+    /**
+     * Integer longitude tile id, e.g. -107 for a tile covering -107..-106.
+     */
+    int32_t lon_index;
+} SidereonTerrainTileId;
+
+/**
+ * One explicit DTED source for list-based memory-mappable terrain-store
+ * construction. The core builder parses the DTED header and validates that
+ * the parsed origin matches tile_id.
+ */
+typedef struct SidereonDtedTileListEntry {
+    /**
+     * Expected integer DTED tile id.
+     */
+    struct SidereonTerrainTileId tile_id;
+    /**
+     * Non-empty UTF-8 path to the DTED `.dt2` tile.
+     */
+    const char *path;
+} SidereonDtedTileListEntry;
 
 /**
  * A position in the ITRF / IGS-realization ECEF frame, in meters.
@@ -8657,24 +9244,6 @@ typedef struct SidereonProjVgridshiftError {
 } SidereonProjVgridshiftError;
 
 /**
- * GNSS week and time-of-week value.
- */
-typedef struct SidereonGnssWeekTow {
-    /**
-     * Time scale code, one of SidereonTimeScale.
-     */
-    uint32_t system;
-    /**
-     * Week number.
-     */
-    uint32_t week;
-    /**
-     * Seconds of week.
-     */
-    double tow_s;
-} SidereonGnssWeekTow;
-
-/**
  * Whole-grid IONEX vertical-TEC samples for sidereon_ionex_from_tec_grid_samples.
  * Arrays are caller-owned. `tec_maps_tecu` is flattened in
  * `[map][lat][lon]` order with
@@ -9637,6 +10206,20 @@ typedef struct SidereonMovingBaselineEpochSummary {
      */
     struct SidereonRtkFixedMetadata fixed;
 } SidereonMovingBaselineEpochSummary;
+
+/**
+ * One diagnostic for a NAV block skipped by the lenient parser.
+ */
+typedef struct SidereonSkippedNavBlock {
+    /**
+     * Satellite token from the skipped block.
+     */
+    struct SidereonSatelliteToken satellite;
+    /**
+     * Null-terminated core diagnostic text from the skipped block.
+     */
+    char message[256];
+} SidereonSkippedNavBlock;
 
 /**
  * Fixed-width metadata for one time-aware NAVCEN assessment. Read the NANU
@@ -12154,6 +12737,63 @@ typedef struct SidereonLinkBudget {
     double required_cn0_dbhz;
 } SidereonLinkBudget;
 
+/**
+ * Full precision, scale-tagged clock epoch. For `JulianDate`, the nanosecond
+ * pair is zero; for `Nanos`, the Julian fields are zero. The signed 128-bit
+ * value is transported losslessly as two's-complement high/low words.
+ */
+typedef struct SidereonClockEpoch {
+    /**
+     * TimeScale code.
+     */
+    uint32_t scale;
+    /**
+     * SidereonRinexClockInstantRepresentation code.
+     */
+    uint32_t representation;
+    /**
+     * Whole Julian date for the JulianDate representation.
+     */
+    double jd_whole;
+    /**
+     * Residual Julian-day fraction for the JulianDate representation.
+     */
+    double jd_fraction;
+    /**
+     * Signed high 64 bits of the Nanos representation.
+     */
+    int64_t nanos_high;
+    /**
+     * Low 64 bits of the Nanos representation.
+     */
+    uint64_t nanos_low;
+} SidereonClockEpoch;
+
+/**
+ * One complete RINEX clock series sample.
+ */
+typedef struct SidereonClockPoint {
+    /**
+     * Scale-tagged sample epoch.
+     */
+    struct SidereonClockEpoch epoch;
+    /**
+     * Satellite clock bias, seconds.
+     */
+    double bias_s;
+} SidereonClockPoint;
+
+/**
+ * One GLONASS RINEX record skipped because its extended satellite slot cannot
+ * be represented by the core satellite identifier.
+ */
+typedef struct SidereonSkippedGlonassRecord {
+    /**
+     * Raw satellite token from the skipped input record, such as `R28`.
+     */
+    struct SidereonSatelliteToken satellite;
+} SidereonSkippedGlonassRecord;
+
 typedef struct SidereonRinexLintFinding {
     char code[RINEX_QC_CODE_C_BYTES];
     uint32_t severity;
@@ -13691,110 +14331,128 @@ typedef struct SidereonRtkResidualValidationOptions {
 } SidereonRtkResidualValidationOptions;
 
 /**
- * One RINEX code/carrier pair used to build a single-frequency RTK arc.
+ * One dual-frequency RINEX RTK arc epoch's time, array lengths, and optional
+ * fields. Read epoch_sort_key with the corresponding string accessor.
  */
-typedef struct SidereonRtkRinexSignalPair {
+typedef struct SidereonRtkRinexDualFrequencyArcEpochOutMetadata {
     /**
-     * GNSS system as SidereonGnssSystem.
+     * Split Julian day whole part.
      */
-    uint32_t system;
+    double jd_whole;
     /**
-     * Null-terminated RINEX code observable, e.g. C1C.
+     * Split Julian day fractional part.
      */
-    char code_observable[RINEX_OBS_CODE_C_BYTES];
+    double jd_fraction;
     /**
-     * Null-terminated RINEX carrier observable, e.g. L1C.
+     * Whether gap_time_s carries a value.
      */
-    char phase_observable[RINEX_OBS_CODE_C_BYTES];
-} SidereonRtkRinexSignalPair;
+    bool has_gap_time_s;
+    /**
+     * Comparable gap coordinate in seconds when present.
+     */
+    double gap_time_s;
+    /**
+     * Number of paired satellite observations.
+     */
+    size_t observation_count;
+    /**
+     * Number of shared positions.
+     */
+    size_t satellite_position_count;
+    /**
+     * Number of base transmit-time positions.
+     */
+    size_t base_satellite_position_count;
+    /**
+     * Number of rover transmit-time positions.
+     */
+    size_t rover_satellite_position_count;
+    /**
+     * Whether velocity_mps carries a value.
+     */
+    bool has_velocity_mps;
+    /**
+     * Rover ECEF velocity in metres/second when present.
+     */
+    double velocity_mps[3];
+    /**
+     * Whether prediction_time_s carries a value.
+     */
+    bool has_prediction_time;
+    /**
+     * Epoch time coordinate in seconds when present.
+     */
+    double prediction_time_s;
+} SidereonRtkRinexDualFrequencyArcEpochOutMetadata;
 
 /**
- * Options for building single-frequency RTK arcs from paired RINEX OBS files.
- * Initialize with sidereon_rtk_rinex_arc_options_init.
+ * One output dual-frequency observation with fixed-size ambiguity-id storage.
  */
-typedef struct SidereonRtkRinexArcOptions {
+typedef struct SidereonRtkDualFrequencyObservationOut {
     /**
-     * Optional array of signal pairs. A zero count uses the GPS C1C/L1C default.
+     * Ambiguity id.
      */
-    const struct SidereonRtkRinexSignalPair *signal_pairs;
+    struct SidereonRtkId ambiguity_id;
     /**
-     * Number of signal pairs.
+     * Band-1 pseudorange in metres.
      */
-    size_t signal_pair_count;
+    double p1_m;
     /**
-     * Whether max_epochs carries a value.
+     * Band-2 pseudorange in metres.
      */
-    bool has_max_epochs;
+    double p2_m;
     /**
-     * Optional cap on base epochs considered, in file order.
+     * Band-1 carrier phase in cycles.
      */
-    size_t max_epochs;
+    double phi1_cycles;
     /**
-     * Minimum common satellites with observations and ephemeris in an epoch.
+     * Band-2 carrier phase in cycles.
      */
-    size_t min_common_satellites;
+    double phi2_cycles;
     /**
-     * Fill prediction_time_s in generated arc epochs.
+     * Band-1 carrier frequency in Hz.
      */
-    bool include_prediction_time;
-} SidereonRtkRinexArcOptions;
+    double f1_hz;
+    /**
+     * Band-2 carrier frequency in Hz.
+     */
+    double f2_hz;
+    /**
+     * Whether the band-1 loss-of-lock indicator is present.
+     */
+    bool has_lli1;
+    /**
+     * Band-1 loss-of-lock indicator when has_lli1 is true.
+     */
+    int64_t lli1;
+    /**
+     * Whether the band-2 loss-of-lock indicator is present.
+     */
+    bool has_lli2;
+    /**
+     * Band-2 loss-of-lock indicator when has_lli2 is true.
+     */
+    int64_t lli2;
+} SidereonRtkDualFrequencyObservationOut;
 
 /**
- * One RINEX dual-frequency code/carrier selection.
+ * One output dual-frequency satellite observation with fixed-size satellite
+ * and ambiguity-id storage.
  */
-typedef struct SidereonRtkRinexDualSignalPair {
+typedef struct SidereonRtkDualFrequencySatelliteObservationOut {
     /**
-     * GNSS system as SidereonGnssSystem.
+     * Physical satellite id token.
      */
-    uint32_t system;
+    struct SidereonSatelliteToken sat_id;
     /**
-     * Null-terminated band-1 code observable, e.g. C1C.
+     * Base receiver observation.
      */
-    char code1_observable[RINEX_OBS_CODE_C_BYTES];
+    struct SidereonRtkDualFrequencyObservationOut base;
     /**
-     * Null-terminated band-1 carrier observable, e.g. L1C.
+     * Rover receiver observation.
      */
-    char phase1_observable[RINEX_OBS_CODE_C_BYTES];
-    /**
-     * Null-terminated band-2 code observable, e.g. C2W.
-     */
-    char code2_observable[RINEX_OBS_CODE_C_BYTES];
-    /**
-     * Null-terminated band-2 carrier observable, e.g. L2W.
-     */
-    char phase2_observable[RINEX_OBS_CODE_C_BYTES];
-} SidereonRtkRinexDualSignalPair;
-
-/**
- * Options for building dual-frequency RTK arcs from paired RINEX OBS files.
- * Initialize with sidereon_rtk_rinex_dual_arc_options_init.
- */
-typedef struct SidereonRtkRinexDualArcOptions {
-    /**
-     * Optional array of signal pairs. A zero count uses GPS C1C/L1C + C2W/L2W.
-     */
-    const struct SidereonRtkRinexDualSignalPair *signal_pairs;
-    /**
-     * Number of signal pairs.
-     */
-    size_t signal_pair_count;
-    /**
-     * Whether max_epochs carries a value.
-     */
-    bool has_max_epochs;
-    /**
-     * Optional cap on base epochs considered, in file order.
-     */
-    size_t max_epochs;
-    /**
-     * Minimum common satellites with observations and ephemeris in an epoch.
-     */
-    size_t min_common_satellites;
-    /**
-     * Fill prediction_time_s in generated arc epochs.
-     */
-    bool include_prediction_time;
-} SidereonRtkRinexDualArcOptions;
+    struct SidereonRtkDualFrequencyObservationOut rover;
+} SidereonRtkDualFrequencySatelliteObservationOut;
 
 /**
  * Optional preprocessing for an RTK arc, mirroring
@@ -14393,6 +15051,29 @@ typedef struct SidereonSbasKMultipliers {
      */
     double k_v;
 } SidereonSbasKMultipliers;
+
+/**
+ * One timestamped SBAS text-log block. The payload bytes are owned by the
+ * parent `SidereonSbasLogBlocks` handle and copied with its bytes accessor.
+ */
+typedef struct SidereonSbasLogBlock {
+    /**
+     * SBAS satellite token.
+     */
+    struct SidereonSatelliteToken sat_id;
+    /**
+     * GPST week and time of week of the logged block.
+     */
+    struct SidereonGnssWeekTow epoch;
+    /**
+     * Wire form of the payload.
+     */
+    enum SidereonSbasWireForm form;
+    /**
+     * Number of payload bytes available through the bytes accessor.
+     */
+    size_t byte_count;
+} SidereonSbasLogBlock;
 
 /**
  * One satellite row in an SBAS protection geometry snapshot.
@@ -18634,10 +19315,72 @@ enum SidereonStatus sidereon_broadcast_emission_media_batch_at_j2000_s(const str
 void sidereon_broadcast_ephemeris_free(struct SidereonBroadcastEphemeris *broadcast);
 
 /**
+ * Write the number of GLONASS frequency-channel map entries.
+ *
+ * Safety: broadcast is a live handle; out_count points to a size_t.
+ */
+enum SidereonStatus sidereon_broadcast_ephemeris_glonass_frequency_channel_count(const struct SidereonBroadcastEphemeris *broadcast,
+                                                                                 size_t *out_count);
+
+/**
+ * Copy the deterministic GLONASS slot-to-frequency-channel map.
+ *
+ * Safety: broadcast is a live handle; out points to `len` writable entries or
+ * is NULL when len is zero; the count pointers point to writable size_t values.
+ */
+enum SidereonStatus sidereon_broadcast_ephemeris_glonass_frequency_channels(const struct SidereonBroadcastEphemeris *broadcast,
+                                                                            struct SidereonFrequencyChannel *out,
+                                                                            size_t len,
+                                                                            size_t *out_written,
+                                                                            size_t *out_required);
+
+/**
+ * Write the number of GLONASS state-vector records held by a broadcast store.
+ *
+ * Safety: broadcast is a live handle; out_count points to a size_t.
+ */
+enum SidereonStatus sidereon_broadcast_ephemeris_glonass_record_count(const struct SidereonBroadcastEphemeris *broadcast,
+                                                                      size_t *out_count);
+
+/**
+ * Copy GLONASS state-vector records held by a broadcast store.
+ *
+ * Safety: broadcast is a live handle; out points to `len` writable
+ * SidereonGlonassRecord values or is NULL when len is zero; the count pointers
+ * point to writable size_t values.
+ */
+enum SidereonStatus sidereon_broadcast_ephemeris_glonass_records(const struct SidereonBroadcastEphemeris *broadcast,
+                                                                 struct SidereonGlonassRecord *out,
+                                                                 size_t len,
+                                                                 size_t *out_written,
+                                                                 size_t *out_required);
+
+/**
+ * Copy the broadcast ionosphere-correction header values.
+ *
+ * Safety: broadcast is a live handle; out points to a SidereonIonoCorrections.
+ */
+enum SidereonStatus sidereon_broadcast_ephemeris_iono_corrections(const struct SidereonBroadcastEphemeris *broadcast,
+                                                                  struct SidereonIonoCorrections *out);
+
+/**
+ * Return the optional GPS-minus-UTC leap-second header value. `out_present`
+ * distinguishes an absent header from a present zero value.
+ *
+ * Safety: broadcast is a live handle; both output pointers point to writable
+ * values.
+ */
+enum SidereonStatus sidereon_broadcast_ephemeris_leap_seconds(const struct SidereonBroadcastEphemeris *broadcast,
+                                                              double *out_leap_seconds,
+                                                              bool *out_present);
+
+/**
  * Read and parse a RINEX navigation file from a UTF-8 filesystem path into a
  * broadcast ephemeris source. On success writes a newly owned handle to
- * *out_broadcast. Release it with sidereon_broadcast_ephemeris_free. Delegates
- * to sidereon::load_rinex_nav.
+ * *out_broadcast. Release it with sidereon_broadcast_ephemeris_free. Reads the
+ * file once as bytes, validates UTF-8 once, then delegates to
+ * sidereon::parse_rinex_nav and sidereon_core::rinex::nav::parse_leap_seconds
+ * using that same text.
  *
  * Safety: path must be a non-empty UTF-8 C string; out_broadcast must point to
  * storage for a SidereonBroadcastEphemeris*.
@@ -18681,6 +19424,22 @@ enum SidereonStatus sidereon_broadcast_ephemeris_records(const struct SidereonBr
                                                          size_t len,
                                                          size_t *out_written,
                                                          size_t *out_required);
+
+/**
+ * Copy complete broadcast records held by the store. The records are returned
+ * in the engine's deterministic record order and the output uses the standard
+ * caller-buffer convention. Unlike `sidereon_broadcast_ephemeris_records`,
+ * this route exposes every orbit, clock, optional delay, and CNAV field.
+ *
+ * Safety: broadcast is a live handle; out points to `len` writable
+ * SidereonBroadcastRecord values or is NULL when len is zero; the count
+ * pointers point to writable size_t values.
+ */
+enum SidereonStatus sidereon_broadcast_ephemeris_records_full(const struct SidereonBroadcastEphemeris *broadcast,
+                                                              struct SidereonBroadcastRecord *out,
+                                                              size_t len,
+                                                              size_t *out_written,
+                                                              size_t *out_required);
 
 /**
  * Sample a loaded broadcast-navigation source over a regular grid.
@@ -18843,6 +19602,35 @@ enum SidereonStatus sidereon_broadcast_satellite_state(const struct SidereonKepl
                                                        double tgd_s,
                                                        bool is_geo,
                                                        struct SidereonSatelliteState *out);
+
+/**
+ * Build a dual-frequency RTK arc from parsed paired RINEX observations and an
+ * SP3 ephemeris. The core builder performs all epoch, satellite, signal-pair,
+ * transmit-time, and skipped-epoch processing.
+ *
+ * Safety: sp3, base_obs, rover_obs, and options must be live handles/pointers;
+ * out_arc must point to storage for a SidereonRtkRinexDualFrequencyArc*.
+ */
+enum SidereonStatus sidereon_build_dual_frequency_rinex_rtk_arc(const struct SidereonSp3 *sp3,
+                                                                const struct SidereonRinexObs *base_obs,
+                                                                const struct SidereonRinexObs *rover_obs,
+                                                                const struct SidereonRtkRinexDualArcOptions *options,
+                                                                struct SidereonRtkRinexDualFrequencyArc **out_arc);
+
+/**
+ * Build a single-frequency RTK arc from parsed paired RINEX observations and
+ * an SP3 ephemeris. The core builder performs epoch and satellite selection,
+ * signal-pair extraction, transmit-time lookups, wavelength construction, and
+ * skipped-epoch accounting.
+ *
+ * Safety: sp3, base_obs, rover_obs, and options must be live handles/pointers;
+ * out_arc must point to storage for a SidereonRtkRinexArc*.
+ */
+enum SidereonStatus sidereon_build_rinex_rtk_arc(const struct SidereonSp3 *sp3,
+                                                 const struct SidereonRinexObs *base_obs,
+                                                 const struct SidereonRinexObs *rover_obs,
+                                                 const struct SidereonRtkRinexArcOptions *options,
+                                                 struct SidereonRtkRinexArc **out_arc);
 
 /**
  * Copy the core carrier-band label into out.
@@ -19947,6 +20735,83 @@ enum SidereonStatus sidereon_constellation_validation_missing_sp3_ids(const stru
                                                                       size_t *out_written,
                                                                       size_t *out_required);
 
+/**
+ * Transform a six-by-six ECI covariance to RTN axes at an ECI Cartesian
+ * state. Delegates to `eci_to_rtn_covariance6` in sidereon-core.
+ *
+ * Safety: covariance and state point to valid input structs; out points to a
+ * writable SidereonCovarianceMatrix6.
+ */
+enum SidereonStatus sidereon_covariance6_eci_to_rtn(const struct SidereonCovarianceMatrix6 *covariance,
+                                                    const struct SidereonCartesianState *state,
+                                                    struct SidereonCovarianceMatrix6 *out);
+
+/**
+ * Build a validated row-major six-by-six covariance from six diagonal
+ * variances. Delegates to `sidereon_core::astro::covariance::Covariance6::from_diagonal`.
+ *
+ * Safety: diagonal points to exactly `diagonal_len` readable doubles and must
+ * contain six entries; out points to a writable SidereonCovarianceMatrix6.
+ */
+enum SidereonStatus sidereon_covariance6_from_diagonal(const double *diagonal,
+                                                       size_t diagonal_len,
+                                                       struct SidereonCovarianceMatrix6 *out);
+
+/**
+ * Interpolate two same-frame six-by-six covariances with the core PSD-safe
+ * interpolation policy. Delegates to
+ * `sidereon_core::astro::covariance::interpolate_covariance_psd`.
+ *
+ * Safety: a, b, and out point to SidereonCovarianceMatrix6 values.
+ */
+enum SidereonStatus sidereon_covariance6_interpolate_psd(const struct SidereonCovarianceMatrix6 *a,
+                                                         const struct SidereonCovarianceMatrix6 *b,
+                                                         double u,
+                                                         struct SidereonCovarianceMatrix6 *out);
+
+/**
+ * Convert a validated six-by-six covariance from kilometres to metres.
+ * Delegates to `sidereon_core::astro::covariance::covariance6_km_to_m`.
+ *
+ * Safety: covariance points to a SidereonCovarianceMatrix6 and out points to a
+ * writable SidereonCovarianceMatrix6.
+ */
+enum SidereonStatus sidereon_covariance6_km_to_m(const struct SidereonCovarianceMatrix6 *covariance,
+                                                 struct SidereonCovarianceMatrix6 *out);
+
+/**
+ * Convert a validated six-by-six covariance from metres to kilometres.
+ * Delegates to `sidereon_core::astro::covariance::covariance6_m_to_km`.
+ *
+ * Safety: covariance points to a SidereonCovarianceMatrix6 and out points to a
+ * writable SidereonCovarianceMatrix6.
+ */
+enum SidereonStatus sidereon_covariance6_m_to_km(const struct SidereonCovarianceMatrix6 *covariance,
+                                                 struct SidereonCovarianceMatrix6 *out);
+
+/**
+ * Transform a six-by-six RTN covariance to ECI axes at an ECI Cartesian
+ * state. Delegates to `rtn_to_eci_covariance6` in sidereon-core.
+ *
+ * Safety: covariance and state point to valid input structs; out points to a
+ * writable SidereonCovarianceMatrix6.
+ */
+enum SidereonStatus sidereon_covariance6_rtn_to_eci(const struct SidereonCovarianceMatrix6 *covariance,
+                                                    const struct SidereonCartesianState *state,
+                                                    struct SidereonCovarianceMatrix6 *out);
+
+/**
+ * Validate a row-major six-by-six covariance matrix. The output is written
+ * only after `Covariance6::try_from_matrix` accepts the matrix, so an invalid
+ * matrix returns the engine error through the normal invalid-argument status.
+ * Delegates to `sidereon_core::astro::covariance::Covariance6::try_from_matrix`.
+ *
+ * Safety: covariance points to a SidereonCovarianceMatrix6 and out points to a
+ * writable SidereonCovariance6Validation.
+ */
+enum SidereonStatus sidereon_covariance6_validate(const struct SidereonCovarianceMatrix6 *covariance,
+                                                  struct SidereonCovariance6Validation *out);
+
 enum SidereonStatus sidereon_covariance_ephemeris_count(const struct SidereonCovarianceEphemeris *ephemeris,
                                                         size_t *out_count);
 
@@ -20151,6 +21016,18 @@ enum SidereonStatus sidereon_cw_stm(double mean_motion_rad_s,
  * Safety: out_options must point to writable storage.
  */
 enum SidereonStatus sidereon_cycle_slip_options_init(struct SidereonCycleSlipOptions *out_options);
+
+/**
+ * Write the integer day-of-year for a validated product date. January 1 is
+ * `1`. Delegates to `sidereon_core::data::day_of_year` and preserves the
+ * product-date integer semantics.
+ *
+ * Safety: out must point to a uint16_t.
+ */
+enum SidereonStatus sidereon_data_day_of_year(int32_t year,
+                                              uint8_t month,
+                                              uint8_t day,
+                                              uint16_t *out);
 
 /**
  * Copy the published default sampling token for a center/product/date.
@@ -20439,11 +21316,39 @@ enum SidereonStatus sidereon_data_validate_exact_product_set(const struct Sidere
                                                              size_t available_count);
 
 /**
+ * Write the fractional day-of-year for a civil instant. January 1 at midnight
+ * is `1.0`; fractional seconds are retained. The civil date is validated by
+ * the public data-catalog date constructor before delegating to
+ * `sidereon_core::astro::time::civil::day_of_year`.
+ *
+ * Safety: out must point to a double.
+ */
+enum SidereonStatus sidereon_day_of_year(int32_t year,
+                                         int32_t month,
+                                         int32_t day,
+                                         int32_t hour,
+                                         int32_t minute,
+                                         double second,
+                                         double *out);
+
+/**
  * Initialize decay-estimate controls with core defaults.
  *
  * Safety: out_config must point to a SidereonDecayConfig.
  */
 enum SidereonStatus sidereon_decay_config_init(struct SidereonDecayConfig *out_config);
+
+/**
+ * Write the standard ionosphere-free carrier pair for a GNSS system and set
+ * `*out_present`. GPS, Galileo, and BeiDou have defaults; GLONASS and other
+ * valid systems have no constellation-wide default. Delegates to
+ * `sidereon_core::frequencies::default_iono_free_pair`.
+ *
+ * Safety: out_pair and out_present point to writable storage.
+ */
+enum SidereonStatus sidereon_default_iono_free_pair(uint32_t system,
+                                                    struct SidereonCarrierPair *out_pair,
+                                                    bool *out_present);
 
 /**
  * Default single-point-positioning carrier frequency in Hz for a system.
@@ -20838,6 +21743,23 @@ enum SidereonStatus sidereon_dted_tile_get_elevation(const struct SidereonDtedTi
                                                      int16_t *out_elevation_m);
 
 /**
+ * Convert an explicit DTED tile list into canonical memory-mappable terrain
+ * store bytes. Header parsing, tile-id validation, sorting, deduplication,
+ * alignment, and checksums are performed by the public core converter.
+ *
+ * Safety: entries points to entry_count SidereonDtedTileListEntry values, or
+ * is NULL when entry_count is zero; each path is a non-empty UTF-8 C string;
+ * out points to len bytes or is NULL when len is zero; out_written and
+ * out_required must point to size_t values.
+ */
+enum SidereonStatus sidereon_dted_tile_list_to_mmap_store(const struct SidereonDtedTileListEntry *entries,
+                                                          size_t entry_count,
+                                                          uint8_t *out,
+                                                          size_t len,
+                                                          size_t *out_written,
+                                                          size_t *out_required);
+
+/**
  * Load one DTED tile. Tile heights are orthometric meters.
  *
  * Safety: path must be a non-empty UTF-8 C string; out_tile must point to a
@@ -21028,6 +21950,22 @@ enum SidereonStatus sidereon_ellipsoidal_height_m(double orthometric_height_m_in
  * Safety: out_options must point to a SidereonEmissionMediaOptions.
  */
 enum SidereonStatus sidereon_emission_media_options_init(struct SidereonEmissionMediaOptions *out_options);
+
+/**
+ * Encode an arbitrary caller-supplied full NAV record list. The list is
+ * validated by the public BroadcastStore constructor before delegation to the
+ * core `encode_nav` writer, preventing an invalid CNAV record from reaching a
+ * panic-only encoder path.
+ *
+ * Safety: records points to `record_count` readable full records (or is NULL
+ * when the count is zero); out follows the standard variable-output contract.
+ */
+enum SidereonStatus sidereon_encode_rinex_nav(const struct SidereonBroadcastRecord *records,
+                                              size_t record_count,
+                                              uint8_t *out,
+                                              size_t len,
+                                              size_t *out_written,
+                                              size_t *out_required);
 
 /**
  * Build the encounter (B-plane) frame from two objects' position/velocity.
@@ -23643,6 +24581,59 @@ enum SidereonStatus sidereon_lnav_encode(const struct SidereonLnavParams *params
                                          size_t subframe_len);
 
 /**
+ * Compute the six transmitted parity bytes `[D25..D30]` from 24 source data
+ * bits and the previous word's D29/D30 bits. Delegates to
+ * `sidereon_core::navigation::lnav::parity` without changing those dependency
+ * bits or the bit-byte representation.
+ *
+ * Safety: data24 points to exactly `data24_len` readable bytes; out_parity
+ * points to exactly six writable bytes and `parity_len` must be six.
+ */
+enum SidereonStatus sidereon_lnav_parity(const uint8_t *data24,
+                                         size_t data24_len,
+                                         uint8_t d29_prev,
+                                         uint8_t d30_prev,
+                                         uint8_t *out_parity,
+                                         size_t parity_len);
+
+/**
+ * Verify the six parity bits in one transmitted 30-bit LNAV word. Delegates
+ * to `sidereon_core::navigation::lnav::parity_valid`, preserving D29/D30
+ * dependency semantics; only the required 30-byte input shape is checked at
+ * the ABI boundary.
+ *
+ * Safety: word30 points to exactly `word30_len` readable bytes; out_valid
+ * points to a bool.
+ */
+enum SidereonStatus sidereon_lnav_parity_valid(const uint8_t *word30,
+                                               size_t word30_len,
+                                               uint8_t d29_prev,
+                                               uint8_t d30_prev,
+                                               bool *out_valid);
+
+/**
+ * Extract the 3-bit subframe identifier from a 30-bit HOW word or a 300-bit
+ * LNAV subframe. Delegates to `sidereon_core::navigation::lnav::subframe_id`
+ * and rejects every other input length through the normal status path.
+ *
+ * Safety: bits points to exactly `bits_len` readable bytes; out_subframe_id
+ * points to a uint64_t.
+ */
+enum SidereonStatus sidereon_lnav_subframe_id(const uint8_t *bits,
+                                              size_t bits_len,
+                                              uint64_t *out_subframe_id);
+
+/**
+ * Extract the 17-bit time-of-week count from a 30-bit HOW word or a 300-bit
+ * LNAV subframe. Delegates to `sidereon_core::navigation::lnav::tow` and
+ * rejects every other input length through the normal status path.
+ *
+ * Safety: bits points to exactly `bits_len` readable bytes; out_tow points to
+ * a uint64_t.
+ */
+enum SidereonStatus sidereon_lnav_tow(const uint8_t *bits, size_t bits_len, uint64_t *out_tow);
+
+/**
  * Locate a source from sensor arrival times. Sensor positions are caller-owned
  * 2D or 3D Cartesian coordinates in meters. Arrival times are seconds, and
  * propagation_speed_m_s is meters per second. options may be NULL for defaults.
@@ -24082,6 +25073,64 @@ enum SidereonStatus sidereon_moving_baseline_solution_epoch_count(const struct S
  * Safety: solution must be a handle from sidereon_solve_moving_baseline or NULL.
  */
 void sidereon_moving_baseline_solution_free(struct SidereonMovingBaselineSolution *solution);
+
+/**
+ * Release a lenient NAV parse handle. Passing NULL is a no-op.
+ *
+ * Safety: parse is NULL or a live handle from
+ * sidereon_parse_rinex_nav_lenient.
+ */
+void sidereon_nav_parse_free(struct SidereonRinexNavParse *parse);
+
+/**
+ * Copy one full successfully parsed NAV record by deterministic file-order
+ * index.
+ *
+ * Safety: parse is a live handle; out_record points to a writable full record.
+ */
+enum SidereonStatus sidereon_nav_parse_record(const struct SidereonRinexNavParse *parse,
+                                              size_t index,
+                                              struct SidereonBroadcastRecord *out_record);
+
+/**
+ * Write the number of successfully parsed records in a lenient NAV result.
+ *
+ * Safety: parse is a live handle; out_count points to a size_t.
+ */
+enum SidereonStatus sidereon_nav_parse_record_count(const struct SidereonRinexNavParse *parse,
+                                                    size_t *out_count);
+
+/**
+ * Copy one skipped NAV block diagnostic by deterministic file-order index.
+ *
+ * Safety: parse is a live handle; out_skipped points to a writable diagnostic.
+ */
+enum SidereonStatus sidereon_nav_parse_skipped(const struct SidereonRinexNavParse *parse,
+                                               size_t index,
+                                               struct SidereonSkippedNavBlock *out_skipped);
+
+/**
+ * Write the number of skipped NAV block diagnostics in a lenient result.
+ *
+ * Safety: parse is a live handle; out_count points to a size_t.
+ */
+enum SidereonStatus sidereon_nav_parse_skipped_count(const struct SidereonRinexNavParse *parse,
+                                                     size_t *out_count);
+
+/**
+ * Copy the complete core diagnostic text for one skipped NAV block. This
+ * variable-length accessor complements the bounded C display field in
+ * `SidereonSkippedNavBlock`.
+ *
+ * Safety: parse is a live handle; out points to len writable bytes or is NULL
+ * when len is zero; count pointers point to writable size_t values.
+ */
+enum SidereonStatus sidereon_nav_parse_skipped_message(const struct SidereonRinexNavParse *parse,
+                                                       size_t index,
+                                                       uint8_t *out,
+                                                       size_t len,
+                                                       size_t *out_written,
+                                                       size_t *out_required);
 
 /**
  * Copy fixed metadata for one NAVCEN assessment by PRN-sorted index.
@@ -25000,6 +26049,89 @@ enum SidereonStatus sidereon_parallactic_angle_deg(double observer_latitude_deg,
                                                    double hour_angle_deg,
                                                    double declination_deg,
                                                    double *out_angle_deg);
+
+/**
+ * Parse RINEX GLONASS state-vector records into an owned list. Representable
+ * records are retained and malformed representable records fail the parse.
+ * Extended slots that cannot be represented by the core satellite identifier
+ * are skipped, with their raw satellite tokens retained for inspection by
+ * `sidereon_rinex_glonass_records_skipped_count` and
+ * `sidereon_rinex_glonass_records_skipped_item`.
+ *
+ * Safety: data points to len readable UTF-8 bytes; out_records points to an
+ * owned list handle slot.
+ */
+enum SidereonStatus sidereon_parse_rinex_glonass_records(const uint8_t *data,
+                                                         size_t len,
+                                                         struct SidereonRinexGlonassRecords **out_records);
+
+/**
+ * Parse RINEX NAV-header ionosphere corrections into a fixed, presence-tagged
+ * value. Empty headers are valid and return all presence flags false.
+ *
+ * Safety: data points to len readable UTF-8 bytes; out points to a writable
+ * SidereonIonoCorrections.
+ */
+enum SidereonStatus sidereon_parse_rinex_iono_corrections(const uint8_t *data,
+                                                          size_t len,
+                                                          struct SidereonIonoCorrections *out);
+
+/**
+ * Parse the optional RINEX NAV-header GPS-minus-UTC leap-second value.
+ * `out_present` distinguishes an absent header from a present zero value.
+ *
+ * Safety: data points to len readable UTF-8 bytes; output pointers point to
+ * writable values.
+ */
+enum SidereonStatus sidereon_parse_rinex_leap_seconds(const uint8_t *data,
+                                                      size_t len,
+                                                      double *out_leap_seconds,
+                                                      bool *out_present);
+
+/**
+ * Parse a RINEX NAV source while retaining core skipped-block diagnostics.
+ * Header failures remain errors; malformed supported body blocks are retained
+ * in the returned `SidereonRinexNavParse` diagnostics.
+ *
+ * Safety: data points to len readable bytes; out_parse points to an owned
+ * SidereonRinexNavParse handle slot.
+ */
+enum SidereonStatus sidereon_parse_rinex_nav_lenient(const uint8_t *data,
+                                                     size_t len,
+                                                     struct SidereonRinexNavParse **out_parse);
+
+/**
+ * Parse all supported raw RINEX NAV records before the broadcast-store
+ * health/message policy filter.
+ *
+ * Safety: data points to len readable bytes; out_records points to an owned
+ * list handle slot.
+ */
+enum SidereonStatus sidereon_parse_rinex_nav_records(const uint8_t *data,
+                                                     size_t len,
+                                                     struct SidereonRinexNavRecords **out_records);
+
+/**
+ * Parse comma-delimited EMS SBAS text-log lines. This is a text parser and
+ * does not perform binary SBAS message decoding.
+ *
+ * Safety: data points to len readable bytes; out_blocks points to an owned
+ * list handle slot.
+ */
+enum SidereonStatus sidereon_parse_sbas_ems_lines(const uint8_t *data,
+                                                  size_t len,
+                                                  struct SidereonSbasLogBlocks **out_blocks);
+
+/**
+ * Parse RTKLIB SBAS text-log lines. This is a text parser and does not
+ * perform binary SBAS message decoding.
+ *
+ * Safety: data points to len readable bytes; out_blocks points to an owned
+ * list handle slot.
+ */
+enum SidereonStatus sidereon_parse_sbas_rtklib_lines(const uint8_t *data,
+                                                     size_t len,
+                                                     struct SidereonSbasLogBlocks **out_blocks);
 
 /**
  * Parse a multi-record CelesTrak/Space-Track TLE file into N initialized
@@ -26553,6 +27685,35 @@ enum SidereonStatus sidereon_rf_link_margin(const struct SidereonLinkBudget *bud
 enum SidereonStatus sidereon_rf_wavelength(double frequency_hz, double *out);
 
 /**
+ * RINEX observation-band frequency in hertz for a system and one-character
+ * band digit. A GLONASS G1/G2 lookup uses `glonass_channel` only when
+ * `has_glonass_channel` is true. Delegates to
+ * `sidereon_core::frequencies::rinex_band_frequency_hz`.
+ *
+ * Safety: band points to a non-empty, null-terminated UTF-8 string containing
+ * exactly one character; out points to a double.
+ */
+enum SidereonStatus sidereon_rinex_band_frequency_hz(uint32_t system,
+                                                     const char *band,
+                                                     bool has_glonass_channel,
+                                                     int8_t glonass_channel,
+                                                     double *out);
+
+/**
+ * RINEX observation-band wavelength in metres for a system and one-character
+ * band digit. Uses the same GLONASS channel policy as the frequency route.
+ * Delegates to `sidereon_core::frequencies::rinex_band_wavelength_m`.
+ *
+ * Safety: band points to a non-empty, null-terminated UTF-8 string containing
+ * exactly one character; out points to a double.
+ */
+enum SidereonStatus sidereon_rinex_band_wavelength_m(uint32_t system,
+                                                     const char *band,
+                                                     bool has_glonass_channel,
+                                                     int8_t glonass_channel,
+                                                     double *out);
+
+/**
  * Interpolate a satellite clock bias (seconds) at a GPS-seconds epoch. Writes
  * the bias to *out_bias_s and sets *out_available to whether the satellite has a
  * usable value at that epoch. Delegates to
@@ -26586,12 +27747,110 @@ enum SidereonStatus sidereon_rinex_clock_parse(const uint8_t *text,
                                                struct SidereonRinexClock **out_clock);
 
 /**
+ * Parse a RINEX clock source lossily, skipping malformed and non-AS rows as
+ * defined by the public core parser.
+ *
+ * Safety: text points to len readable UTF-8 bytes; out_clock points to an
+ * owned clock handle slot.
+ */
+enum SidereonStatus sidereon_rinex_clock_parse_lossy(const uint8_t *text,
+                                                     size_t len,
+                                                     struct SidereonRinexClock **out_clock);
+
+/**
+ * Write the total number of complete scale-tagged samples in a RINEX clock.
+ *
+ * Safety: clock is a live handle; out_count points to a size_t.
+ */
+enum SidereonStatus sidereon_rinex_clock_sample_count(const struct SidereonRinexClock *clock,
+                                                      size_t *out_count);
+
+/**
  * Write the number of satellites with a clock series to *out_count.
  *
  * Safety: clock is a live handle; out_count points to a size_t.
  */
 enum SidereonStatus sidereon_rinex_clock_satellite_count(const struct SidereonRinexClock *clock,
                                                          size_t *out_count);
+
+/**
+ * Copy the deterministic satellite-token enumeration of a RINEX clock file.
+ * The core `series_rows` API supplies the series enumeration; complete
+ * scale-tagged samples are available through the series handle routes below.
+ *
+ * Safety: clock is a live handle; out points to len writable tokens or is
+ * NULL when len is zero; count pointers point to writable size_t values.
+ */
+enum SidereonStatus sidereon_rinex_clock_satellites(const struct SidereonRinexClock *clock,
+                                                    struct SidereonSatelliteToken *out,
+                                                    size_t len,
+                                                    size_t *out_written,
+                                                    size_t *out_required);
+
+/**
+ * Return one complete RINEX clock series by deterministic satellite-order
+ * index. The returned handle owns a clone of the core series.
+ *
+ * Safety: clock is a live handle; out_series points to a writable handle slot.
+ */
+enum SidereonStatus sidereon_rinex_clock_series(const struct SidereonRinexClock *clock,
+                                                size_t index,
+                                                struct SidereonClockSeries **out_series);
+
+/**
+ * Write the number of satellite series in a RINEX clock file.
+ *
+ * Safety: clock is a live handle; out_count points to a size_t.
+ */
+enum SidereonStatus sidereon_rinex_clock_series_count(const struct SidereonRinexClock *clock,
+                                                      size_t *out_count);
+
+/**
+ * Return one complete RINEX clock series for a satellite, or a null output
+ * handle with status Ok when the satellite has no series.
+ *
+ * Safety: clock is a live handle; satellite_id is a non-empty UTF-8 C string;
+ * out_series points to a writable handle slot.
+ */
+enum SidereonStatus sidereon_rinex_clock_series_for(const struct SidereonRinexClock *clock,
+                                                    const char *satellite_id,
+                                                    struct SidereonClockSeries **out_series);
+
+/**
+ * Release a RINEX clock series handle. Passing NULL is a no-op.
+ *
+ * Safety: series is NULL or a live handle returned by a clock-series route.
+ */
+void sidereon_rinex_clock_series_free(struct SidereonClockSeries *series);
+
+/**
+ * Write the number of samples in one complete RINEX clock series.
+ *
+ * Safety: series is a live handle; out_count points to a size_t.
+ */
+enum SidereonStatus sidereon_rinex_clock_series_sample_count(const struct SidereonClockSeries *series,
+                                                             size_t *out_count);
+
+/**
+ * Copy complete scale-tagged samples from one clock series using the standard
+ * caller-buffer convention.
+ *
+ * Safety: series is a live handle; out points to len writable samples or is
+ * NULL when len is zero; count pointers point to writable size_t values.
+ */
+enum SidereonStatus sidereon_rinex_clock_series_samples(const struct SidereonClockSeries *series,
+                                                        struct SidereonClockPoint *out,
+                                                        size_t len,
+                                                        size_t *out_written,
+                                                        size_t *out_required);
+
+/**
+ * Copy the satellite identity carried by a series handle.
+ *
+ * Safety: series is a live handle; out_satellite points to a writable token.
+ */
+enum SidereonStatus sidereon_rinex_clock_series_satellite(const struct SidereonClockSeries *series,
+                                                          struct SidereonSatelliteToken *out_satellite);
 
 /**
  * Serialize a RINEX clock product back to text (not null-terminated).
@@ -26623,6 +27882,51 @@ enum SidereonStatus sidereon_rinex_encode_nav(const struct SidereonBroadcastEphe
                                               size_t *out_written,
                                               size_t *out_required);
 
+/**
+ * Write the number of representable parsed GLONASS records.
+ *
+ * Safety: records is a live handle; out_count points to a size_t.
+ */
+enum SidereonStatus sidereon_rinex_glonass_records_count(const struct SidereonRinexGlonassRecords *records,
+                                                         size_t *out_count);
+
+/**
+ * Release a GLONASS record-list handle. Passing NULL is a no-op.
+ *
+ * Safety: records is NULL or a live handle returned by
+ * sidereon_parse_rinex_glonass_records.
+ */
+void sidereon_rinex_glonass_records_free(struct SidereonRinexGlonassRecords *records);
+
+/**
+ * Copy one parsed GLONASS record by deterministic file-order index.
+ *
+ * Safety: records is a live handle; out_record points to a writable record.
+ */
+enum SidereonStatus sidereon_rinex_glonass_records_item(const struct SidereonRinexGlonassRecords *records,
+                                                        size_t index,
+                                                        struct SidereonGlonassRecord *out_record);
+
+/**
+ * Write the number of GLONASS records skipped because their extended slots
+ * are not representable by the core satellite identifier.
+ *
+ * Safety: records is a live handle; out_count points to a size_t.
+ */
+enum SidereonStatus sidereon_rinex_glonass_records_skipped_count(const struct SidereonRinexGlonassRecords *records,
+                                                                 size_t *out_count);
+
+/**
+ * Copy one skipped GLONASS record by deterministic file-order index. The
+ * returned satellite token is the raw token from the input record, including
+ * extended slots such as `R28`.
+ *
+ * Safety: records is a live handle; out_skipped points to a writable value.
+ */
+enum SidereonStatus sidereon_rinex_glonass_records_skipped_item(const struct SidereonRinexGlonassRecords *records,
+                                                                size_t index,
+                                                                struct SidereonSkippedGlonassRecord *out_skipped);
+
 enum SidereonStatus sidereon_rinex_lint_findings(const struct SidereonRinexLintReport *report,
                                                  struct SidereonRinexLintFinding *out,
                                                  size_t len,
@@ -26641,6 +27945,32 @@ void sidereon_rinex_lint_report_free(struct SidereonRinexLintReport *report);
 
 enum SidereonStatus sidereon_rinex_lint_summary(const struct SidereonRinexLintReport *report,
                                                 struct SidereonRinexLintSummary *out_summary);
+
+/**
+ * Write the number of records in a raw NAV record list.
+ *
+ * Safety: records is a live handle; out_count points to a size_t.
+ */
+enum SidereonStatus sidereon_rinex_nav_records_count(const struct SidereonRinexNavRecords *records,
+                                                     size_t *out_count);
+
+/**
+ * Release a raw NAV record-list handle. Passing NULL is a no-op.
+ *
+ * Safety: records is NULL or a live handle returned by
+ * sidereon_parse_rinex_nav_records.
+ */
+void sidereon_rinex_nav_records_free(struct SidereonRinexNavRecords *records);
+
+/**
+ * Copy one raw full NAV record by deterministic file-order index.
+ *
+ * Safety: records is a live handle; out_record points to a writable full
+ * record.
+ */
+enum SidereonStatus sidereon_rinex_nav_records_item(const struct SidereonRinexNavRecords *records,
+                                                    size_t index,
+                                                    struct SidereonBroadcastRecord *out_record);
 
 /**
  * Copy flattened carrier-phase rows for one epoch.
@@ -26825,6 +28155,38 @@ enum SidereonStatus sidereon_rinex_obs_values(const struct SidereonRinexObs *obs
  */
 enum SidereonStatus sidereon_rinex_obs_version(const struct SidereonRinexObs *obs,
                                                double *out_version);
+
+/**
+ * RINEX observation-code frequency in hertz for a system and full observation
+ * code. The RINEX version and optional GLONASS FDMA channel are passed to the
+ * core policy without reduction. Delegates to
+ * `sidereon_core::frequencies::rinex_observation_frequency_hz`.
+ *
+ * Safety: code points to a non-empty, null-terminated UTF-8 string; out points
+ * to a double.
+ */
+enum SidereonStatus sidereon_rinex_observation_frequency_hz(uint32_t system,
+                                                            const char *code,
+                                                            double rinex_version,
+                                                            bool has_glonass_channel,
+                                                            int8_t glonass_channel,
+                                                            double *out);
+
+/**
+ * RINEX observation-code wavelength in metres for a system and full
+ * observation code. Delegates to
+ * `sidereon_core::frequencies::rinex_observation_wavelength_m` with the RINEX
+ * version and optional GLONASS channel unchanged.
+ *
+ * Safety: code points to a non-empty, null-terminated UTF-8 string; out points
+ * to a double.
+ */
+enum SidereonStatus sidereon_rinex_observation_wavelength_m(uint32_t system,
+                                                            const char *code,
+                                                            double rinex_version,
+                                                            bool has_glonass_channel,
+                                                            int8_t glonass_channel,
+                                                            double *out);
 
 enum SidereonStatus sidereon_rinex_repair_actions(const struct SidereonRinexRepair *repair,
                                                   struct SidereonRinexRepairAction *out,
@@ -28057,6 +29419,112 @@ enum SidereonStatus sidereon_rtk_measurement_model_init(struct SidereonRtkMeasur
 enum SidereonStatus sidereon_rtk_residual_validation_options_init(struct SidereonRtkResidualValidationOptions *out_options);
 
 /**
+ * Copy one single-frequency RINEX RTK arc epoch's base observations.
+ *
+ * Safety: arc must be a live handle; out points to len output entries or is
+ * NULL when len is zero; out_written and out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_rtk_rinex_arc_epoch_base_observations(const struct SidereonRtkRinexArc *arc,
+                                                                   size_t index,
+                                                                   struct SidereonRtkArcObservationOut *out,
+                                                                   size_t len,
+                                                                   size_t *out_written,
+                                                                   size_t *out_required);
+
+/**
+ * Copy one single-frequency RINEX RTK arc epoch's base transmit-time
+ * satellite positions.
+ *
+ * Safety: arc must be a live handle; out points to len output entries or is
+ * NULL when len is zero; out_written and out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_rtk_rinex_arc_epoch_base_satellite_positions(const struct SidereonRtkRinexArc *arc,
+                                                                          size_t index,
+                                                                          struct SidereonRtkArcPositionOut *out,
+                                                                          size_t len,
+                                                                          size_t *out_written,
+                                                                          size_t *out_required);
+
+/**
+ * Number of epochs in a single-frequency RINEX RTK arc.
+ *
+ * Safety: arc must be a live handle; out_count must point to a size_t.
+ */
+enum SidereonStatus sidereon_rtk_rinex_arc_epoch_count(const struct SidereonRtkRinexArc *arc,
+                                                       size_t *out_count);
+
+/**
+ * Copy one single-frequency RINEX RTK arc epoch's counts and optional fields.
+ *
+ * Safety: arc must be a live handle; out must point to a
+ * SidereonRtkArcEpochOutMetadata.
+ */
+enum SidereonStatus sidereon_rtk_rinex_arc_epoch_metadata(const struct SidereonRtkRinexArc *arc,
+                                                          size_t index,
+                                                          struct SidereonRtkArcEpochOutMetadata *out);
+
+/**
+ * Copy one single-frequency RINEX RTK arc epoch's rover observations.
+ *
+ * Safety: arc must be a live handle; out points to len output entries or is
+ * NULL when len is zero; out_written and out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_rtk_rinex_arc_epoch_rover_observations(const struct SidereonRtkRinexArc *arc,
+                                                                    size_t index,
+                                                                    struct SidereonRtkArcObservationOut *out,
+                                                                    size_t len,
+                                                                    size_t *out_written,
+                                                                    size_t *out_required);
+
+/**
+ * Copy one single-frequency RINEX RTK arc epoch's rover transmit-time
+ * satellite positions.
+ *
+ * Safety: arc must be a live handle; out points to len output entries or is
+ * NULL when len is zero; out_written and out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_rtk_rinex_arc_epoch_rover_satellite_positions(const struct SidereonRtkRinexArc *arc,
+                                                                           size_t index,
+                                                                           struct SidereonRtkArcPositionOut *out,
+                                                                           size_t len,
+                                                                           size_t *out_written,
+                                                                           size_t *out_required);
+
+/**
+ * Copy one single-frequency RINEX RTK arc epoch's shared satellite positions.
+ *
+ * Safety: arc must be a live handle; out points to len output entries or is
+ * NULL when len is zero; out_written and out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_rtk_rinex_arc_epoch_satellite_positions(const struct SidereonRtkRinexArc *arc,
+                                                                     size_t index,
+                                                                     struct SidereonRtkArcPositionOut *out,
+                                                                     size_t len,
+                                                                     size_t *out_written,
+                                                                     size_t *out_required);
+
+/**
+ * Release a single-frequency RINEX RTK arc. Passing NULL is a no-op.
+ *
+ * Safety: arc must be NULL or a live handle from
+ * sidereon_build_rinex_rtk_arc.
+ */
+void sidereon_rtk_rinex_arc_free(struct SidereonRtkRinexArc *arc);
+
+/**
+ * Copy the single-frequency RINEX RTK arc's code-to-phase offsets in ambiguity
+ * id order.
+ *
+ * Safety: arc must be a live handle; out points to len output entries or is
+ * NULL when len is zero; out_written and out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_rtk_rinex_arc_offsets_m(const struct SidereonRtkRinexArc *arc,
+                                                     struct SidereonRtkMapValue *out,
+                                                     size_t len,
+                                                     size_t *out_written,
+                                                     size_t *out_required);
+
+/**
  * Initialize RINEX single-frequency RTK arc options with GPS C1C/L1C defaults.
  *
  * Safety: options must point to a writable SidereonRtkRinexArcOptions.
@@ -28064,11 +29532,136 @@ enum SidereonStatus sidereon_rtk_residual_validation_options_init(struct Sidereo
 enum SidereonStatus sidereon_rtk_rinex_arc_options_init(struct SidereonRtkRinexArcOptions *options);
 
 /**
+ * Number of base epochs skipped by the single-frequency RINEX RTK arc
+ * builder.
+ *
+ * Safety: arc must be a live handle; out_count must point to a size_t.
+ */
+enum SidereonStatus sidereon_rtk_rinex_arc_skipped_epoch_count(const struct SidereonRtkRinexArc *arc,
+                                                               size_t *out_count);
+
+/**
+ * Copy the single-frequency RINEX RTK arc's carrier wavelengths in ambiguity
+ * id order.
+ *
+ * Safety: arc must be a live handle; out points to len output entries or is
+ * NULL when len is zero; out_written and out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_rtk_rinex_arc_wavelengths_m(const struct SidereonRtkRinexArc *arc,
+                                                         struct SidereonRtkMapValue *out,
+                                                         size_t len,
+                                                         size_t *out_written,
+                                                         size_t *out_required);
+
+/**
  * Initialize RINEX dual-frequency RTK arc options with GPS L1/L2 defaults.
  *
  * Safety: options must point to a writable SidereonRtkRinexDualArcOptions.
  */
 enum SidereonStatus sidereon_rtk_rinex_dual_arc_options_init(struct SidereonRtkRinexDualArcOptions *options);
+
+/**
+ * Copy one dual-frequency RINEX RTK arc epoch's base transmit-time satellite
+ * positions.
+ *
+ * Safety: arc must be a live handle; out points to len output entries or is
+ * NULL when len is zero; out_written and out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_rtk_rinex_dual_frequency_arc_epoch_base_satellite_positions(const struct SidereonRtkRinexDualFrequencyArc *arc,
+                                                                                         size_t index,
+                                                                                         struct SidereonRtkArcPositionOut *out,
+                                                                                         size_t len,
+                                                                                         size_t *out_written,
+                                                                                         size_t *out_required);
+
+/**
+ * Number of epochs in a dual-frequency RINEX RTK arc.
+ *
+ * Safety: arc must be a live handle; out_count must point to a size_t.
+ */
+enum SidereonStatus sidereon_rtk_rinex_dual_frequency_arc_epoch_count(const struct SidereonRtkRinexDualFrequencyArc *arc,
+                                                                      size_t *out_count);
+
+/**
+ * Copy one dual-frequency RINEX RTK arc epoch's time, counts, and optional
+ * fields into *out. The optional sort key is copied separately.
+ *
+ * Safety: arc must be a live handle; out must point to a
+ * SidereonRtkRinexDualFrequencyArcEpochOutMetadata.
+ */
+enum SidereonStatus sidereon_rtk_rinex_dual_frequency_arc_epoch_metadata(const struct SidereonRtkRinexDualFrequencyArc *arc,
+                                                                         size_t index,
+                                                                         struct SidereonRtkRinexDualFrequencyArcEpochOutMetadata *out);
+
+/**
+ * Copy one dual-frequency RINEX RTK arc epoch's paired observations.
+ *
+ * Safety: arc must be a live handle; out points to len output entries or is
+ * NULL when len is zero; out_written and out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_rtk_rinex_dual_frequency_arc_epoch_observations(const struct SidereonRtkRinexDualFrequencyArc *arc,
+                                                                             size_t index,
+                                                                             struct SidereonRtkDualFrequencySatelliteObservationOut *out,
+                                                                             size_t len,
+                                                                             size_t *out_written,
+                                                                             size_t *out_required);
+
+/**
+ * Copy one dual-frequency RINEX RTK arc epoch's rover transmit-time satellite
+ * positions.
+ *
+ * Safety: arc must be a live handle; out points to len output entries or is
+ * NULL when len is zero; out_written and out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_rtk_rinex_dual_frequency_arc_epoch_rover_satellite_positions(const struct SidereonRtkRinexDualFrequencyArc *arc,
+                                                                                          size_t index,
+                                                                                          struct SidereonRtkArcPositionOut *out,
+                                                                                          size_t len,
+                                                                                          size_t *out_written,
+                                                                                          size_t *out_required);
+
+/**
+ * Copy one dual-frequency RINEX RTK arc epoch's shared satellite positions.
+ *
+ * Safety: arc must be a live handle; out points to len output entries or is
+ * NULL when len is zero; out_written and out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_rtk_rinex_dual_frequency_arc_epoch_satellite_positions(const struct SidereonRtkRinexDualFrequencyArc *arc,
+                                                                                    size_t index,
+                                                                                    struct SidereonRtkArcPositionOut *out,
+                                                                                    size_t len,
+                                                                                    size_t *out_written,
+                                                                                    size_t *out_required);
+
+/**
+ * Copy one dual-frequency RINEX RTK arc epoch's optional sort key as UTF-8
+ * bytes without a terminating NUL.
+ *
+ * Safety: arc must be a live handle; out points to len bytes or is NULL when
+ * len is zero; out_written and out_required must point to size_t.
+ */
+enum SidereonStatus sidereon_rtk_rinex_dual_frequency_arc_epoch_sort_key(const struct SidereonRtkRinexDualFrequencyArc *arc,
+                                                                         size_t index,
+                                                                         uint8_t *out,
+                                                                         size_t len,
+                                                                         size_t *out_written,
+                                                                         size_t *out_required);
+
+/**
+ * Release a dual-frequency RINEX RTK arc. Passing NULL is a no-op.
+ *
+ * Safety: arc must be NULL or a live handle from
+ * sidereon_build_dual_frequency_rinex_rtk_arc.
+ */
+void sidereon_rtk_rinex_dual_frequency_arc_free(struct SidereonRtkRinexDualFrequencyArc *arc);
+
+/**
+ * Number of base epochs skipped by the dual-frequency RINEX RTK arc builder.
+ *
+ * Safety: arc must be a live handle; out_count must point to a size_t.
+ */
+enum SidereonStatus sidereon_rtk_rinex_dual_frequency_arc_skipped_epoch_count(const struct SidereonRtkRinexDualFrequencyArc *arc,
+                                                                              size_t *out_count);
 
 /**
  * Initialize static RINEX RTK baseline config with engine defaults.
@@ -28919,6 +30512,44 @@ enum SidereonStatus sidereon_sbas_k_multipliers_en_route_npa(struct SidereonSbas
 enum SidereonStatus sidereon_sbas_k_multipliers_precision_approach(struct SidereonSbasKMultipliers *out_k);
 
 /**
+ * Copy one SBAS text-log payload using the standard variable-output contract.
+ *
+ * Safety: blocks is a live handle; out points to len writable bytes or is NULL
+ * when len is zero; the count pointers point to writable size_t values.
+ */
+enum SidereonStatus sidereon_sbas_log_blocks_bytes(const struct SidereonSbasLogBlocks *blocks,
+                                                   size_t index,
+                                                   uint8_t *out,
+                                                   size_t len,
+                                                   size_t *out_written,
+                                                   size_t *out_required);
+
+/**
+ * Write the number of SBAS text-log blocks.
+ *
+ * Safety: blocks is a live handle; out_count points to a size_t.
+ */
+enum SidereonStatus sidereon_sbas_log_blocks_count(const struct SidereonSbasLogBlocks *blocks,
+                                                   size_t *out_count);
+
+/**
+ * Release an SBAS text-log block list. Passing NULL is a no-op.
+ *
+ * Safety: blocks is NULL or a live handle returned by an SBAS line parser.
+ */
+void sidereon_sbas_log_blocks_free(struct SidereonSbasLogBlocks *blocks);
+
+/**
+ * Copy one SBAS text-log block's metadata by deterministic input order.
+ *
+ * Safety: blocks is a live handle; out_block points to a writable metadata
+ * value.
+ */
+enum SidereonStatus sidereon_sbas_log_blocks_item(const struct SidereonSbasLogBlocks *blocks,
+                                                  size_t index,
+                                                  struct SidereonSbasLogBlock *out_block);
+
+/**
  * Compute SBAS HPL and VPL from protection geometry and range-error rows.
  *
  * Safety: geometry, model, out_protection, and out_error must point to their
@@ -29223,6 +30854,18 @@ enum SidereonStatus sidereon_screen_tca_conjunctions_from_tle_catalog(const char
                                                                       size_t len,
                                                                       size_t *out_written,
                                                                       size_t *out_required);
+
+/**
+ * Write the second-of-day value formed by the civil clock fields. Delegates to
+ * `sidereon_core::astro::time::civil::second_of_day` and preserves fractional
+ * seconds.
+ *
+ * Safety: out must point to a double.
+ */
+enum SidereonStatus sidereon_second_of_day(int32_t hour,
+                                           int32_t minute,
+                                           double second,
+                                           double *out);
 
 /**
  * Single-epoch convenience over sidereon_select_ionex_over_range.
@@ -33778,6 +35421,18 @@ enum SidereonStatus sidereon_weight_vector(const struct SidereonWeightEntry *ent
                                            const struct SidereonPseudorangeVarianceOptions *options,
                                            double *out_values,
                                            bool *out_present);
+
+/**
+ * Convert an explicit DTED tile list and write the canonical memory-mappable
+ * terrain store through the public core writer.
+ *
+ * Safety: entries points to entry_count SidereonDtedTileListEntry values, or
+ * is NULL when entry_count is zero; each path and out_path is a non-empty
+ * UTF-8 C string.
+ */
+enum SidereonStatus sidereon_write_dted_tile_list_to_mmap_store(const struct SidereonDtedTileListEntry *entries,
+                                                                size_t entry_count,
+                                                                const char *out_path);
 
 /**
  * Convert a DTED tile tree and write memory-mappable terrain store bytes to

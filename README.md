@@ -37,7 +37,7 @@ reports the exact `target_directory`.
 Regenerate the header only after changing the C surface:
 
 ```sh
-cargo install cbindgen   # once
+cargo install --locked cbindgen --version 0.29.4   # once
 cbindgen --config bindings/c/cbindgen.toml --crate sidereon-c \
     --output bindings/c/include/sidereon.h
 ```
@@ -472,6 +472,15 @@ selects arithmetic from the host platform.
   temporal-correlation covariance with calibrated day-length bounds, optional
   elevation cutoff, optional tropospheric-gradient estimation, DGNSS, velocity
   solving, RAIM / FDE fault detection and exclusion, Huber reweighting, and DOP.
+- **C parity routes.** The public C ABI includes covariance-6 construction,
+  validation, unit conversion, PSD interpolation, and ECI/RTN transforms;
+  calendar day/second helpers; RINEX signal frequency, wavelength, and default
+  ionosphere-free-pair policy; and GPS LNAV TOW, subframe, parity, and validity
+  helpers. It also exposes full broadcast records, GLONASS state vectors and
+  frequency channels, RINEX NAV header values and lenient/raw diagnostics,
+  RINEX clock series, SBAS text-log blocks, and single- and dual-frequency
+  RINEX RTK arcs with query/fill accessors. DTED tile lists can be converted to
+  or written as deterministic memory-mappable stores.
 - **Integrity and error bounds.** Multi-constellation ARAIM protection levels,
   SBAS protection levels (DO-229), per-observation reliability (minimal
   detectable bias, internal and external), observability classification of
@@ -547,12 +556,18 @@ file you supply.
 
 ## How it's validated
 
-`bindings/c/tests/run_smoke.sh` builds the library, regenerates the header,
-compiles a suite of C programs against it, and runs them on committed reference
-fixtures, asserting the binding reproduces the engine's reference numbers
-bit-exact. CI also runs `bindings/c/tests/run_ci_smoke.sh` on Linux and macOS;
-that network-free gate checks the committed header byte-for-byte and executes
-the focused data-distribution, exact-SP3, and RINEX observation-QC ABI programs.
+`bindings/c/tests/run_smoke.sh` builds the library, regenerates the header with
+cbindgen 0.29.4, compiles a suite of C programs against it, and runs them on
+committed reference fixtures, asserting the binding reproduces the engine's
+reference numbers bit-exact. CI also runs
+`bindings/c/tests/run_ci_smoke.sh` on Linux and macOS; that network-free gate
+checks the committed header byte-for-byte and executes the focused
+data-distribution, exact-SP3, RINEX observation-QC, covariance/policy, RINEX
+NAV/clock/SBAS, and RINEX RTK/DTED ABI programs. The last three use only
+committed fixtures: `fixed_policy_smoke` takes no arguments,
+`rinex_nav_clock_smoke` takes the committed NAV and clock paths, and
+`rinex_rtk_dted_smoke` takes the committed SP3, WTZR/WTZZ observation paths,
+and DTED tile directory.
 
 ## Other interfaces
 

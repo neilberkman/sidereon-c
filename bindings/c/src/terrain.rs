@@ -151,6 +151,16 @@ pub struct SidereonTerrainStoreError {
     pub found_checksum64: u64,
 }
 
+/// Integer terrain tile id used by explicit DTED tile-list store builders.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SidereonTerrainTileId {
+    /// Integer latitude tile id, e.g. 36 for a tile covering 36..37 degrees.
+    pub lat_index: i32,
+    /// Integer longitude tile id, e.g. -107 for a tile covering -107..-106.
+    pub lon_index: i32,
+}
+
 /// Terrain datum conversion or geoid loading error kind.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
