@@ -616,6 +616,102 @@ pub unsafe extern "C" fn sidereon_gnss_system_label(
 
 // --- Civil <-> J2000 time conversions (sidereon_core::astro::time::civil) -----
 
+/// Write the second-of-day value formed by the civil clock fields. Delegates to
+/// `sidereon_core::astro::time::civil::second_of_day` and preserves fractional
+/// seconds.
+///
+/// Safety: out must point to a double.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_second_of_day(
+    hour: i32,
+    minute: i32,
+    second: f64,
+    out: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_second_of_day", SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out, "sidereon_second_of_day", "out"));
+        *out = sidereon_core::astro::time::civil::second_of_day(hour, minute, second);
+        SidereonStatus::Ok
+    })
+}
+
+/// Write the fractional day-of-year for a civil instant. January 1 at midnight
+/// is `1.0`; fractional seconds are retained. The civil date is validated by
+/// the public data-catalog date constructor before delegating to
+/// `sidereon_core::astro::time::civil::day_of_year`.
+///
+/// Safety: out must point to a double.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_day_of_year(
+    year: i32,
+    month: i32,
+    day: i32,
+    hour: i32,
+    minute: i32,
+    second: f64,
+    out: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_day_of_year", SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out, "sidereon_day_of_year", "out"));
+        *out = 0.0;
+        let month = match u8::try_from(month) {
+            Ok(month) => month,
+            Err(_) => {
+                set_last_error("sidereon_day_of_year: month is outside uint8 range".to_string());
+                return SidereonStatus::InvalidArgument;
+            }
+        };
+        let day = match u8::try_from(day) {
+            Ok(day) => day,
+            Err(_) => {
+                set_last_error("sidereon_day_of_year: day is outside uint8 range".to_string());
+                return SidereonStatus::InvalidArgument;
+            }
+        };
+        c_try!(
+            sidereon_core::data::ProductDate::new(year, month, day).map_err(|err| {
+                set_last_error(format!("sidereon_day_of_year: {err}"));
+                SidereonStatus::InvalidArgument
+            })
+        );
+        *out = sidereon_core::astro::time::civil::day_of_year(
+            year,
+            i32::from(month),
+            i32::from(day),
+            hour,
+            minute,
+            second,
+        );
+        SidereonStatus::Ok
+    })
+}
+
+/// Write the integer day-of-year for a validated product date. January 1 is
+/// `1`. Delegates to `sidereon_core::data::day_of_year` and preserves the
+/// product-date integer semantics.
+///
+/// Safety: out must point to a uint16_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_data_day_of_year(
+    year: i32,
+    month: u8,
+    day: u8,
+    out: *mut u16,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_data_day_of_year", SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out, "sidereon_data_day_of_year", "out"));
+        *out = 0;
+        let date = c_try!(
+            sidereon_core::data::ProductDate::new(year, month, day).map_err(|err| {
+                set_last_error(format!("sidereon_data_day_of_year: {err}"));
+                SidereonStatus::InvalidArgument
+            },)
+        );
+        *out = sidereon_core::data::day_of_year(date);
+        SidereonStatus::Ok
+    })
+}
+
 /// J2000 seconds for a civil UTC-like calendar instant (the engine's
 /// proleptic-Gregorian count). Delegates to
 /// sidereon_core::astro::time::civil::j2000_seconds (infallible).
@@ -933,6 +1029,53 @@ fn gnss_week_tow_to_c(value: GnssWeekTow) -> SidereonGnssWeekTow {
         system: time_scale_to_c_code(value.system),
         week: value.week,
         tow_s: value.tow_s,
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn calendar_routes_preserve_fractional_and_product_date_semantics() {
+        let mut second_of_day = 0.0;
+        assert_eq!(
+            unsafe { sidereon_second_of_day(1, 2, 3.5, &mut second_of_day) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(second_of_day.to_bits(), (3_723.5_f64).to_bits());
+
+        let mut day_of_year = 0.0;
+        assert_eq!(
+            unsafe { sidereon_day_of_year(2024, 1, 1, 0, 0, 0.0, &mut day_of_year) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(day_of_year.to_bits(), 1.0_f64.to_bits());
+        assert_eq!(
+            unsafe { sidereon_day_of_year(2024, 2, 29, 12, 0, 0.25, &mut day_of_year) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(
+            day_of_year.to_bits(),
+            (60.0_f64 + 43_200.25 / 86_400.0).to_bits()
+        );
+
+        let mut product_day = 0;
+        assert_eq!(
+            unsafe { sidereon_data_day_of_year(2020, 3, 1, &mut product_day) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(product_day, 61);
+
+        assert_eq!(
+            unsafe { sidereon_day_of_year(2023, 2, 29, 0, 0, 0.0, &mut day_of_year) },
+            SidereonStatus::InvalidArgument
+        );
+        assert_eq!(
+            unsafe { sidereon_data_day_of_year(2023, 2, 29, &mut product_day) },
+            SidereonStatus::InvalidArgument
+        );
     }
 }
 

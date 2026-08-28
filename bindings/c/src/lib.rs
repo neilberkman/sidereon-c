@@ -1307,9 +1307,10 @@ unsafe fn build_spp_solve_inputs(
             beta: inputs.klobuchar_beta,
         },
         beidou_klobuchar,
-        // The C surface does not yet expose broadcast Galileo NeQuick-G
-        // coefficients, so Galileo keeps the Klobuchar fallback and existing
-        // zero-Galileo goldens stay bit-identical.
+        // This legacy SPP input does not carry broadcast Galileo NeQuick-G
+        // coefficients; the standalone broadcast route exposes them. Galileo
+        // therefore keeps the Klobuchar fallback and existing zero-Galileo
+        // goldens stay bit-identical.
         galileo_nequick: None,
         sbas_iono: None,
         glonass_channels,

@@ -40,6 +40,16 @@ pub enum SidereonCarrierBand {
     G2 = 15,
 }
 
+/// A standard two-carrier ionosphere-free pair.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SidereonCarrierPair {
+    /// First carrier band in the affine combination.
+    pub band1: SidereonCarrierBand,
+    /// Second carrier band in the affine combination.
+    pub band2: SidereonCarrierBand,
+}
+
 /// Copy the core carrier-band label into out.
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_carrier_band_label(
@@ -137,6 +147,271 @@ pub unsafe extern "C" fn sidereon_wavelength_m(
             }
         }
     })
+}
+
+/// RINEX observation-band frequency in hertz for a system and one-character
+/// band digit. A GLONASS G1/G2 lookup uses `glonass_channel` only when
+/// `has_glonass_channel` is true. Delegates to
+/// `sidereon_core::frequencies::rinex_band_frequency_hz`.
+///
+/// Safety: band points to a non-empty, null-terminated UTF-8 string containing
+/// exactly one character; out points to a double.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rinex_band_frequency_hz(
+    system: u32,
+    band: *const c_char,
+    has_glonass_channel: bool,
+    glonass_channel: i8,
+    out: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rinex_band_frequency_hz",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(out, "sidereon_rinex_band_frequency_hz", "out"));
+            *out = 0.0;
+            let system = c_try!(gnss_system_from_c_code(
+                "sidereon_rinex_band_frequency_hz",
+                "system",
+                system
+            ));
+            let band = c_try!(rinex_band_char_from_c(
+                "sidereon_rinex_band_frequency_hz",
+                band
+            ));
+            match sidereon_core::frequencies::rinex_band_frequency_hz(
+                system,
+                band,
+                has_glonass_channel.then_some(glonass_channel),
+            ) {
+                Some(value) => {
+                    *out = value;
+                    SidereonStatus::Ok
+                }
+                None => {
+                    set_last_error(
+                        "sidereon_rinex_band_frequency_hz: undefined system/band/channel combination"
+                            .to_string(),
+                    );
+                    SidereonStatus::InvalidArgument
+                }
+            }
+        },
+    )
+}
+
+/// RINEX observation-band wavelength in metres for a system and one-character
+/// band digit. Uses the same GLONASS channel policy as the frequency route.
+/// Delegates to `sidereon_core::frequencies::rinex_band_wavelength_m`.
+///
+/// Safety: band points to a non-empty, null-terminated UTF-8 string containing
+/// exactly one character; out points to a double.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rinex_band_wavelength_m(
+    system: u32,
+    band: *const c_char,
+    has_glonass_channel: bool,
+    glonass_channel: i8,
+    out: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rinex_band_wavelength_m",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(out, "sidereon_rinex_band_wavelength_m", "out"));
+            *out = 0.0;
+            let system = c_try!(gnss_system_from_c_code(
+                "sidereon_rinex_band_wavelength_m",
+                "system",
+                system
+            ));
+            let band = c_try!(rinex_band_char_from_c(
+                "sidereon_rinex_band_wavelength_m",
+                band
+            ));
+            match sidereon_core::frequencies::rinex_band_wavelength_m(
+                system,
+                band,
+                has_glonass_channel.then_some(glonass_channel),
+            ) {
+                Some(value) => {
+                    *out = value;
+                    SidereonStatus::Ok
+                }
+                None => {
+                    set_last_error(
+                        "sidereon_rinex_band_wavelength_m: undefined system/band/channel combination"
+                            .to_string(),
+                    );
+                    SidereonStatus::InvalidArgument
+                }
+            }
+        },
+    )
+}
+
+/// RINEX observation-code frequency in hertz for a system and full observation
+/// code. The RINEX version and optional GLONASS FDMA channel are passed to the
+/// core policy without reduction. Delegates to
+/// `sidereon_core::frequencies::rinex_observation_frequency_hz`.
+///
+/// Safety: code points to a non-empty, null-terminated UTF-8 string; out points
+/// to a double.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rinex_observation_frequency_hz(
+    system: u32,
+    code: *const c_char,
+    rinex_version: f64,
+    has_glonass_channel: bool,
+    glonass_channel: i8,
+    out: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rinex_observation_frequency_hz",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out,
+                "sidereon_rinex_observation_frequency_hz",
+                "out"
+            ));
+            *out = 0.0;
+            let system = c_try!(gnss_system_from_c_code(
+                "sidereon_rinex_observation_frequency_hz",
+                "system",
+                system
+            ));
+            let code = c_try!(parse_c_string(
+                "sidereon_rinex_observation_frequency_hz",
+                "code",
+                code
+            ));
+            match sidereon_core::frequencies::rinex_observation_frequency_hz(
+                system,
+                &code,
+                rinex_version,
+                has_glonass_channel.then_some(glonass_channel),
+            ) {
+                Some(value) => {
+                    *out = value;
+                    SidereonStatus::Ok
+                }
+                None => {
+                    set_last_error(
+                        "sidereon_rinex_observation_frequency_hz: undefined system/code/version/channel combination"
+                            .to_string(),
+                    );
+                    SidereonStatus::InvalidArgument
+                }
+            }
+        },
+    )
+}
+
+/// RINEX observation-code wavelength in metres for a system and full
+/// observation code. Delegates to
+/// `sidereon_core::frequencies::rinex_observation_wavelength_m` with the RINEX
+/// version and optional GLONASS channel unchanged.
+///
+/// Safety: code points to a non-empty, null-terminated UTF-8 string; out points
+/// to a double.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rinex_observation_wavelength_m(
+    system: u32,
+    code: *const c_char,
+    rinex_version: f64,
+    has_glonass_channel: bool,
+    glonass_channel: i8,
+    out: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rinex_observation_wavelength_m",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out,
+                "sidereon_rinex_observation_wavelength_m",
+                "out"
+            ));
+            *out = 0.0;
+            let system = c_try!(gnss_system_from_c_code(
+                "sidereon_rinex_observation_wavelength_m",
+                "system",
+                system
+            ));
+            let code = c_try!(parse_c_string(
+                "sidereon_rinex_observation_wavelength_m",
+                "code",
+                code
+            ));
+            match sidereon_core::frequencies::rinex_observation_wavelength_m(
+                system,
+                &code,
+                rinex_version,
+                has_glonass_channel.then_some(glonass_channel),
+            ) {
+                Some(value) => {
+                    *out = value;
+                    SidereonStatus::Ok
+                }
+                None => {
+                    set_last_error(
+                        "sidereon_rinex_observation_wavelength_m: undefined system/code/version/channel combination"
+                            .to_string(),
+                    );
+                    SidereonStatus::InvalidArgument
+                }
+            }
+        },
+    )
+}
+
+/// Write the standard ionosphere-free carrier pair for a GNSS system and set
+/// `*out_present`. GPS, Galileo, and BeiDou have defaults; GLONASS and other
+/// valid systems have no constellation-wide default. Delegates to
+/// `sidereon_core::frequencies::default_iono_free_pair`.
+///
+/// Safety: out_pair and out_present point to writable storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_default_iono_free_pair(
+    system: u32,
+    out_pair: *mut SidereonCarrierPair,
+    out_present: *mut bool,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_default_iono_free_pair",
+        SidereonStatus::Panic,
+        || {
+            let out_pair = c_try!(require_out(
+                out_pair,
+                "sidereon_default_iono_free_pair",
+                "out_pair"
+            ));
+            *out_pair = SidereonCarrierPair {
+                band1: SidereonCarrierBand::L1,
+                band2: SidereonCarrierBand::L1,
+            };
+            let out_present = c_try!(require_out(
+                out_present,
+                "sidereon_default_iono_free_pair",
+                "out_present"
+            ));
+            *out_present = false;
+            let system = c_try!(gnss_system_from_c_code(
+                "sidereon_default_iono_free_pair",
+                "system",
+                system
+            ));
+            if let Some(pair) = sidereon_core::frequencies::default_iono_free_pair(system) {
+                *out_pair = SidereonCarrierPair {
+                    band1: carrier_band_to_c(pair.band1),
+                    band2: carrier_band_to_c(pair.band2),
+                };
+                *out_present = true;
+            }
+            SidereonStatus::Ok
+        },
+    )
 }
 
 /// Default single-point-positioning carrier frequency in Hz for a system.
@@ -2052,6 +2327,235 @@ fn carrier_band_from_c(
         }
     };
     Ok(mapped)
+}
+
+unsafe fn rinex_band_char_from_c(
+    fn_name: &str,
+    band: *const c_char,
+) -> Result<char, SidereonStatus> {
+    let band = parse_c_string(fn_name, "band", band)?;
+    let mut chars = band.chars();
+    let Some(value) = chars.next() else {
+        unreachable!("parse_c_string rejects empty strings")
+    };
+    if chars.next().is_some() {
+        set_last_error(format!(
+            "{fn_name}: band must contain exactly one character"
+        ));
+        return Err(SidereonStatus::InvalidArgument);
+    }
+    Ok(value)
+}
+
+fn carrier_band_to_c(band: sidereon_core::frequencies::CarrierBand) -> SidereonCarrierBand {
+    use sidereon_core::frequencies::CarrierBand as B;
+    match band {
+        B::L1 => SidereonCarrierBand::L1,
+        B::L2 => SidereonCarrierBand::L2,
+        B::L5 => SidereonCarrierBand::L5,
+        B::E1 => SidereonCarrierBand::E1,
+        B::E5a => SidereonCarrierBand::E5a,
+        B::E5b => SidereonCarrierBand::E5b,
+        B::E5 => SidereonCarrierBand::E5,
+        B::E6 => SidereonCarrierBand::E6,
+        B::B1c => SidereonCarrierBand::B1c,
+        B::B1i => SidereonCarrierBand::B1i,
+        B::B2a => SidereonCarrierBand::B2a,
+        B::B2b => SidereonCarrierBand::B2b,
+        B::B2 => SidereonCarrierBand::B2,
+        B::B3i => SidereonCarrierBand::B3i,
+        B::G1 => SidereonCarrierBand::G1,
+        B::G2 => SidereonCarrierBand::G2,
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod tests {
+    use super::*;
+
+    fn band(text: &'static [u8]) -> *const c_char {
+        text.as_ptr().cast()
+    }
+
+    #[test]
+    fn rinex_frequency_routes_preserve_band_code_version_and_channel_policy() {
+        let mut frequency_hz = 0.0;
+        assert_eq!(
+            unsafe {
+                sidereon_rinex_band_frequency_hz(
+                    SidereonGnssSystem::Gps as u32,
+                    band(b"1\0"),
+                    false,
+                    0,
+                    &mut frequency_hz,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(frequency_hz.to_bits(), (1_575_420_000.0_f64).to_bits());
+
+        assert_eq!(
+            unsafe {
+                sidereon_rinex_band_frequency_hz(
+                    SidereonGnssSystem::Glonass as u32,
+                    band(b"1\0"),
+                    true,
+                    -4,
+                    &mut frequency_hz,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(frequency_hz.to_bits(), (1_599_750_000.0_f64).to_bits());
+        assert_eq!(
+            unsafe {
+                sidereon_rinex_band_frequency_hz(
+                    SidereonGnssSystem::Glonass as u32,
+                    band(b"1\0"),
+                    false,
+                    0,
+                    &mut frequency_hz,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+
+        assert_eq!(
+            unsafe {
+                sidereon_rinex_observation_frequency_hz(
+                    SidereonGnssSystem::BeiDou as u32,
+                    band(b"C1I\0"),
+                    3.02,
+                    false,
+                    0,
+                    &mut frequency_hz,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(frequency_hz.to_bits(), (1_561_098_000.0_f64).to_bits());
+        assert_eq!(
+            unsafe {
+                sidereon_rinex_observation_frequency_hz(
+                    SidereonGnssSystem::BeiDou as u32,
+                    band(b"C1I\0"),
+                    3.03,
+                    false,
+                    0,
+                    &mut frequency_hz,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(frequency_hz.to_bits(), (1_575_420_000.0_f64).to_bits());
+        assert_eq!(
+            unsafe {
+                sidereon_rinex_band_frequency_hz(
+                    SidereonGnssSystem::Gps as u32,
+                    band(b"12\0"),
+                    false,
+                    0,
+                    &mut frequency_hz,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+    }
+
+    #[test]
+    fn rinex_wavelength_and_default_pair_routes_match_core_values() {
+        let mut frequency_hz = 0.0;
+        let mut wavelength_m = 0.0;
+        assert_eq!(
+            unsafe {
+                sidereon_rinex_observation_frequency_hz(
+                    SidereonGnssSystem::Gps as u32,
+                    band(b"L1C\0"),
+                    3.05,
+                    false,
+                    0,
+                    &mut frequency_hz,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(
+            unsafe {
+                sidereon_rinex_observation_wavelength_m(
+                    SidereonGnssSystem::Gps as u32,
+                    band(b"L1C\0"),
+                    3.05,
+                    false,
+                    0,
+                    &mut wavelength_m,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert!((frequency_hz * wavelength_m - 299_792_458.0).abs() < 1.0e-6);
+        assert_eq!(
+            unsafe {
+                sidereon_rinex_band_wavelength_m(
+                    SidereonGnssSystem::Glonass as u32,
+                    band(b"2\0"),
+                    true,
+                    6,
+                    &mut wavelength_m,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert!((wavelength_m - 299_792_458.0 / 1_248_625_000.0).abs() < 1.0e-15);
+
+        let expected = [
+            (
+                SidereonGnssSystem::Gps,
+                SidereonCarrierBand::L1,
+                SidereonCarrierBand::L2,
+            ),
+            (
+                SidereonGnssSystem::Galileo,
+                SidereonCarrierBand::E1,
+                SidereonCarrierBand::E5a,
+            ),
+            (
+                SidereonGnssSystem::BeiDou,
+                SidereonCarrierBand::B1i,
+                SidereonCarrierBand::B3i,
+            ),
+        ];
+        for (system, band1, band2) in expected {
+            let mut pair = SidereonCarrierPair {
+                band1: SidereonCarrierBand::L1,
+                band2: SidereonCarrierBand::L1,
+            };
+            let mut present = false;
+            assert_eq!(
+                unsafe { sidereon_default_iono_free_pair(system as u32, &mut pair, &mut present) },
+                SidereonStatus::Ok
+            );
+            assert!(present);
+            assert_eq!(pair.band1, band1);
+            assert_eq!(pair.band2, band2);
+        }
+        let mut pair = SidereonCarrierPair {
+            band1: SidereonCarrierBand::L1,
+            band2: SidereonCarrierBand::L1,
+        };
+        let mut present = true;
+        assert_eq!(
+            unsafe {
+                sidereon_default_iono_free_pair(
+                    SidereonGnssSystem::Glonass as u32,
+                    &mut pair,
+                    &mut present,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert!(!present);
+    }
 }
 
 unsafe fn iq_samples_from_c(

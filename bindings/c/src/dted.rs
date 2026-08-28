@@ -1,4 +1,9 @@
 use super::*;
+use sidereon_core::terrain_store::{
+    dted_tile_list_to_mmap_store as core_dted_tile_list_to_mmap_store,
+    write_dted_tile_list_to_mmap_store as core_write_dted_tile_list_to_mmap_store,
+    DtedTileListEntry as CoreDtedTileListEntry, TerrainTileId as CoreTerrainTileId,
+};
 
 // --- DTED terrain lookup (sidereon_core::terrain) ---------------------------
 
@@ -12,6 +17,18 @@ pub struct SidereonDtedTerrain {
 /// sidereon_dted_tile_free.
 pub struct SidereonDtedTile {
     pub(crate) inner: DtedTile,
+}
+
+/// One explicit DTED source for list-based memory-mappable terrain-store
+/// construction. The core builder parses the DTED header and validates that
+/// the parsed origin matches tile_id.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonDtedTileListEntry {
+    /// Expected integer DTED tile id.
+    pub tile_id: SidereonTerrainTileId,
+    /// Non-empty UTF-8 path to the DTED `.dt2` tile.
+    pub path: *const c_char,
 }
 
 /// DTED interpolation mode for orthometric terrain heights.
@@ -378,6 +395,94 @@ pub unsafe extern "C" fn sidereon_dted_tile_free(tile: *mut SidereonDtedTile) {
     free_boxed(tile);
 }
 
+/// Convert an explicit DTED tile list into canonical memory-mappable terrain
+/// store bytes. Header parsing, tile-id validation, sorting, deduplication,
+/// alignment, and checksums are performed by the public core converter.
+///
+/// Safety: entries points to entry_count SidereonDtedTileListEntry values, or
+/// is NULL when entry_count is zero; each path is a non-empty UTF-8 C string;
+/// out points to len bytes or is NULL when len is zero; out_written and
+/// out_required must point to size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_dted_tile_list_to_mmap_store(
+    entries: *const SidereonDtedTileListEntry,
+    entry_count: usize,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_dted_tile_list_to_mmap_store",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_dted_tile_list_to_mmap_store",
+                out_written,
+                out_required
+            ));
+            let entries = c_try!(dted_tile_list_entries_from_c(
+                "sidereon_dted_tile_list_to_mmap_store",
+                entries,
+                entry_count,
+            ));
+            let bytes = match core_dted_tile_list_to_mmap_store(&entries) {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    return map_terrain_store_error("sidereon_dted_tile_list_to_mmap_store", err)
+                }
+            };
+            c_try!(copy_prefix_to_c(
+                "sidereon_dted_tile_list_to_mmap_store",
+                "out",
+                &bytes,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Convert an explicit DTED tile list and write the canonical memory-mappable
+/// terrain store through the public core writer.
+///
+/// Safety: entries points to entry_count SidereonDtedTileListEntry values, or
+/// is NULL when entry_count is zero; each path and out_path is a non-empty
+/// UTF-8 C string.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_write_dted_tile_list_to_mmap_store(
+    entries: *const SidereonDtedTileListEntry,
+    entry_count: usize,
+    out_path: *const c_char,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_write_dted_tile_list_to_mmap_store",
+        SidereonStatus::Panic,
+        || {
+            let entries = c_try!(dted_tile_list_entries_from_c(
+                "sidereon_write_dted_tile_list_to_mmap_store",
+                entries,
+                entry_count,
+            ));
+            let out_path = c_try!(parse_c_string(
+                "sidereon_write_dted_tile_list_to_mmap_store",
+                "out_path",
+                out_path,
+            ));
+            match core_write_dted_tile_list_to_mmap_store(&entries, std::path::Path::new(&out_path))
+            {
+                Ok(()) => SidereonStatus::Ok,
+                Err(err) => {
+                    map_terrain_store_error("sidereon_write_dted_tile_list_to_mmap_store", err)
+                }
+            }
+        },
+    )
+}
+
 /// Convert a DTED tile tree rooted at root into memory-mappable terrain store
 /// bytes. The output uses the variable-length output contract. Store postings
 /// are orthometric heights in metres.
@@ -460,6 +565,23 @@ pub unsafe extern "C" fn sidereon_write_dted_tree_to_mmap_store(
     )
 }
 
+unsafe fn dted_tile_list_entries_from_c(
+    fn_name: &str,
+    entries: *const SidereonDtedTileListEntry,
+    entry_count: usize,
+) -> Result<Vec<CoreDtedTileListEntry>, SidereonStatus> {
+    let raw = require_slice(entries, entry_count, fn_name, "entries")?;
+    let mut converted = Vec::with_capacity(raw.len());
+    for (idx, entry) in raw.iter().enumerate() {
+        let path = parse_c_string(fn_name, &format!("entries[{idx}].path"), entry.path)?;
+        converted.push(CoreDtedTileListEntry::new(
+            CoreTerrainTileId::new(entry.tile_id.lat_index, entry.tile_id.lon_index),
+            path,
+        ));
+    }
+    Ok(converted)
+}
+
 /// One longitude-first terrain lookup point, in degrees.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -510,5 +632,86 @@ fn dted_height_result_from_core(result: sidereon_core::Result<f64>) -> SidereonD
             has_height_m: false,
             height_m: 0.0,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::CString;
+
+    struct TempDirectoryGuard(std::path::PathBuf);
+
+    impl Drop for TempDirectoryGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn dted_tile_list_marshalling_checks_paths_and_core_errors() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "sidereon-c-dted-marshalling-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&temp_root);
+        let _ = std::fs::remove_file(&temp_root);
+        std::fs::create_dir_all(&temp_root).unwrap();
+        let _cleanup = TempDirectoryGuard(temp_root.clone());
+
+        let entry = SidereonDtedTileListEntry {
+            tile_id: SidereonTerrainTileId {
+                lat_index: 36,
+                lon_index: -107,
+            },
+            path: ptr::null(),
+        };
+        let error = unsafe { dted_tile_list_entries_from_c("test_dted_tile_list", &entry, 1) }
+            .expect_err("a list entry must have a path");
+        assert_eq!(error, SidereonStatus::NullPointer);
+
+        let missing_path = temp_root.join("missing-input.dt2");
+        let _ = std::fs::remove_file(&missing_path);
+        let missing_path = CString::new(missing_path.to_str().unwrap()).unwrap();
+        let entry = SidereonDtedTileListEntry {
+            tile_id: SidereonTerrainTileId {
+                lat_index: 36,
+                lon_index: -107,
+            },
+            path: missing_path.as_ptr(),
+        };
+        let mut written = usize::MAX;
+        let mut required = usize::MAX;
+        let status = unsafe {
+            sidereon_dted_tile_list_to_mmap_store(
+                &entry,
+                1,
+                ptr::null_mut(),
+                0,
+                &mut written,
+                &mut required,
+            )
+        };
+        assert_eq!(status, SidereonStatus::InvalidArgument);
+        let mut typed = unsafe { std::mem::zeroed::<SidereonTerrainStoreError>() };
+        assert_eq!(
+            unsafe { sidereon_last_terrain_store_error(&mut typed) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(typed.kind, SidereonTerrainStoreErrorKind::Parse as u32);
+        assert_eq!((written, required), (0, 0));
+
+        let missing_parent = temp_root.join("missing-parent");
+        let _ = std::fs::remove_dir_all(&missing_parent);
+        let output_path = missing_parent.join("sidereon.store");
+        let output_path = CString::new(output_path.to_str().unwrap()).unwrap();
+        let status = unsafe {
+            sidereon_write_dted_tile_list_to_mmap_store(ptr::null(), 0, output_path.as_ptr())
+        };
+        assert_eq!(status, SidereonStatus::InvalidArgument);
+        let mut typed = unsafe { std::mem::zeroed::<SidereonTerrainStoreError>() };
+        unsafe { sidereon_last_terrain_store_error(&mut typed) };
+        assert_eq!(typed.kind, SidereonTerrainStoreErrorKind::Io as u32);
+        assert!(!missing_parent.exists());
     }
 }

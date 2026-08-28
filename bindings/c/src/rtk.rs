@@ -5,6 +5,9 @@ use sidereon_core::positioning::{
     StaticReferenceModeStatus, StaticReferenceStationError, StaticReferenceStationMode,
     StaticReferenceStationRinexOptions, StaticReferenceStationSolution,
 };
+use sidereon_core::rtk_filter::{
+    RtkRinexArc as CoreRtkRinexArc, RtkRinexDualFrequencyArc as CoreRtkRinexDualFrequencyArc,
+};
 
 /// The result of an RTK float solve. Opaque to C. Create with
 /// sidereon_solve_rtk_float and release with sidereon_rtk_float_solution_free.
@@ -1338,6 +1341,23 @@ pub struct SidereonRtkRinexDualArcOptions {
     pub include_prediction_time: bool,
 }
 
+/// A single-frequency RTK arc built from paired RINEX observations and an SP3
+/// ephemeris. Opaque to C. Create with sidereon_build_rinex_rtk_arc, read with
+/// the sidereon_rtk_rinex_arc_* accessors, and release with
+/// sidereon_rtk_rinex_arc_free.
+pub struct SidereonRtkRinexArc {
+    pub(crate) inner: CoreRtkRinexArc,
+}
+
+/// A dual-frequency RTK arc built from paired RINEX observations and an SP3
+/// ephemeris. Opaque to C. Create with
+/// sidereon_build_dual_frequency_rinex_rtk_arc, read with the
+/// sidereon_rtk_rinex_dual_frequency_arc_* accessors, and release with
+/// sidereon_rtk_rinex_dual_frequency_arc_free.
+pub struct SidereonRtkRinexDualFrequencyArc {
+    pub(crate) inner: CoreRtkRinexDualFrequencyArc,
+}
+
 /// Static RTK solve config for paired raw RINEX OBS plus SP3. Initialize with
 /// sidereon_rtk_rinex_static_baseline_config_init.
 #[repr(C)]
@@ -1639,6 +1659,78 @@ pub struct SidereonRtkArcEpochOutMetadata {
     /// Whether prediction_time_s carries a value.
     pub has_prediction_time: bool,
     /// Epoch time coordinate (seconds) when present.
+    pub prediction_time_s: f64,
+}
+
+/// One output dual-frequency observation with fixed-size ambiguity-id storage.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonRtkDualFrequencyObservationOut {
+    /// Ambiguity id.
+    pub ambiguity_id: SidereonRtkId,
+    /// Band-1 pseudorange in metres.
+    pub p1_m: f64,
+    /// Band-2 pseudorange in metres.
+    pub p2_m: f64,
+    /// Band-1 carrier phase in cycles.
+    pub phi1_cycles: f64,
+    /// Band-2 carrier phase in cycles.
+    pub phi2_cycles: f64,
+    /// Band-1 carrier frequency in Hz.
+    pub f1_hz: f64,
+    /// Band-2 carrier frequency in Hz.
+    pub f2_hz: f64,
+    /// Whether the band-1 loss-of-lock indicator is present.
+    pub has_lli1: bool,
+    /// Band-1 loss-of-lock indicator when has_lli1 is true.
+    pub lli1: i64,
+    /// Whether the band-2 loss-of-lock indicator is present.
+    pub has_lli2: bool,
+    /// Band-2 loss-of-lock indicator when has_lli2 is true.
+    pub lli2: i64,
+}
+
+/// One output dual-frequency satellite observation with fixed-size satellite
+/// and ambiguity-id storage.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonRtkDualFrequencySatelliteObservationOut {
+    /// Physical satellite id token.
+    pub sat_id: SidereonSatelliteToken,
+    /// Base receiver observation.
+    pub base: SidereonRtkDualFrequencyObservationOut,
+    /// Rover receiver observation.
+    pub rover: SidereonRtkDualFrequencyObservationOut,
+}
+
+/// One dual-frequency RINEX RTK arc epoch's time, array lengths, and optional
+/// fields. Read epoch_sort_key with the corresponding string accessor.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonRtkRinexDualFrequencyArcEpochOutMetadata {
+    /// Split Julian day whole part.
+    pub jd_whole: f64,
+    /// Split Julian day fractional part.
+    pub jd_fraction: f64,
+    /// Whether gap_time_s carries a value.
+    pub has_gap_time_s: bool,
+    /// Comparable gap coordinate in seconds when present.
+    pub gap_time_s: f64,
+    /// Number of paired satellite observations.
+    pub observation_count: usize,
+    /// Number of shared positions.
+    pub satellite_position_count: usize,
+    /// Number of base transmit-time positions.
+    pub base_satellite_position_count: usize,
+    /// Number of rover transmit-time positions.
+    pub rover_satellite_position_count: usize,
+    /// Whether velocity_mps carries a value.
+    pub has_velocity_mps: bool,
+    /// Rover ECEF velocity in metres/second when present.
+    pub velocity_mps: [f64; 3],
+    /// Whether prediction_time_s carries a value.
+    pub has_prediction_time: bool,
+    /// Epoch time coordinate in seconds when present.
     pub prediction_time_s: f64,
 }
 
@@ -4184,6 +4276,755 @@ pub unsafe extern "C" fn sidereon_rtk_arc_solution_free(solution: *mut SidereonR
 // accessors close the construct -> encode -> decode loop. Each builder wraps one
 // constructed sidereon_core::rtcm::Message in a single-element list.
 
+/// Build a single-frequency RTK arc from parsed paired RINEX observations and
+/// an SP3 ephemeris. The core builder performs epoch and satellite selection,
+/// signal-pair extraction, transmit-time lookups, wavelength construction, and
+/// skipped-epoch accounting.
+///
+/// Safety: sp3, base_obs, rover_obs, and options must be live handles/pointers;
+/// out_arc must point to storage for a SidereonRtkRinexArc*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_build_rinex_rtk_arc(
+    sp3: *const SidereonSp3,
+    base_obs: *const SidereonRinexObs,
+    rover_obs: *const SidereonRinexObs,
+    options: *const SidereonRtkRinexArcOptions,
+    out_arc: *mut *mut SidereonRtkRinexArc,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_build_rinex_rtk_arc",
+        SidereonStatus::Panic,
+        || {
+            let out_arc = c_try!(require_out(
+                out_arc,
+                "sidereon_build_rinex_rtk_arc",
+                "out_arc"
+            ));
+            *out_arc = ptr::null_mut();
+            let sp3 = c_try!(require_ref(sp3, "sidereon_build_rinex_rtk_arc", "sp3"));
+            let base_obs = c_try!(require_ref(
+                base_obs,
+                "sidereon_build_rinex_rtk_arc",
+                "base_obs"
+            ));
+            let rover_obs = c_try!(require_ref(
+                rover_obs,
+                "sidereon_build_rinex_rtk_arc",
+                "rover_obs"
+            ));
+            let options = c_try!(require_ref(
+                options,
+                "sidereon_build_rinex_rtk_arc",
+                "options"
+            ));
+            let options = c_try!(rtk_rinex_arc_options_from_c(
+                "sidereon_build_rinex_rtk_arc",
+                options,
+            ));
+            match build_rinex_rtk_arc(&sp3.inner, &base_obs.inner, &rover_obs.inner, &options) {
+                Ok(inner) => {
+                    write_boxed_handle(out_arc, SidereonRtkRinexArc { inner });
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_rtk_rinex_arc_error("sidereon_build_rinex_rtk_arc", &err),
+            }
+        },
+    )
+}
+
+/// Build a dual-frequency RTK arc from parsed paired RINEX observations and an
+/// SP3 ephemeris. The core builder performs all epoch, satellite, signal-pair,
+/// transmit-time, and skipped-epoch processing.
+///
+/// Safety: sp3, base_obs, rover_obs, and options must be live handles/pointers;
+/// out_arc must point to storage for a SidereonRtkRinexDualFrequencyArc*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_build_dual_frequency_rinex_rtk_arc(
+    sp3: *const SidereonSp3,
+    base_obs: *const SidereonRinexObs,
+    rover_obs: *const SidereonRinexObs,
+    options: *const SidereonRtkRinexDualArcOptions,
+    out_arc: *mut *mut SidereonRtkRinexDualFrequencyArc,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_build_dual_frequency_rinex_rtk_arc",
+        SidereonStatus::Panic,
+        || {
+            let out_arc = c_try!(require_out(
+                out_arc,
+                "sidereon_build_dual_frequency_rinex_rtk_arc",
+                "out_arc"
+            ));
+            *out_arc = ptr::null_mut();
+            let sp3 = c_try!(require_ref(
+                sp3,
+                "sidereon_build_dual_frequency_rinex_rtk_arc",
+                "sp3"
+            ));
+            let base_obs = c_try!(require_ref(
+                base_obs,
+                "sidereon_build_dual_frequency_rinex_rtk_arc",
+                "base_obs"
+            ));
+            let rover_obs = c_try!(require_ref(
+                rover_obs,
+                "sidereon_build_dual_frequency_rinex_rtk_arc",
+                "rover_obs"
+            ));
+            let options = c_try!(require_ref(
+                options,
+                "sidereon_build_dual_frequency_rinex_rtk_arc",
+                "options"
+            ));
+            let options = c_try!(rtk_rinex_dual_arc_options_from_c(
+                "sidereon_build_dual_frequency_rinex_rtk_arc",
+                options,
+            ));
+            match build_dual_frequency_rinex_rtk_arc(
+                &sp3.inner,
+                &base_obs.inner,
+                &rover_obs.inner,
+                &options,
+            ) {
+                Ok(inner) => {
+                    write_boxed_handle(out_arc, SidereonRtkRinexDualFrequencyArc { inner });
+                    SidereonStatus::Ok
+                }
+                Err(err) => {
+                    map_rtk_rinex_arc_error("sidereon_build_dual_frequency_rinex_rtk_arc", &err)
+                }
+            }
+        },
+    )
+}
+
+/// Number of epochs in a single-frequency RINEX RTK arc.
+///
+/// Safety: arc must be a live handle; out_count must point to a size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtk_rinex_arc_epoch_count(
+    arc: *const SidereonRtkRinexArc,
+    out_count: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtk_rinex_arc_epoch_count",
+        SidereonStatus::Panic,
+        || {
+            let out_count = c_try!(require_out(
+                out_count,
+                "sidereon_rtk_rinex_arc_epoch_count",
+                "out_count"
+            ));
+            let arc = c_try!(require_ref(
+                arc,
+                "sidereon_rtk_rinex_arc_epoch_count",
+                "arc"
+            ));
+            *out_count = arc.inner.epochs.len();
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Number of base epochs skipped by the single-frequency RINEX RTK arc
+/// builder.
+///
+/// Safety: arc must be a live handle; out_count must point to a size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtk_rinex_arc_skipped_epoch_count(
+    arc: *const SidereonRtkRinexArc,
+    out_count: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtk_rinex_arc_skipped_epoch_count",
+        SidereonStatus::Panic,
+        || {
+            let out_count = c_try!(require_out(
+                out_count,
+                "sidereon_rtk_rinex_arc_skipped_epoch_count",
+                "out_count"
+            ));
+            let arc = c_try!(require_ref(
+                arc,
+                "sidereon_rtk_rinex_arc_skipped_epoch_count",
+                "arc"
+            ));
+            *out_count = arc.inner.skipped_epoch_count;
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy one single-frequency RINEX RTK arc epoch's counts and optional fields.
+///
+/// Safety: arc must be a live handle; out must point to a
+/// SidereonRtkArcEpochOutMetadata.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtk_rinex_arc_epoch_metadata(
+    arc: *const SidereonRtkRinexArc,
+    index: usize,
+    out: *mut SidereonRtkArcEpochOutMetadata,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtk_rinex_arc_epoch_metadata",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out,
+                "sidereon_rtk_rinex_arc_epoch_metadata",
+                "out"
+            ));
+            let epoch = c_try!(rtk_rinex_arc_epoch_at(
+                "sidereon_rtk_rinex_arc_epoch_metadata",
+                arc,
+                index,
+            ));
+            *out = rtk_arc_epoch_metadata_to_c(epoch);
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy one single-frequency RINEX RTK arc epoch's base observations.
+///
+/// Safety: arc must be a live handle; out points to len output entries or is
+/// NULL when len is zero; out_written and out_required must point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtk_rinex_arc_epoch_base_observations(
+    arc: *const SidereonRtkRinexArc,
+    index: usize,
+    out: *mut SidereonRtkArcObservationOut,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtk_rinex_arc_epoch_base_observations",
+        SidereonStatus::Panic,
+        || {
+            copy_rinex_arc_epoch_observations(
+                "sidereon_rtk_rinex_arc_epoch_base_observations",
+                arc,
+                index,
+                false,
+                RtkVariableOut {
+                    out,
+                    len,
+                    out_written,
+                    out_required,
+                },
+            )
+        },
+    )
+}
+
+/// Copy one single-frequency RINEX RTK arc epoch's rover observations.
+///
+/// Safety: arc must be a live handle; out points to len output entries or is
+/// NULL when len is zero; out_written and out_required must point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtk_rinex_arc_epoch_rover_observations(
+    arc: *const SidereonRtkRinexArc,
+    index: usize,
+    out: *mut SidereonRtkArcObservationOut,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtk_rinex_arc_epoch_rover_observations",
+        SidereonStatus::Panic,
+        || {
+            copy_rinex_arc_epoch_observations(
+                "sidereon_rtk_rinex_arc_epoch_rover_observations",
+                arc,
+                index,
+                true,
+                RtkVariableOut {
+                    out,
+                    len,
+                    out_written,
+                    out_required,
+                },
+            )
+        },
+    )
+}
+
+/// Copy one single-frequency RINEX RTK arc epoch's shared satellite positions.
+///
+/// Safety: arc must be a live handle; out points to len output entries or is
+/// NULL when len is zero; out_written and out_required must point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtk_rinex_arc_epoch_satellite_positions(
+    arc: *const SidereonRtkRinexArc,
+    index: usize,
+    out: *mut SidereonRtkArcPositionOut,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtk_rinex_arc_epoch_satellite_positions",
+        SidereonStatus::Panic,
+        || {
+            copy_rinex_arc_epoch_positions(
+                "sidereon_rtk_rinex_arc_epoch_satellite_positions",
+                arc,
+                index,
+                0,
+                RtkVariableOut {
+                    out,
+                    len,
+                    out_written,
+                    out_required,
+                },
+            )
+        },
+    )
+}
+
+/// Copy one single-frequency RINEX RTK arc epoch's base transmit-time
+/// satellite positions.
+///
+/// Safety: arc must be a live handle; out points to len output entries or is
+/// NULL when len is zero; out_written and out_required must point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtk_rinex_arc_epoch_base_satellite_positions(
+    arc: *const SidereonRtkRinexArc,
+    index: usize,
+    out: *mut SidereonRtkArcPositionOut,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtk_rinex_arc_epoch_base_satellite_positions",
+        SidereonStatus::Panic,
+        || {
+            copy_rinex_arc_epoch_positions(
+                "sidereon_rtk_rinex_arc_epoch_base_satellite_positions",
+                arc,
+                index,
+                1,
+                RtkVariableOut {
+                    out,
+                    len,
+                    out_written,
+                    out_required,
+                },
+            )
+        },
+    )
+}
+
+/// Copy one single-frequency RINEX RTK arc epoch's rover transmit-time
+/// satellite positions.
+///
+/// Safety: arc must be a live handle; out points to len output entries or is
+/// NULL when len is zero; out_written and out_required must point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtk_rinex_arc_epoch_rover_satellite_positions(
+    arc: *const SidereonRtkRinexArc,
+    index: usize,
+    out: *mut SidereonRtkArcPositionOut,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtk_rinex_arc_epoch_rover_satellite_positions",
+        SidereonStatus::Panic,
+        || {
+            copy_rinex_arc_epoch_positions(
+                "sidereon_rtk_rinex_arc_epoch_rover_satellite_positions",
+                arc,
+                index,
+                2,
+                RtkVariableOut {
+                    out,
+                    len,
+                    out_written,
+                    out_required,
+                },
+            )
+        },
+    )
+}
+
+/// Copy the single-frequency RINEX RTK arc's carrier wavelengths in ambiguity
+/// id order.
+///
+/// Safety: arc must be a live handle; out points to len output entries or is
+/// NULL when len is zero; out_written and out_required must point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtk_rinex_arc_wavelengths_m(
+    arc: *const SidereonRtkRinexArc,
+    out: *mut SidereonRtkMapValue,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtk_rinex_arc_wavelengths_m",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_rtk_rinex_arc_wavelengths_m",
+                out_written,
+                out_required
+            ));
+            let arc = c_try!(require_ref(
+                arc,
+                "sidereon_rtk_rinex_arc_wavelengths_m",
+                "arc"
+            ));
+            let rows = rtk_map_values_to_c(&arc.inner.wavelengths_m);
+            c_try!(copy_prefix_to_c(
+                "sidereon_rtk_rinex_arc_wavelengths_m",
+                "out",
+                &rows,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy the single-frequency RINEX RTK arc's code-to-phase offsets in ambiguity
+/// id order.
+///
+/// Safety: arc must be a live handle; out points to len output entries or is
+/// NULL when len is zero; out_written and out_required must point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtk_rinex_arc_offsets_m(
+    arc: *const SidereonRtkRinexArc,
+    out: *mut SidereonRtkMapValue,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtk_rinex_arc_offsets_m",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_rtk_rinex_arc_offsets_m",
+                out_written,
+                out_required
+            ));
+            let arc = c_try!(require_ref(arc, "sidereon_rtk_rinex_arc_offsets_m", "arc"));
+            let rows = rtk_map_values_to_c(&arc.inner.offsets_m);
+            c_try!(copy_prefix_to_c(
+                "sidereon_rtk_rinex_arc_offsets_m",
+                "out",
+                &rows,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Release a single-frequency RINEX RTK arc. Passing NULL is a no-op.
+///
+/// Safety: arc must be NULL or a live handle from
+/// sidereon_build_rinex_rtk_arc.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtk_rinex_arc_free(arc: *mut SidereonRtkRinexArc) {
+    free_boxed(arc);
+}
+
+/// Number of epochs in a dual-frequency RINEX RTK arc.
+///
+/// Safety: arc must be a live handle; out_count must point to a size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtk_rinex_dual_frequency_arc_epoch_count(
+    arc: *const SidereonRtkRinexDualFrequencyArc,
+    out_count: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtk_rinex_dual_frequency_arc_epoch_count",
+        SidereonStatus::Panic,
+        || {
+            let out_count = c_try!(require_out(
+                out_count,
+                "sidereon_rtk_rinex_dual_frequency_arc_epoch_count",
+                "out_count"
+            ));
+            let arc = c_try!(require_ref(
+                arc,
+                "sidereon_rtk_rinex_dual_frequency_arc_epoch_count",
+                "arc"
+            ));
+            *out_count = arc.inner.epochs.len();
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Number of base epochs skipped by the dual-frequency RINEX RTK arc builder.
+///
+/// Safety: arc must be a live handle; out_count must point to a size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtk_rinex_dual_frequency_arc_skipped_epoch_count(
+    arc: *const SidereonRtkRinexDualFrequencyArc,
+    out_count: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtk_rinex_dual_frequency_arc_skipped_epoch_count",
+        SidereonStatus::Panic,
+        || {
+            let out_count = c_try!(require_out(
+                out_count,
+                "sidereon_rtk_rinex_dual_frequency_arc_skipped_epoch_count",
+                "out_count"
+            ));
+            let arc = c_try!(require_ref(
+                arc,
+                "sidereon_rtk_rinex_dual_frequency_arc_skipped_epoch_count",
+                "arc"
+            ));
+            *out_count = arc.inner.skipped_epoch_count;
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy one dual-frequency RINEX RTK arc epoch's time, counts, and optional
+/// fields into *out. The optional sort key is copied separately.
+///
+/// Safety: arc must be a live handle; out must point to a
+/// SidereonRtkRinexDualFrequencyArcEpochOutMetadata.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtk_rinex_dual_frequency_arc_epoch_metadata(
+    arc: *const SidereonRtkRinexDualFrequencyArc,
+    index: usize,
+    out: *mut SidereonRtkRinexDualFrequencyArcEpochOutMetadata,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtk_rinex_dual_frequency_arc_epoch_metadata",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out,
+                "sidereon_rtk_rinex_dual_frequency_arc_epoch_metadata",
+                "out"
+            ));
+            let epoch = c_try!(rtk_rinex_dual_frequency_arc_epoch_at(
+                "sidereon_rtk_rinex_dual_frequency_arc_epoch_metadata",
+                arc,
+                index,
+            ));
+            *out = rtk_rinex_dual_frequency_epoch_metadata_to_c(epoch);
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy one dual-frequency RINEX RTK arc epoch's optional sort key as UTF-8
+/// bytes without a terminating NUL.
+///
+/// Safety: arc must be a live handle; out points to len bytes or is NULL when
+/// len is zero; out_written and out_required must point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtk_rinex_dual_frequency_arc_epoch_sort_key(
+    arc: *const SidereonRtkRinexDualFrequencyArc,
+    index: usize,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtk_rinex_dual_frequency_arc_epoch_sort_key",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_rtk_rinex_dual_frequency_arc_epoch_sort_key",
+                out_written,
+                out_required
+            ));
+            let epoch = c_try!(rtk_rinex_dual_frequency_arc_epoch_at(
+                "sidereon_rtk_rinex_dual_frequency_arc_epoch_sort_key",
+                arc,
+                index,
+            ));
+            let key = epoch.epoch_sort_key.as_deref().unwrap_or("");
+            c_try!(copy_prefix_to_c(
+                "sidereon_rtk_rinex_dual_frequency_arc_epoch_sort_key",
+                "out",
+                key.as_bytes(),
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy one dual-frequency RINEX RTK arc epoch's paired observations.
+///
+/// Safety: arc must be a live handle; out points to len output entries or is
+/// NULL when len is zero; out_written and out_required must point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtk_rinex_dual_frequency_arc_epoch_observations(
+    arc: *const SidereonRtkRinexDualFrequencyArc,
+    index: usize,
+    out: *mut SidereonRtkDualFrequencySatelliteObservationOut,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtk_rinex_dual_frequency_arc_epoch_observations",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_rtk_rinex_dual_frequency_arc_epoch_observations",
+                out_written,
+                out_required
+            ));
+            let epoch = c_try!(rtk_rinex_dual_frequency_arc_epoch_at(
+                "sidereon_rtk_rinex_dual_frequency_arc_epoch_observations",
+                arc,
+                index,
+            ));
+            let rows = rtk_dual_frequency_satellite_observations_to_c(&epoch.observations);
+            c_try!(copy_prefix_to_c(
+                "sidereon_rtk_rinex_dual_frequency_arc_epoch_observations",
+                "out",
+                &rows,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy one dual-frequency RINEX RTK arc epoch's shared satellite positions.
+///
+/// Safety: arc must be a live handle; out points to len output entries or is
+/// NULL when len is zero; out_written and out_required must point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtk_rinex_dual_frequency_arc_epoch_satellite_positions(
+    arc: *const SidereonRtkRinexDualFrequencyArc,
+    index: usize,
+    out: *mut SidereonRtkArcPositionOut,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtk_rinex_dual_frequency_arc_epoch_satellite_positions",
+        SidereonStatus::Panic,
+        || {
+            copy_rinex_dual_frequency_arc_epoch_positions(
+                "sidereon_rtk_rinex_dual_frequency_arc_epoch_satellite_positions",
+                arc,
+                index,
+                0,
+                RtkVariableOut {
+                    out,
+                    len,
+                    out_written,
+                    out_required,
+                },
+            )
+        },
+    )
+}
+
+/// Copy one dual-frequency RINEX RTK arc epoch's base transmit-time satellite
+/// positions.
+///
+/// Safety: arc must be a live handle; out points to len output entries or is
+/// NULL when len is zero; out_written and out_required must point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtk_rinex_dual_frequency_arc_epoch_base_satellite_positions(
+    arc: *const SidereonRtkRinexDualFrequencyArc,
+    index: usize,
+    out: *mut SidereonRtkArcPositionOut,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtk_rinex_dual_frequency_arc_epoch_base_satellite_positions",
+        SidereonStatus::Panic,
+        || {
+            copy_rinex_dual_frequency_arc_epoch_positions(
+                "sidereon_rtk_rinex_dual_frequency_arc_epoch_base_satellite_positions",
+                arc,
+                index,
+                1,
+                RtkVariableOut {
+                    out,
+                    len,
+                    out_written,
+                    out_required,
+                },
+            )
+        },
+    )
+}
+
+/// Copy one dual-frequency RINEX RTK arc epoch's rover transmit-time satellite
+/// positions.
+///
+/// Safety: arc must be a live handle; out points to len output entries or is
+/// NULL when len is zero; out_written and out_required must point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtk_rinex_dual_frequency_arc_epoch_rover_satellite_positions(
+    arc: *const SidereonRtkRinexDualFrequencyArc,
+    index: usize,
+    out: *mut SidereonRtkArcPositionOut,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtk_rinex_dual_frequency_arc_epoch_rover_satellite_positions",
+        SidereonStatus::Panic,
+        || {
+            copy_rinex_dual_frequency_arc_epoch_positions(
+                "sidereon_rtk_rinex_dual_frequency_arc_epoch_rover_satellite_positions",
+                arc,
+                index,
+                2,
+                RtkVariableOut {
+                    out,
+                    len,
+                    out_written,
+                    out_required,
+                },
+            )
+        },
+    )
+}
+
+/// Release a dual-frequency RINEX RTK arc. Passing NULL is a no-op.
+///
+/// Safety: arc must be NULL or a live handle from
+/// sidereon_build_dual_frequency_rinex_rtk_arc.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtk_rinex_dual_frequency_arc_free(
+    arc: *mut SidereonRtkRinexDualFrequencyArc,
+) {
+    free_boxed(arc);
+}
+
 /// Solve one static RTK baseline directly from parsed RINEX OBS plus SP3. On
 /// success writes a static-arc solution handle to *out_solution. Release it with
 /// sidereon_rtk_static_arc_solution_free.
@@ -5489,9 +6330,457 @@ fn rtk_arc_positions_to_c(values: &BTreeMap<String, [f64; 3]>) -> Vec<SidereonRt
         .collect()
 }
 
+fn rtk_arc_epoch_metadata_to_c(epoch: &RtkArcEpoch) -> SidereonRtkArcEpochOutMetadata {
+    SidereonRtkArcEpochOutMetadata {
+        base_count: epoch.base.len(),
+        rover_count: epoch.rover.len(),
+        satellite_position_count: epoch.satellite_positions_m.len(),
+        base_satellite_position_count: epoch.base_satellite_positions_m.len(),
+        rover_satellite_position_count: epoch.rover_satellite_positions_m.len(),
+        has_velocity_mps: epoch.velocity_mps.is_some(),
+        velocity_mps: epoch.velocity_mps.unwrap_or([0.0; 3]),
+        has_prediction_time: epoch.prediction_time_s.is_some(),
+        prediction_time_s: epoch.prediction_time_s.unwrap_or(0.0),
+    }
+}
+
+fn rtk_dual_frequency_observation_to_c(
+    observation: &RtkDualFrequencyObservation,
+) -> SidereonRtkDualFrequencyObservationOut {
+    SidereonRtkDualFrequencyObservationOut {
+        ambiguity_id: rtk_id_token(&observation.ambiguity_id),
+        p1_m: observation.p1_m,
+        p2_m: observation.p2_m,
+        phi1_cycles: observation.phi1_cycles,
+        phi2_cycles: observation.phi2_cycles,
+        f1_hz: observation.f1_hz,
+        f2_hz: observation.f2_hz,
+        has_lli1: observation.lli1.is_some(),
+        lli1: observation.lli1.unwrap_or(0),
+        has_lli2: observation.lli2.is_some(),
+        lli2: observation.lli2.unwrap_or(0),
+    }
+}
+
+fn rtk_dual_frequency_satellite_observations_to_c(
+    values: &[RtkDualFrequencySatelliteObservation],
+) -> Vec<SidereonRtkDualFrequencySatelliteObservationOut> {
+    values
+        .iter()
+        .map(
+            |observation| SidereonRtkDualFrequencySatelliteObservationOut {
+                sat_id: satellite_token_from_text(&observation.satellite_id),
+                base: rtk_dual_frequency_observation_to_c(&observation.base),
+                rover: rtk_dual_frequency_observation_to_c(&observation.rover),
+            },
+        )
+        .collect()
+}
+
+fn rtk_rinex_dual_frequency_epoch_metadata_to_c(
+    epoch: &RtkDualFrequencyArcEpoch,
+) -> SidereonRtkRinexDualFrequencyArcEpochOutMetadata {
+    SidereonRtkRinexDualFrequencyArcEpochOutMetadata {
+        jd_whole: epoch.jd_whole,
+        jd_fraction: epoch.jd_fraction,
+        has_gap_time_s: epoch.gap_time_s.is_some(),
+        gap_time_s: epoch.gap_time_s.unwrap_or(0.0),
+        observation_count: epoch.observations.len(),
+        satellite_position_count: epoch.satellite_positions_m.len(),
+        base_satellite_position_count: epoch.base_satellite_positions_m.len(),
+        rover_satellite_position_count: epoch.rover_satellite_positions_m.len(),
+        has_velocity_mps: epoch.velocity_mps.is_some(),
+        velocity_mps: epoch.velocity_mps.unwrap_or([0.0; 3]),
+        has_prediction_time: epoch.prediction_time_s.is_some(),
+        prediction_time_s: epoch.prediction_time_s.unwrap_or(0.0),
+    }
+}
+
+unsafe fn rtk_rinex_arc_epoch_at<'a>(
+    fn_name: &str,
+    arc: *const SidereonRtkRinexArc,
+    index: usize,
+) -> Result<&'a RtkArcEpoch, SidereonStatus> {
+    let handle = require_ref(arc, fn_name, "arc")?;
+    handle.inner.epochs.get(index).ok_or_else(|| {
+        set_last_error(format!(
+            "{fn_name}: epoch index {index} out of range ({} epochs)",
+            handle.inner.epochs.len()
+        ));
+        SidereonStatus::InvalidArgument
+    })
+}
+
+unsafe fn rtk_rinex_dual_frequency_arc_epoch_at<'a>(
+    fn_name: &str,
+    arc: *const SidereonRtkRinexDualFrequencyArc,
+    index: usize,
+) -> Result<&'a RtkDualFrequencyArcEpoch, SidereonStatus> {
+    let handle = require_ref(arc, fn_name, "arc")?;
+    handle.inner.epochs.get(index).ok_or_else(|| {
+        set_last_error(format!(
+            "{fn_name}: epoch index {index} out of range ({} epochs)",
+            handle.inner.epochs.len()
+        ));
+        SidereonStatus::InvalidArgument
+    })
+}
+
+unsafe fn copy_rinex_arc_epoch_observations(
+    fn_name: &str,
+    arc: *const SidereonRtkRinexArc,
+    index: usize,
+    rover: bool,
+    output: RtkVariableOut<SidereonRtkArcObservationOut>,
+) -> SidereonStatus {
+    c_try!(init_copy_counts(
+        fn_name,
+        output.out_written,
+        output.out_required
+    ));
+    let epoch = c_try!(rtk_rinex_arc_epoch_at(fn_name, arc, index));
+    let source = if rover { &epoch.rover } else { &epoch.base };
+    let rows = rtk_arc_observations_to_c(source);
+    c_try!(copy_prefix_to_c(
+        fn_name,
+        "out",
+        &rows,
+        output.out,
+        output.len,
+        output.out_written,
+        output.out_required,
+    ));
+    SidereonStatus::Ok
+}
+
+unsafe fn copy_rinex_arc_epoch_positions(
+    fn_name: &str,
+    arc: *const SidereonRtkRinexArc,
+    index: usize,
+    which: u32,
+    output: RtkVariableOut<SidereonRtkArcPositionOut>,
+) -> SidereonStatus {
+    c_try!(init_copy_counts(
+        fn_name,
+        output.out_written,
+        output.out_required
+    ));
+    let epoch = c_try!(rtk_rinex_arc_epoch_at(fn_name, arc, index));
+    let source = match which {
+        0 => &epoch.satellite_positions_m,
+        1 => &epoch.base_satellite_positions_m,
+        2 => &epoch.rover_satellite_positions_m,
+        _ => {
+            set_last_error(format!("{fn_name}: invalid position selector {which}"));
+            return SidereonStatus::InvalidArgument;
+        }
+    };
+    let rows = rtk_arc_positions_to_c(source);
+    c_try!(copy_prefix_to_c(
+        fn_name,
+        "out",
+        &rows,
+        output.out,
+        output.len,
+        output.out_written,
+        output.out_required,
+    ));
+    SidereonStatus::Ok
+}
+
+unsafe fn copy_rinex_dual_frequency_arc_epoch_positions(
+    fn_name: &str,
+    arc: *const SidereonRtkRinexDualFrequencyArc,
+    index: usize,
+    which: u32,
+    output: RtkVariableOut<SidereonRtkArcPositionOut>,
+) -> SidereonStatus {
+    c_try!(init_copy_counts(
+        fn_name,
+        output.out_written,
+        output.out_required
+    ));
+    let epoch = c_try!(rtk_rinex_dual_frequency_arc_epoch_at(fn_name, arc, index));
+    let source = match which {
+        0 => &epoch.satellite_positions_m,
+        1 => &epoch.base_satellite_positions_m,
+        2 => &epoch.rover_satellite_positions_m,
+        _ => {
+            set_last_error(format!("{fn_name}: invalid position selector {which}"));
+            return SidereonStatus::InvalidArgument;
+        }
+    };
+    let rows = rtk_arc_positions_to_c(source);
+    c_try!(copy_prefix_to_c(
+        fn_name,
+        "out",
+        &rows,
+        output.out,
+        output.len,
+        output.out_written,
+        output.out_required,
+    ));
+    SidereonStatus::Ok
+}
+
 fn rtk_cycle_slip_receiver_to_c(receiver: CycleSlipReceiver) -> SidereonRtkCycleSlipReceiver {
     match receiver {
         CycleSlipReceiver::Base => SidereonRtkCycleSlipReceiver::Base,
         CycleSlipReceiver::Rover => SidereonRtkCycleSlipReceiver::Rover,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn single_arc() -> CoreRtkRinexArc {
+        let observation = RtkArcObservation {
+            satellite_id: "G05".to_string(),
+            ambiguity_id: "G05".to_string(),
+            code_m: 20_000_000.0,
+            phase_m: 20_000_001.0,
+            lli: Some(1),
+        };
+        let positions = BTreeMap::from([("G05".to_string(), [1.0, 2.0, 3.0])]);
+        CoreRtkRinexArc {
+            epochs: vec![RtkArcEpoch {
+                base: vec![observation.clone()],
+                rover: vec![observation],
+                satellite_positions_m: positions.clone(),
+                base_satellite_positions_m: positions.clone(),
+                rover_satellite_positions_m: positions,
+                velocity_mps: Some([4.0, 5.0, 6.0]),
+                prediction_time_s: Some(7.0),
+            }],
+            wavelengths_m: BTreeMap::from([("G05".to_string(), 0.19)]),
+            offsets_m: BTreeMap::from([("G05".to_string(), 0.0)]),
+            skipped_epoch_count: 3,
+        }
+    }
+
+    fn dual_arc() -> CoreRtkRinexDualFrequencyArc {
+        let observation = RtkDualFrequencyObservation {
+            ambiguity_id: "G05".to_string(),
+            p1_m: 20_000_000.0,
+            p2_m: 20_000_010.0,
+            phi1_cycles: 100_000.0,
+            phi2_cycles: 80_000.0,
+            f1_hz: 1_575_420_000.0,
+            f2_hz: 1_227_600_000.0,
+            lli1: Some(1),
+            lli2: None,
+        };
+        let positions = BTreeMap::from([("G05".to_string(), [1.0, 2.0, 3.0])]);
+        CoreRtkRinexDualFrequencyArc {
+            epochs: vec![RtkDualFrequencyArcEpoch {
+                jd_whole: 2_459_000.0,
+                jd_fraction: 0.25,
+                epoch_sort_key: Some("2020-06-25T00:00:00".to_string()),
+                gap_time_s: Some(10.0),
+                observations: vec![RtkDualFrequencySatelliteObservation {
+                    satellite_id: "G05".to_string(),
+                    base: observation.clone(),
+                    rover: observation,
+                }],
+                satellite_positions_m: positions.clone(),
+                base_satellite_positions_m: positions.clone(),
+                rover_satellite_positions_m: positions,
+                velocity_mps: None,
+                prediction_time_s: Some(11.0),
+            }],
+            skipped_epoch_count: 2,
+        }
+    }
+
+    #[test]
+    fn rinex_arc_accessors_preserve_fields_and_checked_buffers() {
+        let handle = Box::into_raw(Box::new(SidereonRtkRinexArc {
+            inner: single_arc(),
+        }));
+        let mut count = 0;
+        assert_eq!(
+            unsafe { sidereon_rtk_rinex_arc_epoch_count(handle, &mut count) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(count, 1);
+
+        let mut skipped = 0;
+        assert_eq!(
+            unsafe { sidereon_rtk_rinex_arc_skipped_epoch_count(handle, &mut skipped) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(skipped, 3);
+
+        let mut metadata = SidereonRtkArcEpochOutMetadata {
+            base_count: 0,
+            rover_count: 0,
+            satellite_position_count: 0,
+            base_satellite_position_count: 0,
+            rover_satellite_position_count: 0,
+            has_velocity_mps: false,
+            velocity_mps: [0.0; 3],
+            has_prediction_time: false,
+            prediction_time_s: 0.0,
+        };
+        assert_eq!(
+            unsafe { sidereon_rtk_rinex_arc_epoch_metadata(handle, 0, &mut metadata) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(metadata.base_count, 1);
+        assert!(metadata.has_velocity_mps);
+        assert_eq!(metadata.velocity_mps, [4.0, 5.0, 6.0]);
+        assert!(metadata.has_prediction_time);
+
+        let mut written = usize::MAX;
+        let mut required = 0;
+        assert_eq!(
+            unsafe {
+                sidereon_rtk_rinex_arc_epoch_base_observations(
+                    handle,
+                    0,
+                    ptr::null_mut(),
+                    0,
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!((written, required), (0, 1));
+        let mut observations = vec![unsafe { std::mem::zeroed::<SidereonRtkArcObservationOut>() }];
+        assert_eq!(
+            unsafe {
+                sidereon_rtk_rinex_arc_epoch_base_observations(
+                    handle,
+                    0,
+                    observations.as_mut_ptr(),
+                    observations.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(observations[0].code_m, 20_000_000.0);
+        assert!(observations[0].has_lli);
+
+        assert_eq!(
+            unsafe {
+                sidereon_rtk_rinex_arc_epoch_satellite_positions(
+                    handle,
+                    9,
+                    ptr::null_mut(),
+                    0,
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+
+        let mut maps = vec![unsafe { std::mem::zeroed::<SidereonRtkMapValue>() }];
+        assert_eq!(
+            unsafe {
+                sidereon_rtk_rinex_arc_wavelengths_m(
+                    handle,
+                    maps.as_mut_ptr(),
+                    maps.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(maps[0].value, 0.19);
+
+        unsafe {
+            sidereon_rtk_rinex_arc_free(handle);
+            sidereon_rtk_rinex_arc_free(ptr::null_mut());
+        }
+    }
+
+    #[test]
+    fn dual_rinex_arc_accessors_preserve_time_sort_key_and_lli_presence() {
+        let handle = Box::into_raw(Box::new(SidereonRtkRinexDualFrequencyArc {
+            inner: dual_arc(),
+        }));
+        let mut metadata = SidereonRtkRinexDualFrequencyArcEpochOutMetadata {
+            jd_whole: 0.0,
+            jd_fraction: 0.0,
+            has_gap_time_s: false,
+            gap_time_s: 0.0,
+            observation_count: 0,
+            satellite_position_count: 0,
+            base_satellite_position_count: 0,
+            rover_satellite_position_count: 0,
+            has_velocity_mps: false,
+            velocity_mps: [0.0; 3],
+            has_prediction_time: false,
+            prediction_time_s: 0.0,
+        };
+        assert_eq!(
+            unsafe {
+                sidereon_rtk_rinex_dual_frequency_arc_epoch_metadata(handle, 0, &mut metadata)
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(metadata.observation_count, 1);
+        assert_eq!(metadata.jd_fraction, 0.25);
+        assert!(metadata.has_gap_time_s && metadata.has_prediction_time);
+
+        let mut written = 0;
+        let mut required = 0;
+        assert_eq!(
+            unsafe {
+                sidereon_rtk_rinex_dual_frequency_arc_epoch_sort_key(
+                    handle,
+                    0,
+                    ptr::null_mut(),
+                    0,
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(required, "2020-06-25T00:00:00".len());
+        let mut rows =
+            vec![unsafe { std::mem::zeroed::<SidereonRtkDualFrequencySatelliteObservationOut>() }];
+        assert_eq!(
+            unsafe {
+                sidereon_rtk_rinex_dual_frequency_arc_epoch_observations(
+                    handle,
+                    0,
+                    rows.as_mut_ptr(),
+                    rows.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(rows[0].base.p1_m, 20_000_000.0);
+        assert!(rows[0].base.has_lli1);
+        assert!(!rows[0].base.has_lli2);
+        unsafe {
+            sidereon_rtk_rinex_dual_frequency_arc_free(handle);
+            sidereon_rtk_rinex_dual_frequency_arc_free(ptr::null_mut());
+        }
+    }
+
+    #[test]
+    fn rinex_arc_option_marshalling_checks_signal_pair_pointer() {
+        let options = SidereonRtkRinexArcOptions {
+            signal_pairs: ptr::null(),
+            signal_pair_count: 1,
+            has_max_epochs: false,
+            max_epochs: 0,
+            min_common_satellites: 4,
+            include_prediction_time: true,
+        };
+        let error = unsafe { rtk_rinex_arc_options_from_c("test_rinex_arc_options", &options) }
+            .expect_err("nonzero signal-pair count must require a pointer");
+        assert_eq!(error, SidereonStatus::NullPointer);
     }
 }

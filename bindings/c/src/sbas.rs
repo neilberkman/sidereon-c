@@ -6,6 +6,247 @@ pub struct SidereonSbasBlock {
     pub(crate) inner: SbasBlock,
 }
 
+/// One timestamped SBAS text-log block. The payload bytes are owned by the
+/// parent `SidereonSbasLogBlocks` handle and copied with its bytes accessor.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonSbasLogBlock {
+    /// SBAS satellite token.
+    pub sat_id: SidereonSatelliteToken,
+    /// GPST week and time of week of the logged block.
+    pub epoch: SidereonGnssWeekTow,
+    /// Wire form of the payload.
+    pub form: SidereonSbasWireForm,
+    /// Number of payload bytes available through the bytes accessor.
+    pub byte_count: usize,
+}
+
+/// Owned timestamped SBAS text-log blocks returned by the EMS or RTKLIB
+/// parsers. Payloads remain valid until this handle is freed.
+pub struct SidereonSbasLogBlocks {
+    pub(crate) blocks: Vec<sidereon_core::sbas::SbasLogBlock>,
+}
+
+/// Parse comma-delimited EMS SBAS text-log lines. This is a text parser and
+/// does not perform binary SBAS message decoding.
+///
+/// Safety: data points to len readable bytes; out_blocks points to an owned
+/// list handle slot.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_parse_sbas_ems_lines(
+    data: *const u8,
+    len: usize,
+    out_blocks: *mut *mut SidereonSbasLogBlocks,
+) -> SidereonStatus {
+    parse_sbas_log_lines(
+        "sidereon_parse_sbas_ems_lines",
+        data,
+        len,
+        out_blocks,
+        sidereon_core::sbas::parse_ems_lines,
+    )
+}
+
+/// Parse RTKLIB SBAS text-log lines. This is a text parser and does not
+/// perform binary SBAS message decoding.
+///
+/// Safety: data points to len readable bytes; out_blocks points to an owned
+/// list handle slot.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_parse_sbas_rtklib_lines(
+    data: *const u8,
+    len: usize,
+    out_blocks: *mut *mut SidereonSbasLogBlocks,
+) -> SidereonStatus {
+    parse_sbas_log_lines(
+        "sidereon_parse_sbas_rtklib_lines",
+        data,
+        len,
+        out_blocks,
+        sidereon_core::sbas::parse_rtklib_lines,
+    )
+}
+
+unsafe fn parse_sbas_log_lines(
+    fn_name: &str,
+    data: *const u8,
+    len: usize,
+    out_blocks: *mut *mut SidereonSbasLogBlocks,
+    parser: fn(&str) -> sidereon_core::Result<Vec<sidereon_core::sbas::SbasLogBlock>>,
+) -> SidereonStatus {
+    ffi_boundary(fn_name, SidereonStatus::Panic, || {
+        let out_blocks = c_try!(require_out(out_blocks, fn_name, "out_blocks"));
+        *out_blocks = ptr::null_mut();
+        let bytes = c_try!(require_slice(data, len, fn_name, "data"));
+        let text = match str::from_utf8(bytes) {
+            Ok(text) => text,
+            Err(_) => {
+                set_last_error(format!("{fn_name}: data is not valid UTF-8"));
+                return SidereonStatus::InvalidToken;
+            }
+        };
+        let blocks = match parser(text) {
+            Ok(blocks) => blocks,
+            Err(err) => {
+                set_last_error(format!("{fn_name}: {err}"));
+                return SidereonStatus::InvalidArgument;
+            }
+        };
+        write_boxed_handle(out_blocks, SidereonSbasLogBlocks { blocks });
+        SidereonStatus::Ok
+    })
+}
+
+/// Release an SBAS text-log block list. Passing NULL is a no-op.
+///
+/// Safety: blocks is NULL or a live handle returned by an SBAS line parser.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sbas_log_blocks_free(blocks: *mut SidereonSbasLogBlocks) {
+    free_boxed(blocks);
+}
+
+/// Write the number of SBAS text-log blocks.
+///
+/// Safety: blocks is a live handle; out_count points to a size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sbas_log_blocks_count(
+    blocks: *const SidereonSbasLogBlocks,
+    out_count: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_sbas_log_blocks_count",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_count,
+                "sidereon_sbas_log_blocks_count",
+                "out_count"
+            ));
+            *out = 0;
+            let blocks = c_try!(require_ref(
+                blocks,
+                "sidereon_sbas_log_blocks_count",
+                "blocks"
+            ));
+            *out = blocks.blocks.len();
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy one SBAS text-log block's metadata by deterministic input order.
+///
+/// Safety: blocks is a live handle; out_block points to a writable metadata
+/// value.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sbas_log_blocks_item(
+    blocks: *const SidereonSbasLogBlocks,
+    index: usize,
+    out_block: *mut SidereonSbasLogBlock,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_sbas_log_blocks_item",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_block,
+                "sidereon_sbas_log_blocks_item",
+                "out_block"
+            ));
+            *out = empty_sbas_log_block();
+            let blocks = c_try!(require_ref(
+                blocks,
+                "sidereon_sbas_log_blocks_item",
+                "blocks"
+            ));
+            let Some(block) = blocks.blocks.get(index) else {
+                set_last_error(format!(
+                    "sidereon_sbas_log_blocks_item: index {index} out of range"
+                ));
+                return SidereonStatus::InvalidArgument;
+            };
+            *out = sbas_log_block_to_c(block);
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy one SBAS text-log payload using the standard variable-output contract.
+///
+/// Safety: blocks is a live handle; out points to len writable bytes or is NULL
+/// when len is zero; the count pointers point to writable size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sbas_log_blocks_bytes(
+    blocks: *const SidereonSbasLogBlocks,
+    index: usize,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_sbas_log_blocks_bytes",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_sbas_log_blocks_bytes",
+                out_written,
+                out_required
+            ));
+            let blocks = c_try!(require_ref(
+                blocks,
+                "sidereon_sbas_log_blocks_bytes",
+                "blocks"
+            ));
+            let Some(block) = blocks.blocks.get(index) else {
+                set_last_error(format!(
+                    "sidereon_sbas_log_blocks_bytes: index {index} out of range"
+                ));
+                return SidereonStatus::InvalidArgument;
+            };
+            c_try!(copy_prefix_to_c(
+                "sidereon_sbas_log_blocks_bytes",
+                "out",
+                &block.bytes,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+fn sbas_log_block_to_c(block: &sidereon_core::sbas::SbasLogBlock) -> SidereonSbasLogBlock {
+    SidereonSbasLogBlock {
+        sat_id: satellite_token(block.satellite_id),
+        epoch: SidereonGnssWeekTow {
+            system: time_scale_to_c_code(block.epoch.system),
+            week: block.epoch.week,
+            tow_s: block.epoch.tow_s,
+        },
+        form: match block.form {
+            SbasWireForm::Framed250 => SidereonSbasWireForm::Framed250,
+            SbasWireForm::Body226 => SidereonSbasWireForm::Body226,
+        },
+        byte_count: block.bytes.len(),
+    }
+}
+
+pub(crate) fn empty_sbas_log_block() -> SidereonSbasLogBlock {
+    SidereonSbasLogBlock {
+        sat_id: satellite_token_from_text(""),
+        epoch: SidereonGnssWeekTow {
+            system: SidereonTimeScale::Gpst as u32,
+            week: 0,
+            tow_s: 0.0,
+        },
+        form: SidereonSbasWireForm::Body226,
+        byte_count: 0,
+    }
+}
+
 pub struct SidereonSbasCorrectionStore {
     pub(crate) inner: SbasCorrectionStore,
 }

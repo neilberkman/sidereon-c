@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Public C parity routes for covariance/calendar and signal/LNAV policy,
+  rich broadcast and RINEX NAV/clock/GLONASS/header data, SBAS logs, RINEX
+  RTK arcs, and DTED tile-list stores, including diagnostics for skipped
+  extended GLONASS slots, with deterministic CI smokes covering the new
+  surfaces and committed fixtures.
+
 ## 1.1.1 - 2026-08-26
 
 ### Changed

@@ -20,6 +20,10 @@ pub enum SidereonBroadcastReasonKind {
 /// sidereon_broadcast_ephemeris_free.
 pub struct SidereonBroadcastEphemeris {
     pub(crate) inner: BroadcastEphemeris,
+    // BroadcastStore intentionally keeps this header value private. Keep the
+    // parsed header value beside the public store handle so the C surface does
+    // not replace an optional value with a sentinel.
+    pub(crate) leap_seconds: Option<f64>,
 }
 
 /// Parse a RINEX navigation file into a broadcast ephemeris source, keeping the
@@ -68,7 +72,20 @@ pub unsafe extern "C" fn sidereon_broadcast_ephemeris_parse_nav(
                     return SidereonStatus::InvalidArgument;
                 }
             };
-            write_boxed_handle(out_broadcast, SidereonBroadcastEphemeris { inner });
+            let leap_seconds = match sidereon_core::rinex::nav::parse_leap_seconds(text) {
+                Ok(value) => value,
+                Err(err) => {
+                    set_last_error(format!("sidereon_broadcast_ephemeris_parse_nav: {err}"));
+                    return SidereonStatus::InvalidArgument;
+                }
+            };
+            write_boxed_handle(
+                out_broadcast,
+                SidereonBroadcastEphemeris {
+                    inner,
+                    leap_seconds,
+                },
+            );
             SidereonStatus::Ok
         },
     )
@@ -76,8 +93,10 @@ pub unsafe extern "C" fn sidereon_broadcast_ephemeris_parse_nav(
 
 /// Read and parse a RINEX navigation file from a UTF-8 filesystem path into a
 /// broadcast ephemeris source. On success writes a newly owned handle to
-/// *out_broadcast. Release it with sidereon_broadcast_ephemeris_free. Delegates
-/// to sidereon::load_rinex_nav.
+/// *out_broadcast. Release it with sidereon_broadcast_ephemeris_free. Reads the
+/// file once as bytes, validates UTF-8 once, then delegates to
+/// sidereon::parse_rinex_nav and sidereon_core::rinex::nav::parse_leap_seconds
+/// using that same text.
 ///
 /// Safety: path must be a non-empty UTF-8 C string; out_broadcast must point to
 /// storage for a SidereonBroadcastEphemeris*.
@@ -101,14 +120,44 @@ pub unsafe extern "C" fn sidereon_broadcast_ephemeris_load_nav(
                 "path",
                 path
             ));
-            let inner = match sidereon::load_rinex_nav(&path) {
+            let source = match std::fs::read(&path) {
+                Ok(source) => source,
+                Err(err) => {
+                    set_last_error(format!("sidereon_broadcast_ephemeris_load_nav: {err}"));
+                    return SidereonStatus::InvalidArgument;
+                }
+            };
+            let source = match str::from_utf8(&source) {
+                Ok(source) => source,
+                Err(_) => {
+                    set_last_error(
+                        "sidereon_broadcast_ephemeris_load_nav: source is not valid UTF-8"
+                            .to_string(),
+                    );
+                    return SidereonStatus::InvalidToken;
+                }
+            };
+            let inner = match sidereon::parse_rinex_nav(source) {
                 Ok(inner) => inner,
                 Err(err) => {
                     set_last_error(format!("sidereon_broadcast_ephemeris_load_nav: {err}"));
                     return SidereonStatus::InvalidArgument;
                 }
             };
-            write_boxed_handle(out_broadcast, SidereonBroadcastEphemeris { inner });
+            let leap_seconds = match sidereon_core::rinex::nav::parse_leap_seconds(source) {
+                Ok(value) => value,
+                Err(err) => {
+                    set_last_error(format!("sidereon_broadcast_ephemeris_load_nav: {err}"));
+                    return SidereonStatus::InvalidArgument;
+                }
+            };
+            write_boxed_handle(
+                out_broadcast,
+                SidereonBroadcastEphemeris {
+                    inner,
+                    leap_seconds,
+                },
+            );
             SidereonStatus::Ok
         },
     )
@@ -861,6 +910,168 @@ pub const SIDEREON_LNAV_SUBFRAME_LENGTH: usize = 300;
 
 // Pin the exported constant to the core definition: a divergence is a build error.
 
+/// Extract the 17-bit time-of-week count from a 30-bit HOW word or a 300-bit
+/// LNAV subframe. Delegates to `sidereon_core::navigation::lnav::tow` and
+/// rejects every other input length through the normal status path.
+///
+/// Safety: bits points to exactly `bits_len` readable bytes; out_tow points to
+/// a uint64_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_lnav_tow(
+    bits: *const u8,
+    bits_len: usize,
+    out_tow: *mut u64,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_lnav_tow", SidereonStatus::Panic, || {
+        let out_tow = c_try!(require_out(out_tow, "sidereon_lnav_tow", "out_tow"));
+        *out_tow = 0;
+        let bits = c_try!(require_slice(bits, bits_len, "sidereon_lnav_tow", "bits"));
+        match sidereon_core::navigation::lnav::tow(bits) {
+            Some(value) => {
+                *out_tow = value;
+                SidereonStatus::Ok
+            }
+            None => {
+                set_last_error(
+                    "sidereon_lnav_tow: bits must contain exactly 30 or 300 bytes".to_string(),
+                );
+                SidereonStatus::InvalidArgument
+            }
+        }
+    })
+}
+
+/// Extract the 3-bit subframe identifier from a 30-bit HOW word or a 300-bit
+/// LNAV subframe. Delegates to `sidereon_core::navigation::lnav::subframe_id`
+/// and rejects every other input length through the normal status path.
+///
+/// Safety: bits points to exactly `bits_len` readable bytes; out_subframe_id
+/// points to a uint64_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_lnav_subframe_id(
+    bits: *const u8,
+    bits_len: usize,
+    out_subframe_id: *mut u64,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_lnav_subframe_id", SidereonStatus::Panic, || {
+        let out_subframe_id = c_try!(require_out(
+            out_subframe_id,
+            "sidereon_lnav_subframe_id",
+            "out_subframe_id"
+        ));
+        *out_subframe_id = 0;
+        let bits = c_try!(require_slice(
+            bits,
+            bits_len,
+            "sidereon_lnav_subframe_id",
+            "bits"
+        ));
+        match sidereon_core::navigation::lnav::subframe_id(bits) {
+            Some(value) => {
+                *out_subframe_id = value;
+                SidereonStatus::Ok
+            }
+            None => {
+                set_last_error(
+                    "sidereon_lnav_subframe_id: bits must contain exactly 30 or 300 bytes"
+                        .to_string(),
+                );
+                SidereonStatus::InvalidArgument
+            }
+        }
+    })
+}
+
+/// Compute the six transmitted parity bytes `[D25..D30]` from 24 source data
+/// bits and the previous word's D29/D30 bits. Delegates to
+/// `sidereon_core::navigation::lnav::parity` without changing those dependency
+/// bits or the bit-byte representation.
+///
+/// Safety: data24 points to exactly `data24_len` readable bytes; out_parity
+/// points to exactly six writable bytes and `parity_len` must be six.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_lnav_parity(
+    data24: *const u8,
+    data24_len: usize,
+    d29_prev: u8,
+    d30_prev: u8,
+    out_parity: *mut u8,
+    parity_len: usize,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_lnav_parity", SidereonStatus::Panic, || {
+        if parity_len != 6 {
+            set_last_error(format!(
+                "sidereon_lnav_parity: parity_len must be 6, got {parity_len}"
+            ));
+            return SidereonStatus::InvalidArgument;
+        }
+        c_try!(require_out_array(
+            out_parity,
+            parity_len,
+            "sidereon_lnav_parity",
+            "out_parity"
+        ));
+        let out_parity = slice::from_raw_parts_mut(out_parity, 6);
+        out_parity.fill(0);
+        let data24 = c_try!(require_slice(
+            data24,
+            data24_len,
+            "sidereon_lnav_parity",
+            "data24"
+        ));
+        match sidereon_core::navigation::lnav::parity(data24, d29_prev, d30_prev) {
+            Ok(value) => {
+                out_parity.copy_from_slice(&value);
+                SidereonStatus::Ok
+            }
+            Err(err) => {
+                set_last_error(format!("sidereon_lnav_parity: {err:?}"));
+                SidereonStatus::InvalidArgument
+            }
+        }
+    })
+}
+
+/// Verify the six parity bits in one transmitted 30-bit LNAV word. Delegates
+/// to `sidereon_core::navigation::lnav::parity_valid`, preserving D29/D30
+/// dependency semantics; only the required 30-byte input shape is checked at
+/// the ABI boundary.
+///
+/// Safety: word30 points to exactly `word30_len` readable bytes; out_valid
+/// points to a bool.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_lnav_parity_valid(
+    word30: *const u8,
+    word30_len: usize,
+    d29_prev: u8,
+    d30_prev: u8,
+    out_valid: *mut bool,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_lnav_parity_valid", SidereonStatus::Panic, || {
+        let out_valid = c_try!(require_out(
+            out_valid,
+            "sidereon_lnav_parity_valid",
+            "out_valid"
+        ));
+        *out_valid = false;
+        let word30 = c_try!(require_slice(
+            word30,
+            word30_len,
+            "sidereon_lnav_parity_valid",
+            "word30"
+        ));
+        if word30_len != sidereon_core::navigation::lnav::WORD_LENGTH {
+            set_last_error(format!(
+                "sidereon_lnav_parity_valid: word30_len must be {}, got {word30_len}",
+                sidereon_core::navigation::lnav::WORD_LENGTH
+            ));
+            return SidereonStatus::InvalidArgument;
+        }
+        *out_valid = sidereon_core::navigation::lnav::parity_valid(word30, d29_prev, d30_prev);
+        SidereonStatus::Ok
+    })
+}
+
 /// Encode GPS LNAV subframes 1-3 from clock and ephemeris parameters. Writes the
 /// three 300-bit subframes (one 0/1 bit per byte, most significant first) into
 /// out_sf1/out_sf2/out_sf3, each of which must hold subframe_len ==
@@ -1316,6 +1527,196 @@ pub struct SidereonBroadcastRecordInfo {
     pub cnav: SidereonCnavParameters,
 }
 
+/// All optional group-delay fields carried by one broadcast navigation record.
+/// A `has_*` flag distinguishes an absent header/record field from a zero
+/// delay. This is the lossless value form used by the raw NAV list routes.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonBroadcastGroupDelays {
+    /// Whether `gps_tgd_s` is present.
+    pub has_gps_tgd_s: bool,
+    /// GPS LNAV TGD, seconds.
+    pub gps_tgd_s: f64,
+    /// Whether `galileo_bgd_e5a_e1_s` is present.
+    pub has_galileo_bgd_e5a_e1_s: bool,
+    /// Galileo BGD E5a/E1, seconds.
+    pub galileo_bgd_e5a_e1_s: f64,
+    /// Whether `galileo_bgd_e5b_e1_s` is present.
+    pub has_galileo_bgd_e5b_e1_s: bool,
+    /// Galileo BGD E5b/E1, seconds.
+    pub galileo_bgd_e5b_e1_s: f64,
+    /// Whether `beidou_tgd1_s` is present.
+    pub has_beidou_tgd1_s: bool,
+    /// BeiDou TGD1, seconds.
+    pub beidou_tgd1_s: f64,
+    /// Whether `beidou_tgd2_s` is present.
+    pub has_beidou_tgd2_s: bool,
+    /// BeiDou TGD2, seconds.
+    pub beidou_tgd2_s: f64,
+    /// Whether `cnav_isc_l1ca_s` is present.
+    pub has_cnav_isc_l1ca_s: bool,
+    /// GPS/QZSS CNAV ISC for L1 C/A, seconds.
+    pub cnav_isc_l1ca_s: f64,
+    /// Whether `cnav_isc_l2c_s` is present.
+    pub has_cnav_isc_l2c_s: bool,
+    /// GPS/QZSS CNAV ISC for L2C, seconds.
+    pub cnav_isc_l2c_s: f64,
+    /// Whether `cnav_isc_l5i5_s` is present.
+    pub has_cnav_isc_l5i5_s: bool,
+    /// GPS/QZSS CNAV ISC for L5 I5, seconds.
+    pub cnav_isc_l5i5_s: f64,
+    /// Whether `cnav_isc_l5q5_s` is present.
+    pub has_cnav_isc_l5q5_s: bool,
+    /// GPS/QZSS CNAV ISC for L5 Q5, seconds.
+    pub cnav_isc_l5q5_s: f64,
+    /// Whether `cnav_isc_l1cd_s` is present.
+    pub has_cnav_isc_l1cd_s: bool,
+    /// GPS/QZSS CNAV-2 ISC for L1C data, seconds.
+    pub cnav_isc_l1cd_s: f64,
+    /// Whether `cnav_isc_l1cp_s` is present.
+    pub has_cnav_isc_l1cp_s: bool,
+    /// GPS/QZSS CNAV-2 ISC for L1C pilot, seconds.
+    pub cnav_isc_l1cp_s: f64,
+}
+
+/// Complete CNAV/CNAV-2 extension carried by a broadcast record.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonBroadcastCnavParameters {
+    /// Whether this record has a CNAV extension.
+    pub present: bool,
+    /// Semi-major axis rate ADOT (m/s).
+    pub adot_m_s: f64,
+    /// Rate of change of mean motion, rad/s².
+    pub delta_n0_dot_rad_s2: f64,
+    /// Scale of `top`.
+    pub top: SidereonGnssWeekTow,
+    /// Delta URA ED index.
+    pub ura_ed_index: i8,
+    /// Nominal URA NED0 index.
+    pub ura_ned0_index: i8,
+    /// Nominal URA NED1 index.
+    pub ura_ned1_index: u8,
+    /// Nominal URA NED2 index.
+    pub ura_ned2_index: u8,
+    /// Transmission time, seconds of week.
+    pub transmission_time_sow: f64,
+    /// Whether `flags` is present.
+    pub has_flags: bool,
+    /// CNAV flags when present.
+    pub flags: u32,
+}
+
+/// Complete broadcast navigation record. The scale is carried by `toe`,
+/// `toc`, and (when present) the CNAV `top` value; optional fields use explicit
+/// presence flags.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonBroadcastRecord {
+    /// Transmitting satellite token.
+    pub sat_id: SidereonSatelliteToken,
+    /// Navigation message as SidereonNavMessage.
+    pub message: u32,
+    /// Native issue-of-data value.
+    pub issue: u32,
+    /// Message carrying the issue value, as SidereonNavMessage.
+    pub issue_message: u32,
+    /// Native broadcast week number.
+    pub week: u32,
+    /// Scale-tagged ephemeris reference epoch.
+    pub toe: SidereonGnssWeekTow,
+    /// Scale-tagged clock reference epoch.
+    pub toc: SidereonGnssWeekTow,
+    /// Complete Keplerian orbit fields.
+    pub elements: SidereonKeplerianElements,
+    /// Complete clock polynomial fields.
+    pub clock: SidereonClockPolynomial,
+    /// Complete optional group-delay fields.
+    pub group_delays: SidereonBroadcastGroupDelays,
+    /// Complete optional CNAV fields.
+    pub cnav: SidereonBroadcastCnavParameters,
+    /// Satellite health word.
+    pub sv_health: f64,
+    /// Signal-in-space accuracy, meters.
+    pub sv_accuracy_m: f64,
+    /// Whether `fit_interval_s` is present.
+    pub has_fit_interval_s: bool,
+    /// GPS curve-fit interval, seconds, when present.
+    pub fit_interval_s: f64,
+}
+
+/// One GLONASS RINEX state-vector broadcast record.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonGlonassRecord {
+    /// Transmitting satellite token.
+    pub sat_id: SidereonSatelliteToken,
+    /// Reference epoch, seconds past J2000 in UTC.
+    pub toe_utc_j2000_s: f64,
+    /// ECEF position, meters.
+    pub pos_m: [f64; 3],
+    /// ECEF velocity, meters/second.
+    pub vel_m_s: [f64; 3],
+    /// ECEF acceleration, meters/second².
+    pub acc_m_s2: [f64; 3],
+    /// Broadcast clock bias, seconds.
+    pub clk_bias: f64,
+    /// Relative frequency offset.
+    pub gamma_n: f64,
+    /// Satellite health word.
+    pub sv_health: f64,
+    /// FDMA frequency-channel number.
+    pub freq_channel: i32,
+}
+
+/// One optional Klobuchar alpha/beta coefficient set.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonKlobucharAlphaBeta {
+    /// Whether the coefficient set is present.
+    pub present: bool,
+    /// Alpha coefficients a0..a3.
+    pub alpha: [f64; 4],
+    /// Beta coefficients b0..b3.
+    pub beta: [f64; 4],
+}
+
+/// One optional Galileo NeQuick-G coefficient set.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonGalileoNequickCoeffs {
+    /// Whether the coefficient set is present.
+    pub present: bool,
+    /// Constant effective-ionisation coefficient.
+    pub ai0: f64,
+    /// Linear MODIP coefficient.
+    pub ai1: f64,
+    /// Quadratic MODIP coefficient.
+    pub ai2: f64,
+}
+
+/// Broadcast ionosphere-correction header values.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonIonoCorrections {
+    /// GPS Klobuchar coefficients.
+    pub gps: SidereonKlobucharAlphaBeta,
+    /// BeiDou Klobuchar coefficients.
+    pub beidou: SidereonKlobucharAlphaBeta,
+    /// Galileo NeQuick-G coefficients.
+    pub galileo: SidereonGalileoNequickCoeffs,
+}
+
+/// One GLONASS slot-to-FDMA-channel entry from a broadcast store.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonFrequencyChannel {
+    /// GLONASS slot/PRN number.
+    pub slot: u8,
+    /// FDMA channel number.
+    pub channel: i8,
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_broadcast_ephemeris_record_count(
     broadcast: *const SidereonBroadcastEphemeris,
@@ -1372,6 +1773,277 @@ pub unsafe extern "C" fn sidereon_broadcast_ephemeris_records(
                 .collect();
             c_try!(copy_prefix_to_c(
                 "sidereon_broadcast_ephemeris_records",
+                "out",
+                &values,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy complete broadcast records held by the store. The records are returned
+/// in the engine's deterministic record order and the output uses the standard
+/// caller-buffer convention. Unlike `sidereon_broadcast_ephemeris_records`,
+/// this route exposes every orbit, clock, optional delay, and CNAV field.
+///
+/// Safety: broadcast is a live handle; out points to `len` writable
+/// SidereonBroadcastRecord values or is NULL when len is zero; the count
+/// pointers point to writable size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_broadcast_ephemeris_records_full(
+    broadcast: *const SidereonBroadcastEphemeris,
+    out: *mut SidereonBroadcastRecord,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_broadcast_ephemeris_records_full",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_broadcast_ephemeris_records_full",
+                out_written,
+                out_required
+            ));
+            let broadcast = c_try!(require_ref(
+                broadcast,
+                "sidereon_broadcast_ephemeris_records_full",
+                "broadcast"
+            ));
+            let values: Vec<_> = broadcast
+                .inner
+                .records()
+                .iter()
+                .map(broadcast_record_to_c_full)
+                .collect();
+            c_try!(copy_prefix_to_c(
+                "sidereon_broadcast_ephemeris_records_full",
+                "out",
+                &values,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Write the number of GLONASS state-vector records held by a broadcast store.
+///
+/// Safety: broadcast is a live handle; out_count points to a size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_broadcast_ephemeris_glonass_record_count(
+    broadcast: *const SidereonBroadcastEphemeris,
+    out_count: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_broadcast_ephemeris_glonass_record_count",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_count,
+                "sidereon_broadcast_ephemeris_glonass_record_count",
+                "out_count"
+            ));
+            *out = 0;
+            let broadcast = c_try!(require_ref(
+                broadcast,
+                "sidereon_broadcast_ephemeris_glonass_record_count",
+                "broadcast"
+            ));
+            *out = broadcast.inner.glonass_records().len();
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy GLONASS state-vector records held by a broadcast store.
+///
+/// Safety: broadcast is a live handle; out points to `len` writable
+/// SidereonGlonassRecord values or is NULL when len is zero; the count pointers
+/// point to writable size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_broadcast_ephemeris_glonass_records(
+    broadcast: *const SidereonBroadcastEphemeris,
+    out: *mut SidereonGlonassRecord,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_broadcast_ephemeris_glonass_records",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_broadcast_ephemeris_glonass_records",
+                out_written,
+                out_required
+            ));
+            let broadcast = c_try!(require_ref(
+                broadcast,
+                "sidereon_broadcast_ephemeris_glonass_records",
+                "broadcast"
+            ));
+            let values: Vec<_> = broadcast
+                .inner
+                .glonass_records()
+                .iter()
+                .map(glonass_record_to_c)
+                .collect();
+            c_try!(copy_prefix_to_c(
+                "sidereon_broadcast_ephemeris_glonass_records",
+                "out",
+                &values,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy the broadcast ionosphere-correction header values.
+///
+/// Safety: broadcast is a live handle; out points to a SidereonIonoCorrections.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_broadcast_ephemeris_iono_corrections(
+    broadcast: *const SidereonBroadcastEphemeris,
+    out: *mut SidereonIonoCorrections,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_broadcast_ephemeris_iono_corrections",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out,
+                "sidereon_broadcast_ephemeris_iono_corrections",
+                "out"
+            ));
+            *out = empty_iono_corrections();
+            let broadcast = c_try!(require_ref(
+                broadcast,
+                "sidereon_broadcast_ephemeris_iono_corrections",
+                "broadcast"
+            ));
+            *out = iono_corrections_to_c(&broadcast.inner.iono_corrections());
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Return the optional GPS-minus-UTC leap-second header value. `out_present`
+/// distinguishes an absent header from a present zero value.
+///
+/// Safety: broadcast is a live handle; both output pointers point to writable
+/// values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_broadcast_ephemeris_leap_seconds(
+    broadcast: *const SidereonBroadcastEphemeris,
+    out_leap_seconds: *mut f64,
+    out_present: *mut bool,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_broadcast_ephemeris_leap_seconds",
+        SidereonStatus::Panic,
+        || {
+            let out_value = c_try!(require_out(
+                out_leap_seconds,
+                "sidereon_broadcast_ephemeris_leap_seconds",
+                "out_leap_seconds"
+            ));
+            *out_value = 0.0;
+            let out_present = c_try!(require_out(
+                out_present,
+                "sidereon_broadcast_ephemeris_leap_seconds",
+                "out_present"
+            ));
+            *out_present = false;
+            let broadcast = c_try!(require_ref(
+                broadcast,
+                "sidereon_broadcast_ephemeris_leap_seconds",
+                "broadcast"
+            ));
+            if let Some(value) = broadcast.leap_seconds {
+                *out_value = value;
+                *out_present = true;
+            }
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Write the number of GLONASS frequency-channel map entries.
+///
+/// Safety: broadcast is a live handle; out_count points to a size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_broadcast_ephemeris_glonass_frequency_channel_count(
+    broadcast: *const SidereonBroadcastEphemeris,
+    out_count: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_broadcast_ephemeris_glonass_frequency_channel_count",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_count,
+                "sidereon_broadcast_ephemeris_glonass_frequency_channel_count",
+                "out_count"
+            ));
+            *out = 0;
+            let broadcast = c_try!(require_ref(
+                broadcast,
+                "sidereon_broadcast_ephemeris_glonass_frequency_channel_count",
+                "broadcast"
+            ));
+            *out = broadcast.inner.glonass_frequency_channels().len();
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy the deterministic GLONASS slot-to-frequency-channel map.
+///
+/// Safety: broadcast is a live handle; out points to `len` writable entries or
+/// is NULL when len is zero; the count pointers point to writable size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_broadcast_ephemeris_glonass_frequency_channels(
+    broadcast: *const SidereonBroadcastEphemeris,
+    out: *mut SidereonFrequencyChannel,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_broadcast_ephemeris_glonass_frequency_channels",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_broadcast_ephemeris_glonass_frequency_channels",
+                out_written,
+                out_required
+            ));
+            let broadcast = c_try!(require_ref(
+                broadcast,
+                "sidereon_broadcast_ephemeris_glonass_frequency_channels",
+                "broadcast"
+            ));
+            let values: Vec<_> = broadcast
+                .inner
+                .glonass_frequency_channels()
+                .into_iter()
+                .map(|(slot, channel)| SidereonFrequencyChannel { slot, channel })
+                .collect();
+            c_try!(copy_prefix_to_c(
+                "sidereon_broadcast_ephemeris_glonass_frequency_channels",
                 "out",
                 &values,
                 out,
@@ -1809,6 +2481,70 @@ fn empty_broadcast_record_info() -> SidereonBroadcastRecordInfo {
     }
 }
 
+pub(crate) fn empty_broadcast_record() -> SidereonBroadcastRecord {
+    SidereonBroadcastRecord {
+        sat_id: satellite_token_from_text(""),
+        message: 0,
+        issue: 0,
+        issue_message: 0,
+        week: 0,
+        toe: SidereonGnssWeekTow {
+            system: SidereonTimeScale::Gpst as u32,
+            week: 0,
+            tow_s: 0.0,
+        },
+        toc: SidereonGnssWeekTow {
+            system: SidereonTimeScale::Gpst as u32,
+            week: 0,
+            tow_s: 0.0,
+        },
+        elements: SidereonKeplerianElements {
+            sqrt_a: 0.0,
+            e: 0.0,
+            m0: 0.0,
+            delta_n: 0.0,
+            omega0: 0.0,
+            i0: 0.0,
+            omega: 0.0,
+            omega_dot: 0.0,
+            idot: 0.0,
+            cuc: 0.0,
+            cus: 0.0,
+            crc: 0.0,
+            crs: 0.0,
+            cic: 0.0,
+            cis: 0.0,
+            toe_sow: 0.0,
+        },
+        clock: SidereonClockPolynomial {
+            af0: 0.0,
+            af1: 0.0,
+            af2: 0.0,
+            toc_sow: 0.0,
+        },
+        group_delays: empty_broadcast_group_delays(),
+        cnav: empty_broadcast_cnav_parameters(),
+        sv_health: 0.0,
+        sv_accuracy_m: 0.0,
+        has_fit_interval_s: false,
+        fit_interval_s: 0.0,
+    }
+}
+
+pub(crate) fn empty_glonass_record() -> SidereonGlonassRecord {
+    SidereonGlonassRecord {
+        sat_id: satellite_token_from_text(""),
+        toe_utc_j2000_s: 0.0,
+        pos_m: [0.0; 3],
+        vel_m_s: [0.0; 3],
+        acc_m_s2: [0.0; 3],
+        clk_bias: 0.0,
+        gamma_n: 0.0,
+        sv_health: 0.0,
+        freq_channel: 0,
+    }
+}
+
 fn nav_message_from_c(
     fn_name: &str,
     message: u32,
@@ -1933,5 +2669,454 @@ fn cnav_parameters_to_c(
         }
     } else {
         empty_cnav_parameters()
+    }
+}
+
+fn broadcast_group_delays_to_c(
+    delays: &sidereon_core::rinex::nav::BroadcastGroupDelays,
+) -> SidereonBroadcastGroupDelays {
+    SidereonBroadcastGroupDelays {
+        has_gps_tgd_s: delays.gps_tgd_s.is_some(),
+        gps_tgd_s: delays.gps_tgd_s.unwrap_or(0.0),
+        has_galileo_bgd_e5a_e1_s: delays.galileo_bgd_e5a_e1_s.is_some(),
+        galileo_bgd_e5a_e1_s: delays.galileo_bgd_e5a_e1_s.unwrap_or(0.0),
+        has_galileo_bgd_e5b_e1_s: delays.galileo_bgd_e5b_e1_s.is_some(),
+        galileo_bgd_e5b_e1_s: delays.galileo_bgd_e5b_e1_s.unwrap_or(0.0),
+        has_beidou_tgd1_s: delays.beidou_tgd1_s.is_some(),
+        beidou_tgd1_s: delays.beidou_tgd1_s.unwrap_or(0.0),
+        has_beidou_tgd2_s: delays.beidou_tgd2_s.is_some(),
+        beidou_tgd2_s: delays.beidou_tgd2_s.unwrap_or(0.0),
+        has_cnav_isc_l1ca_s: delays.cnav_isc_l1ca_s.is_some(),
+        cnav_isc_l1ca_s: delays.cnav_isc_l1ca_s.unwrap_or(0.0),
+        has_cnav_isc_l2c_s: delays.cnav_isc_l2c_s.is_some(),
+        cnav_isc_l2c_s: delays.cnav_isc_l2c_s.unwrap_or(0.0),
+        has_cnav_isc_l5i5_s: delays.cnav_isc_l5i5_s.is_some(),
+        cnav_isc_l5i5_s: delays.cnav_isc_l5i5_s.unwrap_or(0.0),
+        has_cnav_isc_l5q5_s: delays.cnav_isc_l5q5_s.is_some(),
+        cnav_isc_l5q5_s: delays.cnav_isc_l5q5_s.unwrap_or(0.0),
+        has_cnav_isc_l1cd_s: delays.cnav_isc_l1cd_s.is_some(),
+        cnav_isc_l1cd_s: delays.cnav_isc_l1cd_s.unwrap_or(0.0),
+        has_cnav_isc_l1cp_s: delays.cnav_isc_l1cp_s.is_some(),
+        cnav_isc_l1cp_s: delays.cnav_isc_l1cp_s.unwrap_or(0.0),
+    }
+}
+
+fn broadcast_cnav_parameters_to_c(
+    cnav: Option<sidereon_core::rinex::nav::CnavParameters>,
+) -> SidereonBroadcastCnavParameters {
+    match cnav {
+        Some(cnav) => SidereonBroadcastCnavParameters {
+            present: true,
+            adot_m_s: cnav.adot_m_s,
+            delta_n0_dot_rad_s2: cnav.delta_n0_dot_rad_s2,
+            top: SidereonGnssWeekTow {
+                system: time_scale_to_c_code(cnav.top.system),
+                week: cnav.top.week,
+                tow_s: cnav.top.tow_s,
+            },
+            ura_ed_index: cnav.ura_ed_index,
+            ura_ned0_index: cnav.ura_ned0_index,
+            ura_ned1_index: cnav.ura_ned1_index,
+            ura_ned2_index: cnav.ura_ned2_index,
+            transmission_time_sow: cnav.transmission_time_sow,
+            has_flags: cnav.flags.is_some(),
+            flags: cnav.flags.unwrap_or(0),
+        },
+        None => empty_broadcast_cnav_parameters(),
+    }
+}
+
+pub(crate) fn broadcast_record_to_c_full(
+    record: &sidereon_core::rinex::nav::BroadcastRecord,
+) -> SidereonBroadcastRecord {
+    SidereonBroadcastRecord {
+        sat_id: satellite_token(record.satellite_id),
+        message: nav_message_to_c(record.message),
+        issue: record.issue_of_data.issue,
+        issue_message: nav_message_to_c(record.issue_of_data.message),
+        week: record.week,
+        toe: SidereonGnssWeekTow {
+            system: time_scale_to_c_code(record.toe.system),
+            week: record.toe.week,
+            tow_s: record.toe.tow_s,
+        },
+        toc: SidereonGnssWeekTow {
+            system: time_scale_to_c_code(record.toc.system),
+            week: record.toc.week,
+            tow_s: record.toc.tow_s,
+        },
+        elements: SidereonKeplerianElements {
+            sqrt_a: record.elements.sqrt_a,
+            e: record.elements.e,
+            m0: record.elements.m0,
+            delta_n: record.elements.delta_n,
+            omega0: record.elements.omega0,
+            i0: record.elements.i0,
+            omega: record.elements.omega,
+            omega_dot: record.elements.omega_dot,
+            idot: record.elements.idot,
+            cuc: record.elements.cuc,
+            cus: record.elements.cus,
+            crc: record.elements.crc,
+            crs: record.elements.crs,
+            cic: record.elements.cic,
+            cis: record.elements.cis,
+            toe_sow: record.elements.toe_sow,
+        },
+        clock: SidereonClockPolynomial {
+            af0: record.clock.af0,
+            af1: record.clock.af1,
+            af2: record.clock.af2,
+            toc_sow: record.clock.toc_sow,
+        },
+        group_delays: broadcast_group_delays_to_c(&record.group_delays),
+        cnav: broadcast_cnav_parameters_to_c(record.cnav),
+        sv_health: record.sv_health,
+        sv_accuracy_m: record.sv_accuracy_m,
+        has_fit_interval_s: record.fit_interval_s.is_some(),
+        fit_interval_s: record.fit_interval_s.unwrap_or(0.0),
+    }
+}
+
+pub(crate) fn glonass_record_to_c(
+    record: &sidereon_core::rinex::nav::GlonassRecord,
+) -> SidereonGlonassRecord {
+    SidereonGlonassRecord {
+        sat_id: satellite_token(record.satellite_id),
+        toe_utc_j2000_s: record.toe_utc_j2000_s,
+        pos_m: record.pos_m,
+        vel_m_s: record.vel_m_s,
+        acc_m_s2: record.acc_m_s2,
+        clk_bias: record.clk_bias,
+        gamma_n: record.gamma_n,
+        sv_health: record.sv_health,
+        freq_channel: record.freq_channel,
+    }
+}
+
+pub(crate) fn iono_corrections_to_c(
+    iono: &sidereon_core::rinex::nav::IonoCorrections,
+) -> SidereonIonoCorrections {
+    let klobuchar = |value: Option<sidereon_core::rinex::nav::KlobucharAlphaBeta>| {
+        value
+            .map(|value| SidereonKlobucharAlphaBeta {
+                present: true,
+                alpha: value.alpha,
+                beta: value.beta,
+            })
+            .unwrap_or_else(empty_klobuchar_alpha_beta)
+    };
+    let galileo = iono
+        .galileo
+        .map(|value| SidereonGalileoNequickCoeffs {
+            present: true,
+            ai0: value.ai0,
+            ai1: value.ai1,
+            ai2: value.ai2,
+        })
+        .unwrap_or_else(empty_galileo_nequick_coeffs);
+    SidereonIonoCorrections {
+        gps: klobuchar(iono.gps),
+        beidou: klobuchar(iono.beidou),
+        galileo,
+    }
+}
+
+fn empty_broadcast_cnav_parameters() -> SidereonBroadcastCnavParameters {
+    SidereonBroadcastCnavParameters {
+        present: false,
+        adot_m_s: 0.0,
+        delta_n0_dot_rad_s2: 0.0,
+        top: SidereonGnssWeekTow {
+            system: SidereonTimeScale::Gpst as u32,
+            week: 0,
+            tow_s: 0.0,
+        },
+        ura_ed_index: 0,
+        ura_ned0_index: 0,
+        ura_ned1_index: 0,
+        ura_ned2_index: 0,
+        transmission_time_sow: 0.0,
+        has_flags: false,
+        flags: 0,
+    }
+}
+
+fn empty_broadcast_group_delays() -> SidereonBroadcastGroupDelays {
+    SidereonBroadcastGroupDelays {
+        has_gps_tgd_s: false,
+        gps_tgd_s: 0.0,
+        has_galileo_bgd_e5a_e1_s: false,
+        galileo_bgd_e5a_e1_s: 0.0,
+        has_galileo_bgd_e5b_e1_s: false,
+        galileo_bgd_e5b_e1_s: 0.0,
+        has_beidou_tgd1_s: false,
+        beidou_tgd1_s: 0.0,
+        has_beidou_tgd2_s: false,
+        beidou_tgd2_s: 0.0,
+        has_cnav_isc_l1ca_s: false,
+        cnav_isc_l1ca_s: 0.0,
+        has_cnav_isc_l2c_s: false,
+        cnav_isc_l2c_s: 0.0,
+        has_cnav_isc_l5i5_s: false,
+        cnav_isc_l5i5_s: 0.0,
+        has_cnav_isc_l5q5_s: false,
+        cnav_isc_l5q5_s: 0.0,
+        has_cnav_isc_l1cd_s: false,
+        cnav_isc_l1cd_s: 0.0,
+        has_cnav_isc_l1cp_s: false,
+        cnav_isc_l1cp_s: 0.0,
+    }
+}
+
+fn empty_klobuchar_alpha_beta() -> SidereonKlobucharAlphaBeta {
+    SidereonKlobucharAlphaBeta {
+        present: false,
+        alpha: [0.0; 4],
+        beta: [0.0; 4],
+    }
+}
+
+fn empty_galileo_nequick_coeffs() -> SidereonGalileoNequickCoeffs {
+    SidereonGalileoNequickCoeffs {
+        present: false,
+        ai0: 0.0,
+        ai1: 0.0,
+        ai2: 0.0,
+    }
+}
+
+pub(crate) fn empty_iono_corrections() -> SidereonIonoCorrections {
+    SidereonIonoCorrections {
+        gps: empty_klobuchar_alpha_beta(),
+        beidou: empty_klobuchar_alpha_beta(),
+        galileo: empty_galileo_nequick_coeffs(),
+    }
+}
+
+fn broadcast_group_delays_from_c(
+    delays: &SidereonBroadcastGroupDelays,
+) -> sidereon_core::rinex::nav::BroadcastGroupDelays {
+    sidereon_core::rinex::nav::BroadcastGroupDelays {
+        gps_tgd_s: delays.has_gps_tgd_s.then_some(delays.gps_tgd_s),
+        galileo_bgd_e5a_e1_s: delays
+            .has_galileo_bgd_e5a_e1_s
+            .then_some(delays.galileo_bgd_e5a_e1_s),
+        galileo_bgd_e5b_e1_s: delays
+            .has_galileo_bgd_e5b_e1_s
+            .then_some(delays.galileo_bgd_e5b_e1_s),
+        beidou_tgd1_s: delays.has_beidou_tgd1_s.then_some(delays.beidou_tgd1_s),
+        beidou_tgd2_s: delays.has_beidou_tgd2_s.then_some(delays.beidou_tgd2_s),
+        cnav_isc_l1ca_s: delays.has_cnav_isc_l1ca_s.then_some(delays.cnav_isc_l1ca_s),
+        cnav_isc_l2c_s: delays.has_cnav_isc_l2c_s.then_some(delays.cnav_isc_l2c_s),
+        cnav_isc_l5i5_s: delays.has_cnav_isc_l5i5_s.then_some(delays.cnav_isc_l5i5_s),
+        cnav_isc_l5q5_s: delays.has_cnav_isc_l5q5_s.then_some(delays.cnav_isc_l5q5_s),
+        cnav_isc_l1cd_s: delays.has_cnav_isc_l1cd_s.then_some(delays.cnav_isc_l1cd_s),
+        cnav_isc_l1cp_s: delays.has_cnav_isc_l1cp_s.then_some(delays.cnav_isc_l1cp_s),
+    }
+}
+
+fn broadcast_cnav_parameters_from_c(
+    fn_name: &str,
+    cnav: &SidereonBroadcastCnavParameters,
+) -> Result<Option<sidereon_core::rinex::nav::CnavParameters>, SidereonStatus> {
+    if !cnav.present {
+        return Ok(None);
+    }
+    let top = gnss_week_tow_from_c(fn_name, &cnav.top)?;
+    Ok(Some(sidereon_core::rinex::nav::CnavParameters {
+        adot_m_s: cnav.adot_m_s,
+        delta_n0_dot_rad_s2: cnav.delta_n0_dot_rad_s2,
+        top,
+        ura_ed_index: cnav.ura_ed_index,
+        ura_ned0_index: cnav.ura_ned0_index,
+        ura_ned1_index: cnav.ura_ned1_index,
+        ura_ned2_index: cnav.ura_ned2_index,
+        transmission_time_sow: cnav.transmission_time_sow,
+        flags: cnav.has_flags.then_some(cnav.flags),
+    }))
+}
+
+pub(crate) fn broadcast_record_from_c(
+    fn_name: &str,
+    record: &SidereonBroadcastRecord,
+) -> Result<sidereon_core::rinex::nav::BroadcastRecord, SidereonStatus> {
+    let sat_text = fixed_c_token_to_string(fn_name, "record.sat_id.bytes", &record.sat_id.bytes)?;
+    let satellite_id = GnssSatelliteId::from_str(&sat_text).map_err(|_| {
+        set_last_error(format!("{fn_name}: invalid satellite token: {sat_text}"));
+        SidereonStatus::InvalidToken
+    })?;
+    let message = nav_message_from_c(fn_name, record.message)?;
+    let issue_message = nav_message_from_c(fn_name, record.issue_message)?;
+    let toe = gnss_week_tow_from_c(fn_name, &record.toe)?;
+    let toc = gnss_week_tow_from_c(fn_name, &record.toc)?;
+    let cnav = broadcast_cnav_parameters_from_c(fn_name, &record.cnav)?;
+    Ok(sidereon_core::rinex::nav::BroadcastRecord {
+        satellite_id,
+        message,
+        issue_of_data: sidereon_core::ephemeris::BroadcastIssue {
+            issue: record.issue,
+            message: issue_message,
+        },
+        week: record.week,
+        toe,
+        toc,
+        elements: record.elements.to_core(),
+        clock: record.clock.to_core(),
+        group_delays: broadcast_group_delays_from_c(&record.group_delays),
+        cnav,
+        sv_health: record.sv_health,
+        sv_accuracy_m: record.sv_accuracy_m,
+        fit_interval_s: record.has_fit_interval_s.then_some(record.fit_interval_s),
+    })
+}
+
+#[cfg(test)]
+mod lnav_word_tests {
+    use super::*;
+
+    fn set_bits(bits: &mut [u8], offset: usize, width: usize, value: u64) {
+        for index in 0..width {
+            bits[offset + index] = ((value >> (width - index - 1)) & 1) as u8;
+        }
+    }
+
+    #[test]
+    fn lnav_routes_extract_how_fields_and_reject_wrong_lengths() {
+        let mut how = [0u8; 30];
+        set_bits(&mut how, 0, 17, 12_345);
+        set_bits(&mut how, 19, 3, 5);
+        let mut tow = 0;
+        let mut subframe_id = 0;
+        assert_eq!(
+            unsafe { sidereon_lnav_tow(how.as_ptr(), how.len(), &mut tow) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(tow, 12_345);
+        assert_eq!(
+            unsafe { sidereon_lnav_subframe_id(how.as_ptr(), how.len(), &mut subframe_id) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(subframe_id, 5);
+
+        let mut subframe = vec![0u8; 300];
+        subframe[30..60].copy_from_slice(&how);
+        assert_eq!(
+            unsafe { sidereon_lnav_tow(subframe.as_ptr(), subframe.len(), &mut tow) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(tow, 12_345);
+        assert_eq!(
+            unsafe {
+                sidereon_lnav_subframe_id(subframe.as_ptr(), subframe.len(), &mut subframe_id)
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(subframe_id, 5);
+
+        let malformed = [0u8; 29];
+        assert_eq!(
+            unsafe { sidereon_lnav_tow(malformed.as_ptr(), malformed.len(), &mut tow) },
+            SidereonStatus::InvalidArgument
+        );
+    }
+
+    #[test]
+    fn lnav_routes_preserve_parity_dependency_bits_and_validity() {
+        let source = [0u8; 24];
+        let mut parity_bits = [0u8; 6];
+        assert_eq!(
+            unsafe {
+                sidereon_lnav_parity(
+                    source.as_ptr(),
+                    source.len(),
+                    0,
+                    0,
+                    parity_bits.as_mut_ptr(),
+                    parity_bits.len(),
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(parity_bits, [0; 6]);
+
+        assert_eq!(
+            unsafe {
+                sidereon_lnav_parity(
+                    source.as_ptr(),
+                    source.len(),
+                    1,
+                    0,
+                    parity_bits.as_mut_ptr(),
+                    parity_bits.len(),
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(parity_bits, [1, 0, 1, 0, 0, 1]);
+        let mut word = [0u8; 30];
+        word[24..].copy_from_slice(&parity_bits);
+        let mut valid = false;
+        assert_eq!(
+            unsafe { sidereon_lnav_parity_valid(word.as_ptr(), word.len(), 1, 0, &mut valid) },
+            SidereonStatus::Ok
+        );
+        assert!(valid);
+        word[0] = 1;
+        assert_eq!(
+            unsafe { sidereon_lnav_parity_valid(word.as_ptr(), word.len(), 1, 0, &mut valid) },
+            SidereonStatus::Ok
+        );
+        assert!(!valid);
+
+        let source_transmitted = [1u8; 24];
+        assert_eq!(
+            unsafe {
+                sidereon_lnav_parity(
+                    source.as_ptr(),
+                    source.len(),
+                    1,
+                    1,
+                    parity_bits.as_mut_ptr(),
+                    parity_bits.len(),
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(parity_bits, [1; 6]);
+        word[..24].copy_from_slice(&source_transmitted);
+        word[24..].copy_from_slice(&parity_bits);
+        assert_eq!(
+            unsafe { sidereon_lnav_parity_valid(word.as_ptr(), word.len(), 1, 1, &mut valid) },
+            SidereonStatus::Ok
+        );
+        assert!(valid);
+
+        let short_source = [0u8; 23];
+        assert_eq!(
+            unsafe {
+                sidereon_lnav_parity(
+                    short_source.as_ptr(),
+                    short_source.len(),
+                    0,
+                    0,
+                    parity_bits.as_mut_ptr(),
+                    parity_bits.len(),
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+        assert_eq!(
+            unsafe {
+                sidereon_lnav_parity_valid(
+                    short_source.as_ptr(),
+                    short_source.len(),
+                    0,
+                    0,
+                    &mut valid,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
     }
 }
