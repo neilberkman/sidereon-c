@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.2.0 - 2026-08-28
+
+### Added
+
+- Public parity routes for covariance-6 construction and ECI/RTN transforms,
+  lenient NAV and SBAS EMS/RTKLIB parsers, calendar helpers, raw NAV record
+  lists, rich broadcast records, RINEX clock series, single- and dual-frequency
+  RTK arc builders, frequency and wavelength policy, default ionosphere-free
+  pairs, GPS LNAV word helpers, and explicit DTED tile-list stores.
+
+### Changed
+
+- Engine update: sidereon 1.2.0 / sidereon-core 1.2.0, which corrects lenient
+  RINEX 4 CNAV decoding and RTKLIB SBAS wire-form preservation.
+
 ## Unreleased
 
 ### Added
