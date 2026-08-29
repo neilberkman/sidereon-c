@@ -16,7 +16,14 @@ static void check_condition(int condition, const char *what) {
     if (!condition) {
         char error[256] = {0};
         sidereon_last_error_message(error, sizeof(error));
-        fprintf(stderr, "FAIL: %s (last_error: %s)\n", what, error);
+        /* The last error is sticky and may come from an earlier call, so it is
+           reported as context rather than as the cause of this failure. */
+        if (error[0] != '\0') {
+            fprintf(stderr, "FAIL: %s (last ABI error, may predate this check: %s)\n",
+                    what, error);
+        } else {
+            fprintf(stderr, "FAIL: %s\n", what);
+        }
         failures++;
     }
 }
