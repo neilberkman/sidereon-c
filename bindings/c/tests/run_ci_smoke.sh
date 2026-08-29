@@ -47,6 +47,16 @@ cc -std=c11 -Wall -Wextra -Werror \
 
 cc -std=c11 -Wall -Wextra -Werror \
     -I"${binding_root}/include" \
+    "${here}/ssr_message_smoke.c" \
+    -L"${lib_dir}" \
+    -lsidereon \
+    -Wl,-rpath,"${lib_dir}" \
+    -lm \
+    -o "${target_dir}/ssr_message_smoke_ci"
+"${target_dir}/ssr_message_smoke_ci"
+
+cc -std=c11 -Wall -Wextra -Werror \
+    -I"${binding_root}/include" \
     "${here}/source_localization_1_1_smoke.c" \
     -L"${lib_dir}" \
     -lsidereon \

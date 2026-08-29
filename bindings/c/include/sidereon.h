@@ -28,6 +28,8 @@
  * RINEX RTK builders return SidereonRtkRinexArc or
  * SidereonRtkRinexDualFrequencyArc released by
  * sidereon_rtk_rinex_arc_free or sidereon_rtk_rinex_dual_frequency_arc_free.
+ * sidereon_ssr_message_decode returns a SidereonSsrMessage released by
+ * sidereon_ssr_message_free.
  * Release each non-null handle exactly once with its matching _free function.
  * Passing NULL to a _free function is a no-op.
  * Last-error storage is thread-local. Opaque handles are read-only shareable
@@ -3652,6 +3654,13 @@ typedef struct SidereonSppDopplerSolution SidereonSppDopplerSolution;
 typedef struct SidereonSppSolution SidereonSppSolution;
 
 typedef struct SidereonSsrCorrectionStore SidereonSsrCorrectionStore;
+
+/**
+ * An opaque decoded RTCM SSR message body. The handle owns one
+ * `sidereon_core::rtcm::SsrMessage` and is released with
+ * sidereon_ssr_message_free.
+ */
+typedef struct SidereonSsrMessage SidereonSsrMessage;
 
 /**
  * A multi-epoch static pseudorange position solution. Opaque to C. Create with
@@ -13864,6 +13873,36 @@ typedef struct SidereonRtcmSsrClockRecord {
     int32_t c2;
 } SidereonRtcmSsrClockRecord;
 
+/**
+ * One raw signal and bias pair in an RTCM SSR code-bias record.
+ */
+typedef struct SidereonRtcmSsrCodeBiasSignal {
+    /**
+     * Raw signal and tracking-mode id.
+     */
+    uint8_t signal_id;
+    /**
+     * Raw code bias integer.
+     */
+    int16_t bias;
+} SidereonRtcmSsrCodeBiasSignal;
+
+/**
+ * One satellite's raw RTCM SSR code-bias record. The nested signal rows are
+ * copied with sidereon_rtcm_message_ssr_code_bias_signals or
+ * sidereon_ssr_message_code_bias_signals.
+ */
+typedef struct SidereonRtcmSsrCodeBiasRecord {
+    /**
+     * Constellation-native satellite id.
+     */
+    uint8_t satellite_id;
+    /**
+     * Number of signal rows belonging to this satellite record.
+     */
+    size_t signal_count;
+} SidereonRtcmSsrCodeBiasRecord;
+
 typedef struct SidereonRtcmSsrHeader {
     uint32_t epoch_time_s;
     uint8_t update_interval;
@@ -13902,6 +13941,56 @@ typedef struct SidereonRtcmSsrOrbitRecord {
     int32_t dot_delta_along;
     int32_t dot_delta_cross;
 } SidereonRtcmSsrOrbitRecord;
+
+/**
+ * One raw signal row in an RTCM SSR phase-bias record.
+ */
+typedef struct SidereonRtcmSsrPhaseBiasSignal {
+    /**
+     * Raw signal and tracking-mode id.
+     */
+    uint8_t signal_id;
+    /**
+     * Signal integer indicator.
+     */
+    uint8_t integer_indicator;
+    /**
+     * Wide-lane integer indicator.
+     */
+    uint8_t wide_lane_integer_indicator;
+    /**
+     * Discontinuity counter.
+     */
+    uint8_t discontinuity_counter;
+    /**
+     * Raw phase bias integer.
+     */
+    int32_t bias;
+} SidereonRtcmSsrPhaseBiasSignal;
+
+/**
+ * One satellite's raw RTCM SSR phase-bias record. The nested signal rows are
+ * copied with sidereon_rtcm_message_ssr_phase_bias_signals or
+ * sidereon_ssr_message_phase_bias_signals.
+ */
+typedef struct SidereonRtcmSsrPhaseBiasRecord {
+    /**
+     * Constellation-native satellite id.
+     */
+    uint8_t satellite_id;
+    /**
+     * Raw yaw angle.
+     */
+    uint16_t yaw_angle;
+    /**
+     * Raw yaw rate.
+     */
+    int8_t yaw_rate;
+    /**
+     * Number of signal rows belonging to this satellite record.
+     */
+    size_t signal_count;
+} SidereonRtcmSsrPhaseBiasRecord;
 
 typedef struct SidereonRtcmSsrUraRecord {
     uint8_t satellite_id;
@@ -28776,6 +28865,38 @@ enum SidereonStatus sidereon_rtcm_message_ssr_clocks(const struct SidereonRtcmMe
                                                      size_t *out_written,
                                                      size_t *out_required);
 
+/**
+ * Copy the code-bias signal rows for one SSR satellite record. Values are raw
+ * wire integers. Variable-length output contract.
+ *
+ * Safety: messages is a live handle; out points to len
+ * SidereonRtcmSsrCodeBiasSignal values or is NULL when len is 0; out_written
+ * and out_required point to size_t.
+ */
+enum SidereonStatus sidereon_rtcm_message_ssr_code_bias_signals(const struct SidereonRtcmMessages *messages,
+                                                                size_t index,
+                                                                size_t record_index,
+                                                                struct SidereonRtcmSsrCodeBiasSignal *out,
+                                                                size_t len,
+                                                                size_t *out_written,
+                                                                size_t *out_required);
+
+/**
+ * Copy an SSR message's per-satellite code-bias records. Each row exposes its
+ * nested signal count. Values are raw wire integers. Variable-length output
+ * contract.
+ *
+ * Safety: messages is a live handle; out points to len
+ * SidereonRtcmSsrCodeBiasRecord values or is NULL when len is 0; out_written
+ * and out_required point to size_t.
+ */
+enum SidereonStatus sidereon_rtcm_message_ssr_code_biases(const struct SidereonRtcmMessages *messages,
+                                                          size_t index,
+                                                          struct SidereonRtcmSsrCodeBiasRecord *out,
+                                                          size_t len,
+                                                          size_t *out_written,
+                                                          size_t *out_required);
+
 enum SidereonStatus sidereon_rtcm_message_ssr_info(const struct SidereonRtcmMessages *messages,
                                                    size_t index,
                                                    struct SidereonRtcmSsrInfo *out_info);
@@ -28786,6 +28907,38 @@ enum SidereonStatus sidereon_rtcm_message_ssr_orbits(const struct SidereonRtcmMe
                                                      size_t len,
                                                      size_t *out_written,
                                                      size_t *out_required);
+
+/**
+ * Copy the phase-bias signal rows for one SSR satellite record. Values are raw
+ * wire integers. Variable-length output contract.
+ *
+ * Safety: messages is a live handle; out points to len
+ * SidereonRtcmSsrPhaseBiasSignal values or is NULL when len is 0; out_written
+ * and out_required point to size_t.
+ */
+enum SidereonStatus sidereon_rtcm_message_ssr_phase_bias_signals(const struct SidereonRtcmMessages *messages,
+                                                                 size_t index,
+                                                                 size_t record_index,
+                                                                 struct SidereonRtcmSsrPhaseBiasSignal *out,
+                                                                 size_t len,
+                                                                 size_t *out_written,
+                                                                 size_t *out_required);
+
+/**
+ * Copy an SSR message's per-satellite phase-bias records. Each row exposes
+ * its raw yaw fields and nested signal count. Values are raw wire integers.
+ * Variable-length output contract.
+ *
+ * Safety: messages is a live handle; out points to len
+ * SidereonRtcmSsrPhaseBiasRecord values or is NULL when len is 0; out_written
+ * and out_required point to size_t.
+ */
+enum SidereonStatus sidereon_rtcm_message_ssr_phase_biases(const struct SidereonRtcmMessages *messages,
+                                                           size_t index,
+                                                           struct SidereonRtcmSsrPhaseBiasRecord *out,
+                                                           size_t len,
+                                                           size_t *out_written,
+                                                           size_t *out_required);
 
 enum SidereonStatus sidereon_rtcm_message_ssr_ura(const struct SidereonRtcmMessages *messages,
                                                   size_t index,
@@ -33660,6 +33813,139 @@ enum SidereonStatus sidereon_ssr_ephemeris_sample(const struct SidereonBroadcast
                                                   size_t len,
                                                   size_t *out_written,
                                                   size_t *out_required);
+
+/**
+ * Copy the bare RTCM SSR message's clock records. Values are raw wire
+ * integers. Variable-length output contract.
+ *
+ * Safety: message is a live handle; out points to len
+ * SidereonRtcmSsrClockRecord values or is NULL when len is 0; out_written and
+ * out_required point to size_t.
+ */
+enum SidereonStatus sidereon_ssr_message_clocks(const struct SidereonSsrMessage *message,
+                                                struct SidereonRtcmSsrClockRecord *out,
+                                                size_t len,
+                                                size_t *out_written,
+                                                size_t *out_required);
+
+/**
+ * Copy the code-bias signal rows for one bare-message satellite record.
+ * Values are raw wire integers. Variable-length output contract.
+ *
+ * Safety: message is a live handle; out points to len
+ * SidereonRtcmSsrCodeBiasSignal values or is NULL when len is 0; out_written
+ * and out_required point to size_t.
+ */
+enum SidereonStatus sidereon_ssr_message_code_bias_signals(const struct SidereonSsrMessage *message,
+                                                           size_t record_index,
+                                                           struct SidereonRtcmSsrCodeBiasSignal *out,
+                                                           size_t len,
+                                                           size_t *out_written,
+                                                           size_t *out_required);
+
+/**
+ * Copy the bare RTCM SSR message's per-satellite code-bias records. Each row
+ * exposes its nested signal count. Values are raw wire integers.
+ * Variable-length output contract.
+ *
+ * Safety: message is a live handle; out points to len
+ * SidereonRtcmSsrCodeBiasRecord values or is NULL when len is 0; out_written
+ * and out_required point to size_t.
+ */
+enum SidereonStatus sidereon_ssr_message_code_biases(const struct SidereonSsrMessage *message,
+                                                     struct SidereonRtcmSsrCodeBiasRecord *out,
+                                                     size_t len,
+                                                     size_t *out_written,
+                                                     size_t *out_required);
+
+/**
+ * Decode one bare RTCM SSR message body. The body excludes the RTCM
+ * transport preamble, length, and CRC. On success the returned handle owns
+ * the decoded `sidereon_core::rtcm::SsrMessage` and is released with
+ * sidereon_ssr_message_free.
+ *
+ * Safety: body points to len readable bytes; out points to a
+ * SidereonSsrMessage*.
+ */
+enum SidereonStatus sidereon_ssr_message_decode(const uint8_t *body,
+                                                size_t len,
+                                                struct SidereonSsrMessage **out);
+
+/**
+ * Release a bare RTCM SSR message handle. Passing NULL is a no-op.
+ *
+ * Safety: message must be NULL or a live handle returned by
+ * sidereon_ssr_message_decode.
+ */
+void sidereon_ssr_message_free(struct SidereonSsrMessage *message);
+
+/**
+ * Copy the bare RTCM SSR message summary into *out_info. The summary includes
+ * all five record counts and the raw common SSR header.
+ *
+ * Safety: message is a live handle; out_info points to a
+ * SidereonRtcmSsrInfo.
+ */
+enum SidereonStatus sidereon_ssr_message_info(const struct SidereonSsrMessage *message,
+                                              struct SidereonRtcmSsrInfo *out_info);
+
+/**
+ * Copy the bare RTCM SSR message's orbit records. Values are raw wire
+ * integers. Variable-length output contract.
+ *
+ * Safety: message is a live handle; out points to len
+ * SidereonRtcmSsrOrbitRecord values or is NULL when len is 0; out_written and
+ * out_required point to size_t.
+ */
+enum SidereonStatus sidereon_ssr_message_orbits(const struct SidereonSsrMessage *message,
+                                                struct SidereonRtcmSsrOrbitRecord *out,
+                                                size_t len,
+                                                size_t *out_written,
+                                                size_t *out_required);
+
+/**
+ * Copy the phase-bias signal rows for one bare-message satellite record.
+ * Values are raw wire integers. Variable-length output contract.
+ *
+ * Safety: message is a live handle; out points to len
+ * SidereonRtcmSsrPhaseBiasSignal values or is NULL when len is 0; out_written
+ * and out_required point to size_t.
+ */
+enum SidereonStatus sidereon_ssr_message_phase_bias_signals(const struct SidereonSsrMessage *message,
+                                                            size_t record_index,
+                                                            struct SidereonRtcmSsrPhaseBiasSignal *out,
+                                                            size_t len,
+                                                            size_t *out_written,
+                                                            size_t *out_required);
+
+/**
+ * Copy the bare RTCM SSR message's per-satellite phase-bias records. Each row
+ * exposes its yaw fields and nested signal count. Values are raw wire
+ * integers. Variable-length output contract.
+ *
+ * Safety: message is a live handle; out points to len
+ * SidereonRtcmSsrPhaseBiasRecord values or is NULL when len is 0; out_written
+ * and out_required point to size_t.
+ */
+enum SidereonStatus sidereon_ssr_message_phase_biases(const struct SidereonSsrMessage *message,
+                                                      struct SidereonRtcmSsrPhaseBiasRecord *out,
+                                                      size_t len,
+                                                      size_t *out_written,
+                                                      size_t *out_required);
+
+/**
+ * Copy the bare RTCM SSR message's URA records. Values are raw wire
+ * integers. Variable-length output contract.
+ *
+ * Safety: message is a live handle; out points to len
+ * SidereonRtcmSsrUraRecord values or is NULL when len is 0; out_written and
+ * out_required point to size_t.
+ */
+enum SidereonStatus sidereon_ssr_message_ura(const struct SidereonSsrMessage *message,
+                                             struct SidereonRtcmSsrUraRecord *out,
+                                             size_t len,
+                                             size_t *out_written,
+                                             size_t *out_required);
 
 enum SidereonStatus sidereon_ssr_solve_broadcast(const struct SidereonBroadcastEphemeris *broadcast,
                                                  const struct SidereonSsrCorrectionStore *store,
