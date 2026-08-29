@@ -24,6 +24,7 @@
   RTK arcs, and DTED tile-list stores, including diagnostics for skipped
   extended GLONASS slots, with deterministic CI smokes covering the new
   surfaces and committed fixtures.
+- Added the public C SBAS broadcast-PRN-to-satellite-id lookup route.
 
 ## 1.1.1 - 2026-08-26
 

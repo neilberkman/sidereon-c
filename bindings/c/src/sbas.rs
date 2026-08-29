@@ -27,6 +27,49 @@ pub struct SidereonSbasLogBlocks {
     pub(crate) blocks: Vec<sidereon_core::sbas::SbasLogBlock>,
 }
 
+/// Map an SBAS broadcast PRN to its canonical GNSS satellite-id token.
+/// Delegates to `sidereon_core::sbas::sbas_prn_to_sat`. The output is the
+/// non-null-terminated token bytes (for example, `S20`) written with the
+/// variable-length output contract. If the core has no mapping, the call
+/// succeeds with zero required and written bytes.
+///
+/// Safety: out must point to len writable bytes or be NULL when len is zero;
+/// out_written and out_required must point to size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sbas_prn_to_satellite_id(
+    broadcast_prn: u16,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_sbas_prn_to_satellite_id",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_sbas_prn_to_satellite_id",
+                out_written,
+                out_required
+            ));
+            let satellite_id = sidereon_core::sbas::sbas_prn_to_sat(broadcast_prn);
+            let token = satellite_id
+                .map(|satellite_id| satellite_id.to_string())
+                .unwrap_or_default();
+            c_try!(copy_prefix_to_c(
+                "sidereon_sbas_prn_to_satellite_id",
+                "out",
+                token.as_bytes(),
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
 /// Parse comma-delimited EMS SBAS text-log lines. This is a text parser and
 /// does not perform binary SBAS message decoding.
 ///

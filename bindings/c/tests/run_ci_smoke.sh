@@ -27,6 +27,16 @@ fi
 
 cc -std=c11 -Wall -Wextra -Werror \
     -I"${binding_root}/include" \
+    "${here}/sbas_prn_smoke.c" \
+    -L"${lib_dir}" \
+    -lsidereon \
+    -Wl,-rpath,"${lib_dir}" \
+    -lm \
+    -o "${target_dir}/sbas_prn_smoke_ci"
+"${target_dir}/sbas_prn_smoke_ci"
+
+cc -std=c11 -Wall -Wextra -Werror \
+    -I"${binding_root}/include" \
     "${here}/version_smoke.c" \
     -L"${lib_dir}" \
     -lsidereon \

@@ -30550,6 +30550,22 @@ enum SidereonStatus sidereon_sbas_log_blocks_item(const struct SidereonSbasLogBl
                                                   struct SidereonSbasLogBlock *out_block);
 
 /**
+ * Map an SBAS broadcast PRN to its canonical GNSS satellite-id token.
+ * Delegates to `sidereon_core::sbas::sbas_prn_to_sat`. The output is the
+ * non-null-terminated token bytes (for example, `S20`) written with the
+ * variable-length output contract. If the core has no mapping, the call
+ * succeeds with zero required and written bytes.
+ *
+ * Safety: out must point to len writable bytes or be NULL when len is zero;
+ * out_written and out_required must point to size_t values.
+ */
+enum SidereonStatus sidereon_sbas_prn_to_satellite_id(uint16_t broadcast_prn,
+                                                      uint8_t *out,
+                                                      size_t len,
+                                                      size_t *out_written,
+                                                      size_t *out_required);
+
+/**
  * Compute SBAS HPL and VPL from protection geometry and range-error rows.
  *
  * Safety: geometry, model, out_protection, and out_error must point to their
