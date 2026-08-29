@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.3.0 - 2026-08-29
+
+### Added
+
+- A route that decodes a bare RTCM SSR message body into its own handle, so
+  callers reach SSR data without naming RTCM types, plus the grouped raw
+  code-bias and phase-bias record and signal accessors that the existing RTCM
+  message path advertised through its counts but never exposed.
+- An SBAS broadcast PRN to satellite-id lookup.
+
+### Changed
+
+- Engine update: sidereon 1.3.0 / sidereon-core 1.3.0.
+- Smoke failures no longer attribute a stale ABI error to an unrelated
+  assertion.
+
 ## 1.2.0 - 2026-08-28
 
 ### Added
