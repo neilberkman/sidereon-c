@@ -24,6 +24,11 @@
   RTK arcs, and DTED tile-list stores, including diagnostics for skipped
   extended GLONASS slots, with deterministic CI smokes covering the new
   surfaces and committed fixtures.
+- Added a C route that decodes a bare RTCM SSR message body into its own
+  handle, so callers reach SSR data without naming RTCM types, and added the
+  grouped raw code-bias and phase-bias record and signal accessors that the
+  existing RTCM message path advertised through its counts but never exposed.
+- Added the public C SBAS broadcast-PRN-to-satellite-id lookup route.
 
 ## 1.1.1 - 2026-08-26
 

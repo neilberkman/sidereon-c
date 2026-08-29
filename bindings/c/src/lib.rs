@@ -265,10 +265,11 @@ use sidereon_core::rtcm::{
     Message as RtcmMessage, MsmKind as RtcmMsmKind, MsmMessage as RtcmMsmMessage,
     MsmSatellite as RtcmMsmSatellite, MsmSignal as RtcmMsmSignal, PreviousLock as RtcmPreviousLock,
     QzssEphemeris as RtcmQzssEphemeris, SsrClockRecord as RtcmSsrClockRecord,
-    SsrHeader as RtcmSsrHeader, SsrKind as RtcmSsrKind, SsrMessage as RtcmSsrMessage,
-    SsrOrbitRecord as RtcmSsrOrbitRecord, StationCoordinates as RtcmStationCoordinates,
-    StreamDiagnostics as RtcmStreamDiagnostics, LLI_HALF_CYCLE as RTCM_LLI_HALF_CYCLE,
-    LLI_LOSS_OF_LOCK as RTCM_LLI_LOSS_OF_LOCK,
+    SsrCodeBiasRecord as RtcmSsrCodeBiasRecord, SsrHeader as RtcmSsrHeader, SsrKind as RtcmSsrKind,
+    SsrMessage as RtcmSsrMessage, SsrOrbitRecord as RtcmSsrOrbitRecord,
+    SsrPhaseBiasRecord as RtcmSsrPhaseBiasRecord, SsrPhaseBiasSignal as RtcmSsrPhaseBiasSignal,
+    StationCoordinates as RtcmStationCoordinates, StreamDiagnostics as RtcmStreamDiagnostics,
+    LLI_HALF_CYCLE as RTCM_LLI_HALF_CYCLE, LLI_LOSS_OF_LOCK as RTCM_LLI_LOSS_OF_LOCK,
 };
 use sidereon_core::rtk::{BaselineReferenceSelection, CycleSlipReceiver};
 use sidereon_core::rtk_filter::defaults::{

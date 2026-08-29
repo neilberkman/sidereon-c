@@ -2103,7 +2103,7 @@ pub unsafe extern "C" fn sidereon_rtcm_message_ssr_info(
             ));
             match message {
                 RtcmMessage::Ssr(ssr) => {
-                    *out = rtcm_ssr_info_to_c(ssr);
+                    *out = crate::ssr::ssr_info_to_c(ssr);
                     SidereonStatus::Ok
                 }
                 _ => rtcm_wrong_kind("sidereon_rtcm_message_ssr_info", "an SSR message"),
@@ -2139,12 +2139,9 @@ pub unsafe extern "C" fn sidereon_rtcm_message_ssr_orbits(
                 RtcmMessage::Ssr(ssr) => ssr,
                 _ => return rtcm_wrong_kind("sidereon_rtcm_message_ssr_orbits", "an SSR message"),
             };
-            let rows: Vec<SidereonRtcmSsrOrbitRecord> =
-                ssr.orbit.iter().map(rtcm_ssr_orbit_to_c).collect();
-            c_try!(copy_prefix_to_c(
+            c_try!(crate::ssr::ssr_copy_orbits(
                 "sidereon_rtcm_message_ssr_orbits",
-                "out",
-                &rows,
+                ssr,
                 out,
                 len,
                 out_written,
@@ -2182,12 +2179,9 @@ pub unsafe extern "C" fn sidereon_rtcm_message_ssr_clocks(
                 RtcmMessage::Ssr(ssr) => ssr,
                 _ => return rtcm_wrong_kind("sidereon_rtcm_message_ssr_clocks", "an SSR message"),
             };
-            let rows: Vec<SidereonRtcmSsrClockRecord> =
-                ssr.clock.iter().map(rtcm_ssr_clock_to_c).collect();
-            c_try!(copy_prefix_to_c(
+            c_try!(crate::ssr::ssr_copy_clocks(
                 "sidereon_rtcm_message_ssr_clocks",
-                "out",
-                &rows,
+                ssr,
                 out,
                 len,
                 out_written,
@@ -2225,18 +2219,219 @@ pub unsafe extern "C" fn sidereon_rtcm_message_ssr_ura(
                 RtcmMessage::Ssr(ssr) => ssr,
                 _ => return rtcm_wrong_kind("sidereon_rtcm_message_ssr_ura", "an SSR message"),
             };
-            let rows: Vec<SidereonRtcmSsrUraRecord> = ssr
-                .ura
-                .iter()
-                .map(|(satellite_id, ura_index)| SidereonRtcmSsrUraRecord {
-                    satellite_id: *satellite_id,
-                    ura_index: *ura_index,
-                })
-                .collect();
-            c_try!(copy_prefix_to_c(
+            c_try!(crate::ssr::ssr_copy_ura(
                 "sidereon_rtcm_message_ssr_ura",
-                "out",
-                &rows,
+                ssr,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy an SSR message's per-satellite code-bias records. Each row exposes its
+/// nested signal count. Values are raw wire integers. Variable-length output
+/// contract.
+///
+/// Safety: messages is a live handle; out points to len
+/// SidereonRtcmSsrCodeBiasRecord values or is NULL when len is 0; out_written
+/// and out_required point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtcm_message_ssr_code_biases(
+    messages: *const SidereonRtcmMessages,
+    index: usize,
+    out: *mut SidereonRtcmSsrCodeBiasRecord,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtcm_message_ssr_code_biases",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_rtcm_message_ssr_code_biases",
+                out_written,
+                out_required
+            ));
+            let message = c_try!(rtcm_message_at(
+                "sidereon_rtcm_message_ssr_code_biases",
+                messages,
+                index
+            ));
+            let ssr = match message {
+                RtcmMessage::Ssr(ssr) => ssr,
+                _ => {
+                    return rtcm_wrong_kind(
+                        "sidereon_rtcm_message_ssr_code_biases",
+                        "an SSR message",
+                    )
+                }
+            };
+            c_try!(crate::ssr::ssr_copy_code_biases(
+                "sidereon_rtcm_message_ssr_code_biases",
+                ssr,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy the code-bias signal rows for one SSR satellite record. Values are raw
+/// wire integers. Variable-length output contract.
+///
+/// Safety: messages is a live handle; out points to len
+/// SidereonRtcmSsrCodeBiasSignal values or is NULL when len is 0; out_written
+/// and out_required point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtcm_message_ssr_code_bias_signals(
+    messages: *const SidereonRtcmMessages,
+    index: usize,
+    record_index: usize,
+    out: *mut SidereonRtcmSsrCodeBiasSignal,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtcm_message_ssr_code_bias_signals",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_rtcm_message_ssr_code_bias_signals",
+                out_written,
+                out_required
+            ));
+            let message = c_try!(rtcm_message_at(
+                "sidereon_rtcm_message_ssr_code_bias_signals",
+                messages,
+                index
+            ));
+            let ssr = match message {
+                RtcmMessage::Ssr(ssr) => ssr,
+                _ => {
+                    return rtcm_wrong_kind(
+                        "sidereon_rtcm_message_ssr_code_bias_signals",
+                        "an SSR message",
+                    )
+                }
+            };
+            c_try!(crate::ssr::ssr_copy_code_bias_signals(
+                "sidereon_rtcm_message_ssr_code_bias_signals",
+                ssr,
+                record_index,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy an SSR message's per-satellite phase-bias records. Each row exposes
+/// its raw yaw fields and nested signal count. Values are raw wire integers.
+/// Variable-length output contract.
+///
+/// Safety: messages is a live handle; out points to len
+/// SidereonRtcmSsrPhaseBiasRecord values or is NULL when len is 0; out_written
+/// and out_required point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtcm_message_ssr_phase_biases(
+    messages: *const SidereonRtcmMessages,
+    index: usize,
+    out: *mut SidereonRtcmSsrPhaseBiasRecord,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtcm_message_ssr_phase_biases",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_rtcm_message_ssr_phase_biases",
+                out_written,
+                out_required
+            ));
+            let message = c_try!(rtcm_message_at(
+                "sidereon_rtcm_message_ssr_phase_biases",
+                messages,
+                index
+            ));
+            let ssr = match message {
+                RtcmMessage::Ssr(ssr) => ssr,
+                _ => {
+                    return rtcm_wrong_kind(
+                        "sidereon_rtcm_message_ssr_phase_biases",
+                        "an SSR message",
+                    )
+                }
+            };
+            c_try!(crate::ssr::ssr_copy_phase_biases(
+                "sidereon_rtcm_message_ssr_phase_biases",
+                ssr,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy the phase-bias signal rows for one SSR satellite record. Values are raw
+/// wire integers. Variable-length output contract.
+///
+/// Safety: messages is a live handle; out points to len
+/// SidereonRtcmSsrPhaseBiasSignal values or is NULL when len is 0; out_written
+/// and out_required point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtcm_message_ssr_phase_bias_signals(
+    messages: *const SidereonRtcmMessages,
+    index: usize,
+    record_index: usize,
+    out: *mut SidereonRtcmSsrPhaseBiasSignal,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtcm_message_ssr_phase_bias_signals",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_rtcm_message_ssr_phase_bias_signals",
+                out_written,
+                out_required
+            ));
+            let message = c_try!(rtcm_message_at(
+                "sidereon_rtcm_message_ssr_phase_bias_signals",
+                messages,
+                index
+            ));
+            let ssr = match message {
+                RtcmMessage::Ssr(ssr) => ssr,
+                _ => {
+                    return rtcm_wrong_kind(
+                        "sidereon_rtcm_message_ssr_phase_bias_signals",
+                        "an SSR message",
+                    )
+                }
+            };
+            c_try!(crate::ssr::ssr_copy_phase_bias_signals(
+                "sidereon_rtcm_message_ssr_phase_bias_signals",
+                ssr,
+                record_index,
                 out,
                 len,
                 out_written,
@@ -2996,42 +3191,6 @@ fn rtcm_glonass_ephemeris_to_c(eph: &RtcmGlonassEphemeris) -> SidereonRtcmGlonas
     }
 }
 
-fn rtcm_ssr_info_to_c(message: &RtcmSsrMessage) -> SidereonRtcmSsrInfo {
-    SidereonRtcmSsrInfo {
-        message_number: message.message_number,
-        system: gnss_system_to_c(message.system),
-        kind: rtcm_ssr_kind_to_c(message.kind),
-        header: rtcm_ssr_header_to_c(&message.header),
-        orbit_count: message.orbit.len(),
-        clock_count: message.clock.len(),
-        ura_count: message.ura.len(),
-        code_bias_count: message.code_bias.len(),
-        phase_bias_count: message.phase_bias.len(),
-    }
-}
-
-fn rtcm_ssr_orbit_to_c(record: &RtcmSsrOrbitRecord) -> SidereonRtcmSsrOrbitRecord {
-    SidereonRtcmSsrOrbitRecord {
-        satellite_id: record.satellite_id,
-        iode: record.iode,
-        delta_radial: record.delta_radial,
-        delta_along: record.delta_along,
-        delta_cross: record.delta_cross,
-        dot_delta_radial: record.dot_delta_radial,
-        dot_delta_along: record.dot_delta_along,
-        dot_delta_cross: record.dot_delta_cross,
-    }
-}
-
-fn rtcm_ssr_clock_to_c(record: &RtcmSsrClockRecord) -> SidereonRtcmSsrClockRecord {
-    SidereonRtcmSsrClockRecord {
-        satellite_id: record.satellite_id,
-        c0: record.c0,
-        c1: record.c1,
-        c2: record.c2,
-    }
-}
-
 fn rtcm_station_from_c(station: &SidereonRtcmStationCoordinates) -> RtcmStationCoordinates {
     RtcmStationCoordinates {
         message_number: station.message_number,
@@ -3318,35 +3477,4 @@ unsafe fn rtcm_build(out_messages: &mut *mut SidereonRtcmMessages, message: Rtcm
             messages: vec![message],
         },
     );
-}
-
-fn rtcm_ssr_kind_to_c(kind: RtcmSsrKind) -> SidereonRtcmSsrKind {
-    match kind {
-        RtcmSsrKind::Orbit => SidereonRtcmSsrKind::Orbit,
-        RtcmSsrKind::Clock => SidereonRtcmSsrKind::Clock,
-        RtcmSsrKind::CombinedOrbitClock => SidereonRtcmSsrKind::CombinedOrbitClock,
-        RtcmSsrKind::CodeBias => SidereonRtcmSsrKind::CodeBias,
-        RtcmSsrKind::PhaseBias => SidereonRtcmSsrKind::PhaseBias,
-        RtcmSsrKind::Ura => SidereonRtcmSsrKind::Ura,
-        RtcmSsrKind::HighRateClock => SidereonRtcmSsrKind::HighRateClock,
-        RtcmSsrKind::Vtec => SidereonRtcmSsrKind::Vtec,
-    }
-}
-
-fn rtcm_ssr_header_to_c(header: &RtcmSsrHeader) -> SidereonRtcmSsrHeader {
-    SidereonRtcmSsrHeader {
-        epoch_time_s: header.epoch_time_s,
-        update_interval: header.update_interval,
-        multiple_message: header.multiple_message,
-        iod_ssr: header.iod_ssr,
-        provider_id: header.provider_id,
-        solution_id: header.solution_id,
-        has_satellite_reference_datum: header.satellite_reference_datum.is_some(),
-        satellite_reference_datum: header.satellite_reference_datum.unwrap_or(false),
-        has_dispersive_bias_consistency: header.dispersive_bias_consistency.is_some(),
-        dispersive_bias_consistency: header.dispersive_bias_consistency.unwrap_or(false),
-        has_mw_consistency: header.mw_consistency.is_some(),
-        mw_consistency: header.mw_consistency.unwrap_or(false),
-        satellite_count: header.satellite_count,
-    }
 }
