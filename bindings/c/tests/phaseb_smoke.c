@@ -20,7 +20,14 @@ static void check(int ok, const char *what) {
         if (n == 0) {
             msg[0] = '\0';
         }
-        fprintf(stderr, "FAIL: %s (last_error: %s)\n", what, msg);
+        /* The last error is sticky and may come from an earlier call, so it is
+           reported as context rather than as the cause of this failure. */
+        if (msg[0] != '\0') {
+            fprintf(stderr, "FAIL: %s (last ABI error, may predate this check: %s)\n",
+                    what, msg);
+        } else {
+            fprintf(stderr, "FAIL: %s\n", what);
+        }
         failures++;
     }
 }
