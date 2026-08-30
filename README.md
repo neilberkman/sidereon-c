@@ -576,6 +576,7 @@ languages, all returning the same numbers:
 
 - Engine / core: [github.com/neilberkman/sidereon](https://github.com/neilberkman/sidereon)
 - Python: [sidereon-python](https://github.com/neilberkman/sidereon-python)
+- Go: [sidereon-go](https://github.com/neilberkman/sidereon-go)
 - Elixir: [sidereon-ex](https://github.com/neilberkman/sidereon-ex)
 - WebAssembly: [sidereon-wasm](https://github.com/neilberkman/sidereon-wasm)
 
