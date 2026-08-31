@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.4.0 - 2026-08-31
+
+### Changed
+
+- Engine update: sidereon 1.4.0 / sidereon-core 1.4.0 /
+  trust-region-least-squares 0.11.0. Every transcendental and fused
+  multiply-add now goes through portable kernels and decompositions run on a
+  portable scalar, so results are bit-identical across x86_64 and arm64;
+  SVD-derived covariance and geometry diagnostics take the values 1.3.3
+  produced on x86_64/glibc, and frozen iterative-fit outputs move in their
+  last bits. No C ABI changes.
+
 ## 1.3.3 - 2026-08-30
 
 ### Changed
