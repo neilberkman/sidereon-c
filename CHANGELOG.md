@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.4.1 - 2026-08-31
+
+### Changed
+
+- Engine update: sidereon 1.4.1 / sidereon-core 1.4.1, superseding 1.4.0.
+  Solutions are unchanged; the engine's trust-region backend no longer
+  overrides the solver's own reductions, so the reported first-order
+  optimality and evaluation counts of fits match 1.3.3 again. No C ABI
+  changes.
+
 ## 1.4.0 - 2026-08-31
 
 ### Changed
