@@ -451,16 +451,16 @@ unsafe fn sidereal_filter_options_from_c(
         return Ok(sidereon_core::sidereal::SiderealFilterOptions::default());
     }
     let options = require_ref(options, fn_name, "options")?;
-    Ok(sidereon_core::sidereal::SiderealFilterOptions {
-        sample_interval: duration_from_seconds(
-            fn_name,
-            "options.sample_interval_s",
-            options.sample_interval_s,
-        )?,
-        prior_periods: options.prior_periods,
-        min_coverage: options.min_coverage,
-        template_method: sidereal_template_method_from_c(fn_name, options)?,
-    })
+    let mut o = sidereon_core::sidereal::SiderealFilterOptions::default();
+    o.sample_interval = duration_from_seconds(
+        fn_name,
+        "options.sample_interval_s",
+        options.sample_interval_s,
+    )?;
+    o.prior_periods = options.prior_periods;
+    o.min_coverage = options.min_coverage;
+    o.template_method = sidereal_template_method_from_c(fn_name, options)?;
+    Ok(o)
 }
 
 fn sidereal_template_method_from_c(

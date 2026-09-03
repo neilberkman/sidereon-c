@@ -994,17 +994,17 @@ unsafe fn ppp_float_config_from_c(
     fn_name: &str,
     config: &SidereonPppFloatConfig,
 ) -> Result<PppFloatSolveConfigInner, SidereonStatus> {
-    Ok(PppFloatSolveConfigInner {
-        weights: ppp_weights_from_c(&config.weights),
-        tropo: ppp_tropo_from_c(fn_name, &config.tropo)?,
-        corrections: ppp_range_corrections_from_c(fn_name, &config.corrections)?,
-        opts: ppp_float_options_from_c(&config.options),
-        residual_screen: config.residual_screen,
-        elevation_cutoff_deg: config
+    Ok(PppFloatSolveConfigInner::new(
+        ppp_weights_from_c(&config.weights),
+        ppp_tropo_from_c(fn_name, &config.tropo)?,
+        ppp_range_corrections_from_c(fn_name, &config.corrections)?,
+        ppp_float_options_from_c(&config.options),
+        config
             .has_elevation_cutoff_deg
             .then_some(config.elevation_cutoff_deg),
-        estimate_residual_ionosphere: false,
-    })
+        config.residual_screen,
+        false,
+    ))
 }
 
 unsafe fn ppp_fixed_config_from_c(
@@ -1023,21 +1023,21 @@ unsafe fn ppp_fixed_config_from_c(
         config.ambiguity.offset_count,
         "ambiguity.offsets_m",
     )?;
-    Ok(PppFixedSolveConfigInner {
-        weights: ppp_weights_from_c(&config.weights),
-        tropo: ppp_tropo_from_c(fn_name, &config.tropo)?,
-        corrections: ppp_range_corrections_from_c(fn_name, &config.corrections)?,
-        opts: ppp_float_options_from_c(&config.options),
-        ambiguity: PppFixedAmbiguityOptionsInner {
-            wavelengths_m,
-            offsets_m,
-            ratio_threshold: config.ambiguity.ratio_threshold,
-        },
-        elevation_cutoff_deg: config
+    let mut ambiguity = PppFixedAmbiguityOptionsInner::new(config.ambiguity.ratio_threshold);
+    ambiguity.wavelengths_m = wavelengths_m;
+    ambiguity.offsets_m = offsets_m;
+    ambiguity.ratio_threshold = config.ambiguity.ratio_threshold;
+    Ok(PppFixedSolveConfigInner::new(
+        ppp_weights_from_c(&config.weights),
+        ppp_tropo_from_c(fn_name, &config.tropo)?,
+        ppp_range_corrections_from_c(fn_name, &config.corrections)?,
+        ppp_float_options_from_c(&config.options),
+        config
             .has_elevation_cutoff_deg
             .then_some(config.elevation_cutoff_deg),
-        estimate_residual_ionosphere: false,
-    })
+        ambiguity,
+        false,
+    ))
 }
 
 #[allow(clippy::type_complexity)]
@@ -1129,19 +1129,19 @@ unsafe fn run_moving_baseline(
 }
 
 fn ppp_auto_init_options_from_c(options: &SidereonPppAutoInitOptions) -> PppAutoInitOptions {
-    PppAutoInitOptions {
-        initial_guess: options.has_initial_guess.then_some(PppInitialGuess {
-            position_m: options.initial_guess_position_m,
-            clock_m: options.initial_guess_clock_m,
-        }),
-        spp_initial_guess: options.spp_initial_guess,
-        spp_troposphere: options.spp_troposphere,
-        spp_met: SurfaceMet {
-            pressure_hpa: options.spp_pressure_hpa,
-            temperature_k: options.spp_temperature_k,
-            relative_humidity: options.spp_relative_humidity,
-        },
-    }
+    let mut o = PppAutoInitOptions::default();
+    o.initial_guess = options.has_initial_guess.then_some(PppInitialGuess {
+        position_m: options.initial_guess_position_m,
+        clock_m: options.initial_guess_clock_m,
+    });
+    o.spp_initial_guess = options.spp_initial_guess;
+    o.spp_troposphere = options.spp_troposphere;
+    o.spp_met = SurfaceMet {
+        pressure_hpa: options.spp_pressure_hpa,
+        temperature_k: options.spp_temperature_k,
+        relative_humidity: options.spp_relative_humidity,
+    };
+    o
 }
 
 fn map_rtk_arc_error(
@@ -1219,14 +1219,12 @@ fn rtk_static_arc_config_from_c(
     config: &SidereonRtkStaticArcConfig,
 ) -> Result<RtkStaticArcConfig, SidereonStatus> {
     let arc = unsafe { rtk_arc_config_from_c(fn_name, &config.arc)? };
-    Ok(RtkStaticArcConfig {
-        arc,
-        opts: ValidatedFixedSolveOpts {
-            float: rtk_float_options_from_c(&config.float_options),
-            fixed: rtk_fixed_options_from_c(&config.fixed_options),
-            residual: rtk_residual_options_from_c(&config.residual_options),
-        },
-    })
+    let opts = ValidatedFixedSolveOpts {
+        float: rtk_float_options_from_c(&config.float_options),
+        fixed: rtk_fixed_options_from_c(&config.fixed_options),
+        residual: rtk_residual_options_from_c(&config.residual_options),
+    };
+    Ok(RtkStaticArcConfig::new(arc, opts))
 }
 
 fn map_rtk_static_arc_error(fn_name: &str, err: &RtkStaticArcError) -> SidereonStatus {
@@ -1601,13 +1599,12 @@ fn ppp_tropo_from_c(
             SidereonStatus::InvalidArgument
         })?;
         let mapping = ppp_tropo_mapping_from_c(fn_name, tropo)?;
-        Ok(PppTroposphereOptionsInner {
-            enabled: true,
-            estimate_ztd: tropo.estimate_ztd,
-            estimate_tropo_gradients: tropo.estimate_tropo_gradients,
-            met,
-            mapping,
-        })
+        let mut o = PppTroposphereOptionsInner::new(met);
+        o.enabled = true;
+        o.estimate_ztd = tropo.estimate_ztd;
+        o.estimate_tropo_gradients = tropo.estimate_tropo_gradients;
+        o.mapping = mapping;
+        Ok(o)
     } else {
         Ok(PppTroposphereOptionsInner::disabled())
     }
@@ -1648,13 +1645,13 @@ unsafe fn ppp_range_corrections_from_c(
 }
 
 fn ppp_float_options_from_c(options: &SidereonPppFloatOptions) -> PppFloatSolveOptions {
-    PppFloatSolveOptions {
-        max_iterations: options.max_iterations,
-        position_tolerance_m: options.position_tolerance_m,
-        clock_tolerance_m: options.clock_tolerance_m,
-        ambiguity_tolerance_m: options.ambiguity_tolerance_m,
-        ztd_tolerance_m: options.ztd_tolerance_m,
-    }
+    let mut o = PppFloatSolveOptions::default();
+    o.max_iterations = options.max_iterations;
+    o.position_tolerance_m = options.position_tolerance_m;
+    o.clock_tolerance_m = options.clock_tolerance_m;
+    o.ambiguity_tolerance_m = options.ambiguity_tolerance_m;
+    o.ztd_tolerance_m = options.ztd_tolerance_m;
+    o
 }
 
 unsafe fn rtk_arc_observations_from_c(
@@ -1702,18 +1699,18 @@ unsafe fn rtk_arc_config_from_c(
         rtk_f64_map_from_c(fn_name, config.offsets_m, config.offset_count, "offsets_m")?;
     let update_opts = rtk_arc_update_opts_from_c(fn_name, &config.update_options)?;
     let preprocessing = rtk_arc_preprocessing_from_c(fn_name, &config.preprocessing)?;
-    Ok(RtkArcConfig {
-        base_m: config.base_m,
+    Ok(RtkArcConfig::new(
+        config.base_m,
         reference,
         model,
-        baseline_prior_sigma_m: config.baseline_prior_sigma_m,
-        ambiguity_prior_sigma_m: config.ambiguity_prior_sigma_m,
-        initial_baseline_m: config.initial_baseline_m,
+        config.baseline_prior_sigma_m,
+        config.ambiguity_prior_sigma_m,
+        config.initial_baseline_m,
         wavelengths_m,
         offsets_m,
         update_opts,
         preprocessing,
-    })
+    ))
 }
 
 fn trls_loss_from_c(fn_name: &str, arg_name: &str, loss: u32) -> Result<TrlsLoss, SidereonStatus> {

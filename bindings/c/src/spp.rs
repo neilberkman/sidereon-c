@@ -1171,12 +1171,11 @@ pub unsafe extern "C" fn sidereon_validate_receiver_solution(
                 "sidereon_validate_receiver_solution",
                 "options"
             ));
-            let opts = SolutionValidationOptions {
-                max_pdop: options.has_max_pdop.then_some(options.max_pdop),
-                min_plausible_radius_m: options.min_plausible_radius_m,
-                max_plausible_radius_m: options.max_plausible_radius_m,
-                max_converged_residual_rms_m: options.max_converged_residual_rms_m,
-            };
+            let mut opts = SolutionValidationOptions::default();
+            opts.max_pdop = options.has_max_pdop.then_some(options.max_pdop);
+            opts.min_plausible_radius_m = options.min_plausible_radius_m;
+            opts.max_plausible_radius_m = options.max_plausible_radius_m;
+            opts.max_converged_residual_rms_m = options.max_converged_residual_rms_m;
             match validate_receiver_solution(&solution.inner, opts) {
                 Ok(()) => SidereonStatus::Ok,
                 Err(err) => extra_invalid_arg("sidereon_validate_receiver_solution", err),
@@ -1983,12 +1982,12 @@ unsafe fn rinex_spp_options_from_c(
         relative_humidity: options.relative_humidity,
     };
     if options.robust_enabled {
-        out.robust = Some(RobustConfig {
-            huber_k: options.robust.huber_k,
-            scale_floor_m: options.robust.scale_floor_m,
-            max_outer: options.robust.max_outer,
-            outer_tol_m: options.robust.outer_tol_m,
-        });
+        let mut robust = RobustConfig::default();
+        robust.huber_k = options.robust.huber_k;
+        robust.scale_floor_m = options.robust.scale_floor_m;
+        robust.max_outer = options.robust.max_outer;
+        robust.outer_tol_m = options.robust.outer_tol_m;
+        out.robust = Some(robust);
     }
     Ok(out)
 }
@@ -2281,10 +2280,8 @@ mod tests {
     }
 
     fn visible_gps(sp3: &Sp3) -> Vec<GnssSatelliteId> {
-        let planning = PredictOptions {
-            light_time: false,
-            ..PredictOptions::default()
-        };
+        let mut planning = PredictOptions::default();
+        planning.light_time = false;
         sp3.satellites()
             .iter()
             .copied()

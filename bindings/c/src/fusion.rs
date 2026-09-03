@@ -2259,9 +2259,7 @@ pub unsafe extern "C" fn sidereon_fusion_velocity_match_outage(
             let matched = match sidereon_core::fusion::velocity_match_outage(
                 &core_states,
                 &first_good_fix,
-                sidereon_core::fusion::VelocityMatchingConfig {
-                    max_outage_duration_s: config.max_outage_duration_s,
-                },
+                sidereon_core::fusion::VelocityMatchingConfig::new(config.max_outage_duration_s),
             ) {
                 Ok(matched) => matched,
                 Err(err) => return map_fusion_error("sidereon_fusion_velocity_match_outage", err),
@@ -2810,9 +2808,10 @@ fn fusion_filter_config_from_c(
         },
     };
     config.imu_to_body_dcm = flat9_from_c(raw.imu_to_body_dcm);
-    config.mechanization = sidereon_core::fusion::MechanizationConfig {
-        coning_correction: coning_correction_from_c(fn_name, raw.mechanization.coning_correction)?,
-    };
+    let mut mechanization = sidereon_core::fusion::MechanizationConfig::default();
+    mechanization.coning_correction =
+        coning_correction_from_c(fn_name, raw.mechanization.coning_correction)?;
+    config.mechanization = mechanization;
     config.loose.lever_arm_body_m = raw.loose_lever_arm_body_m;
     config.loose.fix_status_weighting = sidereon_core::fusion::GnssFixStatusWeighting {
         single_sigma_multiplier: raw.loose_fix_status_weighting.single_sigma_multiplier,
@@ -2833,35 +2832,30 @@ fn fusion_filter_config_from_c(
             outlier_gate_probability: raw.loose_prediction_adaptation.outlier_gate_probability,
         },
     );
-    config.loose.stationary_updates =
-        raw.has_loose_stationary_updates
-            .then_some(sidereon_core::fusion::StationaryUpdateConfig {
-                detector: sidereon_core::fusion::StationaryDetectorConfig {
-                    window_len: raw.loose_stationary_updates.detector.window_len,
-                    max_specific_force_norm_error_mps2: raw
-                        .loose_stationary_updates
-                        .detector
-                        .max_specific_force_norm_error_mps2,
-                    max_body_rate_wrt_ecef_norm_rps: raw
-                        .loose_stationary_updates
-                        .detector
-                        .max_body_rate_wrt_ecef_norm_rps,
-                },
-                zero_velocity_sigma_mps: raw.loose_stationary_updates.zero_velocity_sigma_mps,
-                zero_angular_rate_sigma_rps: raw
-                    .loose_stationary_updates
-                    .zero_angular_rate_sigma_rps,
-            });
-    config.loose.non_holonomic = raw.has_loose_non_holonomic.then_some(
-        sidereon_core::fusion::NonHolonomicConstraintConfig {
-            lateral_velocity_sigma_mps: raw.loose_non_holonomic.lateral_velocity_sigma_mps,
-            vertical_velocity_sigma_mps: raw.loose_non_holonomic.vertical_velocity_sigma_mps,
-            min_speed_mps: raw.loose_non_holonomic.min_speed_mps,
-            max_body_rate_wrt_ecef_norm_rps: raw
-                .loose_non_holonomic
+    config.loose.stationary_updates = raw.has_loose_stationary_updates.then(|| {
+        let detector = sidereon_core::fusion::StationaryDetectorConfig::new(
+            raw.loose_stationary_updates.detector.window_len,
+            raw.loose_stationary_updates
+                .detector
+                .max_specific_force_norm_error_mps2,
+            raw.loose_stationary_updates
+                .detector
                 .max_body_rate_wrt_ecef_norm_rps,
-        },
-    );
+        );
+        sidereon_core::fusion::StationaryUpdateConfig::new(
+            detector,
+            raw.loose_stationary_updates.zero_velocity_sigma_mps,
+            raw.loose_stationary_updates.zero_angular_rate_sigma_rps,
+        )
+    });
+    config.loose.non_holonomic = raw.has_loose_non_holonomic.then(|| {
+        sidereon_core::fusion::NonHolonomicConstraintConfig::new(
+            raw.loose_non_holonomic.lateral_velocity_sigma_mps,
+            raw.loose_non_holonomic.vertical_velocity_sigma_mps,
+            raw.loose_non_holonomic.min_speed_mps,
+            raw.loose_non_holonomic.max_body_rate_wrt_ecef_norm_rps,
+        )
+    });
     config.tight.lever_arm_body_m = raw.tight_lever_arm_body_m;
     config.tight.light_time = raw.tight_light_time;
     config.tight.sagnac = raw.tight_sagnac;
@@ -2871,11 +2865,11 @@ fn fusion_filter_config_from_c(
     config.tight.clock_drift_random_walk_m2_s3 = raw.tight_clock_drift_random_walk_m2_s3;
     config.tight.update_options.innovation_gate =
         fusion_innovation_gate_from_c(raw.has_tight_innovation_gate, raw.tight_innovation_gate);
-    config.ukf_update_options.transform = sidereon_core::fusion::UnscentedTransformOptions {
-        alpha: raw.ukf_alpha,
-        beta: raw.ukf_beta,
-        kappa: raw.ukf_kappa,
-    };
+    let mut transform = sidereon_core::fusion::UnscentedTransformOptions::default();
+    transform.alpha = raw.ukf_alpha;
+    transform.beta = raw.ukf_beta;
+    transform.kappa = raw.ukf_kappa;
+    config.ukf_update_options.transform = transform;
     config.ukf_update_options.innovation_gate =
         fusion_innovation_gate_from_c(raw.has_ukf_innovation_gate, raw.ukf_innovation_gate);
     if let Err(err) = config.validate() {

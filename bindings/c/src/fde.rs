@@ -421,12 +421,12 @@ pub unsafe extern "C" fn sidereon_fde_solution_free(sol: *mut SidereonFdeSolutio
 // serialize from the handle, release with the matching _free.
 
 fn robust_config_value_from_c(config: &SidereonSppRobustConfig) -> RobustConfig {
-    RobustConfig {
-        huber_k: config.huber_k,
-        scale_floor_m: config.scale_floor_m,
-        max_outer: config.max_outer,
-        outer_tol_m: config.outer_tol_m,
-    }
+    let mut o = RobustConfig::default();
+    o.huber_k = config.huber_k;
+    o.scale_floor_m = config.scale_floor_m;
+    o.max_outer = config.max_outer;
+    o.outer_tol_m = config.outer_tol_m;
+    o
 }
 
 fn default_fde_options() -> SidereonFdeOptions {
@@ -466,13 +466,8 @@ unsafe fn run_fde(
         Err(status) => return status,
     };
     let validation = validation_options_from_c(options.use_validation_options, &options.validation);
-    let fde_options = FdeSppOptions {
-        fde: FdeOptions {
-            raim,
-            max_iterations: options.max_iterations,
-        },
-        validation,
-    };
+    let fde = FdeOptions::new(raim, options.max_iterations);
+    let fde_options = FdeSppOptions::new(fde, validation);
 
     match fde_spp(eph, &inputs, with_geodetic, &fde_options) {
         Ok(found) => {
@@ -527,13 +522,8 @@ unsafe fn run_robust_fde(
         Err(status) => return status,
     };
     let validation = validation_options_from_c(options.use_validation_options, &options.validation);
-    let fde_options = FdeSppOptions {
-        fde: FdeOptions {
-            raim,
-            max_iterations: options.max_iterations,
-        },
-        validation,
-    };
+    let fde = FdeOptions::new(raim, options.max_iterations);
+    let fde_options = FdeSppOptions::new(fde, validation);
 
     match spp_robust_fde_driver(eph, &inputs, with_geodetic, robust, &fde_options) {
         Ok(found) => {
@@ -590,9 +580,9 @@ unsafe fn raim_options_from_fde_c(
     let n_systems = options
         .n_systems_enabled
         .then_some(options.n_systems as isize);
-    Ok(RaimOptions {
-        p_fa: options.p_fa,
-        weights,
-        n_systems,
-    })
+    let mut o = RaimOptions::default();
+    o.p_fa = options.p_fa;
+    o.weights = weights;
+    o.n_systems = n_systems;
+    Ok(o)
 }

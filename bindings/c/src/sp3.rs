@@ -2626,10 +2626,10 @@ fn continuity_options_from_c(
             return Err(SidereonStatus::InvalidArgument);
         }
     };
-    Ok(ContinuityOptions {
+    Ok(ContinuityOptions::new(
         speed_bound,
-        residual_tolerance_m: (residual_tolerance_m >= 0.0).then_some(residual_tolerance_m),
-    })
+        (residual_tolerance_m >= 0.0).then_some(residual_tolerance_m),
+    ))
 }
 
 fn continuity_defect_json(defect: &ContinuityDefect) -> serde_json::Value {
@@ -2992,10 +2992,10 @@ unsafe fn sp3_merge_options_from_c(
             ));
             return Err(SidereonStatus::InvalidArgument);
         }
-        Some(OutlierRejectOptions {
-            position_tolerance_m: options.outlier_reject_position_tolerance_m,
-            clock_tolerance_s: options.outlier_reject_clock_tolerance_s,
-        })
+        Some(OutlierRejectOptions::new(
+            options.outlier_reject_position_tolerance_m,
+            options.outlier_reject_clock_tolerance_s,
+        ))
     } else {
         None
     };
@@ -3055,10 +3055,10 @@ unsafe fn sp3_merge_options_from_c(
     merge_options.outlier_reject = outlier_reject;
     merge_options.target_epoch_interval_s = target_epoch_interval_s;
     merge_options.systems = systems;
-    merge_options.frame_reconciliation = Sp3FrameReconciliationOptions {
-        asserted_equivalent_label_sets,
-        helmert: helmert_frame_reconciliation,
-    };
+    let mut frame_reconciliation = Sp3FrameReconciliationOptions::default();
+    frame_reconciliation.asserted_equivalent_label_sets = asserted_equivalent_label_sets;
+    frame_reconciliation.helmert = helmert_frame_reconciliation;
+    merge_options.frame_reconciliation = frame_reconciliation;
     Ok(merge_options)
 }
 
@@ -3298,10 +3298,10 @@ unsafe fn visibility_options_from_c(
         }
         Some(set)
     };
-    Ok(VisibilityOptions {
-        elevation_mask_deg,
-        systems,
-    })
+    let mut o = VisibilityOptions::default();
+    o.elevation_mask_deg = elevation_mask_deg;
+    o.systems = systems;
+    Ok(o)
 }
 
 fn geometry_visible_to_c(sat: &GeometryVisibleSatellite) -> SidereonGeometryVisible {

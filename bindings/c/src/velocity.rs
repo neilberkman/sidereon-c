@@ -129,15 +129,15 @@ pub unsafe extern "C" fn sidereon_solve_velocity(
             VelocitySolveOptions::default()
         } else {
             let options = c_try!(require_ref(options, "sidereon_solve_velocity", "options"));
-            VelocitySolveOptions {
-                observable: c_try!(velocity_observable_from_c(
-                    "sidereon_solve_velocity",
-                    "options.observable",
-                    options.observable
-                )),
-                light_time: options.light_time,
-                sagnac: options.sagnac,
-            }
+            let mut opts = VelocitySolveOptions::default();
+            opts.observable = c_try!(velocity_observable_from_c(
+                "sidereon_solve_velocity",
+                "options.observable",
+                options.observable,
+            ));
+            opts.light_time = options.light_time;
+            opts.sagnac = options.sagnac;
+            opts
         };
 
         let mut parsed = Vec::with_capacity(raw.len());
@@ -518,15 +518,15 @@ pub unsafe extern "C" fn sidereon_solve_velocity_broadcast(
                     "sidereon_solve_velocity_broadcast",
                     "options"
                 ));
-                VelocitySolveOptions {
-                    observable: c_try!(velocity_observable_from_c(
-                        "sidereon_solve_velocity_broadcast",
-                        "options.observable",
-                        options.observable
-                    )),
-                    light_time: options.light_time,
-                    sagnac: options.sagnac,
-                }
+                let mut opts = VelocitySolveOptions::default();
+                opts.observable = c_try!(velocity_observable_from_c(
+                    "sidereon_solve_velocity_broadcast",
+                    "options.observable",
+                    options.observable,
+                ));
+                opts.light_time = options.light_time;
+                opts.sagnac = options.sagnac;
+                opts
             };
 
             let mut parsed = Vec::with_capacity(raw.len());
@@ -577,10 +577,8 @@ mod tests {
     }
 
     fn visible_gps(sp3: &Sp3) -> Vec<GnssSatelliteId> {
-        let planning = PredictOptions {
-            light_time: false,
-            ..PredictOptions::default()
-        };
+        let mut planning = PredictOptions::default();
+        planning.light_time = false;
         sp3.satellites()
             .iter()
             .copied()
@@ -630,15 +628,14 @@ mod tests {
                 }
             })
             .collect::<Vec<_>>();
+        let mut solve_opts = VelocitySolveOptions::default();
+        solve_opts.observable = VelocityObservable::Doppler;
         let expected = sidereon_core::velocity::solve(
             &sp3,
             &core_observations,
             RECEIVER,
             T_RX_J2000_S,
-            VelocitySolveOptions {
-                observable: VelocityObservable::Doppler,
-                ..VelocitySolveOptions::default()
-            },
+            solve_opts,
         )
         .expect("core velocity solve");
 

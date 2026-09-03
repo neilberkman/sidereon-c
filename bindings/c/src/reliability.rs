@@ -342,12 +342,12 @@ fn reliability_options_to_c(value: CoreReliabilityOptions) -> SidereonReliabilit
 }
 
 fn reliability_options_from_c(value: &SidereonReliabilityOptions) -> CoreReliabilityOptions {
-    CoreReliabilityOptions {
-        alpha: value.alpha,
-        beta: value.beta,
-        lambda0_override: value.has_lambda0_override.then_some(value.lambda0_override),
-        min_redundancy: value.min_redundancy,
-    }
+    let mut o = CoreReliabilityOptions::default();
+    o.alpha = value.alpha;
+    o.beta = value.beta;
+    o.lambda0_override = value.has_lambda0_override.then_some(value.lambda0_override);
+    o.min_redundancy = value.min_redundancy;
+    o
 }
 
 unsafe fn reliability_rows_from_c(

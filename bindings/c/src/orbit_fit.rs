@@ -676,32 +676,34 @@ unsafe fn orbit_fit_options_from_c(
     } else {
         None
     };
-    Ok(sidereon_core::ephemeris::OrbitFitOptions {
-        force_model,
-        integrator: propagation_integrator_from_c(fn_name, options.integrator)?,
-        integrator_options: IntegratorOptions {
-            abs_tol: options.abs_tol,
-            rel_tol: options.rel_tol,
-            initial_step: options.initial_step_s,
-            min_step: options.min_step_s,
-            max_step: options.max_step_s,
-            max_steps: options.max_steps,
-            dense_output: false,
-        },
-        solver_options: sidereon_core::astro::math::least_squares::SolveOptions {
-            gtol: options.solver_gtol,
-            ftol: options.solver_ftol,
-            xtol: options.solver_xtol,
-            max_nfev: options.solver_max_nfev,
-        },
-        linear_solve:
-            sidereon_core::astro::math::least_squares::TrustRegionSolve::OwnedGaussianFirstTie,
-        geometry_thresholds: sidereon_core::geometry_quality::GeometryQualityThresholds::default(),
-        min_ledger_samples: options.min_ledger_samples,
-        drag,
-        space_weather: None,
-        propagation_context: propagation_context_from_c(&propagation_config),
-    })
+    let mut integrator_options = IntegratorOptions::default();
+    integrator_options.abs_tol = options.abs_tol;
+    integrator_options.rel_tol = options.rel_tol;
+    integrator_options.initial_step = options.initial_step_s;
+    integrator_options.min_step = options.min_step_s;
+    integrator_options.max_step = options.max_step_s;
+    integrator_options.max_steps = options.max_steps;
+    integrator_options.dense_output = false;
+
+    let mut solver_options = sidereon_core::astro::math::least_squares::SolveOptions::default();
+    solver_options.gtol = options.solver_gtol;
+    solver_options.ftol = options.solver_ftol;
+    solver_options.xtol = options.solver_xtol;
+    solver_options.max_nfev = options.solver_max_nfev;
+
+    let mut o = sidereon_core::ephemeris::OrbitFitOptions::default();
+    o.force_model = force_model;
+    o.integrator = propagation_integrator_from_c(fn_name, options.integrator)?;
+    o.integrator_options = integrator_options;
+    o.solver_options = solver_options;
+    o.linear_solve =
+        sidereon_core::astro::math::least_squares::TrustRegionSolve::OwnedGaussianFirstTie;
+    o.geometry_thresholds = sidereon_core::geometry_quality::GeometryQualityThresholds::default();
+    o.min_ledger_samples = options.min_ledger_samples;
+    o.drag = drag;
+    o.space_weather = None;
+    o.propagation_context = propagation_context_from_c(&propagation_config);
+    Ok(o)
 }
 
 fn default_orbit_fit_options_c() -> SidereonOrbitFitOptions {

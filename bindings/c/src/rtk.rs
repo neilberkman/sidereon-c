@@ -5172,11 +5172,11 @@ pub unsafe extern "C" fn sidereon_solve_static_reference_station_rinex(
             } else {
                 None
             };
-            let options = StaticReferenceStationRinexOptions {
+            let options = StaticReferenceStationRinexOptions::new(
                 code_options,
                 carrier_options,
-                with_geodetic: config.with_geodetic,
-            };
+                config.with_geodetic,
+            );
             match solve_static_reference_station_rinex(
                 &sp3.inner,
                 &reference_obs.inner,
@@ -5668,12 +5668,12 @@ unsafe fn rtk_rinex_arc_options_from_c(
                 )?,
             });
         }
-        RtkRinexArcOptions {
-            signal_pairs: pairs,
-            max_epochs: None,
-            min_common_satellites: options.min_common_satellites,
-            include_prediction_time: options.include_prediction_time,
-        }
+        RtkRinexArcOptions::new(
+            pairs,
+            None,
+            options.min_common_satellites,
+            options.include_prediction_time,
+        )
     };
     out.max_epochs = options.has_max_epochs.then_some(options.max_epochs);
     out.min_common_satellites = options.min_common_satellites;
@@ -5724,12 +5724,12 @@ unsafe fn rtk_rinex_dual_arc_options_from_c(
                 )?,
             });
         }
-        RtkRinexDualArcOptions {
-            signal_pairs: pairs,
-            max_epochs: None,
-            min_common_satellites: options.min_common_satellites,
-            include_prediction_time: options.include_prediction_time,
-        }
+        RtkRinexDualArcOptions::new(
+            pairs,
+            None,
+            options.min_common_satellites,
+            options.include_prediction_time,
+        )
     };
     out.max_epochs = options.has_max_epochs.then_some(options.max_epochs);
     out.min_common_satellites = options.min_common_satellites;
@@ -5743,27 +5743,28 @@ unsafe fn rtk_rinex_static_config_from_c(
     wavelengths_m: BTreeMap<String, f64>,
     offsets_m: BTreeMap<String, f64>,
 ) -> Result<RtkStaticArcConfig, SidereonStatus> {
-    Ok(RtkStaticArcConfig {
-        arc: RtkArcConfig {
-            base_m: config.base_m,
-            reference: rtk_reference_selection_from_c(
-                fn_name,
-                config.reference_mode,
-                config.reference_satellite,
-                config.reference_per_system,
-                config.reference_per_system_count,
-            )?,
-            model: rtk_model_from_c(fn_name, &config.model)?,
-            baseline_prior_sigma_m: config.baseline_prior_sigma_m,
-            ambiguity_prior_sigma_m: config.ambiguity_prior_sigma_m,
-            initial_baseline_m: config.initial_baseline_m,
-            wavelengths_m,
-            offsets_m,
-            update_opts: rtk_arc_update_opts_from_c(fn_name, &config.update_options)?,
-            preprocessing: rtk_arc_preprocessing_from_c(fn_name, &config.preprocessing)?,
-        },
-        opts: rtk_validated_fixed_options_from_c(config),
-    })
+    let arc = RtkArcConfig::new(
+        config.base_m,
+        rtk_reference_selection_from_c(
+            fn_name,
+            config.reference_mode,
+            config.reference_satellite,
+            config.reference_per_system,
+            config.reference_per_system_count,
+        )?,
+        rtk_model_from_c(fn_name, &config.model)?,
+        config.baseline_prior_sigma_m,
+        config.ambiguity_prior_sigma_m,
+        config.initial_baseline_m,
+        wavelengths_m,
+        offsets_m,
+        rtk_arc_update_opts_from_c(fn_name, &config.update_options)?,
+        rtk_arc_preprocessing_from_c(fn_name, &config.preprocessing)?,
+    );
+    Ok(RtkStaticArcConfig::new(
+        arc,
+        rtk_validated_fixed_options_from_c(config),
+    ))
 }
 
 unsafe fn static_reference_carrier_options_from_c(
@@ -5772,15 +5773,10 @@ unsafe fn static_reference_carrier_options_from_c(
 ) -> Result<StaticReferenceCarrierRinexOptions, SidereonStatus> {
     let mut carrier = config.carrier;
     carrier.base_m = config.reference_position_m;
-    Ok(StaticReferenceCarrierRinexOptions {
-        arc_options: rtk_rinex_arc_options_from_c(fn_name, &carrier.arc_options)?,
-        static_config: rtk_rinex_static_config_from_c(
-            fn_name,
-            &carrier,
-            BTreeMap::new(),
-            BTreeMap::new(),
-        )?,
-    })
+    Ok(StaticReferenceCarrierRinexOptions::new(
+        rtk_rinex_arc_options_from_c(fn_name, &carrier.arc_options)?,
+        rtk_rinex_static_config_from_c(fn_name, &carrier, BTreeMap::new(), BTreeMap::new())?,
+    ))
 }
 
 unsafe fn rtk_rinex_wide_lane_static_config_from_c(
@@ -5788,21 +5784,22 @@ unsafe fn rtk_rinex_wide_lane_static_config_from_c(
     config: &SidereonRtkRinexWideLaneFixedConfig,
     reference: BaselineReferenceSelection,
 ) -> Result<RtkStaticArcConfig, SidereonStatus> {
-    Ok(RtkStaticArcConfig {
-        arc: RtkArcConfig {
-            base_m: config.base_m,
-            reference,
-            model: rtk_model_from_c(fn_name, &config.model)?,
-            baseline_prior_sigma_m: config.baseline_prior_sigma_m,
-            ambiguity_prior_sigma_m: config.ambiguity_prior_sigma_m,
-            initial_baseline_m: config.initial_baseline_m,
-            wavelengths_m: BTreeMap::new(),
-            offsets_m: BTreeMap::new(),
-            update_opts: rtk_arc_update_opts_from_c(fn_name, &config.update_options)?,
-            preprocessing: RtkArcPreprocessing::default(),
-        },
-        opts: rtk_validated_fixed_options_from_wide_lane_c(config),
-    })
+    let arc = RtkArcConfig::new(
+        config.base_m,
+        reference,
+        rtk_model_from_c(fn_name, &config.model)?,
+        config.baseline_prior_sigma_m,
+        config.ambiguity_prior_sigma_m,
+        config.initial_baseline_m,
+        BTreeMap::new(),
+        BTreeMap::new(),
+        rtk_arc_update_opts_from_c(fn_name, &config.update_options)?,
+        RtkArcPreprocessing::default(),
+    );
+    Ok(RtkStaticArcConfig::new(
+        arc,
+        rtk_validated_fixed_options_from_wide_lane_c(config),
+    ))
 }
 
 unsafe fn rtk_rinex_wide_lane_fixed_config_from_c(
@@ -5816,30 +5813,32 @@ unsafe fn rtk_rinex_wide_lane_fixed_config_from_c(
         config.reference_per_system,
         config.reference_per_system_count,
     )?;
-    Ok(RtkWideLaneFixedArcConfig {
-        wide_lane: RtkWideLaneArcConfig {
-            base_m: config.base_m,
-            reference: reference.clone(),
-            options: WideLaneOptions {
-                min_epochs: 2,
-                tolerance_cycles: 0.5,
-                skip_short_fragments: false,
-            },
-            cycle_slip: Some(RtkDualCycleSlipConfig {
-                policy: CycleSlipPolicy::DropSatellite,
-                options: sidereon_core::carrier_phase::CycleSlipOptions::default(),
-            }),
-        },
-        ionosphere_free: RtkIonosphereFreeArcConfig {
-            base_m: config.base_m,
-            initial_baseline_m: config.initial_baseline_m,
-            reference: reference.clone(),
-            apply_troposphere: config.apply_troposphere,
-        },
-        solve: RtkWideLaneFixedArcSolveConfig::Static(rtk_rinex_wide_lane_static_config_from_c(
-            fn_name, config, reference,
-        )?),
-    })
+    let mut wide_lane_opts = WideLaneOptions::new(2, 0.5);
+    wide_lane_opts.skip_short_fragments = false;
+    let cycle_slip = RtkDualCycleSlipConfig::new(
+        CycleSlipPolicy::DropSatellite,
+        sidereon_core::carrier_phase::CycleSlipOptions::default(),
+    );
+    let wide_lane = RtkWideLaneArcConfig::new(
+        config.base_m,
+        reference.clone(),
+        wide_lane_opts,
+        Some(cycle_slip),
+    );
+    let ionosphere_free = RtkIonosphereFreeArcConfig::new(
+        config.base_m,
+        config.initial_baseline_m,
+        reference.clone(),
+        config.apply_troposphere,
+    );
+    let solve = RtkWideLaneFixedArcSolveConfig::Static(rtk_rinex_wide_lane_static_config_from_c(
+        fn_name, config, reference,
+    )?);
+    Ok(RtkWideLaneFixedArcConfig::new(
+        wide_lane,
+        ionosphere_free,
+        solve,
+    ))
 }
 
 unsafe fn rtk_dual_frequency_arc_epochs_from_c(
@@ -5900,47 +5899,49 @@ unsafe fn rtk_wide_lane_arc_config_from_c(
     fn_name: &str,
     config: &SidereonRtkWideLaneArcConfig,
 ) -> Result<RtkWideLaneArcConfig, SidereonStatus> {
-    Ok(RtkWideLaneArcConfig {
-        base_m: config.base_m,
-        reference: rtk_reference_selection_from_c(
+    let reference = rtk_reference_selection_from_c(
+        fn_name,
+        config.reference_mode,
+        config.reference_satellite,
+        config.reference_per_system,
+        config.reference_per_system_count,
+    )?;
+    let mut options =
+        WideLaneOptions::new(config.options.min_epochs, config.options.tolerance_cycles);
+    options.skip_short_fragments = config.options.skip_short_fragments;
+    let cycle_slip = if config.has_cycle_slip {
+        Some(rtk_dual_cycle_slip_config_from_c(
             fn_name,
-            config.reference_mode,
-            config.reference_satellite,
-            config.reference_per_system,
-            config.reference_per_system_count,
-        )?,
-        options: WideLaneOptions {
-            min_epochs: config.options.min_epochs,
-            tolerance_cycles: config.options.tolerance_cycles,
-            skip_short_fragments: config.options.skip_short_fragments,
-        },
-        cycle_slip: if config.has_cycle_slip {
-            Some(rtk_dual_cycle_slip_config_from_c(
-                fn_name,
-                &config.cycle_slip,
-            )?)
-        } else {
-            None
-        },
-    })
+            &config.cycle_slip,
+        )?)
+    } else {
+        None
+    };
+    Ok(RtkWideLaneArcConfig::new(
+        config.base_m,
+        reference,
+        options,
+        cycle_slip,
+    ))
 }
 
 unsafe fn rtk_ionosphere_free_arc_config_from_c(
     fn_name: &str,
     config: &SidereonRtkIonosphereFreeArcConfig,
 ) -> Result<RtkIonosphereFreeArcConfig, SidereonStatus> {
-    Ok(RtkIonosphereFreeArcConfig {
-        base_m: config.base_m,
-        initial_baseline_m: config.initial_baseline_m,
-        reference: rtk_reference_selection_from_c(
-            fn_name,
-            config.reference_mode,
-            config.reference_satellite,
-            config.reference_per_system,
-            config.reference_per_system_count,
-        )?,
-        apply_troposphere: config.apply_troposphere,
-    })
+    let reference = rtk_reference_selection_from_c(
+        fn_name,
+        config.reference_mode,
+        config.reference_satellite,
+        config.reference_per_system,
+        config.reference_per_system_count,
+    )?;
+    Ok(RtkIonosphereFreeArcConfig::new(
+        config.base_m,
+        config.initial_baseline_m,
+        reference,
+        config.apply_troposphere,
+    ))
 }
 
 unsafe fn rtk_wide_lane_cycles_from_c(
@@ -6292,10 +6293,10 @@ unsafe fn rtk_dual_cycle_slip_config_from_c(
     fn_name: &str,
     config: &SidereonRtkDualCycleSlipConfig,
 ) -> Result<RtkDualCycleSlipConfig, SidereonStatus> {
-    Ok(RtkDualCycleSlipConfig {
-        policy: rtk_cycle_slip_policy_from_c(fn_name, config.policy)?,
-        options: cycle_slip_options_from_c(&config.options),
-    })
+    Ok(RtkDualCycleSlipConfig::new(
+        rtk_cycle_slip_policy_from_c(fn_name, config.policy)?,
+        cycle_slip_options_from_c(&config.options),
+    ))
 }
 
 fn rtk_id_from_token(

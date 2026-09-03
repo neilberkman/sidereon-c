@@ -2416,13 +2416,13 @@ fn lnav_params_from_c(params: &SidereonLnavParams) -> sidereon_core::navigation:
 
 fn lnav_options_from_c(opts: &SidereonLnavOptions) -> sidereon_core::navigation::lnav::LnavOptions {
     use sidereon_core::navigation::lnav::LnavNumber::Int;
-    sidereon_core::navigation::lnav::LnavOptions {
-        tow: Int(opts.tow),
-        alert: Int(opts.alert),
-        anti_spoof: Int(opts.anti_spoof),
-        integrity: Int(opts.integrity),
-        tlm_message: Int(opts.tlm_message),
-    }
+    sidereon_core::navigation::lnav::LnavOptions::new(
+        Int(opts.tow),
+        Int(opts.alert),
+        Int(opts.anti_spoof),
+        Int(opts.integrity),
+        Int(opts.tlm_message),
+    )
 }
 
 fn lnav_decoded_to_c(d: &sidereon_core::navigation::lnav::LnavDecoded) -> SidereonLnavDecoded {

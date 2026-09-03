@@ -84,11 +84,10 @@ pub unsafe extern "C" fn sidereon_raim(
             weights,
             weight_count
         ));
-        let options = RaimOptions {
-            p_fa,
-            weights: raim_weights,
-            n_systems: n_systems_enabled.then_some(n_systems as isize),
-        };
+        let mut options = RaimOptions::default();
+        options.p_fa = p_fa;
+        options.weights = raim_weights;
+        options.n_systems = n_systems_enabled.then_some(n_systems as isize);
         match sidereon_core::quality::raim(&input, &options) {
             Ok(result) => {
                 *out = raim_result_to_c(&result, &residuals);
@@ -142,11 +141,10 @@ pub unsafe extern "C" fn sidereon_raim_normalized_residuals(
                 weights,
                 weight_count
             ));
-            let options = RaimOptions {
-                p_fa,
-                weights: raim_weights,
-                n_systems: n_systems_enabled.then_some(n_systems as isize),
-            };
+            let mut options = RaimOptions::default();
+            options.p_fa = p_fa;
+            options.weights = raim_weights;
+            options.n_systems = n_systems_enabled.then_some(n_systems as isize);
             match sidereon_core::quality::raim(&input, &options) {
                 Ok(result) => {
                     let rows = raim_normalized_residuals_to_c(&result);
@@ -199,11 +197,10 @@ pub unsafe extern "C" fn sidereon_raim_for_solution(
             weights,
             weight_count
         ));
-        let options = RaimOptions {
-            p_fa,
-            weights: raim_weights,
-            n_systems: n_systems_enabled.then_some(n_systems as isize),
-        };
+        let mut options = RaimOptions::default();
+        options.p_fa = p_fa;
+        options.weights = raim_weights;
+        options.n_systems = n_systems_enabled.then_some(n_systems as isize);
         match sidereon_core::quality::raim_for_solution(&solution.inner, &options) {
             Ok(result) => {
                 *out = raim_result_to_c(&result, &solution.inner.residuals_m);
@@ -242,11 +239,10 @@ pub unsafe extern "C" fn sidereon_raim_fde_design(
             rows,
             row_count
         ));
-        let core_options = RangeFdeOptions {
-            p_fa: options.p_fa,
-            max_exclusions: options.max_exclusions,
-            min_redundancy: options.min_redundancy,
-        };
+        let mut core_options = RangeFdeOptions::default();
+        core_options.p_fa = options.p_fa;
+        core_options.max_exclusions = options.max_exclusions;
+        core_options.min_redundancy = options.min_redundancy;
         match raim_fde_design(&rows, &core_options) {
             Ok(inner) => {
                 write_boxed_handle(out_result, SidereonRangeFdeResult { inner });

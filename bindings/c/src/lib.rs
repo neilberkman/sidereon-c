@@ -1352,11 +1352,13 @@ unsafe fn glonass_channels_from_c(
 }
 
 fn robust_config_from_c(inputs: &SidereonSppInputsV2) -> Option<RobustConfig> {
-    inputs.robust_enabled.then_some(RobustConfig {
-        huber_k: inputs.robust.huber_k,
-        scale_floor_m: inputs.robust.scale_floor_m,
-        max_outer: inputs.robust.max_outer,
-        outer_tol_m: inputs.robust.outer_tol_m,
+    inputs.robust_enabled.then(|| {
+        let mut o = RobustConfig::default();
+        o.huber_k = inputs.robust.huber_k;
+        o.scale_floor_m = inputs.robust.scale_floor_m;
+        o.max_outer = inputs.robust.max_outer;
+        o.outer_tol_m = inputs.robust.outer_tol_m;
+        o
     })
 }
 
@@ -1377,12 +1379,12 @@ fn validation_options_from_c(
     validation: &SidereonSppValidationOptions,
 ) -> SolutionValidationOptions {
     if use_validation_options {
-        SolutionValidationOptions {
-            max_pdop: validation.max_pdop_enabled.then_some(validation.max_pdop),
-            min_plausible_radius_m: validation.min_plausible_radius_m,
-            max_plausible_radius_m: validation.max_plausible_radius_m,
-            max_converged_residual_rms_m: validation.max_converged_residual_rms_m,
-        }
+        let mut o = SolutionValidationOptions::default();
+        o.max_pdop = validation.max_pdop_enabled.then_some(validation.max_pdop);
+        o.min_plausible_radius_m = validation.min_plausible_radius_m;
+        o.max_plausible_radius_m = validation.max_plausible_radius_m;
+        o.max_converged_residual_rms_m = validation.max_converged_residual_rms_m;
+        o
     } else {
         SolutionValidationOptions::default()
     }
@@ -1766,13 +1768,13 @@ unsafe fn ppp_receiver_antenna_from_c(
         options.freq2_label,
         &options.freq2,
     )?;
-    Ok(Some(PppReceiverAntennaOptionsInner {
-        freq1_label: freq1.label.clone(),
-        freq1_hz: options.freq1_hz,
-        freq2_label: freq2.label.clone(),
-        freq2_hz: options.freq2_hz,
-        frequencies: vec![freq1, freq2],
-    }))
+    Ok(Some(PppReceiverAntennaOptionsInner::new(
+        freq1.label.clone(),
+        options.freq1_hz,
+        freq2.label.clone(),
+        options.freq2_hz,
+        vec![freq1, freq2],
+    )))
 }
 
 unsafe fn ppp_satellite_clock_from_c(
@@ -2014,15 +2016,14 @@ fn state_propagator_from_c(
     }
     let force_model = propagation_force_model_kind_from_c(fn_name, config)?;
     let integrator = propagation_integrator_from_c(fn_name, config.integrator)?;
-    let options = IntegratorOptions {
-        abs_tol: config.abs_tol,
-        rel_tol: config.rel_tol,
-        initial_step: config.initial_step_s,
-        min_step: config.min_step_s,
-        max_step: config.max_step_s,
-        max_steps: config.max_steps,
-        dense_output: false,
-    };
+    let mut options = IntegratorOptions::default();
+    options.abs_tol = config.abs_tol;
+    options.rel_tol = config.rel_tol;
+    options.initial_step = config.initial_step_s;
+    options.min_step = config.min_step_s;
+    options.max_step = config.max_step_s;
+    options.max_steps = config.max_steps;
+    options.dense_output = false;
     let drag = if config.has_drag {
         Some(drag_parameters_from_c(fn_name, config.drag)?)
     } else {
@@ -2205,11 +2206,11 @@ fn pass_finder_options_from_c(
         ));
         return Err(SidereonStatus::InvalidArgument);
     }
-    Ok(PassFinderOptions {
-        elevation_mask_deg: options.elevation_mask_deg,
-        coarse_step_seconds: options.step_seconds,
-        time_tolerance_seconds: options.time_tolerance_s,
-    })
+    let mut o = PassFinderOptions::default();
+    o.elevation_mask_deg = options.elevation_mask_deg;
+    o.coarse_step_seconds = options.step_seconds;
+    o.time_tolerance_seconds = options.time_tolerance_s;
+    Ok(o)
 }
 
 fn ground_station_from_c(station: &SidereonGroundStation) -> GroundStation {
@@ -2858,11 +2859,11 @@ unsafe fn predict_options_from_c(
         return Ok(PredictOptions::default());
     }
     let options = require_ref(options, fn_name, "options")?;
-    Ok(PredictOptions {
-        carrier_hz: options.carrier_hz,
-        light_time: options.light_time,
-        sagnac: options.sagnac,
-    })
+    let mut o = PredictOptions::default();
+    o.carrier_hz = options.carrier_hz;
+    o.light_time = options.light_time;
+    o.sagnac = options.sagnac;
+    Ok(o)
 }
 
 fn calendar_epoch_to_c(epoch: CalendarEpoch) -> SidereonCalendarEpoch {
@@ -2933,13 +2934,13 @@ fn pseudorange_variance_options_from_c(
             return Err(SidereonStatus::InvalidArgument);
         }
     };
-    Ok(sidereon_core::quality::PseudorangeVarianceOptions {
-        a_m: options.a_m,
-        b_m: options.b_m,
-        model,
-        cn0_dbhz: options.has_cn0.then_some(options.cn0_dbhz),
-        cn0_scale_m2: options.cn0_scale_m2,
-    })
+    let mut o = sidereon_core::quality::PseudorangeVarianceOptions::default();
+    o.a_m = options.a_m;
+    o.b_m = options.b_m;
+    o.model = model;
+    o.cn0_dbhz = options.has_cn0.then_some(options.cn0_dbhz);
+    o.cn0_scale_m2 = options.cn0_scale_m2;
+    Ok(o)
 }
 
 unsafe fn read_vec3(
@@ -3323,9 +3324,9 @@ fn dted_options_from_c(
     fn_name: &str,
     options: &SidereonDtedLookupOptions,
 ) -> Result<DtedLookupOptions, SidereonStatus> {
-    Ok(DtedLookupOptions {
-        interpolation: dted_interpolation_from_c(fn_name, options.interpolation)?,
-    })
+    let mut o = DtedLookupOptions::default();
+    o.interpolation = dted_interpolation_from_c(fn_name, options.interpolation)?;
+    Ok(o)
 }
 
 thread_local! {
@@ -3662,11 +3663,11 @@ unsafe fn rtk_arc_update_opts_from_c(
 fn cycle_slip_options_from_c(
     options: &SidereonCycleSlipOptions,
 ) -> sidereon_core::carrier_phase::CycleSlipOptions {
-    sidereon_core::carrier_phase::CycleSlipOptions {
-        gf_threshold_m: options.gf_threshold_m,
-        mw_threshold_cycles: options.mw_threshold_cycles,
-        min_arc_gap_s: options.min_arc_gap_s,
-    }
+    let mut o = sidereon_core::carrier_phase::CycleSlipOptions::default();
+    o.gf_threshold_m = options.gf_threshold_m;
+    o.mw_threshold_cycles = options.mw_threshold_cycles;
+    o.min_arc_gap_s = options.min_arc_gap_s;
+    o
 }
 
 unsafe fn rtk_dual_frequency_observation_from_c(
@@ -4020,11 +4021,11 @@ unsafe fn range_prediction_requests_from_c(
     let mut parsed = Vec::with_capacity(requests.len());
     for request in requests {
         let sat = parse_satellite_token(fn_name, request.sat_id)?;
-        parsed.push(RangePredictionRequest {
+        parsed.push(RangePredictionRequest::new(
             sat,
-            receiver_ecef_m: request.receiver_ecef_m,
-            t_rx_j2000_s: request.t_rx_j2000_s,
-        });
+            request.receiver_ecef_m,
+            request.t_rx_j2000_s,
+        ));
     }
     Ok(parsed)
 }
@@ -4438,11 +4439,10 @@ mod tests {
             step_seconds: 300.0,
             time_tolerance_s: 0.001,
         };
-        let core_options = PassFinderOptions {
-            elevation_mask_deg: c_options.elevation_mask_deg,
-            coarse_step_seconds: c_options.step_seconds,
-            time_tolerance_seconds: c_options.time_tolerance_s,
-        };
+        let mut core_options = PassFinderOptions::default();
+        core_options.elevation_mask_deg = c_options.elevation_mask_deg;
+        core_options.coarse_step_seconds = c_options.step_seconds;
+        core_options.time_tolerance_seconds = c_options.time_tolerance_s;
         let start = UtcInstant::from_unix_microseconds(START_UNIX_US);
         let end = UtcInstant::from_unix_microseconds(END_UNIX_US);
         let ground_station = ground_station_from_c(&station);

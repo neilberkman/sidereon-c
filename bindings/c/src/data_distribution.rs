@@ -303,12 +303,12 @@ unsafe fn single_flight_options_from_c(
         ));
         return Err(SidereonStatus::InvalidArgument);
     }
-    Ok(ExactCacheSingleFlightOptions {
-        poll_interval: Duration::from_millis(options.poll_interval_ms),
-        heartbeat_interval: Duration::from_millis(options.heartbeat_interval_ms),
-        liveness_timeout: Duration::from_millis(options.liveness_timeout_ms),
-        wait_timeout: Duration::from_millis(options.wait_timeout_ms),
-    })
+    let mut o = ExactCacheSingleFlightOptions::default();
+    o.poll_interval = Duration::from_millis(options.poll_interval_ms);
+    o.heartbeat_interval = Duration::from_millis(options.heartbeat_interval_ms);
+    o.liveness_timeout = Duration::from_millis(options.liveness_timeout_ms);
+    o.wait_timeout = Duration::from_millis(options.wait_timeout_ms);
+    Ok(o)
 }
 
 pub(super) fn fixed_text<const N: usize>(

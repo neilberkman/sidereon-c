@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.0.0 - 2026-09-02
+
+### Changed
+
+- Engine update: sidereon 2.0.0 / sidereon-core 2.0.0.
+  Accommodates two breaking upstream changes:
+  - Input options, configuration, and request structs in sidereon-core are now
+    marked `#[non_exhaustive]`, so internal callers construct them through
+    `Default::default()` or `new(...)` followed by field assignment rather
+    than struct literal syntax.
+  - The terrain, IONEX TEC grid, and dense-output APIs now return typed error
+    enums (`DtedTileError`, `TecGridError`, and `DenseOutputError`) whose
+    message text is unchanged.
+  No C ABI changes.
+
 ## 1.4.1 - 2026-08-31
 
 ### Changed
