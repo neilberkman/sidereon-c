@@ -706,25 +706,25 @@ pub unsafe extern "C" fn sidereon_find_tca_conjunctions_with_propagated_covarian
                 pc_options.secondary_covariance0
             )
             .map_err(|err| extra_invalid_arg(fname, format!("secondary_covariance0: {err:?}"))));
-            let integrator_options = IntegratorOptions {
-                abs_tol: pc_options.abs_tol,
-                rel_tol: pc_options.rel_tol,
-                initial_step: pc_options.initial_step_s,
-                min_step: pc_options.min_step_s,
-                max_step: pc_options.max_step_s,
-                max_steps: pc_options.max_steps,
-                dense_output: false,
-            };
-            let prop_options = core_tca::TcaPropagatedCovariancePcOptions {
-                hard_body_radius_km: pc_options.hard_body_radius_km,
+            let mut integrator_options = IntegratorOptions::default();
+            integrator_options.abs_tol = pc_options.abs_tol;
+            integrator_options.rel_tol = pc_options.rel_tol;
+            integrator_options.initial_step = pc_options.initial_step_s;
+            integrator_options.min_step = pc_options.min_step_s;
+            integrator_options.max_step = pc_options.max_step_s;
+            integrator_options.max_steps = pc_options.max_steps;
+            integrator_options.dense_output = false;
+
+            let mut prop_options = core_tca::TcaPropagatedCovariancePcOptions::new(
+                pc_options.hard_body_radius_km,
                 method,
                 primary_covariance0,
                 secondary_covariance0,
-                force_model,
-                integrator,
-                integrator_options,
-                process_noise: sidereon_core::astro::propagator::ProcessNoise::None,
-            };
+            );
+            prop_options.force_model = force_model;
+            prop_options.integrator = integrator;
+            prop_options.integrator_options = integrator_options;
+            prop_options.process_noise = sidereon_core::astro::propagator::ProcessNoise::None;
             let conjunctions =
                 match core_tca::find_tca_conjunctions_with_propagated_covariance_from_tles(
                     core_tca::TcaTle::new(&p1, &p2),
@@ -934,11 +934,9 @@ fn force_model_kind_from_c(
     mu_km3_s2_enabled: bool,
     mu_km3_s2: f64,
 ) -> Result<ForceModelKind, SidereonStatus> {
-    let config = PropagationConfig {
-        force_model: propagation_force_model_from_c(fn_name, force_model)?,
-        mu_km3_s2: mu_km3_s2_enabled.then_some(mu_km3_s2),
-        ..PropagationConfig::new(0.0, [0.0; 3], [0.0; 3])
-    };
+    let mut config = PropagationConfig::new(0.0, [0.0; 3], [0.0; 3]);
+    config.force_model = propagation_force_model_from_c(fn_name, force_model)?;
+    config.mu_km3_s2 = mu_km3_s2_enabled.then_some(mu_km3_s2);
     Ok(config.force_model_kind())
 }
 
@@ -994,10 +992,10 @@ fn map_tca_error(fn_name: &str, err: core_tca::TcaError) -> SidereonStatus {
 }
 
 fn tca_finder_options_from_c(o: &SidereonTcaFinderOptions) -> core_tca::TcaFinderOptions {
-    core_tca::TcaFinderOptions {
-        coarse_step_seconds: o.coarse_step_seconds,
-        time_tolerance_seconds: o.time_tolerance_seconds,
-    }
+    let mut opts = core_tca::TcaFinderOptions::default();
+    opts.coarse_step_seconds = o.coarse_step_seconds;
+    opts.time_tolerance_seconds = o.time_tolerance_seconds;
+    opts
 }
 
 fn tca_pc_options_from_c(

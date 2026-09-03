@@ -372,16 +372,17 @@ unsafe fn emission_media_options_from_c<'a>(
         let ionex = require_ref(options.ionex, fn_name, "options.ionex")?;
         Some(ObservableIonosphereCorrection::Ionex(&ionex.inner))
     };
-    Ok(EmissionMediaBatchOptions {
-        carrier_hz: options.carrier_hz,
-        media: ObservableMediaOptions {
-            troposphere,
-            ionosphere,
-        },
-        min_elevation_rad: options
-            .min_elevation_enabled
-            .then_some(options.min_elevation_rad),
-    })
+    let mut media = ObservableMediaOptions::default();
+    media.troposphere = troposphere;
+    media.ionosphere = ionosphere;
+
+    let mut o = EmissionMediaBatchOptions::default();
+    o.carrier_hz = options.carrier_hz;
+    o.media = media;
+    o.min_elevation_rad = options
+        .min_elevation_enabled
+        .then_some(options.min_elevation_rad);
+    Ok(o)
 }
 
 fn emission_met_from_c(fn_name: &str, met: &SidereonMet) -> Result<Met, SidereonStatus> {
@@ -586,17 +587,17 @@ mod tests {
         let receiver = [6_378_137.0, 0.0, 0.0];
         let epoch = 646_272_000.0;
         let met = Met::new(1013.25, 288.15, 0.5).expect("valid met");
-        let options = EmissionMediaBatchOptions {
-            carrier_hz: sidereon_core::constants::F_L1_HZ,
-            media: ObservableMediaOptions {
-                troposphere: Some(ObservableTroposphereCorrection {
-                    met,
-                    mapping: MappingModel::Niell,
-                }),
-                ionosphere: None,
-            },
-            min_elevation_rad: None,
-        };
+        let mut media = ObservableMediaOptions::default();
+        media.troposphere = Some(ObservableTroposphereCorrection {
+            met,
+            mapping: MappingModel::Niell,
+        });
+        media.ionosphere = None;
+
+        let mut options = EmissionMediaBatchOptions::default();
+        options.carrier_hz = sidereon_core::constants::F_L1_HZ;
+        options.media = media;
+        options.min_elevation_rad = None;
 
         let mut satellites = Vec::new();
         for sat in sp3

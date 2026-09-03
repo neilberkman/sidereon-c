@@ -830,13 +830,13 @@ fn observation_qc_options_from_c(
             gap_factor: 1.5,
             clock_jump_threshold_s: sidereon_core::observation_qc::DEFAULT_CLOCK_JUMP_THRESHOLD_S,
         });
-    sidereon_core::observation_qc::ObservationQcOptions {
-        interval_override_s: options
-            .has_interval_override_s
-            .then_some(options.interval_override_s),
-        gap_factor: options.gap_factor,
-        clock_jump_threshold_s: options.clock_jump_threshold_s,
-    }
+    let mut o = sidereon_core::observation_qc::ObservationQcOptions::default();
+    o.interval_override_s = options
+        .has_interval_override_s
+        .then_some(options.interval_override_s);
+    o.gap_factor = options.gap_factor;
+    o.clock_jump_threshold_s = options.clock_jump_threshold_s;
+    o
 }
 
 fn qc_summary_to_c(

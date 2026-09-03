@@ -1009,11 +1009,11 @@ unsafe fn midas_options_from_c(
         return Ok(sidereon_core::geodetic_time_series::MidasOptions::default());
     }
     let options = require_ref(options, fn_name, "options")?;
-    Ok(sidereon_core::geodetic_time_series::MidasOptions {
-        dominant_period_years: options.dominant_period_years,
-        period_tolerance_years: options.period_tolerance_years,
-        min_pairs: options.min_pairs,
-    })
+    let mut o = sidereon_core::geodetic_time_series::MidasOptions::default();
+    o.dominant_period_years = options.dominant_period_years;
+    o.period_tolerance_years = options.period_tolerance_years;
+    o.min_pairs = options.min_pairs;
+    Ok(o)
 }
 
 fn midas_options_to_c(
@@ -1107,11 +1107,11 @@ unsafe fn trajectory_fit_options_from_c(
         return Ok(sidereon_core::geodetic_time_series::TrajectoryFitOptions::default());
     }
     let options = require_ref(options, fn_name, "options")?;
-    Ok(sidereon_core::geodetic_time_series::TrajectoryFitOptions {
-        loss: geodetic_loss_from_c(fn_name, options.loss)?,
-        f_scale_m: options.f_scale_m,
-        max_nfev: options.has_max_nfev.then_some(options.max_nfev),
-    })
+    let mut o = sidereon_core::geodetic_time_series::TrajectoryFitOptions::default();
+    o.loss = geodetic_loss_from_c(fn_name, options.loss)?;
+    o.f_scale_m = options.f_scale_m;
+    o.max_nfev = options.has_max_nfev.then_some(options.max_nfev);
+    Ok(o)
 }
 
 fn geodetic_loss_from_c(
@@ -1242,18 +1242,19 @@ unsafe fn step_options_from_c(
         return Ok(sidereon_core::geodetic_time_series::StepDetectionOptions::default());
     }
     let options = require_ref(options, fn_name, "options")?;
-    Ok(sidereon_core::geodetic_time_series::StepDetectionOptions {
-        window_years: options.window_years,
-        score_threshold: options.score_threshold,
-        min_offset_m: options.min_offset_m,
-        min_samples_each_side: options.min_samples_each_side,
-        min_separation_years: options.min_separation_years,
-        midas: sidereon_core::geodetic_time_series::MidasOptions {
-            dominant_period_years: options.midas.dominant_period_years,
-            period_tolerance_years: options.midas.period_tolerance_years,
-            min_pairs: options.midas.min_pairs,
-        },
-    })
+    let mut midas = sidereon_core::geodetic_time_series::MidasOptions::default();
+    midas.dominant_period_years = options.midas.dominant_period_years;
+    midas.period_tolerance_years = options.midas.period_tolerance_years;
+    midas.min_pairs = options.midas.min_pairs;
+
+    let mut o = sidereon_core::geodetic_time_series::StepDetectionOptions::default();
+    o.window_years = options.window_years;
+    o.score_threshold = options.score_threshold;
+    o.min_offset_m = options.min_offset_m;
+    o.min_samples_each_side = options.min_samples_each_side;
+    o.min_separation_years = options.min_separation_years;
+    o.midas = midas;
+    Ok(o)
 }
 
 fn step_options_to_c(

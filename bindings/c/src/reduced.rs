@@ -1633,19 +1633,19 @@ fn reduced_orbit_source_fit_options_from_c(
     fn_name: &str,
     options: &SidereonReducedOrbitSourceFitOptions,
 ) -> Result<ReducedOrbitSourceFitOptions, SidereonStatus> {
-    Ok(ReducedOrbitSourceFitOptions {
-        sampling: reduced_orbit_source_sampling_from_c(&options.sampling),
-        model: reduced_orbit_model_from_c(fn_name, "options.model", options.model)?,
-    })
+    Ok(ReducedOrbitSourceFitOptions::new(
+        reduced_orbit_source_sampling_from_c(&options.sampling),
+        reduced_orbit_model_from_c(fn_name, "options.model", options.model)?,
+    ))
 }
 
 fn reduced_orbit_source_drift_options_from_c(
     options: &SidereonReducedOrbitSourceDriftOptions,
 ) -> ReducedOrbitSourceDriftOptions {
-    ReducedOrbitSourceDriftOptions {
-        sampling: reduced_orbit_source_sampling_from_c(&options.sampling),
-        threshold_m: options.threshold_m,
-    }
+    ReducedOrbitSourceDriftOptions::new(
+        reduced_orbit_source_sampling_from_c(&options.sampling),
+        options.threshold_m,
+    )
 }
 
 fn reduced_orbit_piecewise_source_fit_options_from_c(
@@ -1653,11 +1653,11 @@ fn reduced_orbit_piecewise_source_fit_options_from_c(
     options: &SidereonReducedOrbitSourceFitOptions,
     segment_s: f64,
 ) -> Result<PiecewiseOrbitSourceFitOptions, SidereonStatus> {
-    Ok(PiecewiseOrbitSourceFitOptions {
-        sampling: reduced_orbit_source_sampling_from_c(&options.sampling),
-        model: reduced_orbit_model_from_c(fn_name, "options.model", options.model)?,
+    Ok(PiecewiseOrbitSourceFitOptions::new(
+        reduced_orbit_source_sampling_from_c(&options.sampling),
+        reduced_orbit_model_from_c(fn_name, "options.model", options.model)?,
         segment_s,
-    })
+    ))
 }
 
 fn reduced_orbit_piecewise_used_samples(piecewise: &ReducedOrbitPiecewise) -> usize {

@@ -201,15 +201,14 @@ fn decay_config_from_c(
     config: &SidereonDecayConfig,
 ) -> Result<DecayConfig, SidereonStatus> {
     let drag = drag_parameters_from_c(fn_name, config.drag)?;
-    let options = IntegratorOptions {
-        abs_tol: config.abs_tol,
-        rel_tol: config.rel_tol,
-        initial_step: config.initial_step_s,
-        min_step: config.min_step_s,
-        max_step: config.max_step_s,
-        max_steps: config.max_steps,
-        dense_output: false,
-    };
+    let mut options = IntegratorOptions::default();
+    options.abs_tol = config.abs_tol;
+    options.rel_tol = config.rel_tol;
+    options.initial_step = config.initial_step_s;
+    options.min_step = config.min_step_s;
+    options.max_step = config.max_step_s;
+    options.max_steps = config.max_steps;
+    options.dense_output = false;
     Ok(DecayConfig::new(drag)
         .with_force_model(propagation_force_model_from_c(fn_name, config.force_model)?)
         .with_mu_km3_s2(config.mu_km3_s2_enabled.then_some(config.mu_km3_s2))

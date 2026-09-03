@@ -2184,10 +2184,9 @@ unsafe fn ppp_corrections_options_from_c(
     fn_name: &str,
     options: &SidereonPppCorrectionsOptions,
 ) -> Result<PppCorrectionsOptions, SidereonStatus> {
-    let pole_tide = options.has_pole_tide.then_some(PppPoleTideOptions {
-        xp_arcsec: options.pole_tide.xp_arcsec,
-        yp_arcsec: options.pole_tide.yp_arcsec,
-    });
+    let pole_tide = options
+        .has_pole_tide
+        .then(|| PppPoleTideOptions::new(options.pole_tide.xp_arcsec, options.pole_tide.yp_arcsec));
     let ocean_loading = options.has_ocean_loading.then_some(PppOceanLoadingBlq {
         amplitude_m: options.ocean_loading.amplitude_m,
         phase_deg: options.ocean_loading.phase_deg,
@@ -2214,32 +2213,31 @@ unsafe fn ppp_corrections_options_from_c(
         } else {
             None
         };
-        Some(PppCodeBiasOptions {
-            bias_set: bias_set.inner.clone(),
-            used_observables_per_sat: ppp_code_bias_satellite_pairs_from_c(
-                fn_name,
-                options.code_bias_satellite_pairs,
-                options.code_bias_satellite_pair_count,
-            )?,
-            used_observables_default: ppp_code_bias_system_pairs_from_c(
-                fn_name,
-                "code_bias_system_pairs",
-                options.code_bias_system_pairs,
-                options.code_bias_system_pair_count,
-            )?,
-            clock_reference,
-        })
+        let mut code_bias_opts = PppCodeBiasOptions::new(bias_set.inner.clone());
+        code_bias_opts.used_observables_per_sat = ppp_code_bias_satellite_pairs_from_c(
+            fn_name,
+            options.code_bias_satellite_pairs,
+            options.code_bias_satellite_pair_count,
+        )?;
+        code_bias_opts.used_observables_default = ppp_code_bias_system_pairs_from_c(
+            fn_name,
+            "code_bias_system_pairs",
+            options.code_bias_system_pairs,
+            options.code_bias_system_pair_count,
+        )?;
+        code_bias_opts.clock_reference = clock_reference;
+        Some(code_bias_opts)
     } else {
         None
     };
-    Ok(PppCorrectionsOptions {
-        solid_earth_tide: options.solid_earth_tide,
-        pole_tide,
-        ocean_loading,
-        phase_windup: options.phase_windup,
-        satellite_antenna,
-        code_bias,
-    })
+    let mut o = PppCorrectionsOptions::new();
+    o.solid_earth_tide = options.solid_earth_tide;
+    o.pole_tide = pole_tide;
+    o.ocean_loading = ocean_loading;
+    o.phase_windup = options.phase_windup;
+    o.satellite_antenna = satellite_antenna;
+    o.code_bias = code_bias;
+    Ok(o)
 }
 
 unsafe fn ppp_corrections_emit_vector(
@@ -2354,23 +2352,23 @@ unsafe fn ppp_satellite_antenna_options_from_c(
     options: *const SidereonSatelliteAntennaOptions,
 ) -> Result<PppSatelliteAntennaOptions, SidereonStatus> {
     let options = require_ref(options, fn_name, "satellite_antenna")?;
-    Ok(PppSatelliteAntennaOptions {
-        freq1_label: parse_bounded_c_string(
+    Ok(PppSatelliteAntennaOptions::new(
+        parse_bounded_c_string(
             fn_name,
             "satellite_antenna.freq1_label",
             options.freq1_label,
             MAX_PPP_SAT_ANTENNA_LABEL_BYTES,
         )?,
-        freq1_hz: options.freq1_hz,
-        freq2_label: parse_bounded_c_string(
+        options.freq1_hz,
+        parse_bounded_c_string(
             fn_name,
             "satellite_antenna.freq2_label",
             options.freq2_label,
             MAX_PPP_SAT_ANTENNA_LABEL_BYTES,
         )?,
-        freq2_hz: options.freq2_hz,
-        antennas: ppp_satellite_antennas_from_c(fn_name, options.antennas, options.antenna_count)?,
-    })
+        options.freq2_hz,
+        ppp_satellite_antennas_from_c(fn_name, options.antennas, options.antenna_count)?,
+    ))
 }
 
 unsafe fn ppp_code_bias_system_pairs_from_c(

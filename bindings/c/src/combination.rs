@@ -858,11 +858,10 @@ unsafe fn arc_from_c(
             gap_time_s: nan_to_none(e.gap_time_s),
         })
         .collect();
-    let opts = sidereon_core::carrier_phase::CycleSlipOptions {
-        gf_threshold_m: options.gf_threshold_m,
-        mw_threshold_cycles: options.mw_threshold_cycles,
-        min_arc_gap_s: options.min_arc_gap_s,
-    };
+    let mut opts = sidereon_core::carrier_phase::CycleSlipOptions::default();
+    opts.gf_threshold_m = options.gf_threshold_m;
+    opts.mw_threshold_cycles = options.mw_threshold_cycles;
+    opts.min_arc_gap_s = options.min_arc_gap_s;
     Ok((arc, opts))
 }
 

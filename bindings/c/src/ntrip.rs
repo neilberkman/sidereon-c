@@ -788,15 +788,15 @@ unsafe fn ntrip_config_from_c(
     } else {
         None
     };
-    Ok(sidereon_core::ntrip::NtripConfig {
-        host,
-        port: config.port,
-        mountpoint,
-        version: ntrip_version_from_c(fn_name, config.version)?,
-        credentials,
-        user_agent_product,
-        gga_interval_s: config.has_gga_interval_s.then_some(config.gga_interval_s),
-    })
+    let mut o = sidereon_core::ntrip::NtripConfig::default();
+    o.host = host;
+    o.port = config.port;
+    o.mountpoint = mountpoint;
+    o.version = ntrip_version_from_c(fn_name, config.version)?;
+    o.credentials = credentials;
+    o.user_agent_product = user_agent_product;
+    o.gga_interval_s = config.has_gga_interval_s.then_some(config.gga_interval_s);
+    Ok(o)
 }
 
 fn ntrip_gga_position_from_c(

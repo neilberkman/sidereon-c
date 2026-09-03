@@ -344,7 +344,7 @@ pub unsafe extern "C" fn sidereon_dted_tile_load(
                 write_boxed_handle(out, SidereonDtedTile { inner });
                 SidereonStatus::Ok
             }
-            Err(err) => map_dted_string_error("sidereon_dted_tile_load", err),
+            Err(err) => map_dted_string_error("sidereon_dted_tile_load", err.to_string()),
         }
     })
 }
@@ -381,7 +381,9 @@ pub unsafe extern "C" fn sidereon_dted_tile_get_elevation(
                     *out = value;
                     SidereonStatus::Ok
                 }
-                Err(err) => map_dted_string_error("sidereon_dted_tile_get_elevation", err),
+                Err(err) => {
+                    map_dted_string_error("sidereon_dted_tile_get_elevation", err.to_string())
+                }
             }
         },
     )

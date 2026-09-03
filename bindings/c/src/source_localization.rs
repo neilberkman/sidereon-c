@@ -805,16 +805,16 @@ fn source_options_from_c(
         return Ok(CoreSourceLocateOptions::default());
     }
     let options = unsafe { require_ref(options, fn_name, "options") }?;
-    Ok(CoreSourceLocateOptions {
-        mode: source_solve_mode_from_c(fn_name, options.mode, options.reference_sensor)?,
-        timing_sigma_s: options.timing_sigma_s,
-        loss: source_loss_from_c(fn_name, "options.loss", options.loss)?,
-        f_scale_s: options.f_scale_s,
-        ftol: options.has_ftol.then_some(options.ftol),
-        xtol: options.has_xtol.then_some(options.xtol),
-        gtol: options.has_gtol.then_some(options.gtol),
-        max_nfev: options.has_max_nfev.then_some(options.max_nfev),
-    })
+    let mut o = CoreSourceLocateOptions::default();
+    o.mode = source_solve_mode_from_c(fn_name, options.mode, options.reference_sensor)?;
+    o.timing_sigma_s = options.timing_sigma_s;
+    o.loss = source_loss_from_c(fn_name, "options.loss", options.loss)?;
+    o.f_scale_s = options.f_scale_s;
+    o.ftol = options.has_ftol.then_some(options.ftol);
+    o.xtol = options.has_xtol.then_some(options.xtol);
+    o.gtol = options.has_gtol.then_some(options.gtol);
+    o.max_nfev = options.has_max_nfev.then_some(options.max_nfev);
+    Ok(o)
 }
 
 unsafe fn source_sensors_from_c(

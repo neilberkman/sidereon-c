@@ -900,16 +900,19 @@ unsafe fn static_options_from_c(
         set_last_error(format!("{fn_name}: robust.max_outer must be positive"));
         return Err(SidereonStatus::InvalidArgument);
     }
-    Ok(CoreStaticSolveOptions {
-        initial_position_m: options.initial_position_m,
-        with_geodetic: options.with_geodetic,
-        robust: options.robust_enabled.then_some(RobustConfig {
-            huber_k: options.robust.huber_k,
-            scale_floor_m: options.robust.scale_floor_m,
-            max_outer: options.robust.max_outer,
-            outer_tol_m: options.robust.outer_tol_m,
-        }),
-    })
+    let robust = options.robust_enabled.then(|| {
+        let mut r = RobustConfig::default();
+        r.huber_k = options.robust.huber_k;
+        r.scale_floor_m = options.robust.scale_floor_m;
+        r.max_outer = options.robust.max_outer;
+        r.outer_tol_m = options.robust.outer_tol_m;
+        r
+    });
+    let mut o = CoreStaticSolveOptions::default();
+    o.initial_position_m = options.initial_position_m;
+    o.with_geodetic = options.with_geodetic;
+    o.robust = robust;
+    Ok(o)
 }
 
 fn static_position_error_kind(err: &CoreStaticSolveError) -> SidereonStaticPositionErrorKind {
@@ -1246,11 +1249,11 @@ mod tests {
     }
 
     fn options() -> CoreStaticSolveOptions {
-        CoreStaticSolveOptions {
-            initial_position_m: [TRUTH[0] + 120.0, TRUTH[1] - 80.0, TRUTH[2] + 50.0],
-            with_geodetic: true,
-            robust: None,
-        }
+        let mut o = CoreStaticSolveOptions::default();
+        o.initial_position_m = [TRUTH[0] + 120.0, TRUTH[1] - 80.0, TRUTH[2] + 50.0];
+        o.with_geodetic = true;
+        o.robust = None;
+        o
     }
 
     fn c_options(options: CoreStaticSolveOptions) -> SidereonStaticPositionOptions {

@@ -614,7 +614,9 @@ unsafe fn geofence_probability_options_from_c(
             return Err(SidereonStatus::InvalidArgument);
         }
     };
-    Ok(CoreGeofenceOptions { method })
+    let mut o = CoreGeofenceOptions::default();
+    o.method = method;
+    Ok(o)
 }
 
 unsafe fn geofence_hysteresis_from_c(

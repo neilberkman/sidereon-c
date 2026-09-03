@@ -602,13 +602,9 @@ unsafe fn code_dcb_options_from_c(
     } else {
         None
     };
-    Ok(Some(CodeDcbOptions {
-        pair,
-        year: options.year,
-        month: options.month,
-        time_scale,
-        receiver_system,
-    }))
+    let mut o = CodeDcbOptions::new(pair, options.year, options.month, time_scale);
+    o.receiver_system = receiver_system;
+    Ok(Some(o))
 }
 
 fn write_bias_handle(out: &mut *mut SidereonBiasSet, inner: BiasSet) {

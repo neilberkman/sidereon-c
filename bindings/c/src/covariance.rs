@@ -754,16 +754,17 @@ pub unsafe extern "C" fn sidereon_propagate_covariance(
                 "sidereon_propagate_covariance",
                 options.process_noise
             ));
+            let mut prop_opts =
+                sidereon_core::astro::propagator::CovariancePropagationOptions::default();
+            prop_opts.process_noise = process_noise;
+            prop_opts.output_frame = output_frame;
             let result = match propagator.propagate_covariance(
                 sidereon_core::astro::propagator::LabeledCovariance6 {
                     covariance: covariance0,
                     frame: input_frame,
                 },
                 epochs,
-                &sidereon_core::astro::propagator::CovariancePropagationOptions {
-                    process_noise,
-                    output_frame,
-                },
+                &prop_opts,
             ) {
                 Ok(result) => result,
                 Err(err) => {

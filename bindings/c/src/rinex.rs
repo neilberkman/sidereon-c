@@ -2891,15 +2891,15 @@ fn repair_options_from_c(
     } else {
         None
     };
-    Ok(sidereon_core::rinex::qc::RepairOptions {
-        file_stamp,
-        set_interval: options.set_interval,
-        set_time_of_last_obs: options.set_time_of_last_obs,
-        set_obs_counts: options.set_obs_counts,
-        drop_empty_records: options.drop_empty_records,
-        sort_records: options.sort_records,
-        drop_unsupported: options.drop_unsupported,
-    })
+    let mut o = sidereon_core::rinex::qc::RepairOptions::default();
+    o.file_stamp = file_stamp;
+    o.set_interval = options.set_interval;
+    o.set_time_of_last_obs = options.set_time_of_last_obs;
+    o.set_obs_counts = options.set_obs_counts;
+    o.drop_empty_records = options.drop_empty_records;
+    o.sort_records = options.sort_records;
+    o.drop_unsupported = options.drop_unsupported;
+    Ok(o)
 }
 
 fn rinex_qc_severity_to_c(severity: sidereon_core::rinex::qc::Severity) -> u32 {

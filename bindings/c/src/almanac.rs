@@ -2273,22 +2273,23 @@ fn observe_options_from_c(
     let Some(options) = (unsafe { options.as_ref() }) else {
         return Ok(sidereon_core::astro::bodies::ObserveOptions::default());
     };
-    Ok(sidereon_core::astro::bodies::ObserveOptions {
-        polar_motion: options.has_polar_motion.then_some(
-            sidereon_core::astro::frames::transforms::PolarMotion {
+    let mut o = sidereon_core::astro::bodies::ObserveOptions::default();
+    o.polar_motion =
+        options
+            .has_polar_motion
+            .then_some(sidereon_core::astro::frames::transforms::PolarMotion {
                 xp_rad: options.xp_rad,
                 yp_rad: options.yp_rad,
-            },
-        ),
-        refraction: options
-            .has_refraction
-            .then_some(sidereon_core::astro::bodies::Refraction {
-                pressure_mbar: options.refraction.pressure_mbar,
-                temperature_c: options.refraction.temperature_c,
-            }),
-        deflection: options.deflection,
-        aberration: options.aberration,
-    })
+            });
+    o.refraction = options
+        .has_refraction
+        .then_some(sidereon_core::astro::bodies::Refraction {
+            pressure_mbar: options.refraction.pressure_mbar,
+            temperature_c: options.refraction.temperature_c,
+        });
+    o.deflection = options.deflection;
+    o.aberration = options.aberration;
+    Ok(o)
 }
 
 fn map_observe_error(
@@ -2471,11 +2472,11 @@ unsafe fn moon_elevation_options_from_c(
         return Ok(CoreMoonElevationOptions::default());
     }
     let options = require_ref(options, fn_name, "options")?;
-    Ok(CoreMoonElevationOptions {
-        elevation_threshold_deg: options.elevation_threshold_deg,
-        step_seconds: options.step_seconds,
-        time_tolerance_seconds: options.time_tolerance_seconds,
-    })
+    let mut o = CoreMoonElevationOptions::default();
+    o.elevation_threshold_deg = options.elevation_threshold_deg;
+    o.step_seconds = options.step_seconds;
+    o.time_tolerance_seconds = options.time_tolerance_seconds;
+    Ok(o)
 }
 
 fn checked_epoch_vec3_output_len(fn_name: &str, count: usize) -> Result<usize, SidereonStatus> {

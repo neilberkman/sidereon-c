@@ -933,12 +933,12 @@ pub unsafe extern "C" fn sidereon_signal_replica(
             out_required
         ));
         let options = c_try!(require_ref(options, "sidereon_signal_replica", "options"));
-        let opts = sidereon_core::signal::ReplicaOptions {
-            sample_rate_hz: options.sample_rate_hz,
-            num_samples: options.num_samples,
-            code_phase_chips: options.code_phase_chips,
-            code_doppler_hz: options.code_doppler_hz,
-        };
+        let opts = sidereon_core::signal::ReplicaOptions::new(
+            options.sample_rate_hz,
+            options.num_samples,
+            options.code_phase_chips,
+            options.code_doppler_hz,
+        );
         let code = match sidereon_core::signal::replica(prn, opts) {
             Ok(c) => c,
             Err(err) => return extra_invalid_arg("sidereon_signal_replica", err),
@@ -978,12 +978,11 @@ pub unsafe extern "C" fn sidereon_signal_correlate(
         };
         let options = c_try!(require_ref(options, "sidereon_signal_correlate", "options"));
         let samples = c_try!(iq_samples_from_c("sidereon_signal_correlate", iq, count));
-        let opts = sidereon_core::signal::CorrelateOptions {
-            sample_rate_hz: options.sample_rate_hz,
-            doppler_hz: options.doppler_hz,
-            code_phase_chips: options.code_phase_chips,
-            code_doppler_hz: options.code_doppler_hz,
-        };
+        let mut opts = sidereon_core::signal::CorrelateOptions::default();
+        opts.sample_rate_hz = options.sample_rate_hz;
+        opts.doppler_hz = options.doppler_hz;
+        opts.code_phase_chips = options.code_phase_chips;
+        opts.code_doppler_hz = options.code_doppler_hz;
         match sidereon_core::signal::correlate(&samples, prn, opts) {
             Ok(r) => {
                 *out = SidereonCorrelationResult {
@@ -1099,12 +1098,11 @@ pub unsafe extern "C" fn sidereon_signal_acquire(
         };
         let options = c_try!(require_ref(options, "sidereon_signal_acquire", "options"));
         let iq = c_try!(iq_samples_from_c("sidereon_signal_acquire", samples, count));
-        let opts = sidereon_core::signal::AcquisitionOptions {
-            sample_rate_hz: options.sample_rate_hz,
-            doppler_min_hz: options.doppler_min_hz,
-            doppler_max_hz: options.doppler_max_hz,
-            doppler_step_hz: options.doppler_step_hz,
-        };
+        let mut opts = sidereon_core::signal::AcquisitionOptions::default();
+        opts.sample_rate_hz = options.sample_rate_hz;
+        opts.doppler_min_hz = options.doppler_min_hz;
+        opts.doppler_max_hz = options.doppler_max_hz;
+        opts.doppler_step_hz = options.doppler_step_hz;
         let result = match sidereon_core::signal::acquire(&iq, prn, opts) {
             Ok(r) => r,
             Err(err) => return extra_invalid_arg("sidereon_signal_acquire", err),
@@ -2645,13 +2643,13 @@ unsafe fn signal_analysis_dll_options_from_c(
     options: *const SidereonSignalAnalysisDllTrackingOptions,
 ) -> Result<sidereon_core::signal::analysis::DllTrackingOptions, SidereonStatus> {
     let options = require_ref(options, fn_name, "options")?;
-    Ok(sidereon_core::signal::analysis::DllTrackingOptions {
-        cn0_db_hz: options.cn0_db_hz,
-        loop_bandwidth_hz: options.loop_bandwidth_hz,
-        integration_time_s: options.integration_time_s,
-        correlator_spacing_chips: options.correlator_spacing_chips,
-        receiver_bandwidth_hz: options.receiver_bandwidth_hz,
-    })
+    Ok(sidereon_core::signal::analysis::DllTrackingOptions::new(
+        options.cn0_db_hz,
+        options.loop_bandwidth_hz,
+        options.integration_time_s,
+        options.correlator_spacing_chips,
+        options.receiver_bandwidth_hz,
+    ))
 }
 
 fn signal_analysis_processing_from_c(
@@ -2677,11 +2675,11 @@ unsafe fn signal_analysis_multipath_options_from_c(
     options: *const SidereonSignalAnalysisMultipathOptions,
 ) -> Result<sidereon_core::signal::analysis::MultipathOptions, SidereonStatus> {
     let options = require_ref(options, fn_name, "options")?;
-    Ok(sidereon_core::signal::analysis::MultipathOptions {
-        multipath_to_direct_ratio: options.multipath_to_direct_ratio,
-        correlator_spacing_chips: options.correlator_spacing_chips,
-        receiver_bandwidth_hz: options.receiver_bandwidth_hz,
-    })
+    Ok(sidereon_core::signal::analysis::MultipathOptions::new(
+        options.multipath_to_direct_ratio,
+        options.correlator_spacing_chips,
+        options.receiver_bandwidth_hz,
+    ))
 }
 
 fn signal_jitter_to_c(

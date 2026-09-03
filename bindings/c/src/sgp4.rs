@@ -288,36 +288,36 @@ unsafe fn sgp4_fit_config_from_c(
     } else {
         Some(require_slice(config.weights, config.weight_count, fn_name, "weights")?.to_vec())
     };
-    Ok(sidereon_core::astro::sgp4::FitConfig {
-        epoch: sgp4_fit_epoch_from_c(fn_name, config)?,
-        fit_bstar: config.fit_bstar,
-        bstar_seed: config.bstar_seed,
-        use_velocity: config.use_velocity,
-        velocity_weight_s: config
-            .has_velocity_weight_s
-            .then_some(config.velocity_weight_s),
-        weights,
-        opsmode: tle_ops_mode_from_c(fn_name, config.opsmode)?,
-        ftol: config.has_ftol.then_some(config.ftol),
-        xtol: config.has_xtol.then_some(config.xtol),
-        gtol: config.has_gtol.then_some(config.gtol),
-        max_nfev: config.has_max_nfev.then_some(config.max_nfev),
-        x_scale: sgp4_x_scale_from_c(fn_name, config)?,
-        loss: sgp4_loss_from_c(fn_name, config.loss)?,
-        f_scale: config.f_scale,
-        metadata: sidereon_core::astro::sgp4::TleMetadata {
-            catalog_number: config.catalog_number,
-            classification: if classification.is_empty() {
-                "U".to_string()
-            } else {
-                classification
-            },
-            international_designator,
-            element_set_number: config.element_set_number,
-            rev_at_epoch: config.rev_at_epoch,
-            object_name,
+    let mut o = sidereon_core::astro::sgp4::FitConfig::default();
+    o.epoch = sgp4_fit_epoch_from_c(fn_name, config)?;
+    o.fit_bstar = config.fit_bstar;
+    o.bstar_seed = config.bstar_seed;
+    o.use_velocity = config.use_velocity;
+    o.velocity_weight_s = config
+        .has_velocity_weight_s
+        .then_some(config.velocity_weight_s);
+    o.weights = weights;
+    o.opsmode = tle_ops_mode_from_c(fn_name, config.opsmode)?;
+    o.ftol = config.has_ftol.then_some(config.ftol);
+    o.xtol = config.has_xtol.then_some(config.xtol);
+    o.gtol = config.has_gtol.then_some(config.gtol);
+    o.max_nfev = config.has_max_nfev.then_some(config.max_nfev);
+    o.x_scale = sgp4_x_scale_from_c(fn_name, config)?;
+    o.loss = sgp4_loss_from_c(fn_name, config.loss)?;
+    o.f_scale = config.f_scale;
+    o.metadata = sidereon_core::astro::sgp4::TleMetadata {
+        catalog_number: config.catalog_number,
+        classification: if classification.is_empty() {
+            "U".to_string()
+        } else {
+            classification
         },
-    })
+        international_designator,
+        element_set_number: config.element_set_number,
+        rev_at_epoch: config.rev_at_epoch,
+        object_name,
+    };
+    Ok(o)
 }
 
 fn sgp4_fit_stats_to_c(

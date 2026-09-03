@@ -935,11 +935,11 @@ unsafe fn allan_options_from_c(
         return Ok(AllanOptions::default());
     }
     let options = require_ref(options, fn_name, "options")?;
-    Ok(AllanOptions {
-        estimators: allan_estimator_set_from_c(options.estimators),
-        tau_grid: allan_tau_grid_from_c(fn_name, options)?,
-        gap_policy: allan_gap_policy_from_c(fn_name, options.gap_policy)?,
-    })
+    let mut o = AllanOptions::default();
+    o.estimators = allan_estimator_set_from_c(options.estimators);
+    o.tau_grid = allan_tau_grid_from_c(fn_name, options)?;
+    o.gap_policy = allan_gap_policy_from_c(fn_name, options.gap_policy)?;
+    Ok(o)
 }
 
 fn allan_curve_for_estimator(
@@ -1176,13 +1176,13 @@ unsafe fn power_law_options_from_c(
         return Ok(PowerLawNoiseOptions::sampled_at_nyquist(basic_tau_s));
     }
     let options = require_ref(options, fn_name, "options")?;
-    Ok(PowerLawNoiseOptions {
-        min_points_per_octave: options.min_points_per_octave,
-        slope_tolerance: options.slope_tolerance,
-        scatter_tolerance: options.scatter_tolerance,
-        basic_tau_s: options.basic_tau_s,
-        measurement_bandwidth_hz: options.measurement_bandwidth_hz,
-    })
+    let mut o = PowerLawNoiseOptions::new(options.basic_tau_s, options.measurement_bandwidth_hz);
+    o.min_points_per_octave = options.min_points_per_octave;
+    o.slope_tolerance = options.slope_tolerance;
+    o.scatter_tolerance = options.scatter_tolerance;
+    o.basic_tau_s = options.basic_tau_s;
+    o.measurement_bandwidth_hz = options.measurement_bandwidth_hz;
+    Ok(o)
 }
 
 fn power_law_options_to_c(options: PowerLawNoiseOptions) -> SidereonPowerLawNoiseOptions {
