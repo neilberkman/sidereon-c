@@ -144,7 +144,8 @@ use sidereon_core::ephemeris::{
     MmapPreciseEphemerisInterpolant, OutlierRejectOptions, PreciseEphemerisInterpolant,
     PreciseEphemerisSample, PreciseEphemerisSamples, PreciseInterpolantError,
     PreciseInterpolantStoreError, PreciseSamplesError, Sp3, Sp3ArtifactIdentity, Sp3FrameLabelSet,
-    Sp3FrameReconciliationMethod, Sp3FrameReconciliationOptions, Sp3MergeInputIdentity, Sp3State,
+    Sp3FrameReconciliationMethod, Sp3FrameReconciliationOptions, Sp3InterpolationOptions,
+    Sp3MergeInputIdentity, Sp3State,
 };
 use sidereon_core::ephemeris::{
     sample as ephemeris_sample, BroadcastEphemeris, EphemerisSampleRow, EphemerisSampleStatus,

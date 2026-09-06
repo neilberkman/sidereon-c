@@ -142,6 +142,17 @@ cc -std=c11 -Wall -Wextra -Werror \
 
 cc -std=c11 -Wall -Wextra -Werror \
     -I"${binding_root}/include" \
+    "${here}/sp3_interpolation_smoke.c" \
+    -L"${lib_dir}" \
+    -lsidereon \
+    -Wl,-rpath,"${lib_dir}" \
+    -lm \
+    -o "${target_dir}/sp3_interpolation_smoke_ci"
+"${target_dir}/sp3_interpolation_smoke_ci" \
+    "${here}/fixtures/sp3/GAP_G01_20201760000_15M.sp3"
+
+cc -std=c11 -Wall -Wextra -Werror \
+    -I"${binding_root}/include" \
     "${here}/fixed_policy_smoke.c" \
     -L"${lib_dir}" \
     -lsidereon \

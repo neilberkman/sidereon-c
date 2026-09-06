@@ -532,7 +532,33 @@ pub unsafe extern "C" fn sidereon_sp3_load_exact(
     out_sp3: *mut *mut SidereonSp3,
     out_coverage: *mut SidereonExactSp3Coverage,
 ) -> SidereonStatus {
-    const FN_NAME: &str = "sidereon_sp3_load_exact";
+    sidereon_sp3_load_exact_with_gap_threshold_factor(
+        data,
+        len,
+        request,
+        0.0,
+        out_sp3,
+        out_coverage,
+    )
+}
+
+/// Parse and validate bytes as one exact SP3 request with an explicit
+/// coverage-gap threshold factor. When gap_threshold_factor is <= 0.0, the core
+/// default of 1.5 is used.
+///
+/// Safety: `data` must reference `len` readable bytes; `request` must be a live
+/// exact-request handle; both output pointers must reference writable storage.
+/// On success the caller owns `*out_sp3`.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sp3_load_exact_with_gap_threshold_factor(
+    data: *const u8,
+    len: usize,
+    request: *const SidereonExactSp3Request,
+    gap_threshold_factor: f64,
+    out_sp3: *mut *mut SidereonSp3,
+    out_coverage: *mut SidereonExactSp3Coverage,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_sp3_load_exact_with_gap_threshold_factor";
     ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
         let out_sp3 = c_try!(require_out(out_sp3, FN_NAME, "out_sp3"));
         *out_sp3 = ptr::null_mut();
@@ -540,8 +566,10 @@ pub unsafe extern "C" fn sidereon_sp3_load_exact(
         *out_coverage = SidereonExactSp3Coverage::HalfOpen;
         let request = c_try!(require_ref(request, FN_NAME, "request"));
         let bytes = c_try!(require_slice(data, len, FN_NAME, "data"));
+        let options = c_try!(interpolation_options_from_c(FN_NAME, gap_threshold_factor));
         let (inner, coverage) = c_try!(core_parse_exact_sp3(bytes, &request.inner)
             .map_err(|error| map_exact_sp3_error(FN_NAME, error)));
+        let inner = inner.with_interpolation_options(options);
         write_boxed_handle(out_sp3, SidereonSp3 { inner });
         *out_coverage = exact_sp3_coverage_to_c(coverage);
         SidereonStatus::Ok
@@ -586,14 +614,58 @@ pub unsafe extern "C" fn sidereon_sp3_load(
     len: usize,
     out_sp3: *mut *mut SidereonSp3,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_sp3_load", SidereonStatus::Panic, || {
-        let out_sp3 = c_try!(require_out(out_sp3, "sidereon_sp3_load", "out_sp3"));
+    sidereon_sp3_load_with_gap_threshold_factor(data, len, 0.0, out_sp3)
+}
+
+/// Parse an SP3-c or SP3-d byte buffer into a precise-ephemeris product with an
+/// explicit coverage-gap threshold factor. When gap_threshold_factor is <= 0.0,
+/// the core default of 1.5 is used. On success writes a newly owned handle to
+/// *out_sp3. Release it with sidereon_sp3_free.
+///
+/// Safety: data must point to len readable bytes; out_sp3 must point to storage
+/// for a SidereonSp3*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sp3_load_with_gap_threshold_factor(
+    data: *const u8,
+    len: usize,
+    gap_threshold_factor: f64,
+    out_sp3: *mut *mut SidereonSp3,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_sp3_load_with_gap_threshold_factor";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let out_sp3 = c_try!(require_out(out_sp3, FN_NAME, "out_sp3"));
         *out_sp3 = ptr::null_mut();
-        let bytes = c_try!(require_slice(data, len, "sidereon_sp3_load", "data"));
+        let bytes = c_try!(require_slice(data, len, FN_NAME, "data"));
+        let options = c_try!(interpolation_options_from_c(FN_NAME, gap_threshold_factor));
         let inner = c_try!(guard(SidereonStatus::Sp3Parse, || {
             sidereon::load_sp3(bytes)
-        }));
+        }))
+        .with_interpolation_options(options);
         write_boxed_handle(out_sp3, SidereonSp3 { inner });
+        SidereonStatus::Ok
+    })
+}
+
+/// Write the SP3 interpolation gap threshold factor carried by this product to
+/// *out_gap_threshold_factor.
+///
+/// Safety: sp3 must be a live SP3 handle; out_gap_threshold_factor must point
+/// to a double.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sp3_gap_threshold_factor(
+    sp3: *const SidereonSp3,
+    out_gap_threshold_factor: *mut f64,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_sp3_gap_threshold_factor";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let out_gap_threshold_factor = c_try!(require_out(
+            out_gap_threshold_factor,
+            FN_NAME,
+            "out_gap_threshold_factor"
+        ));
+        *out_gap_threshold_factor = 0.0;
+        let sp3 = c_try!(require_ref(sp3, FN_NAME, "sp3"));
+        *out_gap_threshold_factor = sp3.inner.interpolation_options().gap_threshold_factor();
         SidereonStatus::Ok
     })
 }
@@ -645,7 +717,40 @@ pub unsafe extern "C" fn sidereon_sp3_check_continuity(
     out_residuals_checked: *mut usize,
     out_residuals_skipped: *mut usize,
 ) -> SidereonStatus {
-    const FN_NAME: &str = "sidereon_sp3_check_continuity";
+    sidereon_sp3_check_continuity_with_gap_threshold_factor(
+        sp3,
+        orbit_class,
+        residual_tolerance_m,
+        0.0,
+        out_defects,
+        out_residuals_checked,
+        out_residuals_skipped,
+    )
+}
+
+/// Run the product-wide continuity pre-check over every satellite series in an
+/// SP3 product with an explicit coverage-gap threshold factor. When
+/// `gap_threshold_factor` is <= 0.0, the core default of 1.5 is used.
+///
+/// `orbit_class` is 0 for MEO GNSS, 1 for geosynchronous, 2 for LEO, or -1 to
+/// disable the speed gate. A negative `residual_tolerance_m` disables the
+/// residual check. `out_defects` receives the number of violations found;
+/// `out_residuals_checked` and `out_residuals_skipped` let a caller tell
+/// "checked and clean" from "not checked". Reports rather than refuses.
+///
+/// Safety: `sp3` must be a live handle and each out pointer must reference
+/// writable storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sp3_check_continuity_with_gap_threshold_factor(
+    sp3: *const SidereonSp3,
+    orbit_class: i32,
+    residual_tolerance_m: f64,
+    gap_threshold_factor: f64,
+    out_defects: *mut usize,
+    out_residuals_checked: *mut usize,
+    out_residuals_skipped: *mut usize,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_sp3_check_continuity_with_gap_threshold_factor";
     ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
         let out_defects = c_try!(require_out(out_defects, FN_NAME, "out_defects"));
         *out_defects = 0;
@@ -666,7 +771,8 @@ pub unsafe extern "C" fn sidereon_sp3_check_continuity(
         let options = c_try!(continuity_options_from_c(
             FN_NAME,
             orbit_class,
-            residual_tolerance_m
+            residual_tolerance_m,
+            gap_threshold_factor,
         ));
         let report = check_continuity(&sp3.inner.precise_ephemeris_samples(), &options);
 
@@ -734,14 +840,60 @@ pub unsafe extern "C" fn sidereon_sp3_continuity_verdict_json(
     out_written: *mut usize,
     out_required: *mut usize,
 ) -> SidereonStatus {
-    const FN_NAME: &str = "sidereon_sp3_continuity_verdict_json";
+    sidereon_sp3_continuity_verdict_json_with_gap_threshold_factor(
+        sp3,
+        orbit_class,
+        residual_tolerance_m,
+        0.0,
+        from_j2000_s,
+        through_j2000_s,
+        out,
+        out_len,
+        out_written,
+        out_required,
+    )
+}
+
+/// Decide whether product-wide continuity findings can influence an inclusive
+/// evaluation window through this product's derived interpolation stencil, with
+/// an explicit coverage-gap threshold factor. When `gap_threshold_factor` is <= 0.0,
+/// the core default of 1.5 is used.
+///
+/// The JSON object contains `decision` (`"accept"` or `"refuse"`), `accepted`,
+/// the influencing defect and splice arrays, and the complete defect and splice
+/// arrays. Standalone checks always have empty splice arrays. `orbit_class` and
+/// `residual_tolerance_m` use the same selectors as
+/// `sidereon_sp3_check_continuity`.
+///
+/// Uses the standard variable-length byte-output contract; JSON bytes are not
+/// null-terminated.
+///
+/// Safety: `sp3` must be a live handle; `out` must reference `out_len` writable
+/// bytes, or be NULL when `out_len` is zero; both count pointers must reference
+/// writable size_t values.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn sidereon_sp3_continuity_verdict_json_with_gap_threshold_factor(
+    sp3: *const SidereonSp3,
+    orbit_class: i32,
+    residual_tolerance_m: f64,
+    gap_threshold_factor: f64,
+    from_j2000_s: f64,
+    through_j2000_s: f64,
+    out: *mut u8,
+    out_len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_sp3_continuity_verdict_json_with_gap_threshold_factor";
     ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
         c_try!(init_copy_counts(FN_NAME, out_written, out_required));
         let sp3 = c_try!(require_ref(sp3, FN_NAME, "sp3"));
         let options = c_try!(continuity_options_from_c(
             FN_NAME,
             orbit_class,
-            residual_tolerance_m
+            residual_tolerance_m,
+            gap_threshold_factor,
         ));
         let window = c_try!(EpochWindow::new(from_j2000_s, through_j2000_s)
             .map_err(|error| map_sp3_argument_error(FN_NAME, error)));
@@ -2611,10 +2763,23 @@ pub unsafe extern "C" fn sidereon_sp3_observable_states_at_shared_j2000_s(
     )
 }
 
+pub(crate) fn interpolation_options_from_c(
+    fn_name: &str,
+    gap_threshold_factor: f64,
+) -> Result<Sp3InterpolationOptions, SidereonStatus> {
+    if !gap_threshold_factor.is_nan() && gap_threshold_factor <= 0.0 {
+        Ok(Sp3InterpolationOptions::default())
+    } else {
+        Sp3InterpolationOptions::new(gap_threshold_factor)
+            .map_err(|error| map_sp3_argument_error(fn_name, error))
+    }
+}
+
 fn continuity_options_from_c(
     fn_name: &str,
     orbit_class: i32,
     residual_tolerance_m: f64,
+    gap_threshold_factor: f64,
 ) -> Result<ContinuityOptions, SidereonStatus> {
     let speed_bound = match orbit_class {
         -1 => None,
@@ -2626,10 +2791,12 @@ fn continuity_options_from_c(
             return Err(SidereonStatus::InvalidArgument);
         }
     };
+    let interpolation = interpolation_options_from_c(fn_name, gap_threshold_factor)?;
     Ok(ContinuityOptions::new(
         speed_bound,
         (residual_tolerance_m >= 0.0).then_some(residual_tolerance_m),
-    ))
+    )
+    .with_interpolation_options(interpolation))
 }
 
 fn continuity_defect_json(defect: &ContinuityDefect) -> serde_json::Value {
@@ -3524,7 +3691,7 @@ mod window_continuity_c_tests {
             unsafe { sidereon_sp3_stencil_extent(&sp3, &mut before_s, &mut after_s) },
             SidereonStatus::Ok
         );
-        assert_eq!((before_s, after_s), (1_500.0, 1_500.0));
+        assert_eq!((before_s, after_s), (3_300.0, 3_300.0));
 
         let inside = verdict_json(&sp3, epochs[24], epochs[72]);
         assert_eq!(inside["decision"], "accept");
@@ -3659,5 +3826,630 @@ mod window_continuity_c_tests {
             SidereonStatus::InvalidArgument
         );
         assert_eq!((written, required), (0, 0));
+    }
+}
+
+#[cfg(test)]
+mod sp3_interpolation_c_tests {
+    use std::ffi::CString;
+    use std::ptr;
+
+    use super::*;
+
+    const GAPPED_SP3_BYTES: &[u8] =
+        include_bytes!("../tests/fixtures/sp3/GAP_G01_20201760000_15M.sp3");
+    const HOLE_MIDPOINT_J2000_S: f64 = 646_260_300.0;
+
+    #[test]
+    fn test_sp3_load_and_interpolation_policy() {
+        let mut sp3: *mut SidereonSp3 = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_sp3_load_with_gap_threshold_factor(
+                    GAPPED_SP3_BYTES.as_ptr(),
+                    GAPPED_SP3_BYTES.len(),
+                    1.0,
+                    &mut sp3,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+
+        assert_eq!(
+            unsafe {
+                sidereon_sp3_load_with_gap_threshold_factor(
+                    GAPPED_SP3_BYTES.as_ptr(),
+                    GAPPED_SP3_BYTES.len(),
+                    0.0,
+                    &mut sp3,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        let mut factor = 0.0;
+        assert_eq!(
+            unsafe { sidereon_sp3_gap_threshold_factor(sp3, &mut factor) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(factor, 1.5);
+
+        let g01 = CString::new("G01").unwrap();
+        let query_epochs = [HOLE_MIDPOINT_J2000_S];
+        let mut pos = [0.0; 3];
+        let mut clk = 0.0;
+        let mut written = 0;
+        assert_eq!(
+            unsafe {
+                sidereon_sp3_interpolate(
+                    sp3,
+                    g01.as_ptr(),
+                    query_epochs.as_ptr(),
+                    1,
+                    pos.as_mut_ptr(),
+                    3,
+                    &mut clk,
+                    1,
+                    &mut written,
+                )
+            },
+            SidereonStatus::Solve
+        );
+        unsafe { sidereon_sp3_free(sp3) };
+
+        assert_eq!(
+            unsafe {
+                sidereon_sp3_load_with_gap_threshold_factor(
+                    GAPPED_SP3_BYTES.as_ptr(),
+                    GAPPED_SP3_BYTES.len(),
+                    13.0,
+                    &mut sp3,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(
+            unsafe { sidereon_sp3_gap_threshold_factor(sp3, &mut factor) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(factor, 13.0);
+
+        assert_eq!(
+            unsafe {
+                sidereon_sp3_interpolate(
+                    sp3,
+                    g01.as_ptr(),
+                    query_epochs.as_ptr(),
+                    1,
+                    pos.as_mut_ptr(),
+                    3,
+                    &mut clk,
+                    1,
+                    &mut written,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(written, 1);
+        assert!(pos[0].is_finite());
+        unsafe { sidereon_sp3_free(sp3) };
+    }
+
+    #[test]
+    fn test_sp3_load_exact_with_gap_threshold_factor() {
+        const EXACT_SP3_BYTES: &[u8] =
+            include_bytes!("../tests/fixtures/sp3/GRG0MGXFIN_20201760000_01D_15M_ORB.SP3");
+        let span = CString::new("01D").unwrap();
+        let sample = CString::new("15M").unwrap();
+        let agency = CString::new("GRGS").unwrap();
+        let mut request: *mut SidereonExactSp3Request = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_sp3_exact_request_new(
+                    2020,
+                    6,
+                    24,
+                    ptr::null(),
+                    span.as_ptr(),
+                    sample.as_ptr(),
+                    agency.as_ptr(),
+                    &mut request,
+                )
+            },
+            SidereonStatus::Ok
+        );
+
+        let mut sp3: *mut SidereonSp3 = ptr::null_mut();
+        let mut coverage = SidereonExactSp3Coverage::Inclusive;
+
+        // Invalid factor 1.0
+        assert_eq!(
+            unsafe {
+                sidereon_sp3_load_exact_with_gap_threshold_factor(
+                    EXACT_SP3_BYTES.as_ptr(),
+                    EXACT_SP3_BYTES.len(),
+                    request,
+                    1.0,
+                    &mut sp3,
+                    &mut coverage,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+
+        // Default factor 0.0 -> 1.5
+        assert_eq!(
+            unsafe {
+                sidereon_sp3_load_exact_with_gap_threshold_factor(
+                    EXACT_SP3_BYTES.as_ptr(),
+                    EXACT_SP3_BYTES.len(),
+                    request,
+                    0.0,
+                    &mut sp3,
+                    &mut coverage,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        let mut factor = 0.0;
+        assert_eq!(
+            unsafe { sidereon_sp3_gap_threshold_factor(sp3, &mut factor) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(factor, 1.5);
+        unsafe { sidereon_sp3_free(sp3) };
+
+        // Explicit factor 13.0
+        assert_eq!(
+            unsafe {
+                sidereon_sp3_load_exact_with_gap_threshold_factor(
+                    EXACT_SP3_BYTES.as_ptr(),
+                    EXACT_SP3_BYTES.len(),
+                    request,
+                    13.0,
+                    &mut sp3,
+                    &mut coverage,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(
+            unsafe { sidereon_sp3_gap_threshold_factor(sp3, &mut factor) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(factor, 13.0);
+
+        unsafe {
+            sidereon_sp3_free(sp3);
+            sidereon_sp3_exact_request_free(request);
+        }
+    }
+
+    #[test]
+    fn test_continuity_with_gap_threshold_factor() {
+        let mut sp3: *mut SidereonSp3 = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_sp3_load(
+                    GAPPED_SP3_BYTES.as_ptr(),
+                    GAPPED_SP3_BYTES.len(),
+                    &mut sp3,
+                )
+            },
+            SidereonStatus::Ok
+        );
+
+        let mut defects = 0;
+        let mut checked = 0;
+        let mut skipped = 0;
+
+        assert_eq!(
+            unsafe {
+                sidereon_sp3_check_continuity_with_gap_threshold_factor(
+                    sp3,
+                    -1,
+                    1.0,
+                    1.0,
+                    &mut defects,
+                    &mut checked,
+                    &mut skipped,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+
+        assert_eq!(
+            unsafe {
+                sidereon_sp3_check_continuity_with_gap_threshold_factor(
+                    sp3,
+                    -1,
+                    1.0,
+                    0.0,
+                    &mut defects,
+                    &mut checked,
+                    &mut skipped,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        let default_defects = defects;
+
+        assert_eq!(
+            unsafe {
+                sidereon_sp3_check_continuity_with_gap_threshold_factor(
+                    sp3,
+                    -1,
+                    1.0,
+                    13.0,
+                    &mut defects,
+                    &mut checked,
+                    &mut skipped,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert!(defects < default_defects);
+
+        let mut written = 0;
+        let mut required = 0;
+        assert_eq!(
+            unsafe {
+                sidereon_sp3_continuity_verdict_json_with_gap_threshold_factor(
+                    sp3,
+                    -1,
+                    1.0,
+                    1.0,
+                    HOLE_MIDPOINT_J2000_S - 100.0,
+                    HOLE_MIDPOINT_J2000_S + 100.0,
+                    ptr::null_mut(),
+                    0,
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+
+        assert_eq!(
+            unsafe {
+                sidereon_sp3_continuity_verdict_json_with_gap_threshold_factor(
+                    sp3,
+                    -1,
+                    1.0,
+                    13.0,
+                    HOLE_MIDPOINT_J2000_S - 100.0,
+                    HOLE_MIDPOINT_J2000_S + 100.0,
+                    ptr::null_mut(),
+                    0,
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert!(required > 0);
+
+        unsafe { sidereon_sp3_free(sp3) };
+    }
+
+    #[test]
+    fn test_samples_and_interpolant_and_artifact_with_gap_threshold_factor() {
+        let mut sp3: *mut SidereonSp3 = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_sp3_load(
+                    GAPPED_SP3_BYTES.as_ptr(),
+                    GAPPED_SP3_BYTES.len(),
+                    &mut sp3,
+                )
+            },
+            SidereonStatus::Ok
+        );
+
+        let mut sample_count = 0;
+        assert_eq!(
+            unsafe {
+                sidereon_sp3_precise_ephemeris_samples(
+                    sp3,
+                    ptr::null_mut(),
+                    0,
+                    &mut 0,
+                    &mut sample_count,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert!(sample_count > 0);
+        let mut samples = vec![
+            SidereonPreciseEphemerisSample {
+                sat: SidereonSatelliteToken { bytes: [0; 17] },
+                epoch_j2000_s: 0.0,
+                time_scale: SidereonTimeScale::Gpst as u32,
+                position_ecef_m: [0.0; 3],
+                has_clock_s: false,
+                clock_s: 0.0,
+                clock_event: false,
+            };
+            sample_count
+        ];
+        let mut written = 0;
+        assert_eq!(
+            unsafe {
+                sidereon_sp3_precise_ephemeris_samples(
+                    sp3,
+                    samples.as_mut_ptr(),
+                    samples.len(),
+                    &mut written,
+                    &mut sample_count,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(written, sample_count);
+        unsafe { sidereon_sp3_free(sp3) };
+
+        let mut samples_handle: *mut SidereonPreciseEphemerisSamples = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_precise_ephemeris_samples_from_samples_with_gap_threshold_factor(
+                    samples.as_ptr(),
+                    samples.len(),
+                    1.0,
+                    &mut samples_handle,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+
+        assert_eq!(
+            unsafe {
+                sidereon_precise_ephemeris_samples_from_samples_with_gap_threshold_factor(
+                    samples.as_ptr(),
+                    samples.len(),
+                    0.0,
+                    &mut samples_handle,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        let mut factor = 0.0;
+        assert_eq!(
+            unsafe {
+                sidereon_precise_ephemeris_samples_gap_threshold_factor(
+                    samples_handle,
+                    &mut factor,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(factor, 1.5);
+
+        let g01 = CString::new("G01").unwrap();
+        let sat_ptrs = [g01.as_ptr()];
+        let mut pos = [0.0; 3];
+        let mut clk = 0.0;
+        let mut has_clk = false;
+        let mut elem_status = SidereonObservableStateElementStatus::Valid;
+        let mut res_status = SidereonStatus::Ok;
+        assert_eq!(
+            unsafe {
+                sidereon_precise_ephemeris_samples_observable_states_at_shared_j2000_s(
+                    samples_handle,
+                    sat_ptrs.as_ptr(),
+                    1,
+                    HOLE_MIDPOINT_J2000_S,
+                    pos.as_mut_ptr(),
+                    &mut clk,
+                    &mut has_clk,
+                    &mut elem_status,
+                    &mut res_status,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(elem_status, SidereonObservableStateElementStatus::Gap);
+        unsafe { sidereon_precise_ephemeris_samples_free(samples_handle) };
+
+        assert_eq!(
+            unsafe {
+                sidereon_precise_ephemeris_samples_from_samples_with_gap_threshold_factor(
+                    samples.as_ptr(),
+                    samples.len(),
+                    13.0,
+                    &mut samples_handle,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(
+            unsafe {
+                sidereon_precise_ephemeris_samples_gap_threshold_factor(
+                    samples_handle,
+                    &mut factor,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(factor, 13.0);
+        assert_eq!(
+            unsafe {
+                sidereon_precise_ephemeris_samples_observable_states_at_shared_j2000_s(
+                    samples_handle,
+                    sat_ptrs.as_ptr(),
+                    1,
+                    HOLE_MIDPOINT_J2000_S,
+                    pos.as_mut_ptr(),
+                    &mut clk,
+                    &mut has_clk,
+                    &mut elem_status,
+                    &mut res_status,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(elem_status, SidereonObservableStateElementStatus::Valid);
+        assert!(pos[0].is_finite());
+        unsafe { sidereon_precise_ephemeris_samples_free(samples_handle) };
+
+        let mut interp_handle: *mut SidereonPreciseEphemerisInterpolant = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_precise_ephemeris_interpolant_from_samples_with_gap_threshold_factor(
+                    samples.as_ptr(),
+                    samples.len(),
+                    1.0,
+                    &mut interp_handle,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+
+        assert_eq!(
+            unsafe {
+                sidereon_precise_ephemeris_interpolant_from_samples_with_gap_threshold_factor(
+                    samples.as_ptr(),
+                    samples.len(),
+                    0.0,
+                    &mut interp_handle,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(
+            unsafe {
+                sidereon_precise_ephemeris_interpolant_gap_threshold_factor(
+                    interp_handle,
+                    &mut factor,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(factor, 1.5);
+        assert_eq!(
+            unsafe {
+                sidereon_precise_ephemeris_interpolant_observable_states_at_shared_j2000_s(
+                    interp_handle,
+                    sat_ptrs.as_ptr(),
+                    1,
+                    HOLE_MIDPOINT_J2000_S,
+                    pos.as_mut_ptr(),
+                    &mut clk,
+                    &mut has_clk,
+                    &mut elem_status,
+                    &mut res_status,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(elem_status, SidereonObservableStateElementStatus::Gap);
+        unsafe { sidereon_precise_ephemeris_interpolant_free(interp_handle) };
+
+        assert_eq!(
+            unsafe {
+                sidereon_precise_ephemeris_interpolant_from_samples_with_gap_threshold_factor(
+                    samples.as_ptr(),
+                    samples.len(),
+                    13.0,
+                    &mut interp_handle,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(
+            unsafe {
+                sidereon_precise_ephemeris_interpolant_gap_threshold_factor(
+                    interp_handle,
+                    &mut factor,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(factor, 13.0);
+        assert_eq!(
+            unsafe {
+                sidereon_precise_ephemeris_interpolant_observable_states_at_shared_j2000_s(
+                    interp_handle,
+                    sat_ptrs.as_ptr(),
+                    1,
+                    HOLE_MIDPOINT_J2000_S,
+                    pos.as_mut_ptr(),
+                    &mut clk,
+                    &mut has_clk,
+                    &mut elem_status,
+                    &mut res_status,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(elem_status, SidereonObservableStateElementStatus::Valid);
+        assert!(pos[0].is_finite());
+        unsafe { sidereon_precise_ephemeris_interpolant_free(interp_handle) };
+
+        let mut sp3_wide: *mut SidereonSp3 = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_sp3_load_with_gap_threshold_factor(
+                    GAPPED_SP3_BYTES.as_ptr(),
+                    GAPPED_SP3_BYTES.len(),
+                    13.0,
+                    &mut sp3_wide,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        let mut art_error = SidereonPreciseInterpolantArtifactErrorKind::None;
+        let mut art_len = 0;
+        assert_eq!(
+            unsafe {
+                sidereon_sp3_precise_interpolant_artifact_bytes(
+                    sp3_wide,
+                    &mut art_error,
+                    ptr::null_mut(),
+                    0,
+                    &mut 0,
+                    &mut art_len,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert!(art_len > 0);
+        let mut art_bytes = vec![0_u8; art_len];
+        assert_eq!(
+            unsafe {
+                sidereon_sp3_precise_interpolant_artifact_bytes(
+                    sp3_wide,
+                    &mut art_error,
+                    art_bytes.as_mut_ptr(),
+                    art_bytes.len(),
+                    &mut written,
+                    &mut art_len,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        unsafe { sidereon_sp3_free(sp3_wide) };
+
+        let mut artifact_handle: *mut SidereonPreciseInterpolantArtifact = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_precise_interpolant_artifact_open_owned(
+                    art_bytes.as_ptr(),
+                    art_bytes.len(),
+                    &mut art_error,
+                    &mut artifact_handle,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(
+            unsafe {
+                sidereon_precise_interpolant_artifact_gap_threshold_factor(
+                    artifact_handle,
+                    &mut factor,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(factor, 13.0);
+        unsafe { sidereon_precise_interpolant_artifact_free(artifact_handle) };
     }
 }

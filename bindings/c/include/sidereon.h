@@ -64,9 +64,9 @@
 #include <stdlib.h>
 
 #define SIDEREON_VERSION_MAJOR 2
-#define SIDEREON_VERSION_MINOR 0
+#define SIDEREON_VERSION_MINOR 1
 #define SIDEREON_VERSION_PATCH 0
-#define SIDEREON_VERSION_STRING "2.0.0"
+#define SIDEREON_VERSION_STRING "2.1.0"
 
 #define ANALYSIS_CENTER_C_BYTES 32
 
@@ -26736,6 +26736,20 @@ enum SidereonStatus sidereon_precise_ephemeris_interpolant_from_samples(const st
                                                                         struct SidereonPreciseEphemerisInterpolant **out_handle);
 
 /**
+ * Build a cached precise-ephemeris interpolant from canonical samples with an
+ * explicit coverage-gap threshold factor. When gap_threshold_factor is <= 0.0,
+ * the core default of 1.5 is used. On success writes a newly owned handle to
+ * *out_handle; release it with sidereon_precise_ephemeris_interpolant_free.
+ *
+ * Safety: samples must point to count entries or be NULL when count is 0;
+ * out_handle must point to storage for a SidereonPreciseEphemerisInterpolant*.
+ */
+enum SidereonStatus sidereon_precise_ephemeris_interpolant_from_samples_with_gap_threshold_factor(const struct SidereonPreciseEphemerisSample *samples,
+                                                                                                  size_t count,
+                                                                                                  double gap_threshold_factor,
+                                                                                                  struct SidereonPreciseEphemerisInterpolant **out_handle);
+
+/**
  * Build a cached precise-ephemeris interpolant from a loaded SP3 handle. On
  * success writes a newly owned handle to *out_handle; release it with
  * sidereon_precise_ephemeris_interpolant_free.
@@ -26745,6 +26759,16 @@ enum SidereonStatus sidereon_precise_ephemeris_interpolant_from_samples(const st
  */
 enum SidereonStatus sidereon_precise_ephemeris_interpolant_from_sp3(const struct SidereonSp3 *sp3,
                                                                     struct SidereonPreciseEphemerisInterpolant **out_handle);
+
+/**
+ * Write the SP3 interpolation gap threshold factor carried by this
+ * interpolant to *out_gap_threshold_factor.
+ *
+ * Safety: interpolant must be a live handle; out_gap_threshold_factor must
+ * point to a double.
+ */
+enum SidereonStatus sidereon_precise_ephemeris_interpolant_gap_threshold_factor(const struct SidereonPreciseEphemerisInterpolant *interpolant,
+                                                                                double *out_gap_threshold_factor);
 
 /**
  * Evaluate many cached precise-interpolant observable states with
@@ -26807,6 +26831,35 @@ void sidereon_precise_ephemeris_samples_free(struct SidereonPreciseEphemerisSamp
 enum SidereonStatus sidereon_precise_ephemeris_samples_from_samples(const struct SidereonPreciseEphemerisSample *samples,
                                                                     size_t count,
                                                                     struct SidereonPreciseEphemerisSamples **out_handle);
+
+/**
+ * Build a sample-backed precise-ephemeris source from count canonical samples
+ * with an explicit coverage-gap threshold factor. When gap_threshold_factor is
+ * <= 0.0, the core default of 1.5 is used.
+ * On success writes a newly owned handle to *out_handle; release it with
+ * sidereon_precise_ephemeris_samples_free. Validation failures (no samples, a
+ * single-sample satellite, non-monotonic epochs, mixed time scales, a
+ * non-representable epoch, a non-finite value, or an invalid gap threshold
+ * factor) return SIDEREON_STATUS_INVALID_ARGUMENT.
+ *
+ * Safety: samples must point to count entries (each with a valid sat token) or
+ * be NULL when count is 0; out_handle must point to storage for a
+ * SidereonPreciseEphemerisSamples*.
+ */
+enum SidereonStatus sidereon_precise_ephemeris_samples_from_samples_with_gap_threshold_factor(const struct SidereonPreciseEphemerisSample *samples,
+                                                                                              size_t count,
+                                                                                              double gap_threshold_factor,
+                                                                                              struct SidereonPreciseEphemerisSamples **out_handle);
+
+/**
+ * Write the SP3 interpolation gap threshold factor carried by this
+ * sample-backed source to *out_gap_threshold_factor.
+ *
+ * Safety: samples must be a live handle; out_gap_threshold_factor must point
+ * to a double.
+ */
+enum SidereonStatus sidereon_precise_ephemeris_samples_gap_threshold_factor(const struct SidereonPreciseEphemerisSamples *samples,
+                                                                            double *out_gap_threshold_factor);
 
 /**
  * Evaluate many sample-backed precise-ephemeris observable states with
@@ -26934,6 +26987,16 @@ enum SidereonStatus sidereon_precise_interpolant_artifact_from_path_attested(con
                                                                              uint64_t claimed_checksum64,
                                                                              enum SidereonPreciseInterpolantArtifactErrorKind *out_error,
                                                                              struct SidereonPreciseInterpolantArtifact **out_artifact);
+
+/**
+ * Write the SP3 interpolation gap threshold factor recorded in this
+ * artifact's header to *out_gap_threshold_factor.
+ *
+ * Safety: artifact must be a live handle; out_gap_threshold_factor must point
+ * to a double.
+ */
+enum SidereonStatus sidereon_precise_interpolant_artifact_gap_threshold_factor(const struct SidereonPreciseInterpolantArtifact *artifact,
+                                                                               double *out_gap_threshold_factor);
 
 /**
  * Write the checksum of an opened artifact to *out_checksum.
@@ -32539,6 +32602,28 @@ enum SidereonStatus sidereon_sp3_check_continuity(const struct SidereonSp3 *sp3,
                                                   size_t *out_residuals_skipped);
 
 /**
+ * Run the product-wide continuity pre-check over every satellite series in an
+ * SP3 product with an explicit coverage-gap threshold factor. When
+ * `gap_threshold_factor` is <= 0.0, the core default of 1.5 is used.
+ *
+ * `orbit_class` is 0 for MEO GNSS, 1 for geosynchronous, 2 for LEO, or -1 to
+ * disable the speed gate. A negative `residual_tolerance_m` disables the
+ * residual check. `out_defects` receives the number of violations found;
+ * `out_residuals_checked` and `out_residuals_skipped` let a caller tell
+ * "checked and clean" from "not checked". Reports rather than refuses.
+ *
+ * Safety: `sp3` must be a live handle and each out pointer must reference
+ * writable storage.
+ */
+enum SidereonStatus sidereon_sp3_check_continuity_with_gap_threshold_factor(const struct SidereonSp3 *sp3,
+                                                                            int32_t orbit_class,
+                                                                            double residual_tolerance_m,
+                                                                            double gap_threshold_factor,
+                                                                            size_t *out_defects,
+                                                                            size_t *out_residuals_checked,
+                                                                            size_t *out_residuals_skipped);
+
+/**
  * Estimate the per-epoch clock-reference offset of `other` relative to
  * `reference`. Delegates to sidereon_core::ephemeris::clock_reference_offset.
  * Uses the variable-length output contract documented at the top of the
@@ -32582,6 +32667,36 @@ enum SidereonStatus sidereon_sp3_continuity_verdict_json(const struct SidereonSp
                                                          size_t out_len,
                                                          size_t *out_written,
                                                          size_t *out_required);
+
+/**
+ * Decide whether product-wide continuity findings can influence an inclusive
+ * evaluation window through this product's derived interpolation stencil, with
+ * an explicit coverage-gap threshold factor. When `gap_threshold_factor` is <= 0.0,
+ * the core default of 1.5 is used.
+ *
+ * The JSON object contains `decision` (`"accept"` or `"refuse"`), `accepted`,
+ * the influencing defect and splice arrays, and the complete defect and splice
+ * arrays. Standalone checks always have empty splice arrays. `orbit_class` and
+ * `residual_tolerance_m` use the same selectors as
+ * `sidereon_sp3_check_continuity`.
+ *
+ * Uses the standard variable-length byte-output contract; JSON bytes are not
+ * null-terminated.
+ *
+ * Safety: `sp3` must be a live handle; `out` must reference `out_len` writable
+ * bytes, or be NULL when `out_len` is zero; both count pointers must reference
+ * writable size_t values.
+ */
+enum SidereonStatus sidereon_sp3_continuity_verdict_json_with_gap_threshold_factor(const struct SidereonSp3 *sp3,
+                                                                                   int32_t orbit_class,
+                                                                                   double residual_tolerance_m,
+                                                                                   double gap_threshold_factor,
+                                                                                   double from_j2000_s,
+                                                                                   double through_j2000_s,
+                                                                                   uint8_t *out,
+                                                                                   size_t out_len,
+                                                                                   size_t *out_written,
+                                                                                   size_t *out_required);
 
 /**
  * Write the epoch count declared on SP3 header line 1.
@@ -32742,6 +32857,16 @@ enum SidereonStatus sidereon_sp3_exact_request_new(int32_t year,
 void sidereon_sp3_free(struct SidereonSp3 *sp3);
 
 /**
+ * Write the SP3 interpolation gap threshold factor carried by this product to
+ * *out_gap_threshold_factor.
+ *
+ * Safety: sp3 must be a live SP3 handle; out_gap_threshold_factor must point
+ * to a double.
+ */
+enum SidereonStatus sidereon_sp3_gap_threshold_factor(const struct SidereonSp3 *sp3,
+                                                      double *out_gap_threshold_factor);
+
+/**
  * Build sampled rise/set/peak visibility passes over an inclusive window.
  * Delegates to sidereon_core::geometry::passes. Uses the variable-length output
  * contract documented at the top of the header.
@@ -32861,6 +32986,36 @@ enum SidereonStatus sidereon_sp3_load_exact(const uint8_t *data,
                                             const struct SidereonExactSp3Request *request,
                                             struct SidereonSp3 **out_sp3,
                                             enum SidereonExactSp3Coverage *out_coverage);
+
+/**
+ * Parse and validate bytes as one exact SP3 request with an explicit
+ * coverage-gap threshold factor. When gap_threshold_factor is <= 0.0, the core
+ * default of 1.5 is used.
+ *
+ * Safety: `data` must reference `len` readable bytes; `request` must be a live
+ * exact-request handle; both output pointers must reference writable storage.
+ * On success the caller owns `*out_sp3`.
+ */
+enum SidereonStatus sidereon_sp3_load_exact_with_gap_threshold_factor(const uint8_t *data,
+                                                                      size_t len,
+                                                                      const struct SidereonExactSp3Request *request,
+                                                                      double gap_threshold_factor,
+                                                                      struct SidereonSp3 **out_sp3,
+                                                                      enum SidereonExactSp3Coverage *out_coverage);
+
+/**
+ * Parse an SP3-c or SP3-d byte buffer into a precise-ephemeris product with an
+ * explicit coverage-gap threshold factor. When gap_threshold_factor is <= 0.0,
+ * the core default of 1.5 is used. On success writes a newly owned handle to
+ * *out_sp3. Release it with sidereon_sp3_free.
+ *
+ * Safety: data must point to len readable bytes; out_sp3 must point to storage
+ * for a SidereonSp3*.
+ */
+enum SidereonStatus sidereon_sp3_load_with_gap_threshold_factor(const uint8_t *data,
+                                                                size_t len,
+                                                                double gap_threshold_factor,
+                                                                struct SidereonSp3 **out_sp3);
 
 /**
  * Merge SP3 products using the engine consensus merge path. On success writes

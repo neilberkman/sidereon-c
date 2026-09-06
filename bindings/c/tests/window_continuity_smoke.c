@@ -186,7 +186,7 @@ int main(int argc, char **argv) {
     double before_s = NAN;
     double after_s = NAN;
     if (sidereon_sp3_stencil_extent(sp3, &before_s, &after_s) != SIDEREON_STATUS_OK ||
-        before_s != 1500.0 || after_s != 1500.0) {
+        before_s != 3300.0 || after_s != 3300.0) {
         rc = fail("derive stencil extent");
         goto cleanup;
     }
