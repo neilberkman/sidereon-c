@@ -535,7 +535,10 @@ pub unsafe extern "C" fn sidereon_precise_interpolant_artifact_gap_threshold_fac
         ));
         *out_gap_threshold_factor = 0.0;
         let artifact = c_try!(require_ref(artifact, FN_NAME, "artifact"));
-        *out_gap_threshold_factor = artifact.inner.interpolation_options().gap_threshold_factor();
+        *out_gap_threshold_factor = artifact
+            .inner
+            .interpolation_options()
+            .gap_threshold_factor();
         SidereonStatus::Ok
     })
 }

@@ -128,10 +128,7 @@ pub unsafe extern "C" fn sidereon_precise_ephemeris_samples_from_samples(
     out_handle: *mut *mut SidereonPreciseEphemerisSamples,
 ) -> SidereonStatus {
     sidereon_precise_ephemeris_samples_from_samples_with_gap_threshold_factor(
-        samples,
-        count,
-        0.0,
-        out_handle,
+        samples, count, 0.0, out_handle,
     )
 }
 
@@ -361,10 +358,7 @@ pub unsafe extern "C" fn sidereon_precise_ephemeris_interpolant_from_samples(
     out_handle: *mut *mut SidereonPreciseEphemerisInterpolant,
 ) -> SidereonStatus {
     sidereon_precise_ephemeris_interpolant_from_samples_with_gap_threshold_factor(
-        samples,
-        count,
-        0.0,
-        out_handle,
+        samples, count, 0.0, out_handle,
     )
 }
 
@@ -421,8 +415,10 @@ pub unsafe extern "C" fn sidereon_precise_ephemeris_interpolant_gap_threshold_fa
         ));
         *out_gap_threshold_factor = 0.0;
         let interpolant = c_try!(require_ref(interpolant, FN_NAME, "interpolant"));
-        *out_gap_threshold_factor =
-            interpolant.inner.interpolation_options().gap_threshold_factor();
+        *out_gap_threshold_factor = interpolant
+            .inner
+            .interpolation_options()
+            .gap_threshold_factor();
         SidereonStatus::Ok
     })
 }

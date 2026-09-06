@@ -4029,11 +4029,7 @@ mod sp3_interpolation_c_tests {
         let mut sp3: *mut SidereonSp3 = ptr::null_mut();
         assert_eq!(
             unsafe {
-                sidereon_sp3_load(
-                    GAPPED_SP3_BYTES.as_ptr(),
-                    GAPPED_SP3_BYTES.len(),
-                    &mut sp3,
-                )
+                sidereon_sp3_load(GAPPED_SP3_BYTES.as_ptr(), GAPPED_SP3_BYTES.len(), &mut sp3)
             },
             SidereonStatus::Ok
         );
@@ -4136,11 +4132,7 @@ mod sp3_interpolation_c_tests {
         let mut sp3: *mut SidereonSp3 = ptr::null_mut();
         assert_eq!(
             unsafe {
-                sidereon_sp3_load(
-                    GAPPED_SP3_BYTES.as_ptr(),
-                    GAPPED_SP3_BYTES.len(),
-                    &mut sp3,
-                )
+                sidereon_sp3_load(GAPPED_SP3_BYTES.as_ptr(), GAPPED_SP3_BYTES.len(), &mut sp3)
             },
             SidereonStatus::Ok
         );
@@ -4214,10 +4206,7 @@ mod sp3_interpolation_c_tests {
         let mut factor = 0.0;
         assert_eq!(
             unsafe {
-                sidereon_precise_ephemeris_samples_gap_threshold_factor(
-                    samples_handle,
-                    &mut factor,
-                )
+                sidereon_precise_ephemeris_samples_gap_threshold_factor(samples_handle, &mut factor)
             },
             SidereonStatus::Ok
         );
@@ -4262,10 +4251,7 @@ mod sp3_interpolation_c_tests {
         );
         assert_eq!(
             unsafe {
-                sidereon_precise_ephemeris_samples_gap_threshold_factor(
-                    samples_handle,
-                    &mut factor,
-                )
+                sidereon_precise_ephemeris_samples_gap_threshold_factor(samples_handle, &mut factor)
             },
             SidereonStatus::Ok
         );
