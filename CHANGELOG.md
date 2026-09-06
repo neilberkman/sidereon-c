@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.1.0 - 2026-09-05
+
+### Added
+
+- Exposed the sidereon-core SP3 interpolation policy across the C surface:
+  - SP3 loading and exact loading with an explicit gap threshold factor: `sidereon_sp3_load_with_gap_threshold_factor` and `sidereon_sp3_load_exact_with_gap_threshold_factor` (default unset `<= 0.0` uses core default 1.5).
+  - SP3 interpolation gap threshold factor reader: `sidereon_sp3_gap_threshold_factor`.
+  - Product-wide continuity and window continuity verdict exports with an explicit gap threshold factor: `sidereon_sp3_check_continuity_with_gap_threshold_factor` and `sidereon_sp3_continuity_verdict_json_with_gap_threshold_factor`.
+  - Sample-backed sources and cached interpolants from canonical samples with an explicit gap threshold factor and metadata readers: `sidereon_precise_ephemeris_samples_from_samples_with_gap_threshold_factor`, `sidereon_precise_ephemeris_samples_gap_threshold_factor`, `sidereon_precise_ephemeris_interpolant_from_samples_with_gap_threshold_factor`, and `sidereon_precise_ephemeris_interpolant_gap_threshold_factor`.
+  - Precise-interpolant memory-mappable artifact header reader: `sidereon_precise_interpolant_artifact_gap_threshold_factor`.
+
+### Changed
+
+- Engine update: sidereon 2.1.0 / sidereon-core 2.1.0. Additive upstream release: the SP3 coverage-gap threshold is now a validated, product-carried policy (`Sp3InterpolationOptions`, default 1.5 and bit-identical to before), the SP3 window-scoped continuity reach is derived from the interpolator's actual selectable node spans, and RINEX 4 CNAV week/TOW round trips are stable at the week boundary.
+
 ## 2.0.0 - 2026-09-02
 
 ### Changed

@@ -1,4 +1,5 @@
 use super::*;
+use crate::sp3::interpolation_options_from_c;
 
 /// A sample-backed precise-ephemeris source, built from canonical
 /// position/clock samples rather than parsed SP3 text. Opaque to C. Create with
@@ -126,42 +127,72 @@ pub unsafe extern "C" fn sidereon_precise_ephemeris_samples_from_samples(
     count: usize,
     out_handle: *mut *mut SidereonPreciseEphemerisSamples,
 ) -> SidereonStatus {
-    ffi_boundary(
-        "sidereon_precise_ephemeris_samples_from_samples",
-        SidereonStatus::Panic,
-        || {
-            let out_handle = c_try!(require_out(
-                out_handle,
-                "sidereon_precise_ephemeris_samples_from_samples",
-                "out_handle"
-            ));
-            *out_handle = ptr::null_mut();
-            let raw = c_try!(require_slice(
-                samples,
-                count,
-                "sidereon_precise_ephemeris_samples_from_samples",
-                "samples"
-            ));
-            let mut parsed = Vec::with_capacity(raw.len());
-            for sample in raw {
-                parsed.push(c_try!(precise_sample_from_c(
-                    "sidereon_precise_ephemeris_samples_from_samples",
-                    sample
-                )));
-            }
-            let inner = match PreciseEphemerisSamples::from_samples(parsed) {
-                Ok(inner) => inner,
-                Err(err) => {
-                    return map_precise_samples_error(
-                        "sidereon_precise_ephemeris_samples_from_samples",
-                        err,
-                    )
-                }
-            };
-            write_boxed_handle(out_handle, SidereonPreciseEphemerisSamples { inner });
-            SidereonStatus::Ok
-        },
+    sidereon_precise_ephemeris_samples_from_samples_with_gap_threshold_factor(
+        samples, count, 0.0, out_handle,
     )
+}
+
+/// Build a sample-backed precise-ephemeris source from count canonical samples
+/// with an explicit coverage-gap threshold factor. When gap_threshold_factor is
+/// <= 0.0, the core default of 1.5 is used.
+/// On success writes a newly owned handle to *out_handle; release it with
+/// sidereon_precise_ephemeris_samples_free. Validation failures (no samples, a
+/// single-sample satellite, non-monotonic epochs, mixed time scales, a
+/// non-representable epoch, a non-finite value, or an invalid gap threshold
+/// factor) return SIDEREON_STATUS_INVALID_ARGUMENT.
+///
+/// Safety: samples must point to count entries (each with a valid sat token) or
+/// be NULL when count is 0; out_handle must point to storage for a
+/// SidereonPreciseEphemerisSamples*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_precise_ephemeris_samples_from_samples_with_gap_threshold_factor(
+    samples: *const SidereonPreciseEphemerisSample,
+    count: usize,
+    gap_threshold_factor: f64,
+    out_handle: *mut *mut SidereonPreciseEphemerisSamples,
+) -> SidereonStatus {
+    const FN_NAME: &str =
+        "sidereon_precise_ephemeris_samples_from_samples_with_gap_threshold_factor";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let out_handle = c_try!(require_out(out_handle, FN_NAME, "out_handle"));
+        *out_handle = ptr::null_mut();
+        let raw = c_try!(require_slice(samples, count, FN_NAME, "samples"));
+        let options = c_try!(interpolation_options_from_c(FN_NAME, gap_threshold_factor));
+        let mut parsed = Vec::with_capacity(raw.len());
+        for sample in raw {
+            parsed.push(c_try!(precise_sample_from_c(FN_NAME, sample)));
+        }
+        let inner = match PreciseEphemerisSamples::from_samples(parsed) {
+            Ok(inner) => inner.with_interpolation_options(options),
+            Err(err) => return map_precise_samples_error(FN_NAME, err),
+        };
+        write_boxed_handle(out_handle, SidereonPreciseEphemerisSamples { inner });
+        SidereonStatus::Ok
+    })
+}
+
+/// Write the SP3 interpolation gap threshold factor carried by this
+/// sample-backed source to *out_gap_threshold_factor.
+///
+/// Safety: samples must be a live handle; out_gap_threshold_factor must point
+/// to a double.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_precise_ephemeris_samples_gap_threshold_factor(
+    samples: *const SidereonPreciseEphemerisSamples,
+    out_gap_threshold_factor: *mut f64,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_precise_ephemeris_samples_gap_threshold_factor";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let out_gap_threshold_factor = c_try!(require_out(
+            out_gap_threshold_factor,
+            FN_NAME,
+            "out_gap_threshold_factor"
+        ));
+        *out_gap_threshold_factor = 0.0;
+        let samples = c_try!(require_ref(samples, FN_NAME, "samples"));
+        *out_gap_threshold_factor = samples.inner.interpolation_options().gap_threshold_factor();
+        SidereonStatus::Ok
+    })
 }
 
 /// Release a precise-ephemeris samples handle. Null is a no-op. A non-null handle
@@ -326,42 +357,70 @@ pub unsafe extern "C" fn sidereon_precise_ephemeris_interpolant_from_samples(
     count: usize,
     out_handle: *mut *mut SidereonPreciseEphemerisInterpolant,
 ) -> SidereonStatus {
-    ffi_boundary(
-        "sidereon_precise_ephemeris_interpolant_from_samples",
-        SidereonStatus::Panic,
-        || {
-            let out_handle = c_try!(require_out(
-                out_handle,
-                "sidereon_precise_ephemeris_interpolant_from_samples",
-                "out_handle"
-            ));
-            *out_handle = ptr::null_mut();
-            let raw = c_try!(require_slice(
-                samples,
-                count,
-                "sidereon_precise_ephemeris_interpolant_from_samples",
-                "samples"
-            ));
-            let mut parsed = Vec::with_capacity(raw.len());
-            for sample in raw {
-                parsed.push(c_try!(precise_sample_from_c(
-                    "sidereon_precise_ephemeris_interpolant_from_samples",
-                    sample
-                )));
-            }
-            let inner = match PreciseEphemerisInterpolant::from_samples(parsed) {
-                Ok(inner) => inner,
-                Err(err) => {
-                    return map_precise_interpolant_error(
-                        "sidereon_precise_ephemeris_interpolant_from_samples",
-                        err,
-                    )
-                }
-            };
-            write_boxed_handle(out_handle, SidereonPreciseEphemerisInterpolant { inner });
-            SidereonStatus::Ok
-        },
+    sidereon_precise_ephemeris_interpolant_from_samples_with_gap_threshold_factor(
+        samples, count, 0.0, out_handle,
     )
+}
+
+/// Build a cached precise-ephemeris interpolant from canonical samples with an
+/// explicit coverage-gap threshold factor. When gap_threshold_factor is <= 0.0,
+/// the core default of 1.5 is used. On success writes a newly owned handle to
+/// *out_handle; release it with sidereon_precise_ephemeris_interpolant_free.
+///
+/// Safety: samples must point to count entries or be NULL when count is 0;
+/// out_handle must point to storage for a SidereonPreciseEphemerisInterpolant*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_precise_ephemeris_interpolant_from_samples_with_gap_threshold_factor(
+    samples: *const SidereonPreciseEphemerisSample,
+    count: usize,
+    gap_threshold_factor: f64,
+    out_handle: *mut *mut SidereonPreciseEphemerisInterpolant,
+) -> SidereonStatus {
+    const FN_NAME: &str =
+        "sidereon_precise_ephemeris_interpolant_from_samples_with_gap_threshold_factor";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let out_handle = c_try!(require_out(out_handle, FN_NAME, "out_handle"));
+        *out_handle = ptr::null_mut();
+        let raw = c_try!(require_slice(samples, count, FN_NAME, "samples"));
+        let options = c_try!(interpolation_options_from_c(FN_NAME, gap_threshold_factor));
+        let mut parsed = Vec::with_capacity(raw.len());
+        for sample in raw {
+            parsed.push(c_try!(precise_sample_from_c(FN_NAME, sample)));
+        }
+        let inner = match PreciseEphemerisInterpolant::from_samples(parsed) {
+            Ok(inner) => inner.with_interpolation_options(options),
+            Err(err) => return map_precise_interpolant_error(FN_NAME, err),
+        };
+        write_boxed_handle(out_handle, SidereonPreciseEphemerisInterpolant { inner });
+        SidereonStatus::Ok
+    })
+}
+
+/// Write the SP3 interpolation gap threshold factor carried by this
+/// interpolant to *out_gap_threshold_factor.
+///
+/// Safety: interpolant must be a live handle; out_gap_threshold_factor must
+/// point to a double.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_precise_ephemeris_interpolant_gap_threshold_factor(
+    interpolant: *const SidereonPreciseEphemerisInterpolant,
+    out_gap_threshold_factor: *mut f64,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_precise_ephemeris_interpolant_gap_threshold_factor";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let out_gap_threshold_factor = c_try!(require_out(
+            out_gap_threshold_factor,
+            FN_NAME,
+            "out_gap_threshold_factor"
+        ));
+        *out_gap_threshold_factor = 0.0;
+        let interpolant = c_try!(require_ref(interpolant, FN_NAME, "interpolant"));
+        *out_gap_threshold_factor = interpolant
+            .inner
+            .interpolation_options()
+            .gap_threshold_factor();
+        SidereonStatus::Ok
+    })
 }
 
 /// Build a cached precise-ephemeris interpolant from an existing sample-backed

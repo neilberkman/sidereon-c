@@ -148,6 +148,8 @@ legacy `sidereon_sp3_load` remains the permissive general parser; use
 `sidereon_sp3_declared_epoch_count` and
 `sidereon_sp3_declared_start_j2000_seconds` to inspect its line-1 evidence.
 
+SP3 products and precise sources carry a validated interpolation policy: consecutive node intervals exceeding `gap_threshold_factor` times nominal spacing are treated as coverage gaps that position interpolation will not span. The default is 1.5 (`DEFAULT_GAP_THRESHOLD_FACTOR`). Values `<= 0.0` select this default, while values `<= 1.0`, `NaN`, or infinity fail with `SIDEREON_STATUS_INVALID_ARGUMENT`. Use `sidereon_sp3_load_with_gap_threshold_factor` or `sidereon_sp3_load_exact_with_gap_threshold_factor` to configure products, `sidereon_sp3_gap_threshold_factor` to read the current factor, `sidereon_sp3_check_continuity_with_gap_threshold_factor` and `sidereon_sp3_continuity_verdict_json_with_gap_threshold_factor` for continuity checks with an explicit policy, `sidereon_precise_ephemeris_samples_from_samples_with_gap_threshold_factor` and `sidereon_precise_ephemeris_interpolant_from_samples_with_gap_threshold_factor` (with their corresponding `_gap_threshold_factor` getters) for sample-backed sources, and `sidereon_precise_interpolant_artifact_gap_threshold_factor` to inspect an artifact's header.
+
 The data catalog also exposes `sidereon_data_product_solution_class`,
 `sidereon_data_default_sample_for_date`, `sidereon_data_supported_samples`, and
 `sidereon_data_sp3_content_start_convention`. The content-start query returns a

@@ -197,6 +197,18 @@ and treats malformed or mismatched bytes as a terminal error. The existing
 `sidereon_sp3_declared_start_j2000_seconds` accessors expose the independent
 line-1 evidence used by exact validation.
 
+### SP3 interpolation policy and gap threshold factor
+
+SP3 products and precise-ephemeris sources carry a validated interpolation policy controlling coverage gaps: consecutive node intervals exceeding `gap_threshold_factor` times the nominal spacing are treated as coverage gaps that position interpolation will not span.
+
+The core default is 1.5 (`DEFAULT_GAP_THRESHOLD_FACTOR`). Entry points accepting an explicit factor use `<= 0.0` to select this default; any positive factor must be finite and `> 1.0` (values `<= 1.0`, `NaN`, or `Infinity` return `SIDEREON_STATUS_INVALID_ARGUMENT`).
+
+- **SP3 loading**: `sidereon_sp3_load_with_gap_threshold_factor` and `sidereon_sp3_load_exact_with_gap_threshold_factor` configure the loaded product's interpolation policy. The standard `sidereon_sp3_load` and `sidereon_sp3_load_exact` delegate using the core default.
+- **Product policy queries**: `sidereon_sp3_gap_threshold_factor` writes the product's effective factor to a caller-supplied `double *`.
+- **Continuity checks**: `sidereon_sp3_check_continuity_with_gap_threshold_factor` and `sidereon_sp3_continuity_verdict_json_with_gap_threshold_factor` append the optional factor to configure `ContinuityOptions.interpolation` for hold-out residual replay.
+- **Precise ephemeris samples & interpolants**: `sidereon_precise_ephemeris_samples_from_samples_with_gap_threshold_factor`, `sidereon_precise_ephemeris_samples_gap_threshold_factor`, `sidereon_precise_ephemeris_interpolant_from_samples_with_gap_threshold_factor`, and `sidereon_precise_ephemeris_interpolant_gap_threshold_factor` apply and report the same policy on canonical sample-backed handles.
+- **Precise-interpolant store artifacts**: `sidereon_precise_interpolant_artifact_gap_threshold_factor` reads the factor recorded in an artifact's header.
+
 For CDDIS, send caller-managed credentials only to
 NASA's documented hosts, remove URL queries from logs/provenance, reject HTML
 success bodies, validate content length and the advertised transport compression

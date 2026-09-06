@@ -516,6 +516,33 @@ pub unsafe extern "C" fn sidereon_precise_interpolant_artifact_state(
     )
 }
 
+/// Write the SP3 interpolation gap threshold factor recorded in this
+/// artifact's header to *out_gap_threshold_factor.
+///
+/// Safety: artifact must be a live handle; out_gap_threshold_factor must point
+/// to a double.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_precise_interpolant_artifact_gap_threshold_factor(
+    artifact: *const SidereonPreciseInterpolantArtifact,
+    out_gap_threshold_factor: *mut f64,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_precise_interpolant_artifact_gap_threshold_factor";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let out_gap_threshold_factor = c_try!(require_out(
+            out_gap_threshold_factor,
+            FN_NAME,
+            "out_gap_threshold_factor"
+        ));
+        *out_gap_threshold_factor = 0.0;
+        let artifact = c_try!(require_ref(artifact, FN_NAME, "artifact"));
+        *out_gap_threshold_factor = artifact
+            .inner
+            .interpolation_options()
+            .gap_threshold_factor();
+        SidereonStatus::Ok
+    })
+}
+
 /// Release a precise-interpolant artifact handle. Passing NULL is a no-op.
 ///
 /// Safety: artifact must be NULL or a live handle from an artifact open function
