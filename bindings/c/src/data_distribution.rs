@@ -960,10 +960,11 @@ pub unsafe extern "C" fn sidereon_data_newest_published_product_json(
 /// Copy the ordered cross-line candidates for one predicted IONEX map date
 /// as a JSON array.
 ///
-/// Both CODE predicted lines publish the same official filename for a map
-/// date, but the two-day line is produced a day earlier, so `cod_prd2` is
-/// routinely published while `cod_prd1` is still absent when CODE runs
-/// behind. Candidates are ordered `cod_prd1` first, all cover the SAME map
+/// Both CODE predicted lines cover the same map date, archived under
+/// `CODE/IONO/PRD/` as `COD0OPSP0D` (one-day) and `COD0OPSP1D` (two-day), but
+/// the two-day line is produced a day earlier, so `cod_prd2` is routinely
+/// published while `cod_prd1` is still absent when CODE runs behind.
+/// Candidates are ordered `cod_prd1` first, all cover the SAME map
 /// date (never a neighboring day's map), and each keeps its own line
 /// identity so resolved provenance names the line actually served. Each
 /// element carries `center`, `date`, `sample`, `issue`, `filename`, and
@@ -2795,31 +2796,31 @@ COD0MGXFIN_20261930000_01D_05M_ORB.SP3.gz"
     }
 
     #[test]
-    fn predicted_ionex_direct_locations_preserve_tier_and_identity_year() {
+    fn predicted_ionex_direct_locations_use_the_aiub_prd_archive() {
         for (center, year, month, day, expected) in [
             (
                 "cod_prd1",
                 2026,
                 7,
                 15,
-                "https://www.aiub.unibe.ch/download/CODE/IONO/P1/2026/\
-COD0OPSPRD_20261960000_01D_01H_GIM.INX.gz",
+                "https://www.aiub.unibe.ch/download/CODE/IONO/PRD/\
+COD0OPSP0D_20261960000_01D_01H_GIM.INX.gz",
             ),
             (
                 "cod_prd2",
                 2026,
                 7,
                 16,
-                "https://www.aiub.unibe.ch/download/CODE/IONO/P2/2026/\
-COD0OPSPRD_20261970000_01D_01H_GIM.INX.gz",
+                "https://www.aiub.unibe.ch/download/CODE/IONO/PRD/\
+COD0OPSP1D_20261970000_01D_01H_GIM.INX.gz",
             ),
             (
                 "cod_prd2",
                 2027,
                 1,
                 1,
-                "https://www.aiub.unibe.ch/download/CODE/IONO/P2/2027/\
-COD0OPSPRD_20270010000_01D_01H_GIM.INX.gz",
+                "https://www.aiub.unibe.ch/download/CODE/IONO/PRD/\
+COD0OPSP1D_20270010000_01D_01H_GIM.INX.gz",
             ),
         ] {
             let center = CString::new(center).unwrap();

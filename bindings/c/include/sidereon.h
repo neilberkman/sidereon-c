@@ -65,8 +65,8 @@
 
 #define SIDEREON_VERSION_MAJOR 2
 #define SIDEREON_VERSION_MINOR 1
-#define SIDEREON_VERSION_PATCH 0
-#define SIDEREON_VERSION_STRING "2.1.0"
+#define SIDEREON_VERSION_PATCH 1
+#define SIDEREON_VERSION_STRING "2.1.1"
 
 #define ANALYSIS_CENTER_C_BYTES 32
 
@@ -21224,10 +21224,11 @@ enum SidereonStatus sidereon_data_next_issue_due_json(const char *center,
  * Copy the ordered cross-line candidates for one predicted IONEX map date
  * as a JSON array.
  *
- * Both CODE predicted lines publish the same official filename for a map
- * date, but the two-day line is produced a day earlier, so `cod_prd2` is
- * routinely published while `cod_prd1` is still absent when CODE runs
- * behind. Candidates are ordered `cod_prd1` first, all cover the SAME map
+ * Both CODE predicted lines cover the same map date, archived under
+ * `CODE/IONO/PRD/` as `COD0OPSP0D` (one-day) and `COD0OPSP1D` (two-day), but
+ * the two-day line is produced a day earlier, so `cod_prd2` is routinely
+ * published while `cod_prd1` is still absent when CODE runs behind.
+ * Candidates are ordered `cod_prd1` first, all cover the SAME map
  * date (never a neighboring day's map), and each keeps its own line
  * identity so resolved provenance names the line actually served. Each
  * element carries `center`, `date`, `sample`, `issue`, `filename`, and
