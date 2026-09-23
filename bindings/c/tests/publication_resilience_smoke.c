@@ -1,9 +1,10 @@
 /* Publication-lag resilience surface (core 0.36.0) through the C ABI.
  *
  * The listing rows below are real records from AIUB's whole-tree CSV as
- * recorded live on 2026-08-04, when the one-day predicted ionosphere line's
- * newest map was day 216 while the two-day line already published day 217 -
- * the archive state the cross-line candidate walk exists for.
+ * recorded live on 2026-09-23, when the one-day predicted ionosphere line's
+ * newest map under CODE/IONO/PRD/ was day 265 while the two-day line already
+ * published day 266 - the archive state the cross-line candidate walk exists
+ * for.
  */
 #include "sidereon.h"
 
@@ -12,14 +13,14 @@
 #include <string.h>
 
 static const char AIUB_LISTING[] =
-    "CODE/IONO/P1/2026/COD0OPSPRD_20262150000_01D_01H_GIM.INX.gz;192455;"
-    "2026-08-03T07:09:51Z;41895730d158d884f98a1e0a88cf267e\n"
-    "CODE/IONO/P1/2026/COD0OPSPRD_20262160000_01D_01H_GIM.INX.gz;187029;"
-    "2026-08-04T06:51:14Z;ca54cbde63323584e040641202b4aa79\n"
-    "CODE/IONO/P2/2026/COD0OPSPRD_20262160000_01D_01H_GIM.INX.gz;189076;"
-    "2026-08-03T07:09:52Z;c46b8e4b33be2fac60eb72c061cffe1a\n"
-    "CODE/IONO/P2/2026/COD0OPSPRD_20262170000_01D_01H_GIM.INX.gz;185825;"
-    "2026-08-04T06:51:15Z;ca33b1eccb3959d36c9c631b6b18ffaa\n";
+    "CODE/IONO/PRD/COD0OPSP0D_20262640000_01D_01H_GIM.INX.gz;194613;"
+    "2026-09-21T10:23:03Z;bf99b9bd1323d4425415edcaef3bd29a\n"
+    "CODE/IONO/PRD/COD0OPSP0D_20262650000_01D_01H_GIM.INX.gz;195173;"
+    "2026-09-22T10:00:02Z;617af90a2d509d1bda329b3cd098d46d\n"
+    "CODE/IONO/PRD/COD0OPSP1D_20262650000_01D_01H_GIM.INX.gz;194282;"
+    "2026-09-21T10:23:04Z;f4650077ba859b418744d48c117c7785\n"
+    "CODE/IONO/PRD/COD0OPSP1D_20262660000_01D_01H_GIM.INX.gz;194061;"
+    "2026-09-22T10:00:02Z;89e17e5d8fcbe79f89e6dd9fafbbd624\n";
 
 static int fail(const char *what) {
     char detail[512] = {0};
@@ -33,10 +34,10 @@ int main(void) {
     size_t written = 0;
     size_t required = 0;
 
-    /* Cross-line candidates for map date 2026-08-05 (day 217): both lines,
-     * same map date, P1 first. */
+    /* Cross-line candidates for map date 2026-09-23 (day 266): both lines,
+     * same map date, one-day first. */
     if (sidereon_data_predicted_ionex_line_candidates_json(
-            2026, 8, 5, NULL, out, sizeof(out), &written, &required) !=
+            2026, 9, 23, NULL, out, sizeof(out), &written, &required) !=
         SIDEREON_STATUS_OK) {
         return fail("predicted_ionex_line_candidates_json");
     }
@@ -46,26 +47,28 @@ int main(void) {
     out[written] = '\0';
     if (strstr((const char *)out, "\"center\":\"cod_prd1\"") == NULL ||
         strstr((const char *)out, "\"center\":\"cod_prd2\"") == NULL ||
-        strstr((const char *)out, "\"date\":\"2026-08-05\"") == NULL ||
+        strstr((const char *)out, "\"date\":\"2026-09-23\"") == NULL ||
         strstr((const char *)out,
-               "/IONO/P2/2026/COD0OPSPRD_20262170000_01D_01H_GIM.INX.gz") == NULL) {
+               "/IONO/PRD/COD0OPSP0D_20262660000_01D_01H_GIM.INX.gz") == NULL ||
+        strstr((const char *)out,
+               "/IONO/PRD/COD0OPSP1D_20262660000_01D_01H_GIM.INX.gz") == NULL) {
         return fail("candidate JSON content");
     }
-    if (strstr((const char *)out, "\"date\":\"2026-08-04\"") != NULL ||
-        strstr((const char *)out, "\"date\":\"2026-08-06\"") != NULL) {
+    if (strstr((const char *)out, "\"date\":\"2026-09-22\"") != NULL ||
+        strstr((const char *)out, "\"date\":\"2026-09-24\"") != NULL) {
         return fail("the walk must never substitute a neighboring map date");
     }
 
-    /* Newest published issue per line from the recorded listing: P1 tops out
-     * at day 216 while P2 already has day 217. */
+    /* Newest published issue per line from the recorded listing: the one-day
+     * line tops out at day 265 while the two-day line already has day 266. */
     if (sidereon_data_newest_published_product_json(
             "cod_prd1", SIDEREON_PRODUCT_FAMILY_IONEX, AIUB_LISTING, out,
             sizeof(out), &written, &required) != SIDEREON_STATUS_OK) {
         return fail("newest_published_product_json cod_prd1");
     }
     out[written] = '\0';
-    if (strstr((const char *)out, "\"date\":\"2026-08-04\"") == NULL ||
-        strstr((const char *)out, "\"observed_at\":\"2026-08-04T06:51:14Z\"") == NULL) {
+    if (strstr((const char *)out, "\"date\":\"2026-09-22\"") == NULL ||
+        strstr((const char *)out, "\"observed_at\":\"2026-09-22T10:00:02Z\"") == NULL) {
         return fail("cod_prd1 newest content");
     }
 
@@ -75,7 +78,8 @@ int main(void) {
         return fail("newest_published_product_json cod_prd2");
     }
     out[written] = '\0';
-    if (strstr((const char *)out, "\"date\":\"2026-08-05\"") == NULL) {
+    if (strstr((const char *)out, "\"date\":\"2026-09-23\"") == NULL ||
+        strstr((const char *)out, "COD0OPSP1D_20262660000_01D_01H_GIM.INX") == NULL) {
         return fail("cod_prd2 newest content");
     }
 
