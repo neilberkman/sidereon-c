@@ -79,6 +79,8 @@ pub enum SidereonSelectionStatus {
     InvalidPolicy = 10,
     /// An epoch computation overflowed the i64 J2000-second axis.
     Overflow = 11,
+    /// A typed IONEX epoch conversion failed.
+    IonexEpoch = 12,
 }
 
 /// Which ephemeris source produced a sourced solution. Mirrors
@@ -115,6 +117,9 @@ pub enum SidereonFallbackStatus {
     /// The broadcast fallback path was taken and its SPP solve failed
     /// (FallbackError::Broadcast).
     BroadcastSolve = 6,
+    /// The selected source read UT1 outside the UT1 table and its UT1 policy
+    /// refused it, on either path.
+    Ut1OutsideCoverage = 7,
 }
 
 /// A staleness policy with the engine default cap (3 days).
@@ -162,7 +167,7 @@ pub unsafe extern "C" fn sidereon_select_sp3_over_range(
     out_selection: *mut *mut SidereonSp3,
     out_metadata: *mut SidereonStalenessMetadata,
 ) -> SidereonSelectionStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_select_sp3_over_range",
         SidereonSelectionStatus::Panic,
         || {
@@ -226,8 +231,8 @@ pub unsafe extern "C" fn sidereon_select_sp3(
     )
 }
 
-/// Select an IONEX product usable across the range [start, end] (J2000 seconds),
-/// degrading to a whole-day diurnal-shifted prior product within policy. On
+/// Select an IONEX product usable across the range [start, end] (integer UTC
+/// seconds since J2000, as for sidereon_ionex_slant_delay), degrading to a whole-day diurnal-shifted prior product within policy. On
 /// success writes a newly owned product to *out_selection (a SidereonIonex usable
 /// with sidereon_ionex_slant_delay and released with sidereon_ionex_free) and the
 /// staleness provenance to *out_metadata. For an exact selection the product is
@@ -247,7 +252,7 @@ pub unsafe extern "C" fn sidereon_select_ionex_over_range(
     out_selection: *mut *mut SidereonIonex,
     out_metadata: *mut SidereonStalenessMetadata,
 ) -> SidereonSelectionStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_select_ionex_over_range",
         SidereonSelectionStatus::Panic,
         || {
@@ -271,7 +276,12 @@ pub unsafe extern "C" fn sidereon_select_ionex_over_range(
             let policy = StalenessPolicy {
                 max_staleness_s: policy.max_staleness_s,
             };
-            match select_ionex_over_range(&set, start_epoch_j2000_s, end_epoch_j2000_s, policy) {
+            match select_ionex_over_range(
+                &set,
+                crate::ionex::ionex_epoch_from_j2000_seconds(start_epoch_j2000_s),
+                crate::ionex::ionex_epoch_from_j2000_seconds(end_epoch_j2000_s),
+                policy,
+            ) {
                 Ok(selection) => {
                     *out_metadata = staleness_metadata_to_c(selection.metadata());
                     write_boxed_handle(
@@ -309,6 +319,104 @@ pub unsafe extern "C" fn sidereon_select_ionex(
         out_selection,
         out_metadata,
     )
+}
+
+/// Select an IONEX product across an exact, scale-tagged interval. The
+/// endpoints retain their split/nanosecond precision through the core
+/// selection call. `out_epoch_error` carries any of the seven typed IONEX
+/// epoch conversion causes.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_select_ionex_over_instant_range(
+    products: *const *const SidereonIonex,
+    product_count: usize,
+    start: *const SidereonClockEpoch,
+    end: *const SidereonClockEpoch,
+    policy: SidereonStalenessPolicy,
+    out_selection: *mut *mut SidereonIonex,
+    out_metadata: *mut SidereonStalenessMetadata,
+    out_epoch_error: *mut SidereonIonexEpochError,
+) -> SidereonSelectionStatus {
+    const FN: &str = "sidereon_select_ionex_over_instant_range";
+    engine_error_operation_boundary(FN, SidereonSelectionStatus::Panic, || {
+        if !out_epoch_error.is_null() {
+            *out_epoch_error = no_ionex_epoch_error();
+        }
+        let out_selection = match require_out(out_selection, FN, "out_selection") {
+            Ok(out) => out,
+            Err(status) => return selection_status_from_ffi(status),
+        };
+        *out_selection = ptr::null_mut();
+        let out_metadata = match require_out(out_metadata, FN, "out_metadata") {
+            Ok(out) => out,
+            Err(status) => return selection_status_from_ffi(status),
+        };
+        *out_metadata = empty_staleness_metadata();
+        let start = match require_ref(start, FN, "start")
+            .and_then(|epoch| clock_epoch_from_c(FN, "start", epoch))
+        {
+            Ok(epoch) => epoch,
+            Err(status) => return selection_status_from_ffi(status),
+        };
+        let end = match require_ref(end, FN, "end")
+            .and_then(|epoch| clock_epoch_from_c(FN, "end", epoch))
+        {
+            Ok(epoch) => epoch,
+            Err(status) => return selection_status_from_ffi(status),
+        };
+        let set = match ionex_products_from_c(FN, products, product_count) {
+            Ok(set) => set,
+            Err(status) => return selection_status_from_ffi(status),
+        };
+        let policy = StalenessPolicy {
+            max_staleness_s: policy.max_staleness_s,
+        };
+        match select_ionex_over_range(&set, start, end, policy) {
+            Ok(selection) => {
+                *out_metadata = staleness_metadata_to_c(selection.metadata());
+                write_boxed_handle(
+                    out_selection,
+                    SidereonIonex {
+                        inner: selection.ionex().clone(),
+                    },
+                );
+                SidereonSelectionStatus::Ok
+            }
+            Err(SelectionError::IonexEpoch(error)) => {
+                if !out_epoch_error.is_null() {
+                    *out_epoch_error = ionex_epoch_error_to_c(&error);
+                }
+                map_selection_error(FN, &SelectionError::IonexEpoch(error))
+            }
+            Err(error) => map_selection_error(FN, &error),
+        }
+    })
+}
+
+/// Select one IONEX product at an exact scale-tagged instant.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_select_ionex_at_instant(
+    products: *const *const SidereonIonex,
+    product_count: usize,
+    requested: *const SidereonClockEpoch,
+    policy: SidereonStalenessPolicy,
+    out_selection: *mut *mut SidereonIonex,
+    out_metadata: *mut SidereonStalenessMetadata,
+    out_epoch_error: *mut SidereonIonexEpochError,
+) -> SidereonSelectionStatus {
+    sidereon_select_ionex_over_instant_range(
+        products,
+        product_count,
+        requested,
+        requested,
+        policy,
+        out_selection,
+        out_metadata,
+        out_epoch_error,
+    )
+}
+
+fn selection_status_from_ffi(status: SidereonStatus) -> SidereonSelectionStatus {
+    marshal_status_to_selection(status)
 }
 
 /// Collect an array of IONEX handle pointers into an owned product slice.

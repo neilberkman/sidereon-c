@@ -29,10 +29,15 @@ pub struct SidereonRangeFdeRow {
 pub struct SidereonRangeFdeOptions {
     /// False-alarm probability for the global chi-square test, in (0, 1).
     pub p_fa: f64,
-    /// Maximum number of measurements the exclusion loop may remove.
+    /// Maximum number of measurements the exclusion loop may remove. The
+    /// default, 1, is RTKLIB demo5's single raim_fde exclusion; a larger budget
+    /// repeats the test and a fresh leave-one-out search on the remaining set.
     pub max_exclusions: usize,
     /// Minimum redundancy (degrees of freedom) an exclusion must leave behind.
     pub min_redundancy: usize,
+    /// The largest unweighted post-fit residual RMS, metres, an exclusion may
+    /// leave; the default is RTKLIB demo5's initial rms of 100 m.
+    pub max_exclusion_rms_m: f64,
 }
 
 /// Global chi-square consistency test, mirroring
@@ -76,8 +81,9 @@ pub struct SidereonRangeFdeResult {
     pub(crate) inner: RangeFdeResult,
 }
 
-/// Initialize SidereonRangeFdeOptions with the engine defaults (RTKLIB demo5
-/// p_fa, unbounded exclusions, minimum redundancy 1).
+/// Initialize SidereonRangeFdeOptions with the engine defaults: RTKLIB demo5's
+/// p_fa, single exclusion and 100 m exclusion RMS cap, and minimum redundancy
+/// 1.
 ///
 /// Safety: options must point to a writable SidereonRangeFdeOptions.
 #[no_mangle]
@@ -98,6 +104,7 @@ pub unsafe extern "C" fn sidereon_range_fde_options_init(
                 p_fa: defaults.p_fa,
                 max_exclusions: defaults.max_exclusions,
                 min_redundancy: defaults.min_redundancy,
+                max_exclusion_rms_m: defaults.max_exclusion_rms_m,
             };
             SidereonStatus::Ok
         },

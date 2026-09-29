@@ -15,8 +15,9 @@
  *      built from fields, encoded to a frame, and decoded back to confirm the
  *      construct -> encode -> decode loop round-trips.
  *
- * Every call delegates to sidereon-core; this program only checks the FFI
- * marshaling and that the engine produces sane numbers. argv[1] is the PPP SP3
+ * Every call delegates to sidereon-core. Each engine value is compared exactly
+ * against sidereon-core's own result for the same inputs, written by
+ * tests/valgen (bin w3_merged) into w3_merged_pins.h. argv[1] is the PPP SP3
  * fixture path used by the auto-init drivers.
  */
 #include <math.h>
@@ -28,6 +29,7 @@
 
 #include "sidereon.h"
 #include "ppp_fixture.h"
+#include "w3_merged_pins.h"
 
 static int failures = 0;
 
@@ -48,6 +50,21 @@ static void check(int ok, const char *what) {
         }
         failures++;
     }
+}
+
+static uint64_t f64_bits(double value) {
+    uint64_t bits;
+    memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+static int bits_equal(const double *values, const uint64_t *expected, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        if (f64_bits(values[i]) != expected[i]) {
+            return 0;
+        }
+    }
+    return 1;
 }
 
 static double bits_to_f64(uint64_t bits) {
@@ -104,12 +121,12 @@ static void test_nequick_slant(void) {
 
     double stec = -1.0;
     check(sidereon_nequick_g_stec_tecu(0.0, 0.0, 0.0, &ray, &stec) == SIDEREON_STATUS_OK &&
-              isfinite(stec) && stec > 0.0,
+              f64_bits(stec) == W3M_NEQUICK_STEC_DEFAULT,
           "nequick_g_stec_tecu default coeffs");
 
     double delay = -1.0;
     check(sidereon_nequick_g_delay_m(0.0, 0.0, 0.0, &ray, f_e1, &delay) == SIDEREON_STATUS_OK &&
-              isfinite(delay) && delay > 0.0,
+              f64_bits(delay) == W3M_NEQUICK_DELAY_DEFAULT,
           "nequick_g_delay_m default coeffs");
 
     /* The delay is the dispersive map of the same slant TEC: delay =
@@ -119,7 +136,7 @@ static void test_nequick_slant(void) {
 
     double stec2 = -1.0;
     check(sidereon_nequick_g_stec_tecu(80.0, 0.1, 0.05, &ray, &stec2) == SIDEREON_STATUS_OK &&
-              stec2 > 0.0,
+              f64_bits(stec2) == W3M_NEQUICK_STEC_BROADCAST,
           "nequick_g_stec_tecu broadcast coeffs");
 }
 
@@ -128,33 +145,32 @@ static void test_nequick_slant(void) {
 static void test_raim_fde(void) {
     /* Six four-state range rows (last column is the receiver clock partial),
      * with a consistent truth and a single large outlier the loop must drop. */
-    const double dx_true[4] = {1.0, 2.0, 3.0, 4.0};
+    const double *dx_true = W3M_RAIM_DX_TRUE;
     const char *ids[6] = {"G01", "G02", "G03", "G04", "G05", "G06"};
-    double design[6][4] = {
-        {0.10, 0.20, 0.97, 1.0}, {0.90, 0.10, 0.42, 1.0}, {-0.50, 0.60, 0.62, 1.0},
-        {0.30, -0.80, 0.52, 1.0}, {-0.70, -0.30, 0.65, 1.0}, {0.20, 0.50, 0.84, 1.0},
-    };
-    const int outlier = 2; /* G03 */
+    const int outlier = W3M_RAIM_OUTLIER; /* G03 */
 
     SidereonRangeFdeRow rows[6];
     for (int i = 0; i < 6; i++) {
         double residual = 0.0;
         for (int k = 0; k < 4; k++) {
-            residual += design[i][k] * dx_true[k];
+            residual += W3M_RAIM_DESIGN[i][k] * dx_true[k];
         }
         if (i == outlier) {
-            residual += 50.0;
+            residual += W3M_RAIM_OUTLIER_M;
         }
         rows[i].id = ids[i];
         rows[i].residual_m = residual;
-        rows[i].design_row = design[i];
+        rows[i].design_row = W3M_RAIM_DESIGN[i];
         rows[i].design_dim = 4;
         rows[i].weight = 1.0;
     }
 
     SidereonRangeFdeOptions options;
     check(sidereon_range_fde_options_init(&options) == SIDEREON_STATUS_OK &&
-              options.p_fa > 0.0 && options.p_fa < 1.0,
+              f64_bits(options.p_fa) == W3M_RAIM_OPTIONS_P_FA &&
+              options.max_exclusions == W3M_RAIM_OPTIONS_MAX_EXCLUSIONS &&
+              options.min_redundancy == W3M_RAIM_OPTIONS_MIN_REDUNDANCY &&
+              f64_bits(options.max_exclusion_rms_m) == W3M_RAIM_OPTIONS_MAX_EXCLUSION_RMS_M,
           "range_fde_options_init");
 
     SidereonRangeFdeResult *result = NULL;
@@ -166,14 +182,15 @@ static void test_raim_fde(void) {
     }
 
     size_t dim = 0;
-    check(sidereon_range_fde_result_state_dim(result, &dim) == SIDEREON_STATUS_OK && dim == 4,
+    check(sidereon_range_fde_result_state_dim(result, &dim) == SIDEREON_STATUS_OK && dim == W3M_RAIM_STATE_DIM,
           "range_fde_result_state_dim");
 
     double dx[4] = {0};
     size_t written = 0, required = 0;
     check(sidereon_range_fde_result_state_correction(result, dx, 4, &written, &required) ==
               SIDEREON_STATUS_OK &&
-              written == 4 && required == 4,
+              written == W3M_RAIM_STATE_DIM && required == W3M_RAIM_STATE_DIM &&
+              bits_equal(dx, W3M_RAIM_STATE_CORRECTION, W3M_RAIM_STATE_DIM),
           "range_fde_result_state_correction");
     double err = 0.0;
     for (int k = 0; k < 4; k++) {
@@ -186,17 +203,23 @@ static void test_raim_fde(void) {
     required = 0;
     check(sidereon_range_fde_result_covariance(result, cov, 16, &written, &required) ==
               SIDEREON_STATUS_OK &&
-              written == 16 && required == 16 && isfinite(cov[0]),
+              written == W3M_RAIM_COVARIANCE_LEN && required == W3M_RAIM_COVARIANCE_LEN &&
+              bits_equal(cov, W3M_RAIM_COVARIANCE, W3M_RAIM_COVARIANCE_LEN),
           "range_fde_result_covariance");
 
     SidereonRangeChiSquareTest test;
     check(sidereon_range_fde_result_global_test(result, &test) == SIDEREON_STATUS_OK &&
-              test.testable && !test.fault_detected && test.has_threshold,
+              test.testable == W3M_RAIM_TEST_TESTABLE &&
+              test.fault_detected == W3M_RAIM_TEST_FAULT_DETECTED &&
+              test.has_threshold == W3M_RAIM_TEST_HAS_THRESHOLD &&
+              f64_bits(test.threshold) == W3M_RAIM_TEST_THRESHOLD &&
+              f64_bits(test.weighted_sum_squares) == W3M_RAIM_TEST_WEIGHTED_SUM_SQUARES &&
+              test.dof == W3M_RAIM_TEST_DOF,
           "range_fde global test passes on the protected set");
 
     size_t iterations = 0;
     check(sidereon_range_fde_result_iterations(result, &iterations) == SIDEREON_STATUS_OK &&
-              iterations == 1,
+              iterations == W3M_RAIM_ITERATIONS,
           "range_fde performed one exclusion");
 
     SidereonRtkId excluded[6];
@@ -204,8 +227,8 @@ static void test_raim_fde(void) {
     required = 0;
     check(sidereon_range_fde_result_excluded(result, excluded, 6, &written, &required) ==
               SIDEREON_STATUS_OK &&
-              written == 1 && required == 1 &&
-              strcmp((const char *)excluded[0].bytes, "G03") == 0,
+              written == W3M_RAIM_EXCLUDED_COUNT && required == W3M_RAIM_EXCLUDED_COUNT &&
+              strcmp((const char *)excluded[0].bytes, W3M_RAIM_EXCLUDED[0]) == 0,
           "range_fde excluded the planted outlier");
 
     SidereonRangeFdeDiagnostic diag[6];
@@ -213,9 +236,16 @@ static void test_raim_fde(void) {
     required = 0;
     check(sidereon_range_fde_result_diagnostics(result, diag, 6, &written, &required) ==
               SIDEREON_STATUS_OK &&
-              written == 6 && required == 6 && diag[outlier].excluded &&
-              fabs(diag[outlier].normalized_residual) > 1.0,
+              written == W3M_RAIM_DIAGNOSTIC_COUNT && required == W3M_RAIM_DIAGNOSTIC_COUNT &&
+              diag[outlier].excluded,
           "range_fde diagnostics flag the outlier");
+    for (size_t i = 0; i < written && i < W3M_RAIM_DIAGNOSTIC_COUNT; i++) {
+        check(strcmp((const char *)diag[i].id.bytes, ids[i]) == 0 &&
+                  diag[i].excluded == W3M_RAIM_DIAGNOSTIC_EXCLUDED[i] &&
+                  f64_bits(diag[i].post_fit_residual_m) == W3M_RAIM_DIAGNOSTIC_POST_FIT[i] &&
+                  f64_bits(diag[i].normalized_residual) == W3M_RAIM_DIAGNOSTIC_NORMALIZED[i],
+              "range_fde diagnostic row");
+    }
 
     sidereon_range_fde_result_free(result);
 }
@@ -323,14 +353,17 @@ static void test_rtk_arc(void) {
 
     size_t epoch_count = 0;
     check(sidereon_rtk_arc_solution_epoch_count(sol, &epoch_count) == SIDEREON_STATUS_OK &&
-              epoch_count == 2,
+              epoch_count == W3M_ARC_EPOCH_COUNT,
           "rtk_arc epoch count");
 
     SidereonRtkArcEpochMetadata meta;
     check(sidereon_rtk_arc_solution_epoch_metadata(sol, 1, &meta) == SIDEREON_STATUS_OK &&
-              meta.used_satellite_count == 5 && meta.sd_ambiguity_count == 5 &&
-              meta.fixed_id_count == 4 && meta.integer_fixed && meta.residual_count == 4 &&
-              isfinite(meta.reported_baseline_m[0]),
+              meta.used_satellite_count == W3M_ARC_E1_USED_SATELLITE_COUNT &&
+              meta.sd_ambiguity_count == W3M_ARC_E1_SD_AMBIGUITY_COUNT &&
+              meta.fixed_id_count == W3M_ARC_E1_FIXED_ID_COUNT &&
+              meta.integer_fixed == W3M_ARC_E1_INTEGER_FIXED &&
+              meta.residual_count == W3M_ARC_E1_RESIDUAL_COUNT &&
+              bits_equal(meta.reported_baseline_m, W3M_ARC_E1_REPORTED_BASELINE, 3),
           "rtk_arc epoch metadata");
 
     double err = 0.0;
@@ -343,43 +376,58 @@ static void test_rtk_arc(void) {
     size_t written = 0, required = 0;
     check(sidereon_rtk_arc_solution_epoch_used_satellites(sol, 1, used, 8, &written, &required) ==
               SIDEREON_STATUS_OK &&
-              written == 5 && required == 5,
+              written == W3M_ARC_E1_USED_SATELLITE_COUNT &&
+              required == W3M_ARC_E1_USED_SATELLITE_COUNT,
           "rtk_arc used satellites");
+    for (size_t i = 0; i < written && i < W3M_ARC_E1_USED_SATELLITE_COUNT; i++) {
+        check(strcmp((const char *)used[i].bytes, W3M_ARC_E1_USED_SATELLITES[i]) == 0,
+              "rtk_arc used satellite id");
+    }
 
     SidereonRtkAmbiguity amb[8];
     written = 0;
     required = 0;
     check(sidereon_rtk_arc_solution_epoch_sd_ambiguities(sol, 1, amb, 8, &written, &required) ==
               SIDEREON_STATUS_OK &&
-              written == required && required == meta.sd_ambiguity_count && required > 0 &&
-              isfinite(amb[0].value_m),
+              written == required && required == W3M_ARC_E1_SD_AMBIGUITY_COUNT,
           "rtk_arc sd ambiguities");
+    for (size_t i = 0; i < written && i < W3M_ARC_E1_SD_AMBIGUITY_COUNT; i++) {
+        check(strcmp((const char *)amb[i].id.bytes, W3M_ARC_E1_SD_AMBIGUITY_IDS[i]) == 0 &&
+                  f64_bits(amb[i].value_m) == W3M_ARC_E1_SD_AMBIGUITIES[i],
+              "rtk_arc sd ambiguity");
+    }
 
     SidereonRtkId fixed_ids[8];
     written = 0;
     required = 0;
     check(sidereon_rtk_arc_solution_epoch_string_ids(
               sol, 1, SIDEREON_RTK_ARC_EPOCH_ID_LIST_FIXED_IDS, fixed_ids, 8, &written, &required) ==
-              SIDEREON_STATUS_OK,
+              SIDEREON_STATUS_OK &&
+              written == W3M_ARC_E1_FIXED_ID_COUNT && required == W3M_ARC_E1_FIXED_ID_COUNT,
           "rtk_arc fixed id list");
+    for (size_t i = 0; i < written && i < W3M_ARC_E1_FIXED_ID_COUNT; i++) {
+        check(strcmp((const char *)fixed_ids[i].bytes, W3M_ARC_E1_FIXED_IDS[i]) == 0,
+              "rtk_arc fixed id");
+    }
 
     SidereonRtkArcReferenceOut refs[4];
     written = 0;
     required = 0;
     check(sidereon_rtk_arc_solution_references(sol, refs, 4, &written, &required) ==
               SIDEREON_STATUS_OK &&
-              written == required && required >= 1 &&
-              strcmp((const char *)refs[0].system.bytes, "G") == 0,
+              written == required && required == W3M_ARC_REFERENCE_COUNT &&
+              strcmp((const char *)refs[0].system.bytes, W3M_ARC_REFERENCE0_SYSTEM) == 0 &&
+              strcmp((const char *)refs[0].reference_id.bytes, W3M_ARC_REFERENCE0_ID) == 0,
           "rtk_arc references");
 
     double final_baseline[3] = {0};
     check(sidereon_rtk_arc_solution_final_baseline(sol, final_baseline, 3) == SIDEREON_STATUS_OK &&
-              isfinite(final_baseline[0]),
+              bits_equal(final_baseline, W3M_ARC_FINAL_BASELINE, 3),
           "rtk_arc final baseline");
 
     size_t final_epochs = 0;
     check(sidereon_rtk_arc_solution_final_epoch_count(sol, &final_epochs) == SIDEREON_STATUS_OK &&
-              final_epochs == 2,
+              final_epochs == W3M_ARC_FINAL_EPOCH_COUNT,
           "rtk_arc final epoch count");
 
     sidereon_rtk_arc_solution_free(sol);
@@ -401,28 +449,38 @@ static void test_rtk_arc(void) {
         double fixed_baseline[3] = {0};
         check(sidereon_rtk_static_arc_solution_float_baseline_ecef(static_sol, float_baseline, 3) ==
                       SIDEREON_STATUS_OK &&
-                  isfinite(float_baseline[0]),
+                  bits_equal(float_baseline, W3M_STATIC_FLOAT_BASELINE, 3),
               "static_rtk_arc float baseline");
         check(sidereon_rtk_static_arc_solution_fixed_baseline_ecef(static_sol, fixed_baseline, 3) ==
                       SIDEREON_STATUS_OK &&
-                  isfinite(fixed_baseline[0]),
+                  bits_equal(fixed_baseline, W3M_STATIC_FIXED_BASELINE, 3),
               "static_rtk_arc fixed baseline");
 
         SidereonRtkFixedMetadata fixed_meta;
         check(sidereon_rtk_static_arc_solution_fixed_metadata(static_sol, &fixed_meta) ==
                       SIDEREON_STATUS_OK &&
-                  fixed_meta.fixed_ambiguity_count > 0 &&
-                  fixed_meta.geometry_quality.tier == SIDEREON_OBSERVABILITY_TIER_NOMINAL &&
-                  fixed_meta.geometry_quality.covariance_validated &&
-                  fixed_meta.integer_status == SIDEREON_RTK_INTEGER_STATUS_FIXED,
+                  fixed_meta.fixed_ambiguity_count == W3M_STATIC_FIXED_AMBIGUITY_COUNT &&
+                  fixed_meta.geometry_quality.tier == W3M_STATIC_FIXED_GEOMETRY_TIER &&
+                  fixed_meta.geometry_quality.redundancy ==
+                      W3M_STATIC_FIXED_GEOMETRY_REDUNDANCY &&
+                  fixed_meta.geometry_quality.rank == W3M_STATIC_FIXED_GEOMETRY_RANK &&
+                  fixed_meta.geometry_quality.covariance_validated ==
+                      W3M_STATIC_FIXED_GEOMETRY_COVARIANCE_VALIDATED &&
+                  fixed_meta.integer_status == W3M_STATIC_INTEGER_STATUS,
               "static_rtk_arc fixed metadata");
 
         SidereonGeometryQuality static_geometry;
         check(sidereon_rtk_static_arc_solution_geometry_quality(static_sol, &static_geometry) ==
                       SIDEREON_STATUS_OK &&
-                  static_geometry.tier == fixed_meta.geometry_quality.tier &&
-                  static_geometry.redundancy == fixed_meta.geometry_quality.redundancy &&
-                  static_geometry.covariance_validated,
+                  static_geometry.tier == W3M_STATIC_GEOMETRY_TIER &&
+                  static_geometry.redundancy == W3M_STATIC_GEOMETRY_REDUNDANCY &&
+                  static_geometry.rank == W3M_STATIC_GEOMETRY_RANK &&
+                  f64_bits(static_geometry.condition_number) ==
+                      W3M_STATIC_GEOMETRY_CONDITION_NUMBER &&
+                  f64_bits(static_geometry.gdop) == W3M_STATIC_GEOMETRY_GDOP &&
+                  static_geometry.raim_checkable == W3M_STATIC_GEOMETRY_RAIM_CHECKABLE &&
+                  static_geometry.covariance_validated ==
+                      W3M_STATIC_GEOMETRY_COVARIANCE_VALIDATED,
               "static_rtk_arc geometry quality");
 
         SidereonRtkFixedAmbiguity static_fixed[8];
@@ -430,7 +488,7 @@ static void test_rtk_arc(void) {
         required = 0;
         check(sidereon_rtk_static_arc_solution_fixed_ambiguities(static_sol, static_fixed, 8, &written,
                                                                  &required) == SIDEREON_STATUS_OK &&
-                  written == required && required > 0,
+                  written == required && required == W3M_STATIC_FIXED_AMBIGUITY_COUNT,
               "static_rtk_arc fixed ambiguities");
 
         SidereonRtkAmbiguitySatelliteOut ambiguity_sats[8];
@@ -438,7 +496,7 @@ static void test_rtk_arc(void) {
         required = 0;
         check(sidereon_rtk_static_arc_solution_ambiguity_satellites(
                   static_sol, ambiguity_sats, 8, &written, &required) == SIDEREON_STATUS_OK &&
-                  written == required && required > 0,
+                  written == required && required == W3M_STATIC_AMBIGUITY_SATELLITE_COUNT,
               "static_rtk_arc ambiguity satellites");
 
         sidereon_rtk_static_arc_solution_free(static_sol);
@@ -481,26 +539,27 @@ static void test_rtk_arc(void) {
         required = 0;
         check(sidereon_rtk_arc_solution_split_cycle_slip_arcs(
                   split_sol, split_arcs, 8, &written, &required) == SIDEREON_STATUS_OK &&
-                  written == required && required >= 2,
+                  written == required && required == W3M_SPLIT_ARC_COUNT,
               "rtk_arc split cycle-slip arc metadata");
-        int saw_rover_split = 0;
-        for (size_t i = 0; i < written; i++) {
-            if (split_arcs[i].receiver == SIDEREON_RTK_CYCLE_SLIP_RECEIVER_ROVER &&
-                strcmp((const char *)split_arcs[i].satellite_id.bytes, "G02") == 0 &&
-                strstr((const char *)split_arcs[i].ambiguity_id.bytes, "G02@rover#") != NULL &&
-                split_arcs[i].n_epochs >= 1) {
-                saw_rover_split = 1;
-            }
+        for (size_t i = 0; i < written && i < W3M_SPLIT_ARC_COUNT; i++) {
+            check(split_arcs[i].receiver == W3M_SPLIT_ARC_RECEIVERS[i] &&
+                      strcmp((const char *)split_arcs[i].satellite_id.bytes,
+                             W3M_SPLIT_ARC_SATELLITES[i]) == 0 &&
+                      strcmp((const char *)split_arcs[i].ambiguity_id.bytes,
+                             W3M_SPLIT_ARC_AMBIGUITIES[i]) == 0 &&
+                      split_arcs[i].start_epoch_index == W3M_SPLIT_ARC_STARTS[i] &&
+                      split_arcs[i].end_epoch_index == W3M_SPLIT_ARC_ENDS[i] &&
+                      split_arcs[i].n_epochs == W3M_SPLIT_ARC_N_EPOCHS[i],
+                  "rtk_arc split cycle-slip arc content");
         }
-        check(saw_rover_split, "rtk_arc split cycle-slip arc content");
 
         SidereonSatelliteToken masked[5];
         written = 0;
         required = 0;
         check(sidereon_rtk_arc_solution_elevation_masked_sats(split_sol, masked, 5, &written,
                                                               &required) == SIDEREON_STATUS_OK &&
-                  written == required && required == 1 &&
-                  strcmp((const char *)masked[0].bytes, "G05") == 0,
+                  written == required && required == W3M_SPLIT_MASKED_COUNT &&
+                  strcmp((const char *)masked[0].bytes, W3M_SPLIT_MASKED[0]) == 0,
               "rtk_arc elevation masked satellites metadata");
 
         double covariance[128];
@@ -508,14 +567,15 @@ static void test_rtk_arc(void) {
         required = 0;
         check(sidereon_rtk_arc_solution_measurement_covariance(split_sol, NULL, 0, &written,
                                                                &required) == SIDEREON_STATUS_OK &&
-                  written == 0 && required > 0 && required <= 128,
+                  written == 0 && required == W3M_SPLIT_COVARIANCE_LEN && required <= 128,
               "rtk_arc covariance metadata sizing");
         if (required > 0 && required <= 128) {
             written = 0;
             size_t required_again = 0;
             check(sidereon_rtk_arc_solution_measurement_covariance(
                       split_sol, covariance, 128, &written, &required_again) == SIDEREON_STATUS_OK &&
-                      written == required_again && required_again == required && isfinite(covariance[0]),
+                      written == required_again && required_again == required &&
+                      bits_equal(covariance, W3M_SPLIT_COVARIANCE, W3M_SPLIT_COVARIANCE_LEN),
                   "rtk_arc covariance metadata values");
         }
 
@@ -535,8 +595,8 @@ static void test_rtk_arc(void) {
         required = 0;
         check(sidereon_rtk_arc_solution_dropped_sats(drop_sol, dropped, 5, &written, &required) ==
                       SIDEREON_STATUS_OK &&
-                  written == required && required == 1 &&
-                  strcmp((const char *)dropped[0].bytes, "G02") == 0,
+                  written == required && required == W3M_DROP_COUNT &&
+                  strcmp((const char *)dropped[0].bytes, W3M_DROPPED[0]) == 0,
               "rtk_arc dropped satellites metadata");
         sidereon_rtk_arc_solution_free(drop_sol);
     }
@@ -619,16 +679,19 @@ static void test_rtk_dual_arc_drivers(void) {
     size_t epoch_count = 0;
     check(sidereon_rtk_wide_lane_arc_solution_epoch_count(wl_sol, &epoch_count) ==
                   SIDEREON_STATUS_OK &&
-              epoch_count == 3,
+              epoch_count == W3M_WL_EPOCH_COUNT,
           "wide_lane_rtk_arc epoch count");
 
     SidereonGeometryQuality wl_geometry;
     check(sidereon_rtk_wide_lane_arc_solution_geometry_quality(wl_sol, &wl_geometry) ==
                   SIDEREON_STATUS_OK &&
-              wl_geometry.tier == SIDEREON_OBSERVABILITY_TIER_NOMINAL &&
-              wl_geometry.rank > 0 && wl_geometry.redundancy > 0 &&
-              isfinite(wl_geometry.condition_number) && isfinite(wl_geometry.gdop) &&
-              wl_geometry.covariance_validated,
+              wl_geometry.tier == W3M_WL_GEOMETRY_TIER &&
+              wl_geometry.rank == W3M_WL_GEOMETRY_RANK &&
+              wl_geometry.redundancy == W3M_WL_GEOMETRY_REDUNDANCY &&
+              f64_bits(wl_geometry.condition_number) == W3M_WL_GEOMETRY_CONDITION_NUMBER &&
+              f64_bits(wl_geometry.gdop) == W3M_WL_GEOMETRY_GDOP &&
+              wl_geometry.raim_checkable == W3M_WL_GEOMETRY_RAIM_CHECKABLE &&
+              wl_geometry.covariance_validated == W3M_WL_GEOMETRY_COVARIANCE_VALIDATED,
           "wide_lane_rtk_arc geometry quality");
 
     SidereonRtkWideLaneCycle cycles[8];
@@ -636,15 +699,22 @@ static void test_rtk_dual_arc_drivers(void) {
     size_t required = 0;
     check(sidereon_rtk_wide_lane_arc_solution_wide_lane_cycles(wl_sol, cycles, 8, &written,
                                                                &required) == SIDEREON_STATUS_OK &&
-              written == required && required > 0,
+              written == required && required == W3M_WL_CYCLE_COUNT,
           "wide_lane_rtk_arc cycles");
+    for (size_t i = 0; i < written && i < W3M_WL_CYCLE_COUNT; i++) {
+        check(strcmp((const char *)cycles[i].id.bytes, W3M_WL_CYCLE_IDS[i]) == 0 &&
+                  cycles[i].cycles == W3M_WL_CYCLES[i],
+              "wide_lane_rtk_arc cycle");
+    }
+    /* The ionosphere-free preparation below takes every wide-lane cycle. */
+    const size_t cycle_count = written;
 
     SidereonRtkArcReferenceOut refs[4];
     written = 0;
     required = 0;
     check(sidereon_rtk_wide_lane_arc_solution_references(wl_sol, refs, 4, &written, &required) ==
                   SIDEREON_STATUS_OK &&
-              written == required && required == 1,
+              written == required && required == W3M_WL_REFERENCE_COUNT,
           "wide_lane_rtk_arc references");
 
     SidereonRtkIonosphereFreeArcConfig if_config;
@@ -656,7 +726,7 @@ static void test_rtk_dual_arc_drivers(void) {
     if_config.apply_troposphere = false;
 
     SidereonRtkIonosphereFreeArcSolution *if_sol = NULL;
-    check(sidereon_prepare_ionosphere_free_rtk_arc(epochs, 3, cycles, written, &if_config,
+    check(sidereon_prepare_ionosphere_free_rtk_arc(epochs, 3, cycles, cycle_count, &if_config,
                                                    &if_sol) == SIDEREON_STATUS_OK &&
               if_sol != NULL,
           "prepare_ionosphere_free_rtk_arc");
@@ -664,7 +734,7 @@ static void test_rtk_dual_arc_drivers(void) {
         epoch_count = 0;
         check(sidereon_rtk_ionosphere_free_arc_solution_epoch_count(if_sol, &epoch_count) ==
                       SIDEREON_STATUS_OK &&
-                  epoch_count == 3,
+                  epoch_count == W3M_IF_EPOCH_COUNT,
               "ionosphere_free_rtk_arc epoch count");
 
         SidereonRtkMapValue wavelengths[8];
@@ -673,7 +743,8 @@ static void test_rtk_dual_arc_drivers(void) {
         check(sidereon_rtk_ionosphere_free_arc_solution_wavelengths_m(if_sol, wavelengths, 8,
                                                                       &written, &required) ==
                       SIDEREON_STATUS_OK &&
-                  written == required && required > 0 && isfinite(wavelengths[0].value),
+                  written == required && required == W3M_IF_WAVELENGTH_COUNT &&
+                  f64_bits(wavelengths[0].value) == W3M_IF_WAVELENGTHS[0],
               "ionosphere_free_rtk_arc wavelengths");
 
         SidereonRtkMapValue offsets[8];
@@ -681,14 +752,16 @@ static void test_rtk_dual_arc_drivers(void) {
         required = 0;
         check(sidereon_rtk_ionosphere_free_arc_solution_offsets_m(if_sol, offsets, 8, &written,
                                                                   &required) == SIDEREON_STATUS_OK &&
-                  written == required && required > 0 && isfinite(offsets[0].value),
+                  written == required && required == W3M_IF_OFFSET_COUNT &&
+                  f64_bits(offsets[0].value) == W3M_IF_OFFSETS[0],
               "ionosphere_free_rtk_arc offsets");
 
         SidereonRtkArcEpochOutMetadata meta;
         check(sidereon_rtk_ionosphere_free_arc_solution_epoch_metadata(if_sol, 0, &meta) ==
                       SIDEREON_STATUS_OK &&
-                  meta.base_count > 0 && meta.rover_count > 0 &&
-                  meta.satellite_position_count > 0,
+                  meta.base_count == W3M_IF_E0_BASE_COUNT &&
+                  meta.rover_count == W3M_IF_E0_ROVER_COUNT &&
+                  meta.satellite_position_count == W3M_IF_E0_POSITION_COUNT,
               "ionosphere_free_rtk_arc epoch metadata");
 
         SidereonRtkArcObservationOut base_obs[8];
@@ -697,7 +770,7 @@ static void test_rtk_dual_arc_drivers(void) {
         check(sidereon_rtk_ionosphere_free_arc_solution_epoch_base_observations(
                   if_sol, 0, base_obs, 8, &written, &required) == SIDEREON_STATUS_OK &&
                   written == required && required == meta.base_count &&
-                  strcmp((const char *)base_obs[0].sat_id.bytes, "G01") == 0,
+                  strcmp((const char *)base_obs[0].sat_id.bytes, W3M_IF_E0_BASE0_SAT) == 0,
               "ionosphere_free_rtk_arc base observations");
 
         SidereonRtkArcPositionOut pos[8];
@@ -725,6 +798,12 @@ static void fill_ppp_epochs(SidereonPppObservation observations[PPP_OBS_COUNT],
         observations[i].phase_m = bits_to_f64(PPP_OBS_PHASE_BITS[i]);
         observations[i].freq1_hz = bits_to_f64(PPP_OBS_FREQ1_HZ_BITS[i]);
         observations[i].freq2_hz = bits_to_f64(PPP_OBS_FREQ2_HZ_BITS[i]);
+        observations[i].code1_signal = NULL;
+        observations[i].code2_signal = NULL;
+        observations[i].phase1_signal = NULL;
+        observations[i].phase2_signal = NULL;
+        observations[i].has_glonass_channel = false;
+        observations[i].glonass_channel = 0;
     }
     for (size_t i = 0; i < PPP_EPOCH_COUNT; i++) {
         epochs[i].civil.year = PPP_EPOCH_YEARS[i];
@@ -787,8 +866,21 @@ static void test_ppp_auto_init(const char *sp3_path) {
 
     SidereonPppAutoInitOptions options;
     check(sidereon_ppp_auto_init_options_init(&options) == SIDEREON_STATUS_OK &&
-              !options.has_initial_guess && options.spp_pressure_hpa > 0.0,
+              options.has_initial_guess == W3M_PPP_AUTO_HAS_INITIAL_GUESS &&
+              f64_bits(options.spp_pressure_hpa) == W3M_PPP_AUTO_SPP_PRESSURE_HPA,
           "ppp_auto_init_options_init");
+
+    size_t sp3_epochs_before = 0;
+    check(sidereon_sp3_epoch_count(sp3, &sp3_epochs_before) == SIDEREON_STATUS_OK,
+          "ppp alias control reads live sp3 before refusal");
+    check(sidereon_solve_ppp_auto_init_float(
+              sp3, &float_config, &options,
+              (SidereonPppFloatSolution **)(void *)sp3) == SIDEREON_STATUS_INVALID_ARGUMENT,
+          "ppp auto-init float refuses output overlapping live sp3 handle");
+    size_t sp3_epochs_after = 0;
+    check(sidereon_sp3_epoch_count(sp3, &sp3_epochs_after) == SIDEREON_STATUS_OK &&
+              sp3_epochs_after == sp3_epochs_before,
+          "ppp auto-init float overlap refusal preserves sp3 handle");
 
     SidereonPppFloatSolution *float_sol = NULL;
     check(sidereon_solve_ppp_auto_init_float(sp3, &float_config, &options, &float_sol) ==
@@ -798,9 +890,27 @@ static void test_ppp_auto_init(const char *sp3_path) {
     if (float_sol) {
         double position[3] = {0};
         check(sidereon_ppp_float_solution_position(float_sol, position, 3) == SIDEREON_STATUS_OK &&
-                  isfinite(position[0]) && fabs(position[0]) > 1.0e6,
+                  bits_equal(position, W3M_PPP_AUTO_FLOAT_POSITION, 3),
               "ppp auto-init float position");
         sidereon_ppp_float_solution_free(float_sol);
+    }
+
+    union {
+        SidereonPppFloatConfig config;
+        SidereonPppFloatSolution *solution;
+    } aliased_float;
+    aliased_float.config = float_config;
+    check(sidereon_solve_ppp_auto_init_float(sp3, &aliased_float.config, &options,
+                                             &aliased_float.solution) == SIDEREON_STATUS_OK &&
+              aliased_float.solution != NULL,
+          "ppp auto-init float snapshots config before writing aliased output");
+    if (aliased_float.solution) {
+        double position[3] = {0};
+        check(sidereon_ppp_float_solution_position(aliased_float.solution, position, 3) ==
+                  SIDEREON_STATUS_OK &&
+                  bits_equal(position, W3M_PPP_AUTO_FLOAT_POSITION, 3),
+              "ppp auto-init float aliased output matches disjoint result");
+        sidereon_ppp_float_solution_free(aliased_float.solution);
     }
 
     SidereonPppFixedConfig fixed_config;
@@ -829,6 +939,14 @@ static void test_ppp_auto_init(const char *sp3_path) {
     fixed_config.ambiguity.offset_count = PPP_FIXED_AMBIGUITY_COUNT;
     fixed_config.ambiguity.ratio_threshold = bits_to_f64(PPP_FIXED_RATIO_THRESHOLD_BITS);
 
+    check(sidereon_solve_ppp_auto_init_fixed(
+              sp3, &float_config, &fixed_config, &options,
+              (SidereonPppFixedSolution **)(void *)sp3) == SIDEREON_STATUS_INVALID_ARGUMENT,
+          "ppp auto-init fixed refuses output overlapping live sp3 handle");
+    check(sidereon_sp3_epoch_count(sp3, &sp3_epochs_after) == SIDEREON_STATUS_OK &&
+              sp3_epochs_after == sp3_epochs_before,
+          "ppp auto-init fixed overlap refusal preserves sp3 handle");
+
     SidereonPppFixedSolution *fixed_sol = NULL;
     check(sidereon_solve_ppp_auto_init_fixed(sp3, &float_config, &fixed_config, &options,
                                              &fixed_sol) == SIDEREON_STATUS_OK &&
@@ -837,9 +955,28 @@ static void test_ppp_auto_init(const char *sp3_path) {
     if (fixed_sol) {
         double position[3] = {0};
         check(sidereon_ppp_fixed_solution_position(fixed_sol, position, 3) == SIDEREON_STATUS_OK &&
-                  isfinite(position[0]) && fabs(position[0]) > 1.0e6,
+                  bits_equal(position, W3M_PPP_AUTO_FIXED_POSITION, 3),
               "ppp auto-init fixed position");
         sidereon_ppp_fixed_solution_free(fixed_sol);
+    }
+
+    union {
+        SidereonPppFixedConfig config;
+        SidereonPppFixedSolution *solution;
+    } aliased_fixed;
+    aliased_fixed.config = fixed_config;
+    check(sidereon_solve_ppp_auto_init_fixed(sp3, &float_config, &aliased_fixed.config,
+                                             &options, &aliased_fixed.solution) ==
+                  SIDEREON_STATUS_OK &&
+              aliased_fixed.solution != NULL,
+          "ppp auto-init fixed snapshots config before writing aliased output");
+    if (aliased_fixed.solution) {
+        double position[3] = {0};
+        check(sidereon_ppp_fixed_solution_position(aliased_fixed.solution, position, 3) ==
+                  SIDEREON_STATUS_OK &&
+                  bits_equal(position, W3M_PPP_AUTO_FIXED_POSITION, 3),
+              "ppp auto-init fixed aliased output matches disjoint result");
+        sidereon_ppp_fixed_solution_free(aliased_fixed.solution);
     }
 
     sidereon_sp3_free(sp3);
@@ -876,6 +1013,9 @@ static SidereonRtcmMessages *roundtrip(SidereonRtcmMessages *built, const char *
     return decoded;
 }
 
+/* Each constructed message is compared, after encode and decode, with the
+ * fields it was built from. The captured 1046 frame is compared with
+ * sidereon-core's decode of it (tests/valgen, bin w3_merged). */
 static void test_rtcm_construct(void) {
     /* 1006 station coordinates. */
     SidereonRtcmStationCoordinates station;
@@ -896,23 +1036,31 @@ static void test_rtcm_construct(void) {
     if (decoded) {
         SidereonRtcmStationCoordinates got;
         check(sidereon_rtcm_message_station_coordinates(decoded, 0, &got) == SIDEREON_STATUS_OK &&
-                  got.message_number == 1006 && got.reference_station_id == 2003 &&
-                  got.ecef_x == station.ecef_x && got.has_antenna_height &&
+                  got.message_number == station.message_number &&
+                  got.reference_station_id == station.reference_station_id &&
+                  got.itrf_realization_year == station.itrf_realization_year &&
+                  got.gps_indicator == station.gps_indicator &&
+                  got.ecef_x == station.ecef_x && got.ecef_y == station.ecef_y &&
+                  got.ecef_z == station.ecef_z &&
+                  got.has_antenna_height == station.has_antenna_height &&
                   got.antenna_height == station.antenna_height,
               "rtcm station construct fields");
         sidereon_rtcm_messages_free(decoded);
     }
 
     /* 1008 antenna descriptor (descriptor + serial). */
+    const uint16_t antenna_message = 1008;
+    const char *antenna_descriptor = "TRM59800.00";
     built = NULL;
-    check(sidereon_rtcm_build_antenna_descriptor(1008, 2003, 1, "TRM59800.00", "1440812345", NULL,
-                                                 NULL, NULL, &built) == SIDEREON_STATUS_OK,
+    check(sidereon_rtcm_build_antenna_descriptor(antenna_message, 2003, 1, antenna_descriptor,
+                                                 "1440812345", NULL, NULL, NULL, &built) ==
+              SIDEREON_STATUS_OK,
           "rtcm_build_antenna_descriptor");
     decoded = roundtrip(built, "rtcm antenna construct round-trip");
     if (decoded) {
         SidereonRtcmAntennaDescriptor got;
         check(sidereon_rtcm_message_antenna_descriptor(decoded, 0, &got) == SIDEREON_STATUS_OK &&
-                  got.message_number == 1008 && got.has_antenna_serial_number &&
+                  got.message_number == antenna_message && got.has_antenna_serial_number &&
                   !got.has_receiver_type,
               "rtcm antenna construct fields");
         char descriptor[64];
@@ -921,10 +1069,11 @@ static void test_rtcm_construct(void) {
                   decoded, 0, SIDEREON_RTCM_ANTENNA_STRING_FIELD_ANTENNA_DESCRIPTOR,
                   (uint8_t *)descriptor, sizeof(descriptor), &written, &required) ==
                   SIDEREON_STATUS_OK &&
-                  required == strlen("TRM59800.00"),
+                  required == strlen(antenna_descriptor),
               "rtcm antenna construct descriptor string");
         descriptor[written] = '\0';
-        check(strcmp(descriptor, "TRM59800.00") == 0, "rtcm antenna construct descriptor value");
+        check(strcmp(descriptor, antenna_descriptor) == 0,
+              "rtcm antenna construct descriptor value");
         sidereon_rtcm_messages_free(decoded);
     }
 
@@ -943,8 +1092,8 @@ static void test_rtcm_construct(void) {
     if (decoded) {
         SidereonRtcmGpsEphemeris got;
         check(sidereon_rtcm_message_gps_ephemeris(decoded, 0, &got) == SIDEREON_STATUS_OK &&
-                  got.satellite_id == 8 && got.week_number == 123 && got.a_f0 == 12345 &&
-                  got.sqrt_a == gps.sqrt_a,
+                  got.satellite_id == gps.satellite_id && got.week_number == gps.week_number &&
+                  got.a_f0 == gps.a_f0 && got.t_oe == gps.t_oe && got.sqrt_a == gps.sqrt_a,
               "rtcm gps ephemeris construct fields");
         sidereon_rtcm_messages_free(decoded);
     }
@@ -963,7 +1112,9 @@ static void test_rtcm_construct(void) {
     if (decoded) {
         SidereonRtcmGlonassEphemeris got;
         check(sidereon_rtcm_message_glonass_ephemeris(decoded, 0, &got) == SIDEREON_STATUS_OK &&
-                  got.satellite_id == 5 && got.frequency_channel == 8 && got.m_n_t == 700,
+                  got.satellite_id == glo.satellite_id &&
+                  got.frequency_channel == glo.frequency_channel && got.m_n_t == glo.m_n_t &&
+                  got.t_b == glo.t_b,
               "rtcm glonass ephemeris construct fields");
         sidereon_rtcm_messages_free(decoded);
     }
@@ -986,8 +1137,9 @@ static void test_rtcm_construct(void) {
     if (decoded) {
         SidereonRtcmBeidouEphemeris got;
         check(sidereon_rtcm_message_beidou_ephemeris(decoded, 0, &got) == SIDEREON_STATUS_OK &&
-                  got.satellite_id == 19 && got.week_number == 902 && got.aode == 17 &&
-                  got.a_f0 == -45678 && got.sqrt_a == bds.sqrt_a,
+                  got.satellite_id == bds.satellite_id && got.week_number == bds.week_number &&
+                  got.aode == bds.aode && got.t_oc == bds.t_oc && got.a_f1 == bds.a_f1 &&
+                  got.a_f0 == bds.a_f0 && got.sqrt_a == bds.sqrt_a && got.t_oe == bds.t_oe,
               "rtcm beidou ephemeris construct fields");
         sidereon_rtcm_messages_free(decoded);
     }
@@ -1010,8 +1162,10 @@ static void test_rtcm_construct(void) {
     if (decoded) {
         SidereonRtcmQzssEphemeris got;
         check(sidereon_rtcm_message_qzss_ephemeris(decoded, 0, &got) == SIDEREON_STATUS_OK &&
-                  got.satellite_id == 3 && got.week_number == 123 && got.iode == 11 &&
-                  got.codes_on_l2 == 1 && got.sqrt_a == qzs.sqrt_a,
+                  got.satellite_id == qzs.satellite_id && got.week_number == qzs.week_number &&
+                  got.iode == qzs.iode && got.t_oc == qzs.t_oc && got.a_f0 == qzs.a_f0 &&
+                  got.codes_on_l2 == qzs.codes_on_l2 && got.sqrt_a == qzs.sqrt_a &&
+                  got.t_oe == qzs.t_oe,
               "rtcm qzss ephemeris construct fields");
         sidereon_rtcm_messages_free(decoded);
     }
@@ -1037,8 +1191,11 @@ static void test_rtcm_construct(void) {
         SidereonRtcmGalileoFnavEphemeris got;
         check(sidereon_rtcm_message_galileo_fnav_ephemeris(decoded, 0, &got) ==
                       SIDEREON_STATUS_OK &&
-                  got.satellite_id == 12 && got.week_number == 1402 && got.iod_nav == 7 &&
-                  got.a_f0 == -471483 && got.sqrt_a == gal_fnav.sqrt_a,
+                  got.satellite_id == gal_fnav.satellite_id &&
+                  got.week_number == gal_fnav.week_number && got.iod_nav == gal_fnav.iod_nav &&
+                  got.sisa == gal_fnav.sisa && got.t_oc == gal_fnav.t_oc &&
+                  got.a_f1 == gal_fnav.a_f1 && got.a_f0 == gal_fnav.a_f0 &&
+                  got.sqrt_a == gal_fnav.sqrt_a && got.t_oe == gal_fnav.t_oe,
               "rtcm galileo fnav ephemeris construct fields");
         sidereon_rtcm_messages_free(decoded);
     }
@@ -1066,24 +1223,22 @@ static void test_rtcm_construct(void) {
         SidereonRtcmGalileoInavEphemeris got;
         check(sidereon_rtcm_message_galileo_inav_ephemeris(decoded, 0, &got) ==
                       SIDEREON_STATUS_OK &&
-                  got.satellite_id == 3 && got.week_number == 1402 && got.iod_nav == 7 &&
-                  got.a_f0 == -471483 && got.sqrt_a == gal_inav.sqrt_a &&
-                  got.bgd_e5b_e1 == 7,
+                  got.satellite_id == gal_inav.satellite_id &&
+                  got.week_number == gal_inav.week_number && got.iod_nav == gal_inav.iod_nav &&
+                  got.sisa_index == gal_inav.sisa_index && got.t_oc == gal_inav.t_oc &&
+                  got.a_f1 == gal_inav.a_f1 && got.a_f0 == gal_inav.a_f0 &&
+                  got.sqrt_a == gal_inav.sqrt_a && got.t_oe == gal_inav.t_oe &&
+                  got.bgd_e5a_e1 == gal_inav.bgd_e5a_e1 &&
+                  got.bgd_e5b_e1 == gal_inav.bgd_e5b_e1,
               "rtcm galileo inav ephemeris construct fields");
         sidereon_rtcm_messages_free(decoded);
     }
 
     /* Real captured 1046 Galileo I/NAV frame. */
-    static const uint8_t real_1046[] = {
-        0xd3, 0x00, 0x3f, 0x41, 0x60, 0xd5, 0xe8, 0x07, 0x6b, 0x06, 0xc9, 0x41,
-        0xe0, 0x3f, 0xfe, 0xd3, 0xff, 0xe3, 0x39, 0x17, 0xf3, 0xa4, 0x90, 0xe9,
-        0x84, 0xd2, 0x08, 0x9b, 0xf4, 0xf4, 0x01, 0x10, 0x30, 0xb0, 0x34, 0x3a,
-        0xa8, 0x13, 0xab, 0x5d, 0x41, 0xef, 0xff, 0xb7, 0xe4, 0x4f, 0xe8, 0xcf,
-        0xff, 0x52, 0x77, 0xd0, 0xb0, 0x11, 0xa2, 0x41, 0x63, 0x97, 0xff, 0xff,
-        0xfc, 0x22, 0x80, 0x14, 0x07, 0x00, 0x80, 0x0a, 0x8e,
-    };
+    const uint8_t *real_1046 = W3M_REAL_1046;
+    const size_t real_1046_len = sizeof(W3M_REAL_1046);
     decoded = NULL;
-    check(sidereon_rtcm_decode_messages(real_1046, sizeof(real_1046), &decoded) ==
+    check(sidereon_rtcm_decode_messages(real_1046, real_1046_len, &decoded) ==
               SIDEREON_STATUS_OK,
           "rtcm real galileo inav decode");
     if (decoded) {
@@ -1091,21 +1246,24 @@ static void test_rtcm_construct(void) {
         uint16_t message_number = 0;
         check(sidereon_rtcm_message_kind(decoded, 0, &kind, &message_number) ==
                       SIDEREON_STATUS_OK &&
-                  kind == SIDEREON_RTCM_MESSAGE_KIND_GALILEO_INAV_EPHEMERIS &&
-                  message_number == 1046,
+                  kind == W3M_REAL_1046_KIND &&
+                  message_number == W3M_REAL_1046_MESSAGE_NUMBER,
               "rtcm real galileo inav kind");
         SidereonRtcmGalileoInavEphemeris got;
         check(sidereon_rtcm_message_galileo_inav_ephemeris(decoded, 0, &got) ==
                       SIDEREON_STATUS_OK &&
-                  got.satellite_id == 3 && got.week_number == 1402 && got.iod_nav == 7 &&
-                  got.sqrt_a == UINT64_C(2852448983) && got.eccentricity == UINT64_C(4459564),
+                  got.satellite_id == W3M_REAL_1046_SATELLITE_ID &&
+                  got.week_number == W3M_REAL_1046_WEEK_NUMBER &&
+                  got.iod_nav == W3M_REAL_1046_IOD_NAV &&
+                  got.sqrt_a == W3M_REAL_1046_SQRT_A &&
+                  got.eccentricity == W3M_REAL_1046_ECCENTRICITY,
               "rtcm real galileo inav fields");
         uint8_t frame[96];
         size_t written = 0, required = 0;
         check(sidereon_rtcm_message_to_frame(decoded, 0, frame, sizeof(frame), &written,
                                              &required) == SIDEREON_STATUS_OK &&
-                  written == sizeof(real_1046) && required == sizeof(real_1046) &&
-                  memcmp(frame, real_1046, sizeof(real_1046)) == 0,
+                  written == real_1046_len && required == real_1046_len &&
+                  memcmp(frame, real_1046, real_1046_len) == 0,
               "rtcm real galileo inav frame round-trip");
         sidereon_rtcm_messages_free(decoded);
     }
@@ -1121,6 +1279,7 @@ static void test_rtcm_construct(void) {
     SidereonRtcmMsmSatellite sat;
     memset(&sat, 0, sizeof(sat));
     sat.id = 8;
+    sat.has_rough_range_ms = true;
     sat.rough_range_ms = 75;
     sat.rough_range_mod1 = 512;
     sat.has_extended_info = true;
@@ -1131,9 +1290,16 @@ static void test_rtcm_construct(void) {
     memset(&sig, 0, sizeof(sig));
     sig.satellite_id = 8;
     sig.signal_id = 2;
+    /* MSM7 carries every signal field. */
+    sig.has_fine_pseudorange = true;
     sig.fine_pseudorange = 1234;
+    sig.has_fine_phase_range = true;
     sig.fine_phase_range = -5678;
+    sig.has_lock_time_indicator = true;
     sig.lock_time_indicator = 200;
+    sig.has_half_cycle_ambiguity = true;
+    sig.half_cycle_ambiguity = false;
+    sig.has_cnr = true;
     sig.cnr = 720;
     sig.has_fine_phase_range_rate = true;
     sig.fine_phase_range_rate = 42;
@@ -1144,24 +1310,42 @@ static void test_rtcm_construct(void) {
     if (decoded) {
         SidereonRtcmMsmInfo got;
         check(sidereon_rtcm_message_msm_info(decoded, 0, &got) == SIDEREON_STATUS_OK &&
-                  got.message_number == 1077 && got.system == SIDEREON_GNSS_SYSTEM_GPS &&
-                  got.kind == SIDEREON_RTCM_MSM_KIND_MSM7 && got.satellite_count == 1 &&
+                  got.message_number == info.message_number && got.system == info.system &&
+                  got.kind == info.kind &&
+                  got.header.reference_station_id == info.header.reference_station_id &&
+                  got.header.epoch_time == info.header.epoch_time && got.satellite_count == 1 &&
                   got.signal_count == 1,
               "rtcm msm construct info");
         SidereonRtcmMsmSatellite got_sat[2];
         size_t written = 0, required = 0;
         check(sidereon_rtcm_message_msm_satellites(decoded, 0, got_sat, 2, &written, &required) ==
                   SIDEREON_STATUS_OK &&
-                  written == 1 && got_sat[0].id == 8 && got_sat[0].rough_range_ms == 75 &&
-                  got_sat[0].has_extended_info,
+                  written == 1 && got_sat[0].id == sat.id &&
+                  got_sat[0].has_rough_range_ms == sat.has_rough_range_ms &&
+                  got_sat[0].rough_range_ms == sat.rough_range_ms &&
+                  got_sat[0].rough_range_mod1 == sat.rough_range_mod1 &&
+                  got_sat[0].has_extended_info == sat.has_extended_info &&
+                  got_sat[0].extended_info == sat.extended_info &&
+                  got_sat[0].rough_phase_range_rate_m_s == sat.rough_phase_range_rate_m_s,
               "rtcm msm construct satellites");
         SidereonRtcmMsmSignal got_sig[2];
         written = 0;
         required = 0;
         check(sidereon_rtcm_message_msm_signals(decoded, 0, got_sig, 2, &written, &required) ==
                   SIDEREON_STATUS_OK &&
-                  written == 1 && got_sig[0].signal_id == 2 && got_sig[0].fine_pseudorange == 1234 &&
-                  got_sig[0].has_fine_phase_range_rate && got_sig[0].fine_phase_range_rate == 42,
+                  written == 1 && got_sig[0].signal_id == sig.signal_id &&
+                  got_sig[0].has_fine_pseudorange == sig.has_fine_pseudorange &&
+                  got_sig[0].fine_pseudorange == sig.fine_pseudorange &&
+                  got_sig[0].has_fine_phase_range == sig.has_fine_phase_range &&
+                  got_sig[0].fine_phase_range == sig.fine_phase_range &&
+                  got_sig[0].has_lock_time_indicator == sig.has_lock_time_indicator &&
+                  got_sig[0].lock_time_indicator == sig.lock_time_indicator &&
+                  got_sig[0].has_half_cycle_ambiguity == sig.has_half_cycle_ambiguity &&
+                  got_sig[0].half_cycle_ambiguity == sig.half_cycle_ambiguity &&
+                  got_sig[0].has_cnr == sig.has_cnr &&
+                  got_sig[0].cnr == sig.cnr &&
+                  got_sig[0].has_fine_phase_range_rate == sig.has_fine_phase_range_rate &&
+                  got_sig[0].fine_phase_range_rate == sig.fine_phase_range_rate,
               "rtcm msm construct signals");
         sidereon_rtcm_messages_free(decoded);
     }

@@ -14,6 +14,9 @@ pub enum SidereonSbasPlError {
     NumericalFailure = 2,
     /// The supplied error model is missing, non-finite, or outside its domain.
     InvalidErrorModel = 3,
+    /// Forming the geometry read UT1 outside the UT1 table and the UT1 policy
+    /// refused it.
+    Ut1OutsideCoverage = 4,
 }
 
 /// Fixed SBAS protection-level multipliers.
@@ -236,16 +239,19 @@ pub unsafe extern "C" fn sidereon_sbas_sigma_flt_m_for_udrei(
                 "sidereon_sbas_sigma_flt_m_for_udrei",
                 "out_sigma_m"
             ));
-            *out = 0.0;
-            let degradation = c_try!(require_ref(
+            let sigma = require_ref(
                 degradation,
                 "sidereon_sbas_sigma_flt_m_for_udrei",
-                "degradation"
-            ));
-            match sidereon_core::sbas_pl::sigma_flt_m_for_udrei(
-                udrei,
-                &degradation_params_from_c(degradation),
-            ) {
+                "degradation",
+            )
+            .map(|degradation| {
+                sidereon_core::sbas_pl::sigma_flt_m_for_udrei(
+                    udrei,
+                    &degradation_params_from_c(degradation),
+                )
+            });
+            *out = 0.0;
+            match c_try!(sigma) {
                 Some(sigma_m) => {
                     *out = sigma_m;
                     SidereonStatus::Ok
@@ -305,13 +311,10 @@ pub unsafe extern "C" fn sidereon_sbas_airborne_sigma_air_m(
                 "sidereon_sbas_airborne_sigma_air_m",
                 "out_sigma_m"
             ));
+            let sigma = require_ref(model, "sidereon_sbas_airborne_sigma_air_m", "model")
+                .map(|model| airborne_model_from_c(model).sigma_air_m(elevation_rad));
             *out = 0.0;
-            let model = c_try!(require_ref(
-                model,
-                "sidereon_sbas_airborne_sigma_air_m",
-                "model"
-            ));
-            match airborne_model_from_c(model).sigma_air_m(elevation_rad) {
+            match c_try!(sigma) {
                 Some(sigma_m) => {
                     *out = sigma_m;
                     SidereonStatus::Ok
@@ -342,13 +345,11 @@ pub unsafe extern "C" fn sidereon_sbas_sis_error_sigma_m(
                 "sidereon_sbas_sis_error_sigma_m",
                 "out_sigma_m"
             ));
+            let sigma = require_ref(row, "sidereon_sbas_sis_error_sigma_m", "row")
+                .and_then(|row| sbas_sis_error_from_c("sidereon_sbas_sis_error_sigma_m", row))
+                .map(|row| row.sigma_m());
             *out = 0.0;
-            let row = c_try!(require_ref(row, "sidereon_sbas_sis_error_sigma_m", "row"));
-            let row = c_try!(sbas_sis_error_from_c(
-                "sidereon_sbas_sis_error_sigma_m",
-                row
-            ));
-            match row.sigma_m() {
+            match c_try!(sigma) {
                 Some(sigma_m) => {
                     *out = sigma_m;
                     SidereonStatus::Ok
@@ -383,37 +384,50 @@ pub unsafe extern "C" fn sidereon_sbas_protection_levels(
                 "sidereon_sbas_protection_levels",
                 "out_protection"
             ));
-            *out_protection = empty_sbas_protection();
             let out_error = c_try!(require_out(
                 out_error,
                 "sidereon_sbas_protection_levels",
                 "out_error"
             ));
+            let protection_range = c_try!(checked_output_range(
+                "sidereon_sbas_protection_levels",
+                out_protection,
+                1,
+                "out_protection"
+            ));
+            let error_range = c_try!(checked_output_range(
+                "sidereon_sbas_protection_levels",
+                out_error,
+                1,
+                "out_error"
+            ));
+            c_try!(reject_overlapping_outputs(
+                "sidereon_sbas_protection_levels",
+                protection_range,
+                error_range,
+                "out_protection",
+                "out_error"
+            ));
+            let inputs = (|| {
+                let geometry =
+                    *require_ref(geometry, "sidereon_sbas_protection_levels", "geometry")?;
+                let model = *require_ref(model, "sidereon_sbas_protection_levels", "model")?;
+                let geometry =
+                    sbas_protection_geometry_from_c("sidereon_sbas_protection_levels", &geometry)?;
+                let model = sbas_error_model_from_c("sidereon_sbas_protection_levels", &model)?;
+                Ok((geometry, model))
+            })();
+            *out_protection = empty_sbas_protection();
             *out_error = SidereonSbasPlError::None;
-            let geometry = c_try!(require_ref(
-                geometry,
-                "sidereon_sbas_protection_levels",
-                "geometry"
-            ));
-            let model = c_try!(require_ref(
-                model,
-                "sidereon_sbas_protection_levels",
-                "model"
-            ));
-            let geometry = c_try!(sbas_protection_geometry_from_c(
-                "sidereon_sbas_protection_levels",
-                geometry
-            ));
-            let model = c_try!(sbas_error_model_from_c(
-                "sidereon_sbas_protection_levels",
-                model
-            ));
+            let (geometry, model) = c_try!(inputs);
             match core_sbas_protection_levels(&geometry, &model, sbas_k_from_c(k)) {
                 Ok(protection) => {
                     *out_protection = sbas_protection_to_c(protection);
                     SidereonStatus::Ok
                 }
-                Err(err) => map_sbas_pl_error("sidereon_sbas_protection_levels", err, out_error),
+                Err(err) => {
+                    map_sbas_pl_error("sidereon_sbas_protection_levels", err, &mut *out_error)
+                }
             }
         },
     )
@@ -527,10 +541,12 @@ unsafe fn sbas_protection_geometry_from_c(
             system,
         )?);
     }
+    // The caller supplies the rows directly, so no UT1 was read to form them.
     Ok(AraimGeometry {
         rows: parsed_rows,
         receiver,
         clock_systems,
+        ut1_degraded: None,
     })
 }
 
@@ -616,11 +632,195 @@ fn map_sbas_pl_error(
         CoreSbasPlError::InsufficientGeometry => SidereonSbasPlError::InsufficientGeometry,
         CoreSbasPlError::NumericalFailure => SidereonSbasPlError::NumericalFailure,
         CoreSbasPlError::InvalidErrorModel => SidereonSbasPlError::InvalidErrorModel,
+        CoreSbasPlError::Ut1OutsideCoverage(_) => SidereonSbasPlError::Ut1OutsideCoverage,
     };
     match err {
         CoreSbasPlError::InvalidErrorModel => SidereonStatus::InvalidArgument,
         CoreSbasPlError::InsufficientGeometry | CoreSbasPlError::NumericalFailure => {
             SidereonStatus::Solve
         }
+        CoreSbasPlError::Ut1OutsideCoverage(_) => SidereonStatus::Ut1OutsideCoverage,
+    }
+}
+
+#[cfg(test)]
+mod alias_tests {
+    use super::*;
+
+    #[repr(C)]
+    union GeometryProtectionStorage {
+        geometry: SidereonSbasProtectionGeometry,
+        protection: SidereonSbasProtection,
+    }
+
+    #[test]
+    fn protection_output_may_overlap_geometry_input() {
+        let geometry = SidereonSbasProtectionGeometry {
+            rows: ptr::null(),
+            row_count: 1,
+            receiver: SidereonGeodetic {
+                lat_rad: 0.0,
+                lon_rad: 0.0,
+                height_m: 0.0,
+            },
+            clock_systems: ptr::null(),
+            clock_system_count: 0,
+        };
+        let model = SidereonSbasErrorModel {
+            rows: ptr::null(),
+            row_count: 0,
+        };
+        let mut storage = GeometryProtectionStorage { geometry };
+        let storage_ptr = &mut storage as *mut GeometryProtectionStorage;
+        let geometry_ptr = unsafe { ptr::addr_of!((*storage_ptr).geometry) };
+        let protection_ptr = unsafe { ptr::addr_of_mut!((*storage_ptr).protection) };
+        let mut error = SidereonSbasPlError::NumericalFailure;
+
+        assert_eq!(
+            unsafe {
+                sidereon_sbas_protection_levels(
+                    geometry_ptr,
+                    &model,
+                    SidereonSbasKMultipliers {
+                        k_h: 6.0,
+                        k_v: 5.33,
+                    },
+                    protection_ptr,
+                    &mut error,
+                )
+            },
+            SidereonStatus::NullPointer
+        );
+        assert_eq!(error, SidereonSbasPlError::None);
+        let protection = unsafe { protection_ptr.read() };
+        assert_eq!(protection.hpl_m, 0.0);
+        assert_eq!(protection.vpl_m, 0.0);
+        assert_eq!(protection.d_major_m, 0.0);
+        assert_eq!(protection.sigma_u_m, 0.0);
+        assert_eq!(protection.d_east_m, 0.0);
+        assert_eq!(protection.d_north_m, 0.0);
+        assert_eq!(protection.d_en_m2, 0.0);
+    }
+
+    #[test]
+    fn valid_protection_result_matches_when_output_overlaps_geometry() {
+        let receiver = SidereonGeodetic {
+            lat_rad: 0.0,
+            lon_rad: 0.0,
+            height_m: 0.0,
+        };
+        let ids = [b"G01\0" as &[u8], b"G02\0", b"G03\0", b"G04\0", b"G05\0"];
+        let az_el = [
+            (15.0, 15.0),
+            (80.0, 70.0),
+            (155.0, 25.0),
+            (230.0, 55.0),
+            (310.0, 35.0),
+        ];
+        let mut rows = [SidereonSbasProtectionRow {
+            sat_id: ptr::null(),
+            line_of_sight: SidereonLineOfSight {
+                e_x: 0.0,
+                e_y: 0.0,
+                e_z: 0.0,
+            },
+            system: SidereonGnssSystem::Gps as u32,
+            elevation_rad: 0.0,
+        }; 5];
+        let mut errors = [SidereonSbasSisError {
+            sat_id: ptr::null(),
+            sigma_flt_m: 0.0,
+            sigma_uire_m: 0.0,
+            sigma_air_m: 0.0,
+            sigma_tropo_m: 0.0,
+        }; 5];
+        for index in 0..5 {
+            rows[index].sat_id = ids[index].as_ptr().cast();
+            rows[index].elevation_rad = az_el[index].1 * std::f64::consts::PI / 180.0;
+            assert_eq!(
+                unsafe {
+                    sidereon_line_of_sight_from_az_el_deg(
+                        az_el[index].0,
+                        az_el[index].1,
+                        receiver,
+                        &mut rows[index].line_of_sight,
+                    )
+                },
+                SidereonStatus::Ok
+            );
+            errors[index] = SidereonSbasSisError {
+                sat_id: ids[index].as_ptr().cast(),
+                sigma_flt_m: [2.0, 1.0, 1.5, 1.2, 1.8][index],
+                sigma_uire_m: 0.0,
+                sigma_air_m: 0.0,
+                sigma_tropo_m: 0.0,
+            };
+        }
+        let clocks = [SidereonGnssSystem::Gps as u32];
+        let geometry = SidereonSbasProtectionGeometry {
+            rows: rows.as_ptr(),
+            row_count: rows.len(),
+            receiver,
+            clock_systems: clocks.as_ptr(),
+            clock_system_count: clocks.len(),
+        };
+        let model = SidereonSbasErrorModel {
+            rows: errors.as_ptr(),
+            row_count: errors.len(),
+        };
+        let k = SidereonSbasKMultipliers {
+            k_h: 6.0,
+            k_v: 5.33,
+        };
+        let mut expected = SidereonSbasProtection {
+            hpl_m: 0.0,
+            vpl_m: 0.0,
+            d_major_m: 0.0,
+            sigma_u_m: 0.0,
+            d_east_m: 0.0,
+            d_north_m: 0.0,
+            d_en_m2: 0.0,
+        };
+        let mut expected_error = SidereonSbasPlError::None;
+        assert_eq!(
+            unsafe {
+                sidereon_sbas_protection_levels(
+                    &geometry,
+                    &model,
+                    k,
+                    &mut expected,
+                    &mut expected_error,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(expected_error, SidereonSbasPlError::None);
+
+        let mut storage = GeometryProtectionStorage { geometry };
+        let storage_ptr = &mut storage as *mut GeometryProtectionStorage;
+        let geometry_ptr = unsafe { ptr::addr_of!((*storage_ptr).geometry) };
+        let protection_ptr = unsafe { ptr::addr_of_mut!((*storage_ptr).protection) };
+        let mut actual_error = SidereonSbasPlError::None;
+        assert_eq!(
+            unsafe {
+                sidereon_sbas_protection_levels(
+                    geometry_ptr,
+                    &model,
+                    k,
+                    protection_ptr,
+                    &mut actual_error,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(actual_error, expected_error);
+        let actual = unsafe { protection_ptr.read() };
+        assert_eq!(actual.hpl_m, expected.hpl_m);
+        assert_eq!(actual.vpl_m, expected.vpl_m);
+        assert_eq!(actual.d_major_m, expected.d_major_m);
+        assert_eq!(actual.sigma_u_m, expected.sigma_u_m);
+        assert_eq!(actual.d_east_m, expected.d_east_m);
+        assert_eq!(actual.d_north_m, expected.d_north_m);
+        assert_eq!(actual.d_en_m2, expected.d_en_m2);
     }
 }

@@ -1,5 +1,17 @@
 use super::*;
 
+fn ionosphere_free_invalid_arg(
+    operation: &str,
+    error: sidereon_core::combinations::IonosphereFreeError,
+) -> SidereonStatus {
+    crate::engine_error::record_engine_error(
+        crate::engine_error::SidereonEngineErrorFamily::IonosphereFree,
+        operation,
+        crate::engine_error::ionosphere_free_error_value(&error),
+    );
+    extra_invalid_arg(operation, error)
+}
+
 // --- Dual-frequency combinations (sidereon_core::combinations) ----------------
 
 /// Ionospheric scaling factor gamma = (f1/f2)^2. Delegates to
@@ -12,17 +24,21 @@ pub unsafe extern "C" fn sidereon_combination_gamma(
     f2_hz: f64,
     out: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_combination_gamma", SidereonStatus::Panic, || {
-        let out = c_try!(require_out(out, "sidereon_combination_gamma", "out"));
-        *out = 0.0;
-        match sidereon_core::combinations::gamma(f1_hz, f2_hz) {
-            Ok(v) => {
-                *out = v;
-                SidereonStatus::Ok
+    crate::engine_error::engine_error_operation_boundary(
+        "sidereon_combination_gamma",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(out, "sidereon_combination_gamma", "out"));
+            *out = 0.0;
+            match sidereon_core::combinations::gamma(f1_hz, f2_hz) {
+                Ok(v) => {
+                    *out = v;
+                    SidereonStatus::Ok
+                }
+                Err(err) => ionosphere_free_invalid_arg("sidereon_combination_gamma", err),
             }
-            Err(err) => extra_invalid_arg("sidereon_combination_gamma", err),
-        }
-    })
+        },
+    )
 }
 
 /// Ionosphere-free noise amplification factor. Delegates to
@@ -35,7 +51,7 @@ pub unsafe extern "C" fn sidereon_combination_noise_amplification(
     f2_hz: f64,
     out: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_combination_noise_amplification",
         SidereonStatus::Panic,
         || {
@@ -50,7 +66,9 @@ pub unsafe extern "C" fn sidereon_combination_noise_amplification(
                     *out = v;
                     SidereonStatus::Ok
                 }
-                Err(err) => extra_invalid_arg("sidereon_combination_noise_amplification", err),
+                Err(err) => {
+                    ionosphere_free_invalid_arg("sidereon_combination_noise_amplification", err)
+                }
             }
         },
     )
@@ -68,7 +86,7 @@ pub unsafe extern "C" fn sidereon_combination_ionosphere_free(
     f2_hz: f64,
     out: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_combination_ionosphere_free",
         SidereonStatus::Panic,
         || {
@@ -83,7 +101,9 @@ pub unsafe extern "C" fn sidereon_combination_ionosphere_free(
                     *out = v;
                     SidereonStatus::Ok
                 }
-                Err(err) => extra_invalid_arg("sidereon_combination_ionosphere_free", err),
+                Err(err) => {
+                    ionosphere_free_invalid_arg("sidereon_combination_ionosphere_free", err)
+                }
             }
         },
     )
@@ -101,7 +121,7 @@ pub unsafe extern "C" fn sidereon_combination_ionosphere_free_phase_m(
     f2_hz: f64,
     out: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_combination_ionosphere_free_phase_m",
         SidereonStatus::Panic,
         || {
@@ -118,7 +138,9 @@ pub unsafe extern "C" fn sidereon_combination_ionosphere_free_phase_m(
                     *out = v;
                     SidereonStatus::Ok
                 }
-                Err(err) => extra_invalid_arg("sidereon_combination_ionosphere_free_phase_m", err),
+                Err(err) => {
+                    ionosphere_free_invalid_arg("sidereon_combination_ionosphere_free_phase_m", err)
+                }
             }
         },
     )
@@ -203,7 +225,7 @@ pub unsafe extern "C" fn sidereon_pseudorange_variance(
     options: *const SidereonPseudorangeVarianceOptions,
     out: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    quality_operation_boundary(
         "sidereon_pseudorange_variance",
         SidereonStatus::Panic,
         || {
@@ -223,7 +245,7 @@ pub unsafe extern "C" fn sidereon_pseudorange_variance(
                     *out = v;
                     SidereonStatus::Ok
                 }
-                Err(err) => extra_invalid_arg("sidereon_pseudorange_variance", err),
+                Err(err) => map_quality_error("sidereon_pseudorange_variance", err),
             }
         },
     )
@@ -259,6 +281,14 @@ pub struct SidereonArcEpoch {
     pub f2_hz: f64,
     /// Elapsed seconds since the previous epoch, or NaN when absent.
     pub gap_time_s: f64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonArcEpochV2 {
+    pub legacy: SidereonArcEpoch,
+    pub has_gap_epoch: bool,
+    pub gap_epoch: *const SidereonExactEpoch,
 }
 
 /// Cycle-slip thresholds, mirroring
@@ -352,28 +382,78 @@ pub unsafe extern "C" fn sidereon_smooth_code(
     out_written: *mut usize,
     out_required: *mut usize,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_smooth_code", SidereonStatus::Panic, || {
-        c_try!(init_copy_counts(
-            "sidereon_smooth_code",
-            out_written,
-            out_required
-        ));
-        let (arc, opts) = c_try!(arc_from_c("sidereon_smooth_code", arc, count, options));
+    crate::engine_error::engine_error_operation_boundary(
+        "sidereon_smooth_code",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_smooth_code",
+                out_written,
+                out_required
+            ));
+            let (arc, opts) = c_try!(arc_from_c("sidereon_smooth_code", arc, count, options));
+            let results =
+                match sidereon_core::carrier_phase::smooth_code(&arc, opts, hatch_window_cap) {
+                    Ok(r) => r,
+                    Err(err) => {
+                        return crate::signal::record_carrier_phase_error(
+                            "sidereon_smooth_code",
+                            err,
+                        )
+                    }
+                };
+            let mapped: Vec<SidereonSmoothCodeResult> = results
+                .iter()
+                .map(|r| SidereonSmoothCodeResult {
+                    p_smooth_m: none_to_nan(r.p_smooth_m),
+                    window: r.window,
+                    reset: r.reset,
+                })
+                .collect();
+            c_try!(copy_prefix_to_c(
+                "sidereon_smooth_code",
+                "out",
+                &mapped,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_smooth_code_v2(
+    arc: *const SidereonArcEpochV2,
+    count: usize,
+    options: *const SidereonCycleSlipOptions,
+    hatch_window_cap: usize,
+    out: *mut SidereonSmoothCodeResult,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_smooth_code_v2";
+    crate::engine_error::engine_error_operation_boundary(FN_NAME, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(FN_NAME, out_written, out_required));
+        let (arc, opts) = c_try!(arc_v2_from_c(FN_NAME, arc, count, options));
         let results = match sidereon_core::carrier_phase::smooth_code(&arc, opts, hatch_window_cap)
         {
-            Ok(r) => r,
-            Err(err) => return extra_invalid_arg("sidereon_smooth_code", err),
+            Ok(results) => results,
+            Err(error) => return crate::signal::record_carrier_phase_error(FN_NAME, error),
         };
-        let mapped: Vec<SidereonSmoothCodeResult> = results
+        let mapped: Vec<_> = results
             .iter()
-            .map(|r| SidereonSmoothCodeResult {
-                p_smooth_m: none_to_nan(r.p_smooth_m),
-                window: r.window,
-                reset: r.reset,
+            .map(|result| SidereonSmoothCodeResult {
+                p_smooth_m: none_to_nan(result.p_smooth_m),
+                window: result.window,
+                reset: result.reset,
             })
             .collect();
         c_try!(copy_prefix_to_c(
-            "sidereon_smooth_code",
+            FN_NAME,
             "out",
             &mapped,
             out,
@@ -403,7 +483,7 @@ pub unsafe extern "C" fn sidereon_smooth_iono_free_code(
     out_written: *mut usize,
     out_required: *mut usize,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_smooth_iono_free_code",
         SidereonStatus::Panic,
         || {
@@ -424,7 +504,12 @@ pub unsafe extern "C" fn sidereon_smooth_iono_free_code(
                 hatch_window_cap,
             ) {
                 Ok(r) => r,
-                Err(err) => return extra_invalid_arg("sidereon_smooth_iono_free_code", err),
+                Err(err) => {
+                    return crate::signal::record_carrier_phase_error(
+                        "sidereon_smooth_iono_free_code",
+                        err,
+                    )
+                }
             };
             let mapped: Vec<SidereonIonoFreeSmoothResult> = results
                 .iter()
@@ -450,6 +535,50 @@ pub unsafe extern "C" fn sidereon_smooth_iono_free_code(
     )
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_smooth_iono_free_code_v2(
+    arc: *const SidereonArcEpochV2,
+    count: usize,
+    options: *const SidereonCycleSlipOptions,
+    hatch_window_cap: usize,
+    out: *mut SidereonIonoFreeSmoothResult,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_smooth_iono_free_code_v2";
+    crate::engine_error::engine_error_operation_boundary(FN_NAME, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(FN_NAME, out_written, out_required));
+        let (arc, opts) = c_try!(arc_v2_from_c(FN_NAME, arc, count, options));
+        let results =
+            match sidereon_core::carrier_phase::smooth_iono_free_code(&arc, opts, hatch_window_cap)
+            {
+                Ok(results) => results,
+                Err(error) => return crate::signal::record_carrier_phase_error(FN_NAME, error),
+            };
+        let mapped: Vec<_> = results
+            .iter()
+            .map(|result| SidereonIonoFreeSmoothResult {
+                p_smooth_m: none_to_nan(result.p_smooth_m),
+                p_if_m: none_to_nan(result.p_if_m),
+                l_if_m: none_to_nan(result.l_if_m),
+                window: result.window,
+                reset: result.reset,
+            })
+            .collect();
+        c_try!(copy_prefix_to_c(
+            FN_NAME,
+            "out",
+            &mapped,
+            out,
+            len,
+            out_written,
+            out_required,
+        ));
+        SidereonStatus::Ok
+    })
+}
+
 // --- Ionosphere-free phase from cycles (sidereon_core::combinations) ---------
 
 /// Ionosphere-free carrier-phase combination (meters) from cycle-valued phase
@@ -465,7 +594,7 @@ pub unsafe extern "C" fn sidereon_combination_ionosphere_free_phase_cycles(
     f2_hz: f64,
     out: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_combination_ionosphere_free_phase_cycles",
         SidereonStatus::Panic,
         || {
@@ -485,9 +614,10 @@ pub unsafe extern "C" fn sidereon_combination_ionosphere_free_phase_cycles(
                     *out = v;
                     SidereonStatus::Ok
                 }
-                Err(err) => {
-                    extra_invalid_arg("sidereon_combination_ionosphere_free_phase_cycles", err)
-                }
+                Err(err) => ionosphere_free_invalid_arg(
+                    "sidereon_combination_ionosphere_free_phase_cycles",
+                    err,
+                ),
             }
         },
     )
@@ -609,7 +739,7 @@ pub unsafe extern "C" fn sidereon_combination_ionosphere_free_pseudoranges(
     override_count: usize,
     out: *mut *mut SidereonIonoFreePseudoranges,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_combination_ionosphere_free_pseudoranges",
         SidereonStatus::Panic,
         || {
@@ -646,7 +776,7 @@ pub unsafe extern "C" fn sidereon_combination_ionosphere_free_pseudoranges(
                     write_boxed_handle(out, SidereonIonoFreePseudoranges { combined, dropped });
                     SidereonStatus::Ok
                 }
-                Err(err) => extra_invalid_arg(fname, err),
+                Err(err) => ionosphere_free_invalid_arg(fname, err),
             }
         },
     )
@@ -791,34 +921,84 @@ pub unsafe extern "C" fn sidereon_detect_cycle_slips(
     out_written: *mut usize,
     out_required: *mut usize,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_detect_cycle_slips", SidereonStatus::Panic, || {
-        c_try!(init_copy_counts(
-            "sidereon_detect_cycle_slips",
-            out_written,
-            out_required
-        ));
-        let (arc, opts) = c_try!(arc_from_c(
-            "sidereon_detect_cycle_slips",
-            arc,
-            count,
-            options
-        ));
+    crate::engine_error::engine_error_operation_boundary(
+        "sidereon_detect_cycle_slips",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_detect_cycle_slips",
+                out_written,
+                out_required
+            ));
+            let (arc, opts) = c_try!(arc_from_c(
+                "sidereon_detect_cycle_slips",
+                arc,
+                count,
+                options
+            ));
+            let results = match sidereon_core::carrier_phase::detect_cycle_slips(&arc, opts) {
+                Ok(r) => r,
+                Err(err) => {
+                    return crate::signal::record_carrier_phase_error(
+                        "sidereon_detect_cycle_slips",
+                        err,
+                    )
+                }
+            };
+            let mapped: Vec<SidereonSlipResult> = results
+                .iter()
+                .map(|r| SidereonSlipResult {
+                    slip: r.slip,
+                    reason_mask: slip_reason_mask(&r.reasons),
+                    gf_m: none_to_nan(r.gf_m),
+                    mw_m: none_to_nan(r.mw_m),
+                    skipped: r.skipped,
+                })
+                .collect();
+            c_try!(copy_prefix_to_c(
+                "sidereon_detect_cycle_slips",
+                "out",
+                &mapped,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_detect_cycle_slips_v2(
+    arc: *const SidereonArcEpochV2,
+    count: usize,
+    options: *const SidereonCycleSlipOptions,
+    out: *mut SidereonSlipResult,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_detect_cycle_slips_v2";
+    crate::engine_error::engine_error_operation_boundary(FN_NAME, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(FN_NAME, out_written, out_required));
+        let (arc, opts) = c_try!(arc_v2_from_c(FN_NAME, arc, count, options));
         let results = match sidereon_core::carrier_phase::detect_cycle_slips(&arc, opts) {
-            Ok(r) => r,
-            Err(err) => return extra_invalid_arg("sidereon_detect_cycle_slips", err),
+            Ok(results) => results,
+            Err(error) => return crate::signal::record_carrier_phase_error(FN_NAME, error),
         };
-        let mapped: Vec<SidereonSlipResult> = results
+        let mapped: Vec<_> = results
             .iter()
-            .map(|r| SidereonSlipResult {
-                slip: r.slip,
-                reason_mask: slip_reason_mask(&r.reasons),
-                gf_m: none_to_nan(r.gf_m),
-                mw_m: none_to_nan(r.mw_m),
-                skipped: r.skipped,
+            .map(|result| SidereonSlipResult {
+                slip: result.slip,
+                reason_mask: slip_reason_mask(&result.reasons),
+                gf_m: none_to_nan(result.gf_m),
+                mw_m: none_to_nan(result.mw_m),
+                skipped: result.skipped,
             })
             .collect();
         c_try!(copy_prefix_to_c(
-            "sidereon_detect_cycle_slips",
+            FN_NAME,
             "out",
             &mapped,
             out,
@@ -856,6 +1036,7 @@ unsafe fn arc_from_c(
             f1_hz: nan_to_none(e.f1_hz),
             f2_hz: nan_to_none(e.f2_hz),
             gap_time_s: nan_to_none(e.gap_time_s),
+            gap_epoch: None,
         })
         .collect();
     let mut opts = sidereon_core::carrier_phase::CycleSlipOptions::default();
@@ -863,6 +1044,48 @@ unsafe fn arc_from_c(
     opts.mw_threshold_cycles = options.mw_threshold_cycles;
     opts.min_arc_gap_s = options.min_arc_gap_s;
     Ok((arc, opts))
+}
+
+unsafe fn arc_v2_from_c(
+    fn_name: &str,
+    arc: *const SidereonArcEpochV2,
+    count: usize,
+    options: *const SidereonCycleSlipOptions,
+) -> Result<
+    (
+        Vec<sidereon_core::carrier_phase::ArcEpoch>,
+        sidereon_core::carrier_phase::CycleSlipOptions,
+    ),
+    SidereonStatus,
+> {
+    let options = require_ref(options, fn_name, "options")?;
+    let rows = require_slice(arc, count, fn_name, "arc")?;
+    validate_element_count::<SidereonArcEpochV2>(fn_name, "count", rows.len())?;
+    let mut converted = Vec::with_capacity(rows.len());
+    for (index, row) in rows.iter().enumerate() {
+        let gap_epoch = if row.has_gap_epoch {
+            Some(require_ref(row.gap_epoch, fn_name, &format!("arc[{index}].gap_epoch"))?.inner)
+        } else {
+            None
+        };
+        converted.push(sidereon_core::carrier_phase::ArcEpoch {
+            phi1_cycles: nan_to_none(row.legacy.phi1_cycles),
+            phi2_cycles: nan_to_none(row.legacy.phi2_cycles),
+            p1_m: nan_to_none(row.legacy.p1_m),
+            p2_m: nan_to_none(row.legacy.p2_m),
+            lli1: row.legacy.has_lli1.then_some(row.legacy.lli1),
+            lli2: row.legacy.has_lli2.then_some(row.legacy.lli2),
+            f1_hz: nan_to_none(row.legacy.f1_hz),
+            f2_hz: nan_to_none(row.legacy.f2_hz),
+            gap_time_s: nan_to_none(row.legacy.gap_time_s),
+            gap_epoch,
+        });
+    }
+    let mut core_options = sidereon_core::carrier_phase::CycleSlipOptions::default();
+    core_options.gf_threshold_m = options.gf_threshold_m;
+    core_options.mw_threshold_cycles = options.mw_threshold_cycles;
+    core_options.min_arc_gap_s = options.min_arc_gap_s;
+    Ok((converted, core_options))
 }
 
 fn slip_reason_mask(reasons: &[sidereon_core::carrier_phase::SlipReason]) -> u32 {
@@ -924,5 +1147,532 @@ fn nan_to_none(value: f64) -> Option<f64> {
         None
     } else {
         Some(value)
+    }
+}
+
+#[cfg(test)]
+mod ionosphere_free_engine_error_tests {
+    use super::*;
+    use crate::engine_error::{snapshot_engine_error_for_test, SidereonEngineErrorFamily};
+    use std::ffi::{CStr, CString};
+
+    fn assert_producer_contract(
+        operation: &str,
+        kind: &str,
+        fields: serde_json::Value,
+        legacy: &str,
+        refusal: impl Fn() -> SidereonStatus,
+        success: impl FnOnce() -> SidereonStatus,
+        early_null: impl FnOnce() -> SidereonStatus,
+    ) {
+        assert_eq!(refusal(), SidereonStatus::InvalidArgument);
+        let (info, payload) = snapshot_engine_error_for_test().expect("typed combination refusal");
+        assert_eq!(info.family, SidereonEngineErrorFamily::IonosphereFree);
+        assert_eq!(info.payload_len, payload.len());
+        let value: serde_json::Value = serde_json::from_str(&payload).expect("valid JSON");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "schema_version": 1,
+                "family": "ionosphere_free",
+                "operation": operation,
+                "error": {"kind": kind, "fields": fields}
+            })
+        );
+
+        let mut message = vec![0 as std::os::raw::c_char; 256];
+        let needed =
+            unsafe { crate::sidereon_last_error_message(message.as_mut_ptr(), message.len()) };
+        assert!(needed > 0);
+        let message = unsafe { CStr::from_ptr(message.as_ptr()) }
+            .to_str()
+            .expect("legacy UTF-8");
+        assert_eq!(message, legacy);
+
+        assert_eq!(success(), SidereonStatus::Ok);
+        assert!(snapshot_engine_error_for_test().is_none());
+        assert_eq!(refusal(), SidereonStatus::InvalidArgument);
+        assert!(snapshot_engine_error_for_test().is_some());
+        assert_eq!(early_null(), SidereonStatus::NullPointer);
+        assert!(snapshot_engine_error_for_test().is_none());
+    }
+
+    #[test]
+    fn every_ionosphere_free_producer_records_and_clears_typed_errors() {
+        assert_producer_contract(
+            "sidereon_combination_gamma",
+            "equal_frequencies",
+            serde_json::json!({}),
+            "sidereon_combination_gamma: equal carrier frequencies",
+            || unsafe { sidereon_combination_gamma(1.0, 1.0, &mut 0.0) },
+            || {
+                let mut out = 0.0;
+                unsafe { sidereon_combination_gamma(1575.42e6, 1227.60e6, &mut out) }
+            },
+            || unsafe { sidereon_combination_gamma(1575.42e6, 1227.60e6, ptr::null_mut()) },
+        );
+        assert_producer_contract(
+            "sidereon_combination_noise_amplification",
+            "invalid_frequency",
+            serde_json::json!({}),
+            "sidereon_combination_noise_amplification: carrier frequencies must be positive",
+            || unsafe { sidereon_combination_noise_amplification(0.0, 1.0, &mut 0.0) },
+            || {
+                let mut out = 0.0;
+                unsafe { sidereon_combination_noise_amplification(1575.42e6, 1227.60e6, &mut out) }
+            },
+            || unsafe {
+                sidereon_combination_noise_amplification(1575.42e6, 1227.60e6, ptr::null_mut())
+            },
+        );
+        assert_producer_contract(
+            "sidereon_combination_ionosphere_free",
+            "invalid_observation",
+            serde_json::json!({}),
+            "sidereon_combination_ionosphere_free: observations must be finite",
+            || unsafe {
+                sidereon_combination_ionosphere_free(f64::NAN, 2.0, 1575.42e6, 1227.60e6, &mut 0.0)
+            },
+            || {
+                let mut out = 0.0;
+                unsafe {
+                    sidereon_combination_ionosphere_free(
+                        23.0e6, 23.1e6, 1575.42e6, 1227.60e6, &mut out,
+                    )
+                }
+            },
+            || unsafe {
+                sidereon_combination_ionosphere_free(
+                    23.0e6,
+                    23.1e6,
+                    1575.42e6,
+                    1227.60e6,
+                    ptr::null_mut(),
+                )
+            },
+        );
+        assert_producer_contract(
+            "sidereon_combination_ionosphere_free_phase_m",
+            "invalid_observation",
+            serde_json::json!({}),
+            "sidereon_combination_ionosphere_free_phase_m: observations must be finite",
+            || unsafe {
+                sidereon_combination_ionosphere_free_phase_m(
+                    1.0,
+                    f64::NAN,
+                    1575.42e6,
+                    1227.60e6,
+                    &mut 0.0,
+                )
+            },
+            || {
+                let mut out = 0.0;
+                unsafe {
+                    sidereon_combination_ionosphere_free_phase_m(
+                        1.0, 2.0, 1575.42e6, 1227.60e6, &mut out,
+                    )
+                }
+            },
+            || unsafe {
+                sidereon_combination_ionosphere_free_phase_m(
+                    1.0,
+                    2.0,
+                    1575.42e6,
+                    1227.60e6,
+                    ptr::null_mut(),
+                )
+            },
+        );
+        assert_producer_contract(
+            "sidereon_combination_ionosphere_free_phase_cycles",
+            "invalid_observation",
+            serde_json::json!({}),
+            "sidereon_combination_ionosphere_free_phase_cycles: observations must be finite",
+            || unsafe {
+                sidereon_combination_ionosphere_free_phase_cycles(
+                    f64::NAN,
+                    2.0,
+                    1575.42e6,
+                    1227.60e6,
+                    &mut 0.0,
+                )
+            },
+            || {
+                let mut out = 0.0;
+                unsafe {
+                    sidereon_combination_ionosphere_free_phase_cycles(
+                        1.0, 2.0, 1575.42e6, 1227.60e6, &mut out,
+                    )
+                }
+            },
+            || unsafe {
+                sidereon_combination_ionosphere_free_phase_cycles(
+                    1.0,
+                    2.0,
+                    1575.42e6,
+                    1227.60e6,
+                    ptr::null_mut(),
+                )
+            },
+        );
+
+        let sat = CString::new("G01").expect("sat token");
+        let invalid_band1 = [SidereonPseudorangeObservation {
+            sat_id: sat.as_ptr(),
+            pseudorange_m: f64::NAN,
+        }];
+        let valid_band1 = [SidereonPseudorangeObservation {
+            sat_id: sat.as_ptr(),
+            pseudorange_m: 23.0e6,
+        }];
+        let band2 = [SidereonPseudorangeObservation {
+            sat_id: sat.as_ptr(),
+            pseudorange_m: 23.1e6,
+        }];
+        assert_producer_contract(
+            "sidereon_combination_ionosphere_free_pseudoranges",
+            "invalid_observation",
+            serde_json::json!({}),
+            "sidereon_combination_ionosphere_free_pseudoranges: observations must be finite",
+            || unsafe {
+                sidereon_combination_ionosphere_free_pseudoranges(
+                    invalid_band1.as_ptr(),
+                    invalid_band1.len(),
+                    band2.as_ptr(),
+                    band2.len(),
+                    ptr::null(),
+                    0,
+                    &mut ptr::null_mut(),
+                )
+            },
+            || {
+                let mut result = ptr::null_mut();
+                let status = unsafe {
+                    sidereon_combination_ionosphere_free_pseudoranges(
+                        valid_band1.as_ptr(),
+                        valid_band1.len(),
+                        band2.as_ptr(),
+                        band2.len(),
+                        ptr::null(),
+                        0,
+                        &mut result,
+                    )
+                };
+                if !result.is_null() {
+                    unsafe { sidereon_iono_free_pseudoranges_free(result) };
+                }
+                status
+            },
+            || unsafe {
+                sidereon_combination_ionosphere_free_pseudoranges(
+                    valid_band1.as_ptr(),
+                    valid_band1.len(),
+                    band2.as_ptr(),
+                    band2.len(),
+                    ptr::null(),
+                    0,
+                    ptr::null_mut(),
+                )
+            },
+        );
+    }
+}
+
+#[cfg(test)]
+mod carrier_phase_engine_error_tests {
+    use super::*;
+    use crate::engine_error::{snapshot_engine_error_for_test, SidereonEngineErrorFamily};
+
+    fn assert_producer(
+        operation: &str,
+        legacy: &str,
+        refusal: impl Fn() -> SidereonStatus,
+        success: impl Fn() -> SidereonStatus,
+        early_null: impl Fn() -> SidereonStatus,
+    ) {
+        assert_eq!(refusal(), SidereonStatus::InvalidArgument);
+        let (info, payload) = snapshot_engine_error_for_test().expect("typed carrier refusal");
+        assert_eq!(info.family, SidereonEngineErrorFamily::CarrierPhase);
+        assert_eq!(info.payload_len, payload.len());
+        let value: serde_json::Value = serde_json::from_str(&payload).expect("valid JSON");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "schema_version":1,
+                "family":"carrier_phase",
+                "operation":operation,
+                "error":{"kind":"invalid_threshold","fields":{}}
+            })
+        );
+        let mut message = vec![0 as std::os::raw::c_char; 128];
+        unsafe { crate::sidereon_last_error_message(message.as_mut_ptr(), message.len()) };
+        let message = unsafe { std::ffi::CStr::from_ptr(message.as_ptr()) }
+            .to_str()
+            .expect("legacy UTF-8");
+        assert_eq!(message, legacy);
+        assert_eq!(success(), SidereonStatus::Ok);
+        assert!(snapshot_engine_error_for_test().is_none());
+        assert_eq!(refusal(), SidereonStatus::InvalidArgument);
+        assert!(snapshot_engine_error_for_test().is_some());
+        assert_eq!(early_null(), SidereonStatus::NullPointer);
+        assert!(snapshot_engine_error_for_test().is_none());
+    }
+
+    #[test]
+    fn all_six_arc_carrier_producers_record_and_reset_typed_errors() {
+        let bad = SidereonCycleSlipOptions {
+            gf_threshold_m: f64::NAN,
+            mw_threshold_cycles: 4.0,
+            min_arc_gap_s: 120.0,
+        };
+        let good = SidereonCycleSlipOptions {
+            gf_threshold_m: 0.05,
+            mw_threshold_cycles: 4.0,
+            min_arc_gap_s: 120.0,
+        };
+        let bad_ptr = &bad as *const _;
+        let good_ptr = &good as *const _;
+        let mut written = 0usize;
+        let mut required = 0usize;
+        let written_ptr = &mut written as *mut usize;
+        let required_ptr = &mut required as *mut usize;
+        let smooth: *mut SidereonSmoothCodeResult = std::ptr::null_mut();
+        let iono_free: *mut SidereonIonoFreeSmoothResult = std::ptr::null_mut();
+        let slips: *mut SidereonSlipResult = std::ptr::null_mut();
+
+        assert_producer(
+            "sidereon_smooth_code",
+            "sidereon_smooth_code: carrier thresholds must be finite and sane",
+            || unsafe {
+                sidereon_smooth_code(
+                    std::ptr::null(),
+                    0,
+                    bad_ptr,
+                    1,
+                    smooth,
+                    0,
+                    &mut *written_ptr,
+                    &mut *required_ptr,
+                )
+            },
+            || unsafe {
+                sidereon_smooth_code(
+                    std::ptr::null(),
+                    0,
+                    good_ptr,
+                    1,
+                    smooth,
+                    0,
+                    &mut *written_ptr,
+                    &mut *required_ptr,
+                )
+            },
+            || unsafe {
+                sidereon_smooth_code(
+                    std::ptr::null(),
+                    0,
+                    good_ptr,
+                    1,
+                    smooth,
+                    0,
+                    std::ptr::null_mut(),
+                    &mut *required_ptr,
+                )
+            },
+        );
+        assert_producer(
+            "sidereon_smooth_code_v2",
+            "sidereon_smooth_code_v2: carrier thresholds must be finite and sane",
+            || unsafe {
+                sidereon_smooth_code_v2(
+                    std::ptr::null(),
+                    0,
+                    bad_ptr,
+                    1,
+                    smooth,
+                    0,
+                    &mut *written_ptr,
+                    &mut *required_ptr,
+                )
+            },
+            || unsafe {
+                sidereon_smooth_code_v2(
+                    std::ptr::null(),
+                    0,
+                    good_ptr,
+                    1,
+                    smooth,
+                    0,
+                    &mut *written_ptr,
+                    &mut *required_ptr,
+                )
+            },
+            || unsafe {
+                sidereon_smooth_code_v2(
+                    std::ptr::null(),
+                    0,
+                    good_ptr,
+                    1,
+                    smooth,
+                    0,
+                    std::ptr::null_mut(),
+                    &mut *required_ptr,
+                )
+            },
+        );
+        assert_producer(
+            "sidereon_smooth_iono_free_code",
+            "sidereon_smooth_iono_free_code: carrier thresholds must be finite and sane",
+            || unsafe {
+                sidereon_smooth_iono_free_code(
+                    std::ptr::null(),
+                    0,
+                    bad_ptr,
+                    1,
+                    iono_free,
+                    0,
+                    &mut *written_ptr,
+                    &mut *required_ptr,
+                )
+            },
+            || unsafe {
+                sidereon_smooth_iono_free_code(
+                    std::ptr::null(),
+                    0,
+                    good_ptr,
+                    1,
+                    iono_free,
+                    0,
+                    &mut *written_ptr,
+                    &mut *required_ptr,
+                )
+            },
+            || unsafe {
+                sidereon_smooth_iono_free_code(
+                    std::ptr::null(),
+                    0,
+                    good_ptr,
+                    1,
+                    iono_free,
+                    0,
+                    std::ptr::null_mut(),
+                    &mut *required_ptr,
+                )
+            },
+        );
+        assert_producer(
+            "sidereon_smooth_iono_free_code_v2",
+            "sidereon_smooth_iono_free_code_v2: carrier thresholds must be finite and sane",
+            || unsafe {
+                sidereon_smooth_iono_free_code_v2(
+                    std::ptr::null(),
+                    0,
+                    bad_ptr,
+                    1,
+                    iono_free,
+                    0,
+                    &mut *written_ptr,
+                    &mut *required_ptr,
+                )
+            },
+            || unsafe {
+                sidereon_smooth_iono_free_code_v2(
+                    std::ptr::null(),
+                    0,
+                    good_ptr,
+                    1,
+                    iono_free,
+                    0,
+                    &mut *written_ptr,
+                    &mut *required_ptr,
+                )
+            },
+            || unsafe {
+                sidereon_smooth_iono_free_code_v2(
+                    std::ptr::null(),
+                    0,
+                    good_ptr,
+                    1,
+                    iono_free,
+                    0,
+                    std::ptr::null_mut(),
+                    &mut *required_ptr,
+                )
+            },
+        );
+        assert_producer(
+            "sidereon_detect_cycle_slips",
+            "sidereon_detect_cycle_slips: carrier thresholds must be finite and sane",
+            || unsafe {
+                sidereon_detect_cycle_slips(
+                    std::ptr::null(),
+                    0,
+                    bad_ptr,
+                    slips,
+                    0,
+                    &mut *written_ptr,
+                    &mut *required_ptr,
+                )
+            },
+            || unsafe {
+                sidereon_detect_cycle_slips(
+                    std::ptr::null(),
+                    0,
+                    good_ptr,
+                    slips,
+                    0,
+                    &mut *written_ptr,
+                    &mut *required_ptr,
+                )
+            },
+            || unsafe {
+                sidereon_detect_cycle_slips(
+                    std::ptr::null(),
+                    0,
+                    good_ptr,
+                    slips,
+                    0,
+                    std::ptr::null_mut(),
+                    &mut *required_ptr,
+                )
+            },
+        );
+        assert_producer(
+            "sidereon_detect_cycle_slips_v2",
+            "sidereon_detect_cycle_slips_v2: carrier thresholds must be finite and sane",
+            || unsafe {
+                sidereon_detect_cycle_slips_v2(
+                    std::ptr::null(),
+                    0,
+                    bad_ptr,
+                    slips,
+                    0,
+                    &mut *written_ptr,
+                    &mut *required_ptr,
+                )
+            },
+            || unsafe {
+                sidereon_detect_cycle_slips_v2(
+                    std::ptr::null(),
+                    0,
+                    good_ptr,
+                    slips,
+                    0,
+                    &mut *written_ptr,
+                    &mut *required_ptr,
+                )
+            },
+            || unsafe {
+                sidereon_detect_cycle_slips_v2(
+                    std::ptr::null(),
+                    0,
+                    good_ptr,
+                    slips,
+                    0,
+                    std::ptr::null_mut(),
+                    &mut *required_ptr,
+                )
+            },
+        );
     }
 }

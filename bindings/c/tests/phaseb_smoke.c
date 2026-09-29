@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "sidereon.h"
+#include "w4_pb_pins.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -32,8 +33,18 @@ static void check(int ok, const char *what) {
     }
 }
 
-static void check_close(double got, double want, double tol, const char *what) {
-    check(isfinite(got) && fabs(got - want) <= tol, what);
+/* Exact comparison with a generated bit pattern (tests/valgen w4_pb). */
+static void check_bits(double got, uint64_t expected, const char *what) {
+    uint64_t bits = 0;
+    memcpy(&bits, &got, sizeof(bits));
+    check(bits == expected, what);
+}
+
+static void check_vec_bits(const double *got, const uint64_t *expected, size_t n,
+                           const char *what) {
+    for (size_t i = 0; i < n; i++) {
+        check_bits(got[i], expected[i], what);
+    }
 }
 
 static uint8_t *read_file(const char *path, size_t *out_len) {
@@ -125,7 +136,7 @@ static double first_sp3_epoch(const SidereonSp3 *sp3) {
     size_t required = 0;
     check(sidereon_sp3_epochs_j2000_seconds(sp3, NULL, 0, &written, &required) ==
               SIDEREON_STATUS_OK &&
-              required > 0,
+              required == W4_PB_SP3_EPOCH_COUNT,
           "phaseb sp3 epoch query");
     double *epochs = (double *)calloc(required, sizeof(*epochs));
     if (!epochs) {
@@ -134,9 +145,10 @@ static double first_sp3_epoch(const SidereonSp3 *sp3) {
     }
     check(sidereon_sp3_epochs_j2000_seconds(sp3, epochs, required, &written, &required) ==
               SIDEREON_STATUS_OK &&
-              written > 0,
+              written == W4_PB_SP3_EPOCH_COUNT,
           "phaseb sp3 epoch copy");
     double first = epochs[0];
+    check_bits(first, W4_PB_SP3_EPOCH0_BITS, "phaseb sp3 first epoch");
     free(epochs);
     return first;
 }
@@ -148,12 +160,16 @@ static void test_labels(void) {
     memset(buf, 0, sizeof(buf));
     check(sidereon_gnss_system_label(SIDEREON_GNSS_SYSTEM_GPS, buf, sizeof(buf), &written,
                                      &required) == SIDEREON_STATUS_OK &&
-              written == 3 && required == 3 && memcmp(buf, "GPS", 3) == 0,
+              written == strlen(W4_PB_GNSS_GPS_LABEL) &&
+              required == strlen(W4_PB_GNSS_GPS_LABEL) &&
+              memcmp(buf, W4_PB_GNSS_GPS_LABEL, written) == 0,
           "gnss system label delegates to core");
     memset(buf, 0, sizeof(buf));
     check(sidereon_carrier_band_label(SIDEREON_CARRIER_BAND_L1, buf, sizeof(buf), &written,
                                       &required) == SIDEREON_STATUS_OK &&
-              written == 2 && required == 2 && memcmp(buf, "l1", 2) == 0,
+              written == strlen(W4_PB_CARRIER_L1_LABEL) &&
+              required == strlen(W4_PB_CARRIER_L1_LABEL) &&
+              memcmp(buf, W4_PB_CARRIER_L1_LABEL, written) == 0,
           "carrier band label delegates to core");
 }
 
@@ -185,24 +201,26 @@ static void test_anomaly_and_equinoctial(void) {
     SidereonKeplerSolution solved;
     check(sidereon_mean_to_eccentric_anomaly(mean, ecc, &e_anom) == SIDEREON_STATUS_OK,
           "mean to eccentric anomaly");
+    check_bits(e_anom, W4_PB_E_ANOM_BITS, "eccentric anomaly");
     check(sidereon_eccentric_to_mean_anomaly(e_anom, ecc, &mean_round) == SIDEREON_STATUS_OK,
           "eccentric to mean anomaly");
-    check_close(mean_round, mean, 1e-13, "anomaly mean roundtrip");
+    check_bits(mean_round, W4_PB_MEAN_ROUND_BITS, "anomaly mean roundtrip");
     check(sidereon_eccentric_to_true_anomaly(e_anom, ecc, &true_anom) == SIDEREON_STATUS_OK,
           "eccentric to true anomaly");
     check(sidereon_true_to_eccentric_anomaly(true_anom, ecc, &true_round) == SIDEREON_STATUS_OK,
           "true to eccentric anomaly");
-    check_close(true_round, e_anom, 1e-13, "anomaly eccentric roundtrip");
+    check_bits(true_anom, W4_PB_TRUE_ANOM_BITS, "true anomaly");
+    check_bits(true_round, W4_PB_TRUE_ROUND_BITS, "anomaly eccentric roundtrip");
     check(sidereon_solve_kepler(mean, ecc, &solved) == SIDEREON_STATUS_OK &&
-              solved.iterations > 0,
+              solved.iterations == W4_PB_KEPLER_ITERATIONS,
           "solve kepler");
-    check_close(solved.anomaly_rad, e_anom, 1e-13, "solve kepler value");
+    check_bits(solved.anomaly_rad, W4_PB_KEPLER_ANOMALY_BITS, "solve kepler value");
 
     SidereonClassicalElements coe = sample_coe();
     SidereonClassicalElements propagated;
     check(sidereon_propagate_kepler(&coe, mu, 0.0, &propagated) == SIDEREON_STATUS_OK,
           "propagate kepler");
-    check_close(propagated.nu, coe.nu, 1e-13, "propagate kepler zero dt");
+    check_bits(propagated.nu, W4_PB_PROPAGATED_NU_BITS, "propagate kepler zero dt");
 
     SidereonEquinoctialElements eq;
     SidereonClassicalElements coe_from_eq;
@@ -216,24 +234,24 @@ static void test_anomaly_and_equinoctial(void) {
               SIDEREON_STATUS_OK,
           "coe to equinoctial");
     check(sidereon_eq2coe(&eq, &coe_from_eq) == SIDEREON_STATUS_OK, "equinoctial to coe");
-    check_close(coe_from_eq.a, coe.a, 1e-9, "equinoctial a roundtrip");
+    check_bits(coe_from_eq.a, W4_PB_EQ_ROUND_A_BITS, "equinoctial a roundtrip");
     check(sidereon_coe2mee(&coe, SIDEREON_RETROGRADE_FACTOR_PROGRADE, &mee) ==
               SIDEREON_STATUS_OK,
           "coe to modified equinoctial");
     check(sidereon_mee2coe(&mee, &coe_from_mee) == SIDEREON_STATUS_OK,
           "modified equinoctial to coe");
-    check_close(coe_from_mee.ecc, coe.ecc, 1e-12, "modified equinoctial ecc roundtrip");
+    check_bits(coe_from_mee.ecc, W4_PB_MEE_ROUND_ECC_BITS, "modified equinoctial ecc roundtrip");
     check(sidereon_coe2rv(&coe, mu, r, v) == SIDEREON_STATUS_OK, "coe to rv");
     check(sidereon_rv2eq(r, v, mu, SIDEREON_RETROGRADE_FACTOR_PROGRADE, &eq) ==
               SIDEREON_STATUS_OK,
           "rv to equinoctial");
     check(sidereon_eq2rv(&eq, mu, r2, v2) == SIDEREON_STATUS_OK, "equinoctial to rv");
-    check_close(r2[0], r[0], 1e-6, "equinoctial rv x");
+    check_bits(r2[0], W4_PB_EQ_RV_X_BITS, "equinoctial rv x");
     check(sidereon_rv2mee(r, v, mu, SIDEREON_RETROGRADE_FACTOR_PROGRADE, &mee) ==
               SIDEREON_STATUS_OK,
           "rv to modified equinoctial");
     check(sidereon_mee2rv(&mee, mu, r2, v2) == SIDEREON_STATUS_OK, "modified equinoctial to rv");
-    check_close(v2[1], v[1], 1e-9, "modified equinoctial rv vy");
+    check_bits(v2[1], W4_PB_MEE_RV_VY_BITS, "modified equinoctial rv vy");
 }
 
 static void test_angles_and_relative(void) {
@@ -243,16 +261,16 @@ static void test_angles_and_relative(void) {
     double out = 0.0;
     check(sidereon_angular_separation_deg(x, y, &out) == SIDEREON_STATUS_OK,
           "angular separation vectors");
-    check_close(out, 90.0, 1e-12, "angular separation vectors value");
+    check_bits(out, W4_PB_SEPARATION_VECTORS_BITS, "angular separation vectors value");
     check(sidereon_angular_separation_coords_deg(0.0, 0.0, 90.0, 0.0, &out) ==
               SIDEREON_STATUS_OK,
           "angular separation coords");
-    check_close(out, 90.0, 1e-12, "angular separation coords value");
+    check_bits(out, W4_PB_SEPARATION_COORDS_BITS, "angular separation coords value");
     check(sidereon_position_angle_deg(0.0, 0.0, 90.0, 0.0, &out) == SIDEREON_STATUS_OK,
           "position angle");
-    check_close(out, 90.0, 1e-12, "position angle value");
+    check_bits(out, W4_PB_POSITION_ANGLE_BITS, "position angle value");
     check(sidereon_beta_angle_deg(z, x, &out) == SIDEREON_STATUS_OK, "beta angle");
-    check_close(out, 0.0, 1e-12, "beta angle value");
+    check_bits(out, W4_PB_BETA_ANGLE_BITS, "beta angle value");
 
     SidereonCartesianState chief = {0};
     chief.position_km[0] = 7000.0;
@@ -263,29 +281,31 @@ static void test_angles_and_relative(void) {
     deputy.velocity_km_s[1] += 0.01;
     double rotation[9];
     check(sidereon_relative_rotation(SIDEREON_RELATIVE_FRAME_RTN, &chief, rotation, 9) ==
-              SIDEREON_STATUS_OK &&
-              isfinite(rotation[0]),
+              SIDEREON_STATUS_OK,
           "relative frame rotation");
+    check_vec_bits(rotation, W4_PB_RTN_ROTATION_BITS, 9, "relative frame rotation values");
     SidereonCartesianState rel;
     SidereonCartesianState recovered;
     check(sidereon_relative_state(&chief, &deputy, &rel) == SIDEREON_STATUS_OK,
           "relative state");
     check(sidereon_absolute_from_relative(&chief, &rel, &recovered) == SIDEREON_STATUS_OK,
           "absolute from relative");
-    check_close(recovered.position_km[1], deputy.position_km[1], 1e-9,
-                "relative absolute roundtrip");
+    check_vec_bits(rel.position_km, W4_PB_REL_POSITION_BITS, 3, "relative state position");
+    check_vec_bits(recovered.position_km, W4_PB_RECOVERED_POSITION_BITS, 3,
+                   "relative absolute roundtrip");
     double n = 0.0;
     double stm[36];
-    check(sidereon_relative_mean_motion_circular(7000.0, &n) == SIDEREON_STATUS_OK && n > 0.0,
+    check(sidereon_relative_mean_motion_circular(7000.0, &n) == SIDEREON_STATUS_OK,
           "relative mean motion circular");
-    check(sidereon_relative_mean_motion_from_state(&chief, &out) == SIDEREON_STATUS_OK &&
-              out > 0.0,
+    check_bits(n, W4_PB_MEAN_MOTION_CIRCULAR_BITS, "relative mean motion circular value");
+    check(sidereon_relative_mean_motion_from_state(&chief, &out) == SIDEREON_STATUS_OK,
           "relative mean motion state");
+    check_bits(out, W4_PB_MEAN_MOTION_STATE_BITS, "relative mean motion state value");
     check(sidereon_cw_stm(n, 0.0, stm, 36) == SIDEREON_STATUS_OK, "cw stm");
-    check_close(stm[0], 1.0, 1e-15, "cw stm identity");
+    check_bits(stm[0], W4_PB_CW_STM_00_BITS, "cw stm entry 0");
     check(sidereon_cw_propagate(&rel, n, 0.0, &recovered) == SIDEREON_STATUS_OK,
           "cw propagate");
-    check_close(recovered.position_km[0], rel.position_km[0], 1e-15, "cw zero dt");
+    check_vec_bits(recovered.position_km, W4_PB_CW_PROPAGATED_POSITION_BITS, 3, "cw zero dt");
 }
 
 static void test_observe_and_almanac(SidereonSpk *spk) {
@@ -297,57 +317,65 @@ static void test_observe_and_almanac(SidereonSpk *spk) {
     SidereonBodyObservation obs;
     check(sidereon_observe_options_init(&options) == SIDEREON_STATUS_OK, "observe options init");
     check(sidereon_observe(&station, jan1_2025, SIDEREON_OBSERVE_TARGET_KIND_SUN, NULL, 0, NULL,
-                           NULL, &options, &obs) == SIDEREON_STATUS_OK &&
-              isfinite(obs.apparent.right_ascension_deg) && obs.apparent.distance_km > 0.0,
+                           NULL, &options, &obs) == SIDEREON_STATUS_OK,
           "observe sun");
+    check_bits(obs.apparent.right_ascension_deg, W4_PB_SUN_APPARENT_RA_BITS, "observe sun RA");
+    check_bits(obs.apparent.distance_km, W4_PB_SUN_APPARENT_DISTANCE_BITS,
+               "observe sun distance");
     check(sidereon_observe(&station, jan1_2025, SIDEREON_OBSERVE_TARGET_KIND_MOON, NULL, 0, NULL,
-                           NULL, &options, &obs) == SIDEREON_STATUS_OK &&
-              isfinite(obs.horizontal.azimuth_deg),
+                           NULL, &options, &obs) == SIDEREON_STATUS_OK,
           "observe moon");
+    check_bits(obs.horizontal.azimuth_deg, W4_PB_MOON_AZIMUTH_BITS, "observe moon azimuth");
     if (spk) {
         check(sidereon_observe_spk_body(&station, jan1_2025, spk, 4, &obs) ==
-                  SIDEREON_STATUS_OK &&
-                  obs.astrometric.distance_km > 0.0,
+                  SIDEREON_STATUS_OK,
               "observe spk body");
+        check_bits(obs.astrometric.distance_km, W4_PB_SPK_BODY_ASTROMETRIC_DISTANCE_BITS,
+                   "observe spk body distance");
     }
 
     size_t written = 0;
     size_t required = 0;
     check(sidereon_almanac_seasons(NULL, jan1_2025, apr1_2025, 86400.0, 60.0, NULL, 0,
                                    &written, &required) == SIDEREON_STATUS_OK &&
-              required >= 1,
+              required == W4_PB_SEASON_COUNT,
           "almanac seasons query");
     SidereonSeasonEvent seasons[4];
     check(sidereon_almanac_seasons(NULL, jan1_2025, apr1_2025, 86400.0, 60.0, seasons, 4,
                                    &written, &required) == SIDEREON_STATUS_OK &&
-              written >= 1,
+              written == W4_PB_SEASON_COUNT &&
+              seasons[0].time_unix_us == W4_PB_SEASON0_TIME_UNIX_US,
           "almanac seasons fill");
     check(sidereon_almanac_moon_phases(NULL, jan1_2025, feb15_2025, 21600.0, 60.0, NULL, 0,
                                        &written, &required) == SIDEREON_STATUS_OK &&
-              required >= 1,
+              required == W4_PB_MOON_PHASE_COUNT,
           "almanac moon phases query");
     SidereonMoonPhaseEvent phases[8];
     check(sidereon_almanac_moon_phases(NULL, jan1_2025, feb15_2025, 21600.0, 60.0, phases, 8,
                                        &written, &required) == SIDEREON_STATUS_OK &&
-              written >= 1,
+              written == W4_PB_MOON_PHASE_COUNT &&
+              phases[0].time_unix_us == W4_PB_MOON_PHASE0_TIME_UNIX_US,
           "almanac moon phases fill");
     SidereonPlanetaryEvent planet_events[4];
     check(sidereon_almanac_planetary_events(
               spk, SIDEREON_PLANET_MARS, SIDEREON_PLANETARY_EVENT_KIND_OPPOSITION, jan1_2025,
               feb15_2025, 21600.0, 60.0, planet_events, 4, &written, &required) ==
-              SIDEREON_STATUS_OK,
+                  SIDEREON_STATUS_OK &&
+              required == W4_PB_PLANETARY_EVENT_COUNT,
           "almanac planetary events");
     SidereonMeridianTransit transits[4];
     check(sidereon_almanac_meridian_transits(NULL, SIDEREON_TRANSIT_BODY_KIND_SUN, 0, &station,
                                              jan1_2025, jan1_2025 + 86400000000LL, 3600.0, 10.0,
                                              transits, 4, &written, &required) ==
               SIDEREON_STATUS_OK &&
-              written >= 1,
+              required == W4_PB_TRANSIT_COUNT &&
+              transits[0].time_unix_us == W4_PB_TRANSIT0_TIME_UNIX_US,
           "almanac meridian transits");
     SidereonAlmanacEclipseEvent eclipses[4];
     check(sidereon_almanac_lunar_solar_eclipses(NULL, jan1_2025, apr1_2025, 86400.0, 60.0,
                                                 eclipses, 4, &written, &required) ==
-              SIDEREON_STATUS_OK,
+                  SIDEREON_STATUS_OK &&
+              required == W4_PB_ECLIPSE_COUNT,
           "almanac eclipses");
 }
 
@@ -356,24 +384,24 @@ static void test_drag_decay(void) {
     SidereonDragParameters drag;
     check(sidereon_space_weather_default(&weather) == SIDEREON_STATUS_OK, "space weather default");
     check(sidereon_drag_parameters_from_area_mass(2.2, 20.0, 100.0, weather, 90.0, &drag) ==
-              SIDEREON_STATUS_OK &&
-              drag.bc_factor_m2_kg > 0.0,
+              SIDEREON_STATUS_OK,
           "drag parameters area mass");
+    check_bits(drag.bc_factor_m2_kg, W4_PB_DRAG_BC_FACTOR_BITS, "drag ballistic factor");
     SidereonCartesianState state = {0};
     state.position_km[0] = 6778.0;
     state.velocity_km_s[1] = 7.67;
     double accel[3];
-    check(sidereon_drag_force_acceleration(&drag, &state, accel) == SIDEREON_STATUS_OK &&
-              isfinite(accel[0]),
+    check(sidereon_drag_force_acceleration(&drag, &state, accel) == SIDEREON_STATUS_OK,
           "drag force acceleration");
+    check_vec_bits(accel, W4_PB_DRAG_ACCEL_BITS, 3, "drag force acceleration values");
     SidereonDecayConfig config;
     SidereonDecayEstimate estimate;
     check(sidereon_decay_config_init(&config) == SIDEREON_STATUS_OK, "decay config init");
     config.drag = drag;
     config.reentry_altitude_km = 500.0;
-    check(sidereon_estimate_decay(&state, &config, &estimate) == SIDEREON_STATUS_OK &&
-              estimate.time_to_decay_s == 0.0,
+    check(sidereon_estimate_decay(&state, &config, &estimate) == SIDEREON_STATUS_OK,
           "estimate decay initial below threshold");
+    check_bits(estimate.time_to_decay_s, W4_PB_DECAY_TIME_BITS, "estimate decay time");
 }
 
 static void test_ephemeris_sample(SidereonSp3 *sp3) {
@@ -383,20 +411,22 @@ static void test_ephemeris_sample(SidereonSp3 *sp3) {
     size_t required = 0;
     check(sidereon_sp3_ephemeris_sample(sp3, sats, 1, t, t, 60.0, NULL, 0, &written,
                                         &required) == SIDEREON_STATUS_OK &&
-              required == 1,
+              required == W4_PB_SAMPLE_ROW_COUNT,
           "sp3 ephemeris sample query");
     SidereonEphemerisSampleRow row;
     check(sidereon_sp3_ephemeris_sample(sp3, sats, 1, t, t, 60.0, &row, 1, &written,
                                         &required) == SIDEREON_STATUS_OK &&
-              written == 1 && row.status == SIDEREON_EPHEMERIS_SAMPLE_STATUS_VALID &&
-              row.has_position_ecef_m,
+              written == W4_PB_SAMPLE_ROW_COUNT && row.status == W4_PB_SAMPLE_ROW0_STATUS &&
+              row.has_position_ecef_m == W4_PB_SAMPLE_ROW0_HAS_POSITION,
           "sp3 ephemeris sample fill");
+    check_vec_bits(row.position_ecef_m, W4_PB_SAMPLE_ROW0_POSITION_BITS, 3,
+                   "sp3 ephemeris sample position");
 }
 
 static void test_terrain(const char *dted_root, const char *dted_tile) {
     SidereonDtedLookupOptions options;
     check(sidereon_dted_lookup_options_init(&options) == SIDEREON_STATUS_OK &&
-              options.interpolation == SIDEREON_DTED_INTERPOLATION_BILINEAR,
+              options.interpolation == W4_PB_DTED_DEFAULT_INTERPOLATION,
           "dted lookup options init");
     SidereonDtedTerrain *terrain = NULL;
     double h = 0.0;
@@ -404,9 +434,9 @@ static void test_terrain(const char *dted_root, const char *dted_tile) {
           "dted terrain new");
     if (terrain) {
         check(sidereon_dted_terrain_height_m_with_options(terrain, -106.5, 36.5, &options, &h) ==
-                  SIDEREON_STATUS_OK &&
-                  isfinite(h),
+                  SIDEREON_STATUS_OK,
               "dted terrain height");
+        check_bits(h, W4_PB_DTED_HEIGHT_BITS, "dted terrain height value");
         sidereon_dted_terrain_free(terrain);
     }
     SidereonDtedTile *tile = NULL;
@@ -415,7 +445,8 @@ static void test_terrain(const char *dted_root, const char *dted_tile) {
           "dted tile load");
     if (tile) {
         check(sidereon_dted_tile_get_elevation(tile, -106.5, 36.5, &elev) ==
-                  SIDEREON_STATUS_OK,
+                      SIDEREON_STATUS_OK &&
+                  elev == W4_PB_DTED_TILE_ELEVATION,
               "dted tile elevation");
         sidereon_dted_tile_free(tile);
     }
@@ -463,38 +494,121 @@ static const uint8_t EDGE_BIA[] =
     "-BIAS/SOLUTION\n";
 
 static void test_biases(const char *dcb_path, const char *bia_gz_path) {
+    /* EDGE_BIA departs from Bias-SINEX 1.00 (a short header line, no %=ENDBIA
+     * footer, a count after +BIAS/SOLUTION), so a strict read refuses it and a
+     * lenient read keeps every row and reports each departure. */
+    SidereonBiasSet *strict = NULL;
+    check(!W4_PB_EDGE_STRICT_OK &&
+              sidereon_bias_sinex_parse(EDGE_BIA, sizeof(EDGE_BIA) - 1, &strict) ==
+                  SIDEREON_STATUS_INVALID_ARGUMENT &&
+              strict == NULL,
+          "bias sinex strict parse refuses departures");
     SidereonBiasSet *set = NULL;
-    check(sidereon_bias_sinex_parse(EDGE_BIA, sizeof(EDGE_BIA) - 1, &set) ==
-              SIDEREON_STATUS_OK &&
+    check(sidereon_bias_sinex_parse_with_policy(EDGE_BIA, sizeof(EDGE_BIA) - 1,
+                                                SIDEREON_BIAS_READ_POLICY_LENIENT,
+                                                &set) == SIDEREON_STATUS_OK &&
               set != NULL,
-          "bias sinex parse");
+          "bias sinex lenient parse");
+    SidereonBiasSet *bad = NULL;
+    check(sidereon_bias_sinex_parse_with_policy(EDGE_BIA, sizeof(EDGE_BIA) - 1, 99, &bad) ==
+                  SIDEREON_STATUS_INVALID_ARGUMENT &&
+              bad == NULL,
+          "bias sinex unknown policy");
+    sidereon_bias_set_free(bad);
     if (set) {
         size_t count = 0;
         SidereonBiasMode mode = SIDEREON_BIAS_MODE_UNSPECIFIED;
+        bool has_scale = false;
         uint32_t scale = 0;
-        SidereonBiasEpoch epoch = {2020, 1, 0};
-        bool present = false;
-        double value = 0.0;
-        check(sidereon_bias_set_record_count(set, &count) == SIDEREON_STATUS_OK && count == 11,
+        /* The G01 C1C row carries a slope, whose value refers to the middle of
+         * its validity interval (Bias-SINEX 1.00 section 5.1), so the stated
+         * value is read there exactly. */
+        SidereonBiasEpoch epoch = {2020, 1, 43200};
+        SidereonBiasLookup lookup;
+        size_t records[4] = {0};
+        check(sidereon_bias_set_record_count(set, &count) == SIDEREON_STATUS_OK &&
+                  count == W4_PB_EDGE_RECORD_COUNT,
               "bias record count");
-        check(sidereon_bias_set_mode(set, &mode, &scale) == SIDEREON_STATUS_OK &&
-                  mode == SIDEREON_BIAS_MODE_ABSOLUTE && scale == SIDEREON_TIME_SCALE_GPST,
+        size_t notices = 0;
+        check(sidereon_bias_set_notice_count(set, &notices) == SIDEREON_STATUS_OK &&
+                  notices == W4_PB_EDGE_NOTICE_COUNT,
+              "bias lenient notices");
+        /* The product has no %=ENDBIA footer, and its +BIAS/SOLUTION line,
+         * line 14 of EDGE_BIA (phaseb_smoke.c, the "+BIAS/SOLUTION 11" line
+         * of the literal above), carries a count after the block name. */
+        bool missing_footer = false;
+        bool block_suffix = false;
+        bool text_parts_ok = true;
+        for (size_t i = 0; i < notices; i++) {
+            SidereonBiasNotice notice;
+            check(sidereon_bias_set_notice(set, i, &notice) == SIDEREON_STATUS_OK,
+                  "bias notice");
+            if (notice.kind != SIDEREON_BIAS_NOTICE_KIND_DEPARTURE) {
+                continue;
+            }
+            if (notice.departure == SIDEREON_BIAS_DEPARTURE_KIND_MISSING_FOOTER) {
+                missing_footer = true;
+            }
+            if (notice.departure == SIDEREON_BIAS_DEPARTURE_KIND_BLOCK_START_SUFFIX &&
+                notice.has_line && notice.line == 14) {
+                block_suffix = true;
+            }
+            if (notice.departure == SIDEREON_BIAS_DEPARTURE_KIND_HEADER_LAYOUT) {
+                size_t written = 1;
+                size_t required = 0;
+                text_parts_ok = text_parts_ok &&
+                                sidereon_bias_set_notice_text(set, i,
+                                                              SIDEREON_BIAS_NOTICE_TEXT_REASON,
+                                                              NULL, 0, &written, &required) ==
+                                    SIDEREON_STATUS_OK &&
+                                written == 0 &&
+                                required == W4_PB_EDGE_HEADER_LAYOUT_REASON_LEN;
+            }
+        }
+        check(missing_footer == W4_PB_EDGE_MISSING_FOOTER &&
+                  block_suffix == W4_PB_EDGE_HAS_BLOCK_START_SUFFIX && text_parts_ok,
+              "bias notice kinds");
+        check(sidereon_bias_set_mode(set, &mode, &has_scale, &scale) == SIDEREON_STATUS_OK &&
+                  mode == W4_PB_EDGE_MODE && has_scale == W4_PB_EDGE_HAS_TIME_SCALE &&
+                  scale == W4_PB_EDGE_TIME_SCALE,
               "bias mode");
-        check(sidereon_bias_set_code_osb_seconds(set, "G01", "C1C", epoch, &present, &value) ==
-                  SIDEREON_STATUS_OK &&
-                  present,
+        check(sidereon_bias_set_code_osb_seconds(set, "G01", "C1C", epoch, &lookup, records, 4,
+                                                 NULL, 0) == SIDEREON_STATUS_OK &&
+                  lookup.status == W4_PB_EDGE_CODE_OSB_STATUS &&
+                  lookup.record_count == W4_PB_EDGE_CODE_OSB_RECORD_COUNT &&
+                  records[0] == W4_PB_EDGE_CODE_OSB_RECORD0,
               "bias code osb lookup");
-        check_close(value, -1.234567890000e-9, 1e-18, "bias code osb value");
-        check(sidereon_bias_set_phase_osb_cycles(set, "G01", "L1C", epoch, &present, &value) ==
-                  SIDEREON_STATUS_OK &&
-                  present,
+        check_bits(lookup.value, W4_PB_EDGE_CODE_OSB_VALUE_BITS, "bias code osb value");
+        SidereonBiasRecord record;
+        check(sidereon_bias_set_record(set, records[0], &record) == SIDEREON_STATUS_OK &&
+                  record.has_slope == W4_PB_EDGE_CODE_OSB_RECORD_HAS_SLOPE &&
+                  record.family == W4_PB_EDGE_CODE_OSB_RECORD_FAMILY &&
+                  record.unit == W4_PB_EDGE_CODE_OSB_RECORD_UNIT &&
+                  record.has_line == W4_PB_EDGE_CODE_OSB_RECORD_HAS_LINE,
+              "bias code osb source record");
+        check(sidereon_bias_set_phase_osb_cycles(set, "G01", "L1C", epoch, false, 0.0, &lookup,
+                                                 NULL, 0, NULL, 0) == SIDEREON_STATUS_OK &&
+                  lookup.status == W4_PB_EDGE_PHASE_OSB_STATUS,
               "bias phase osb lookup");
-        check_close(value, -0.105, 1e-15, "bias phase osb value");
-        check(sidereon_bias_set_code_dsb_seconds(set, "G01", "C1C", "C1W", epoch, &present,
-                                                 &value) == SIDEREON_STATUS_OK &&
-                  present,
+        check_bits(lookup.value, W4_PB_EDGE_PHASE_OSB_VALUE_BITS, "bias phase osb value");
+        check(sidereon_bias_set_code_dsb_seconds(set, "G01", "C1C", "C1W", epoch, &lookup, NULL,
+                                                 0, NULL, 0) == SIDEREON_STATUS_OK &&
+                  lookup.status == W4_PB_EDGE_CODE_DSB_STATUS,
               "bias code dsb lookup");
-        check_close(value, -1.794567890000e-9, 1e-18, "bias code dsb value");
+        check_bits(lookup.value, W4_PB_EDGE_CODE_DSB_VALUE_BITS, "bias code dsb value");
+        /* A satellite no row names falls back to its system's row: the
+         * lookup checks the satellite target before the system target. */
+        check(sidereon_bias_set_code_osb_seconds(set, "G02", "C1C", epoch, &lookup, NULL, 0,
+                                                 NULL, 0) == SIDEREON_STATUS_OK &&
+                  lookup.status == W4_PB_EDGE_CODE_OSB_G02_C1C_STATUS,
+              "bias code osb system fallback");
+        check_bits(lookup.value, W4_PB_EDGE_CODE_OSB_G02_C1C_VALUE_BITS,
+                   "bias code osb system value");
+        /* No satellite or system row covers G02 C1W. */
+        check(sidereon_bias_set_code_osb_seconds(set, "G02", "C1W", epoch, &lookup, NULL, 0,
+                                                 NULL, 0) == SIDEREON_STATUS_OK &&
+                  lookup.status == W4_PB_EDGE_CODE_OSB_G02_C1W_STATUS,
+              "bias code osb absent");
         sidereon_bias_set_free(set);
     }
 
@@ -510,20 +624,43 @@ static void test_biases(const char *dcb_path, const char *bia_gz_path) {
           "code dcb load");
     if (dcb) {
         SidereonBiasEpoch epoch = {2026, 153, 0};
-        bool present = false;
-        double value = 0.0;
-        check(sidereon_bias_set_code_dsb_seconds(dcb, "G01", "C1W", "C1C", epoch, &present,
-                                                 &value) == SIDEREON_STATUS_OK &&
-                  present,
+        SidereonBiasLookup lookup;
+        check(sidereon_bias_set_code_dsb_seconds(dcb, "G01", "C1W", "C1C", epoch, &lookup, NULL,
+                                                 0, NULL, 0) == SIDEREON_STATUS_OK &&
+                  lookup.status == W4_PB_DCB_CODE_DSB_STATUS,
               "code dcb lookup");
-        check_close(value, 0.626e-9, 1e-18, "code dcb value");
+        check_bits(lookup.value, W4_PB_DCB_CODE_DSB_VALUE_BITS, "code dcb value");
         sidereon_bias_set_free(dcb);
     }
+    SidereonBiasSet *dcb_policy = NULL;
+    check(W4_PB_DCB_STRICT_OK &&
+              sidereon_code_dcb_load_with_policy(dcb_path, &opts, SIDEREON_BIAS_READ_POLICY_STRICT,
+                                                 &dcb_policy) == SIDEREON_STATUS_OK &&
+              dcb_policy != NULL,
+          "code dcb load with policy");
+    sidereon_bias_set_free(dcb_policy);
 
     SidereonBiasSet *lossy = NULL;
-    check(sidereon_bias_sinex_load_lossy(bia_gz_path, &lossy) == SIDEREON_STATUS_OK &&
+    check(sidereon_bias_sinex_load_with_policy(bia_gz_path, SIDEREON_BIAS_READ_POLICY_LENIENT,
+                                               &lossy) == SIDEREON_STATUS_OK &&
               lossy != NULL,
-          "bias sinex gz lossy load");
+          "bias sinex gz lenient load");
+    if (lossy) {
+        size_t count = 0;
+        size_t notices = 0;
+        SidereonBiasMode mode = SIDEREON_BIAS_MODE_UNSPECIFIED;
+        bool has_scale = false;
+        uint32_t scale = 0;
+        check(sidereon_bias_set_record_count(lossy, &count) == SIDEREON_STATUS_OK &&
+                  count == W4_PB_GZ_RECORD_COUNT,
+              "bias sinex gz record count");
+        check(sidereon_bias_set_notice_count(lossy, &notices) == SIDEREON_STATUS_OK &&
+                  notices == W4_PB_GZ_NOTICE_COUNT,
+              "bias sinex gz notice count");
+        check(sidereon_bias_set_mode(lossy, &mode, &has_scale, &scale) == SIDEREON_STATUS_OK &&
+                  mode == W4_PB_GZ_MODE,
+              "bias sinex gz mode");
+    }
     sidereon_bias_set_free(lossy);
 }
 
@@ -541,8 +678,8 @@ static void test_sbas(void) {
           "sbas block decode");
     if (block) {
         check(sidereon_sbas_block_info(block, &info) == SIDEREON_STATUS_OK &&
-                  info.kind == SIDEREON_SBAS_MESSAGE_KIND_LONG_TERM_CORRECTIONS &&
-                  info.long_term_count > 0,
+                  info.kind == W4_PB_SBAS_KIND &&
+                  info.long_term_count == W4_PB_SBAS_LONG_TERM_COUNT,
               "sbas block info");
         uint8_t encoded[29];
         size_t written = 0;
@@ -557,12 +694,15 @@ static void test_sbas(void) {
               "sbas store new");
         if (store) {
             SidereonGnssWeekTow epoch = {SIDEREON_TIME_SCALE_GPST, 2400, 20.0};
-            check(sidereon_sbas_store_ingest(store, block, "S20", &epoch) == SIDEREON_STATUS_OK,
+            check(W4_PB_SBAS_INGEST_OK &&
+                      sidereon_sbas_store_ingest(store, block, "S20", &epoch) ==
+                          SIDEREON_STATUS_OK,
                   "sbas store ingest");
             bool present = true;
             SidereonSatelliteToken geo;
             check(sidereon_sbas_store_preferred_geo(store, 0.0, &present, &geo) ==
-                      SIDEREON_STATUS_OK,
+                          SIDEREON_STATUS_OK &&
+                      present == W4_PB_SBAS_PREFERRED_GEO_PRESENT,
                   "sbas preferred geo");
             sidereon_sbas_store_free(store);
         }
@@ -587,24 +727,25 @@ static void test_ssr(void) {
         SidereonRtcmSsrInfo info;
         size_t written = 0;
         size_t required = 0;
-        check(sidereon_rtcm_messages_count(messages, &count) == SIDEREON_STATUS_OK && count == 1,
+        check(sidereon_rtcm_messages_count(messages, &count) == SIDEREON_STATUS_OK &&
+                  count == W4_PB_RTCM_MESSAGE_COUNT,
               "ssr rtcm count");
         check(sidereon_rtcm_message_kind(messages, 0, &kind, &number) == SIDEREON_STATUS_OK &&
-                  kind == SIDEREON_RTCM_MESSAGE_KIND_SSR && number == 1060,
+                  kind == W4_PB_RTCM_MESSAGE0_KIND && number == W4_PB_RTCM_MESSAGE0_NUMBER,
               "ssr rtcm kind");
         check(sidereon_rtcm_message_ssr_info(messages, 0, &info) == SIDEREON_STATUS_OK &&
-                  info.kind == SIDEREON_RTCM_SSR_KIND_COMBINED_ORBIT_CLOCK &&
-                  info.orbit_count > 0 && info.clock_count > 0,
+                  info.kind == W4_PB_SSR_KIND && info.orbit_count == W4_PB_SSR_ORBIT_COUNT &&
+                  info.clock_count == W4_PB_SSR_CLOCK_COUNT,
               "ssr info");
         SidereonRtcmSsrOrbitRecord orbits[4];
         SidereonRtcmSsrClockRecord clocks[4];
         check(sidereon_rtcm_message_ssr_orbits(messages, 0, orbits, 4, &written, &required) ==
                   SIDEREON_STATUS_OK &&
-                  written > 0,
+                  required == W4_PB_SSR_ORBIT_COUNT,
               "ssr orbit rows");
         check(sidereon_rtcm_message_ssr_clocks(messages, 0, clocks, 4, &written, &required) ==
                   SIDEREON_STATUS_OK &&
-                  written > 0,
+                  required == W4_PB_SSR_CLOCK_COUNT,
               "ssr clock rows");
         SidereonSsrCorrectionStore *store = NULL;
         SidereonGnssWeekTow epoch = {SIDEREON_TIME_SCALE_GPST, 2425, 344970.0};
@@ -618,14 +759,51 @@ static void test_ssr(void) {
             SidereonSsrClockCorrection clock;
             check(sidereon_ssr_store_orbit(store, "G30", &present, &orbit) ==
                       SIDEREON_STATUS_OK &&
-                      present && isfinite(orbit.radial_m),
+                      present == W4_PB_SSR_G30_ORBIT_PRESENT,
                   "ssr store orbit");
+            check_bits(orbit.radial_m, W4_PB_SSR_G30_RADIAL_BITS, "ssr store orbit radial");
             check(sidereon_ssr_store_clock(store, "G30", &present, &clock) ==
                       SIDEREON_STATUS_OK &&
-                      present && isfinite(clock.c0_m),
+                      present == W4_PB_SSR_G30_CLOCK_PRESENT,
                   "ssr store clock");
+            check_bits(clock.c0_m, W4_PB_SSR_G30_C0_BITS, "ssr store clock c0");
             sidereon_ssr_store_free(store);
         }
+        SidereonSsrCorrectionStore *read_store = NULL;
+        SidereonRtcmStreamDiagnostics *read_diagnostics = NULL;
+        SidereonSsrIngestRefusals *refusals = NULL;
+        size_t trailing = 1;
+        check(sidereon_ssr_store_from_rtcm_reading(frame, frame_len, &epoch, &read_store,
+                                                   &read_diagnostics, &trailing, &refusals) ==
+                      SIDEREON_STATUS_OK &&
+                  read_store != NULL && read_diagnostics != NULL && refusals != NULL &&
+                  trailing == W4_PB_SSR_READING_TRAILING,
+              "ssr store from rtcm, reading");
+        size_t refusal_count = 1;
+        check(refusals != NULL &&
+                  sidereon_ssr_ingest_refusals_count(refusals, &refusal_count) ==
+                      SIDEREON_STATUS_OK &&
+                  refusal_count == W4_PB_SSR_READING_REFUSALS,
+              "ssr reading ingest refusals");
+        if (read_store) {
+            bool present = false;
+            SidereonSsrOrbitCorrection orbit;
+            check(sidereon_ssr_store_orbit(read_store, "G30", &present, &orbit) ==
+                          SIDEREON_STATUS_OK &&
+                      present == W4_PB_SSR_READING_G30_ORBIT_PRESENT &&
+                      orbit.has_nav_message == W4_PB_SSR_READING_G30_HAS_NAV_MESSAGE,
+                  "ssr reading store orbit");
+        }
+        sidereon_ssr_store_free(read_store);
+        sidereon_rtcm_stream_diagnostics_free(read_diagnostics);
+        sidereon_ssr_ingest_refusals_free(refusals);
+        /* One byte short of the frame: the strict build refuses it. */
+        SidereonSsrCorrectionStore *short_store = NULL;
+        check(!W4_PB_SSR_STRICT_PARTIAL_OK &&
+                  sidereon_ssr_store_from_rtcm(frame, frame_len - 1, &epoch, &short_store) ==
+                      SIDEREON_STATUS_INVALID_ARGUMENT &&
+                  short_store == NULL,
+              "ssr strict store refuses a partial frame");
         SidereonSsrCorrectionStore *empty = NULL;
         check(sidereon_ssr_store_new(SIDEREON_SSR_REFERENCE_POINT_CENTER_OF_MASS, &empty) ==
                   SIDEREON_STATUS_OK &&

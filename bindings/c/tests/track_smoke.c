@@ -7,8 +7,10 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "sidereon.h"
+#include "w6_track_pins.h"
 
 static int fail(const char *what) {
     char message[512];
@@ -30,6 +32,19 @@ static int require_ok(SidereonStatus status, const char *what) {
 
 static bool close_abs(double actual, double expected, double tol) {
     return fabs(actual - expected) <= tol;
+}
+
+/* Every expected value below is sidereon-core's own result for these inputs,
+ * from tests/valgen (w6_track). */
+static bool same_bits(const double *values, const uint64_t *expected, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        uint64_t bits = 0;
+        memcpy(&bits, &values[i], sizeof(bits));
+        if (bits != expected[i]) {
+            return false;
+        }
+    }
+    return true;
 }
 
 static int copy_filter_position(SidereonTrackFilter *filter, double *out, size_t len,
@@ -98,7 +113,10 @@ static int test_gated_spike(void) {
     double predicted_covariance[STATE_DIM * STATE_DIM] = {0.0};
     if (copy_filter_position(filter, predicted_position, DIM, "predicted position") != 0 ||
         copy_filter_covariance(filter, predicted_covariance, STATE_DIM * STATE_DIM,
-                               "predicted covariance") != 0) {
+                               "predicted covariance") != 0 ||
+        !same_bits(predicted_position, W6_TRACK_SPIKE_PREDICTED_POSITION_BITS, DIM) ||
+        !same_bits(predicted_covariance, W6_TRACK_SPIKE_PREDICTED_COVARIANCE_BITS,
+                   STATE_DIM * STATE_DIM)) {
         goto cleanup;
     }
 
@@ -112,8 +130,10 @@ static int test_gated_spike(void) {
                        sizeof(spike_covariance) / sizeof(spike_covariance[0]), innovation, DIM,
                        innovation_covariance, DIM * DIM, &innovation_report),
                    "position innovation") != 0 ||
-        innovation_report.dimension != DIM || innovation_report.nis <= 0.0 ||
-        !isfinite(innovation[0]) || innovation_covariance[0] <= 0.0) {
+        innovation_report.dimension != DIM ||
+        !same_bits(&innovation_report.nis, &W6_TRACK_SPIKE_NIS_BITS, 1) ||
+        !same_bits(innovation, W6_TRACK_SPIKE_INNOVATION_BITS, DIM) ||
+        !same_bits(innovation_covariance, W6_TRACK_SPIKE_INNOVATION_COVARIANCE_BITS, DIM * DIM)) {
         goto cleanup;
     }
 
@@ -123,7 +143,10 @@ static int test_gated_spike(void) {
                        sizeof(spike_covariance) / sizeof(spike_covariance[0]), 0.95, history,
                        &gated),
                    "gated recorded update") != 0 ||
-        gated.gate.in_gate || gated.has_update ||
+        gated.gate.in_gate != W6_TRACK_SPIKE_IN_GATE ||
+        gated.has_update != W6_TRACK_SPIKE_HAS_UPDATE ||
+        !same_bits(&gated.gate.nis, &W6_TRACK_SPIKE_GATE_NIS_BITS, 1) ||
+        !same_bits(&gated.gate.threshold, &W6_TRACK_SPIKE_GATE_THRESHOLD_BITS, 1) ||
         gated.state.dimension != prediction.predicted.dimension) {
         goto cleanup;
     }
@@ -133,6 +156,9 @@ static int test_gated_spike(void) {
     if (copy_filter_position(filter, after_position, DIM, "after gated position") != 0 ||
         copy_filter_covariance(filter, after_covariance, STATE_DIM * STATE_DIM,
                                "after gated covariance") != 0 ||
+        !same_bits(after_position, W6_TRACK_SPIKE_AFTER_POSITION_BITS, DIM) ||
+        !same_bits(after_covariance, W6_TRACK_SPIKE_AFTER_COVARIANCE_BITS,
+                   STATE_DIM * STATE_DIM) ||
         !close_abs(after_position[0], predicted_position[0], 0.0)) {
         goto cleanup;
     }
@@ -156,7 +182,8 @@ static int test_gated_spike(void) {
                    "history count") != 0 ||
         require_ok(sidereon_smoothed_track_epoch_count(smoothed, &smoothed_count),
                    "smoothed count") != 0 ||
-        recorded_count == 0 || smoothed_count != recorded_count) {
+        recorded_count != W6_TRACK_SPIKE_RECORDED_COUNT ||
+        smoothed_count != W6_TRACK_SPIKE_SMOOTHED_COUNT || smoothed_count != recorded_count) {
         goto cleanup;
     }
 
@@ -168,6 +195,7 @@ static int test_gated_spike(void) {
                        &required),
                    "last smoothed position") != 0 ||
         written != DIM || required != DIM ||
+        !same_bits(last_smoothed_position, W6_TRACK_SPIKE_LAST_SMOOTHED_POSITION_BITS, DIM) ||
         !close_abs(last_smoothed_position[0], predicted_position[0], 0.0)) {
         goto cleanup;
     }
@@ -222,15 +250,16 @@ static int test_recorded_fix_smoothing(void) {
                        filter, fix, DIM, fix_covariance,
                        sizeof(fix_covariance) / sizeof(fix_covariance[0]), history, &update),
                    "recorded position update") != 0 ||
-        update.updated.frame != SIDEREON_TRACK_COORDINATE_FRAME_ECEF ||
-        update.innovation.dimension != DIM || update.innovation.nis < 0.0 ||
+        update.updated.frame != W6_TRACK_FIX_UPDATED_FRAME ||
+        update.innovation.dimension != W6_TRACK_FIX_INNOVATION_DIMENSION ||
+        !same_bits(&update.innovation.nis, &W6_TRACK_FIX_NIS_BITS, 1) ||
         update.updated.dimension != prediction.predicted.dimension) {
         goto cleanup;
     }
 
     double after_position[DIM] = {0.0, 0.0, 0.0};
     if (copy_filter_position(filter, after_position, DIM, "updated position") != 0 ||
-        !(after_position[0] > initial_position[0])) {
+        !same_bits(after_position, W6_TRACK_FIX_UPDATED_POSITION_BITS, DIM)) {
         goto cleanup;
     }
 
@@ -246,7 +275,8 @@ static int test_recorded_fix_smoothing(void) {
                    "recorded count") != 0 ||
         require_ok(sidereon_smoothed_track_epoch_count(smoothed, &smoothed_count),
                    "smoothed count") != 0 ||
-        recorded_count == 0 || smoothed_count != recorded_count) {
+        recorded_count != W6_TRACK_FIX_RECORDED_COUNT ||
+        smoothed_count != W6_TRACK_FIX_SMOOTHED_COUNT) {
         goto cleanup;
     }
 
@@ -255,10 +285,11 @@ static int test_recorded_fix_smoothing(void) {
     size_t required = 0;
     if (require_ok(sidereon_smoothed_track_epoch(smoothed, 0, &first_epoch),
                    "first smoothed epoch") != 0 ||
-        !first_epoch.has_rts_gain_to_next ||
+        first_epoch.has_rts_gain_to_next != W6_TRACK_FIX_FIRST_HAS_GAIN ||
         require_ok(sidereon_smoothed_track_epoch_rts_gain_to_next(
                        smoothed, 0, NULL, 0, &written, &required),
                    "first RTS gain query") != 0 ||
+        required != W6_TRACK_FIX_FIRST_GAIN_LEN ||
         required != first_epoch.state.state_dimension * first_epoch.state.state_dimension) {
         goto cleanup;
     }
@@ -268,19 +299,15 @@ static int test_recorded_fix_smoothing(void) {
                        smoothed, 0, covariance, sizeof(covariance) / sizeof(covariance[0]),
                        &written, &required),
                    "smoothed covariance") != 0 ||
-        written != required || required != STATE_DIM * STATE_DIM) {
+        written != required || required != STATE_DIM * STATE_DIM ||
+        !same_bits(covariance, W6_TRACK_FIX_FIRST_COVARIANCE_BITS, STATE_DIM * STATE_DIM)) {
         goto cleanup;
-    }
-    for (size_t i = 0; i < sizeof(covariance) / sizeof(covariance[0]); i++) {
-        if (!isfinite(covariance[i])) {
-            goto cleanup;
-        }
     }
 
     if (require_ok(sidereon_smoothed_track_epoch_rts_gain_to_next(
                        smoothed, smoothed_count - 1, NULL, 0, &written, &required),
                    "last RTS gain query") != 0 ||
-        required != 0) {
+        required != W6_TRACK_FIX_LAST_GAIN_LEN) {
         goto cleanup;
     }
 

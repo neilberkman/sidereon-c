@@ -30,6 +30,7 @@
 
 #include "broadcast_fixture.h"
 #include "spp_fixture.h"
+#include "w5_parity_pins.h"
 
 static int fail(const char *what, int code) {
     char message[512];
@@ -52,6 +53,20 @@ static uint64_t f64_to_bits(double value) {
     uint64_t bits;
     memcpy(&bits, &value, sizeof(bits));
     return bits;
+}
+
+/* Exact agreement with a pinned engine value (tests/valgen, bin w5_parity). */
+static bool same_bits(double value, uint64_t want) {
+    return f64_to_bits(value) == want;
+}
+
+static bool same_bits_n(const double *values, const uint64_t *want, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        if (!same_bits(values[i], want[i])) {
+            return false;
+        }
+    }
+    return true;
 }
 
 static uint8_t *read_file(const char *path, size_t *out_len) {
@@ -108,8 +123,8 @@ static int exercise_geometry(const SidereonSp3 *sp3) {
         written != 0) {
         return fail("geometry: visible count query", 1);
     }
-    if (required == 0) {
-        return fail("geometry: no satellites visible above the mask", 1);
+    if (required != W5_PARITY_VISIBLE_COUNT) {
+        return fail("geometry: visible count differs from the engine's", 1);
     }
     SidereonGeometryVisible *rows = calloc(required, sizeof(*rows));
     if (rows == NULL) {
@@ -122,22 +137,24 @@ static int exercise_geometry(const SidereonSp3 *sp3) {
         return fail("geometry: visible fill", 1);
     }
     for (size_t i = 0; i < written; i++) {
-        if (!token_nonempty(&rows[i].satellite) || !isfinite(rows[i].elevation_deg) ||
-            rows[i].elevation_deg < mask_deg || !isfinite(rows[i].azimuth_deg)) {
+        if (!token_nonempty(&rows[i].satellite) ||
+            strcmp(rows[i].satellite.bytes, W5_PARITY_VISIBLE_SATELLITES[i]) != 0 ||
+            !same_bits(rows[i].elevation_deg, W5_PARITY_VISIBLE_ELEVATION_DEG_BITS[i]) ||
+            !same_bits(rows[i].azimuth_deg, W5_PARITY_VISIBLE_AZIMUTH_DEG_BITS[i])) {
             free(rows);
-            return fail("geometry: visible row out of range", 1);
+            return fail("geometry: visible row differs from the engine's", 1);
         }
     }
     size_t n_visible = written;
     free(rows);
 
-    /* GPS-only filter must not exceed the all-systems count. */
+    /* The GPS-only count is the engine's; it cannot exceed the full count. */
     uint32_t gps_only[1] = {(uint32_t)SIDEREON_GNSS_SYSTEM_GPS};
     size_t gps_written = 0;
     size_t gps_required = 0;
     if (sidereon_sp3_geometry_visible(sp3, receiver, t_rx, mask_deg, gps_only, 1, NULL, 0,
                                       &gps_written, &gps_required) != SIDEREON_STATUS_OK ||
-        gps_required > n_visible) {
+        gps_required != W5_PARITY_VISIBLE_GPS_COUNT || gps_required > n_visible) {
         return fail("geometry: GPS-filtered count exceeds total", 1);
     }
 
@@ -148,7 +165,7 @@ static int exercise_geometry(const SidereonSp3 *sp3) {
     if (sidereon_sp3_geometry_visibility_series(sp3, receiver, t_rx, window_end, 600, mask_deg, NULL,
                                                 0, NULL, 0, &series_written, &series_required) !=
             SIDEREON_STATUS_OK ||
-        series_required == 0) {
+        series_required != W5_PARITY_SERIES_COUNT) {
         return fail("geometry: visibility series count", 1);
     }
     SidereonVisibilitySeriesPoint *series = calloc(series_required, sizeof(*series));
@@ -162,6 +179,12 @@ static int exercise_geometry(const SidereonSp3 *sp3) {
         free(series);
         return fail("geometry: visibility series fill", 1);
     }
+    for (size_t i = 0; i < series_written; i++) {
+        if (series[i].n_visible != W5_PARITY_SERIES_N_VISIBLE[i]) {
+            free(series);
+            return fail("geometry: visibility series count differs from the engine's", 1);
+        }
+    }
     free(series);
 
     /* passes over the same window: a valid call (the count may legitimately be
@@ -169,7 +192,8 @@ static int exercise_geometry(const SidereonSp3 *sp3) {
     size_t pass_written = 0;
     size_t pass_required = 0;
     if (sidereon_sp3_geometry_passes(sp3, receiver, t_rx, window_end, 600, mask_deg, NULL, 0, NULL,
-                                     0, &pass_written, &pass_required) != SIDEREON_STATUS_OK) {
+                                     0, &pass_written, &pass_required) != SIDEREON_STATUS_OK ||
+        pass_required != W5_PARITY_PASS_COUNT) {
         return fail("geometry: passes count", 1);
     }
 
@@ -200,7 +224,9 @@ static int exercise_observables(const SidereonSp3 *sp3, const SidereonBroadcastE
                                 SidereonObservablesOptions *out_options) {
     SidereonObservablesOptions options;
     if (sidereon_observables_options_init(&options) != SIDEREON_STATUS_OK ||
-        !(options.carrier_hz > 0.0) || !options.light_time || !options.sagnac) {
+        !same_bits(options.carrier_hz, W5_PARITY_OPTIONS_CARRIER_HZ_BITS) ||
+        options.light_time != W5_PARITY_OPTIONS_LIGHT_TIME ||
+        options.sagnac != W5_PARITY_OPTIONS_SAGNAC) {
         return fail("observables: options init defaults", 1);
     }
     *out_options = options;
@@ -214,7 +240,13 @@ static int exercise_observables(const SidereonSp3 *sp3, const SidereonBroadcastE
     SidereonPredictedObservables sp3_obs;
     if (sidereon_sp3_observables(sp3, SPP_SAT_IDS[0], sp3_receiver, sp3_t_rx, NULL, &sp3_obs) !=
             SIDEREON_STATUS_OK ||
-        check_observables(&sp3_obs) != 0) {
+        check_observables(&sp3_obs) != 0 ||
+        !same_bits(sp3_obs.geometric_range_m, W5_PARITY_SP3_OBS_RANGE_M_BITS) ||
+        !same_bits(sp3_obs.range_rate_m_s, W5_PARITY_SP3_OBS_RANGE_RATE_M_S_BITS) ||
+        !same_bits(sp3_obs.doppler_hz, W5_PARITY_SP3_OBS_DOPPLER_HZ_BITS) ||
+        !same_bits(sp3_obs.elevation_deg, W5_PARITY_SP3_OBS_ELEVATION_DEG_BITS) ||
+        !same_bits(sp3_obs.azimuth_deg, W5_PARITY_SP3_OBS_AZIMUTH_DEG_BITS) ||
+        !same_bits_n(sp3_obs.los_unit, W5_PARITY_SP3_OBS_LOS_UNIT_BITS, 3)) {
         return fail("observables: sp3 predict", 1);
     }
 
@@ -227,18 +259,24 @@ static int exercise_observables(const SidereonSp3 *sp3, const SidereonBroadcastE
     };
     double bc_t_rx = bits_to_f64(BC_T_RX_J2000_S_BITS);
     int predicted = 0;
+    if (W5_PARITY_BROADCAST_OBS_OK_COUNT != BC_OBS_COUNT) {
+        return fail("observables: pinned broadcast row count", 1);
+    }
     for (size_t i = 0; i < BC_OBS_COUNT; i++) {
         SidereonPredictedObservables bc_obs;
-        if (sidereon_broadcast_observables(broadcast, BC_SAT_IDS[i], bc_receiver, bc_t_rx, &options,
-                                           &bc_obs) == SIDEREON_STATUS_OK) {
-            if (check_observables(&bc_obs) != 0) {
-                return fail("observables: broadcast row out of range", 1);
+        bool ok = sidereon_broadcast_observables(broadcast, BC_SAT_IDS[i], bc_receiver, bc_t_rx,
+                                                 &options, &bc_obs) == SIDEREON_STATUS_OK;
+        if (ok != W5_PARITY_BROADCAST_OBS_OK[i]) {
+            return fail("observables: broadcast outcome differs from the engine's", 1);
+        }
+        if (ok) {
+            if (check_observables(&bc_obs) != 0 ||
+                !same_bits(bc_obs.geometric_range_m, W5_PARITY_BROADCAST_OBS_RANGE_M_BITS[i]) ||
+                !same_bits(bc_obs.range_rate_m_s, W5_PARITY_BROADCAST_OBS_RANGE_RATE_M_S_BITS[i])) {
+                return fail("observables: broadcast row differs from the engine's", 1);
             }
             predicted++;
         }
-    }
-    if (predicted == 0) {
-        return fail("observables: broadcast predicted nothing", 1);
     }
 
     printf("observables: sp3 range %.1f km, broadcast predicted %d satellite(s)\n",
@@ -298,8 +336,9 @@ static int exercise_broadcast_velocity(const SidereonBroadcastEphemeris *broadca
         sidereon_velocity_solution_free(solution);
         return fail("broadcast velocity: readout", 1);
     }
-    if (!isfinite(velocity[0]) || !isfinite(velocity[1]) || !isfinite(velocity[2]) ||
-        !isfinite(speed) || !isfinite(drift) || used < 4) {
+    if (!same_bits_n(velocity, W5_PARITY_VELOCITY_M_S_BITS, 3) ||
+        !same_bits(speed, W5_PARITY_SPEED_M_S_BITS) ||
+        !same_bits(drift, W5_PARITY_CLOCK_DRIFT_S_S_BITS) || used != W5_PARITY_USED_SAT_COUNT) {
         sidereon_velocity_solution_free(solution);
         return fail("broadcast velocity: non-finite or under-determined", 1);
     }
@@ -377,8 +416,11 @@ static int exercise_reduced_orbit(const SidereonSp3 *sp3) {
                                    &elements, &stats) != SIDEREON_STATUS_OK) {
         return fail("reduced orbit: fit", 1);
     }
-    if (stats.n_samples != RO_SAMPLE_COUNT || !isfinite(stats.rms_m) || !isfinite(stats.max_m) ||
-        !isfinite(elements.a_m) || !(elements.a_m > 0.0) || !isfinite(elements.mean_motion_rad_s)) {
+    if (stats.n_samples != W5_PARITY_FIT_N_SAMPLES ||
+        !same_bits(stats.rms_m, W5_PARITY_FIT_RMS_M_BITS) ||
+        !same_bits(stats.max_m, W5_PARITY_FIT_MAX_M_BITS) ||
+        !same_bits(elements.a_m, W5_PARITY_FIT_A_M_BITS) ||
+        !same_bits(elements.mean_motion_rad_s, W5_PARITY_FIT_MEAN_MOTION_RAD_S_BITS)) {
         return fail("reduced orbit: fit stats out of range", 1);
     }
 
@@ -390,8 +432,8 @@ static int exercise_reduced_orbit(const SidereonSp3 *sp3) {
         SIDEREON_STATUS_OK) {
         return fail("reduced orbit: position", 1);
     }
-    if (!isfinite(position[0]) || !isfinite(position[1]) || !isfinite(position[2])) {
-        return fail("reduced orbit: position non-finite", 1);
+    if (!same_bits_n(position, W5_PARITY_POSITION_ECEF_BITS, 3)) {
+        return fail("reduced orbit: position differs from the engine's", 1);
     }
     double eval_pos[3];
     double eval_vel[3];
@@ -400,10 +442,8 @@ static int exercise_reduced_orbit(const SidereonSp3 *sp3) {
             (uint32_t)SIDEREON_REDUCED_ORBIT_FRAME_GCRS, eval_pos, eval_vel) != SIDEREON_STATUS_OK) {
         return fail("reduced orbit: position+velocity", 1);
     }
-    double speed = sqrt(eval_vel[0] * eval_vel[0] + eval_vel[1] * eval_vel[1] +
-                        eval_vel[2] * eval_vel[2]);
-    if (!isfinite(speed) || !(speed > 0.0)) {
-        return fail("reduced orbit: velocity magnitude", 1);
+    if (!same_bits_n(eval_vel, W5_PARITY_VELOCITY_GCRS_BITS, 3)) {
+        return fail("reduced orbit: velocity differs from the engine's", 1);
     }
 
     /* Drift report against the same truth samples. */
@@ -417,7 +457,7 @@ static int exercise_reduced_orbit(const SidereonSp3 *sp3) {
     size_t drift_required = 0;
     if (sidereon_reduced_orbit_drift_report_entries(report, NULL, 0, &drift_written,
                                                     &drift_required) != SIDEREON_STATUS_OK ||
-        drift_required != RO_SAMPLE_COUNT) {
+        drift_required != W5_PARITY_DRIFT_ENTRY_COUNT) {
         sidereon_reduced_orbit_drift_report_free(report);
         return fail("reduced orbit: drift entry count", 1);
     }
@@ -434,19 +474,19 @@ static int exercise_reduced_orbit(const SidereonSp3 *sp3) {
         return fail("reduced orbit: drift entry fill", 1);
     }
     for (size_t i = 0; i < drift_written; i++) {
-        if (!isfinite(entries[i].error_m)) {
+        if (!same_bits(entries[i].error_m, W5_PARITY_DRIFT_ERROR_M_BITS[i])) {
             free(entries);
             sidereon_reduced_orbit_drift_report_free(report);
-            return fail("reduced orbit: drift entry non-finite", 1);
+            return fail("reduced orbit: drift entry differs from the engine's", 1);
         }
     }
     free(entries);
 
     SidereonReducedOrbitDriftSummary summary;
-    /* The 1e9 m threshold is never crossed over this horizon, so the summary
-     * reports no crossing (and fabricates no placeholder epoch). */
     if (sidereon_reduced_orbit_drift_report_summary(report, &summary) != SIDEREON_STATUS_OK ||
-        !isfinite(summary.max_m) || !isfinite(summary.rms_m) || summary.has_threshold_crossing) {
+        !same_bits(summary.max_m, W5_PARITY_DRIFT_MAX_M_BITS) ||
+        !same_bits(summary.rms_m, W5_PARITY_DRIFT_RMS_M_BITS) ||
+        summary.has_threshold_crossing != W5_PARITY_DRIFT_HAS_CROSSING) {
         sidereon_reduced_orbit_drift_report_free(report);
         return fail("reduced orbit: drift summary", 1);
     }
@@ -464,8 +504,8 @@ static int exercise_reduced_orbit(const SidereonSp3 *sp3) {
     SidereonReducedOrbitDriftSummary crossed_summary;
     if (sidereon_reduced_orbit_drift_report_summary(crossed, &crossed_summary) !=
             SIDEREON_STATUS_OK ||
-        !crossed_summary.has_threshold_crossing ||
-        crossed_summary.threshold_index >= RO_SAMPLE_COUNT) {
+        crossed_summary.has_threshold_crossing != W5_PARITY_CROSSED_HAS_CROSSING ||
+        crossed_summary.threshold_index != W5_PARITY_CROSSED_THRESHOLD_INDEX) {
         sidereon_reduced_orbit_drift_report_free(crossed);
         return fail("reduced orbit: drift crossing summary", 1);
     }
@@ -476,7 +516,8 @@ static int exercise_reduced_orbit(const SidereonSp3 *sp3) {
                                                     &crossing_written, &crossing_required) !=
             SIDEREON_STATUS_OK ||
         crossing_written != RO_SAMPLE_COUNT ||
-        !isfinite(crossing_entries[crossed_summary.threshold_index].error_m)) {
+        !same_bits(crossing_entries[crossed_summary.threshold_index].error_m,
+                   W5_PARITY_DRIFT_ERROR_M_BITS[crossed_summary.threshold_index])) {
         sidereon_reduced_orbit_drift_report_free(crossed);
         return fail("reduced orbit: drift crossing entry", 1);
     }
@@ -491,7 +532,8 @@ static int exercise_reduced_orbit(const SidereonSp3 *sp3) {
     }
     SidereonReducedOrbitPiecewiseInfo pinfo;
     if (sidereon_reduced_orbit_piecewise_info(piecewise, &pinfo) != SIDEREON_STATUS_OK ||
-        pinfo.n_segments < 2 || pinfo.segment_s != 3600 ||
+        pinfo.n_segments != W5_PARITY_PIECEWISE_N_SEGMENTS ||
+        pinfo.segment_s != W5_PARITY_PIECEWISE_SEGMENT_S ||
         pinfo.model != (uint32_t)SIDEREON_REDUCED_ORBIT_MODEL_CIRCULAR_SECULAR ||
         pinfo.scale != (uint32_t)SIDEREON_TIME_SCALE_GPST) {
         sidereon_reduced_orbit_piecewise_free(piecewise);
@@ -501,7 +543,7 @@ static int exercise_reduced_orbit(const SidereonSp3 *sp3) {
     size_t seg_required = 0;
     if (sidereon_reduced_orbit_piecewise_segments(piecewise, NULL, 0, &seg_written,
                                                   &seg_required) != SIDEREON_STATUS_OK ||
-        seg_written != 0 || seg_required != pinfo.n_segments || seg_required < 2) {
+        seg_written != 0 || seg_required != pinfo.n_segments) {
         sidereon_reduced_orbit_piecewise_free(piecewise);
         return fail("piecewise reduced orbit: segment count", 1);
     }
@@ -518,8 +560,9 @@ static int exercise_reduced_orbit(const SidereonSp3 *sp3) {
         return fail("piecewise reduced orbit: segment fill", 1);
     }
     for (size_t i = 0; i < seg_written; i++) {
-        if (segments[i].stats.n_samples < 4 || !isfinite(segments[i].stats.rms_m) ||
-            !isfinite(segments[i].elements.a_m) || !(segments[i].elements.a_m > 0.0)) {
+        if (segments[i].stats.n_samples != W5_PARITY_PIECEWISE_SEGMENT_N_SAMPLES[i] ||
+            !same_bits(segments[i].stats.rms_m, W5_PARITY_PIECEWISE_SEGMENT_RMS_M_BITS[i]) ||
+            !same_bits(segments[i].elements.a_m, W5_PARITY_PIECEWISE_SEGMENT_A_M_BITS[i])) {
             free(segments);
             sidereon_reduced_orbit_piecewise_free(piecewise);
             return fail("piecewise reduced orbit: segment values", 1);
@@ -531,7 +574,8 @@ static int exercise_reduced_orbit(const SidereonSp3 *sp3) {
     if (sidereon_reduced_orbit_piecewise_select_segment(piecewise, &samples[4].epoch,
                                                         &selected_index,
                                                         &selected) != SIDEREON_STATUS_OK ||
-        selected_index != 1 || !isfinite(selected.stats.rms_m)) {
+        selected_index != W5_PARITY_SELECTED_INDEX ||
+        !same_bits(selected.stats.rms_m, W5_PARITY_SELECTED_RMS_M_BITS)) {
         free(segments);
         sidereon_reduced_orbit_piecewise_free(piecewise);
         return fail("piecewise reduced orbit: select segment", 1);
@@ -542,7 +586,7 @@ static int exercise_reduced_orbit(const SidereonSp3 *sp3) {
     if (sidereon_reduced_orbit_piecewise_position(
             piecewise, &samples[4].epoch, (uint32_t)SIDEREON_REDUCED_ORBIT_FRAME_ECEF, pposition,
             3) != SIDEREON_STATUS_OK ||
-        !isfinite(pposition[0]) || !isfinite(pposition[1]) || !isfinite(pposition[2])) {
+        !same_bits_n(pposition, W5_PARITY_PIECEWISE_POSITION_ECEF_BITS, 3)) {
         sidereon_reduced_orbit_piecewise_free(piecewise);
         return fail("piecewise reduced orbit: position", 1);
     }
@@ -554,10 +598,9 @@ static int exercise_reduced_orbit(const SidereonSp3 *sp3) {
         sidereon_reduced_orbit_piecewise_free(piecewise);
         return fail("piecewise reduced orbit: position+velocity", 1);
     }
-    double pspeed = sqrt(pvel[0] * pvel[0] + pvel[1] * pvel[1] + pvel[2] * pvel[2]);
-    if (!isfinite(pspeed) || !(pspeed > 0.0)) {
+    if (!same_bits_n(pvel, W5_PARITY_PIECEWISE_VELOCITY_GCRS_BITS, 3)) {
         sidereon_reduced_orbit_piecewise_free(piecewise);
-        return fail("piecewise reduced orbit: velocity magnitude", 1);
+        return fail("piecewise reduced orbit: velocity differs from the engine's", 1);
     }
 
     SidereonReducedOrbitDriftReport *preport = NULL;
@@ -572,15 +615,17 @@ static int exercise_reduced_orbit(const SidereonSp3 *sp3) {
     if (sidereon_reduced_orbit_drift_report_entries(preport, pentries, RO_SAMPLE_COUNT,
                                                     &pdrift_written,
                                                     &pdrift_required) != SIDEREON_STATUS_OK ||
-        pdrift_written != RO_SAMPLE_COUNT || pdrift_required != RO_SAMPLE_COUNT) {
+        pdrift_written != W5_PARITY_PIECEWISE_DRIFT_ENTRY_COUNT ||
+        pdrift_required != W5_PARITY_PIECEWISE_DRIFT_ENTRY_COUNT) {
         sidereon_reduced_orbit_drift_report_free(preport);
         sidereon_reduced_orbit_piecewise_free(piecewise);
         return fail("piecewise reduced orbit: drift entries", 1);
     }
     SidereonReducedOrbitDriftSummary psummary;
     if (sidereon_reduced_orbit_drift_report_summary(preport, &psummary) != SIDEREON_STATUS_OK ||
-        !isfinite(psummary.max_m) || !isfinite(psummary.rms_m) ||
-        psummary.has_threshold_crossing) {
+        !same_bits(psummary.max_m, W5_PARITY_PIECEWISE_DRIFT_MAX_M_BITS) ||
+        !same_bits(psummary.rms_m, W5_PARITY_PIECEWISE_DRIFT_RMS_M_BITS) ||
+        psummary.has_threshold_crossing != W5_PARITY_PIECEWISE_DRIFT_HAS_CROSSING) {
         sidereon_reduced_orbit_drift_report_free(preport);
         sidereon_reduced_orbit_piecewise_free(piecewise);
         return fail("piecewise reduced orbit: drift summary", 1);
@@ -611,7 +656,8 @@ static int exercise_atmosphere(void) {
 
     SidereonAtmosphereOutput output;
     if (sidereon_atmosphere_nrlmsise00(&input, &output) != SIDEREON_STATUS_OK ||
-        !(output.density_kg_m3 > 0.0) || !(output.temperature_k > 0.0)) {
+        !same_bits(output.density_kg_m3, W5_PARITY_ATMOSPHERE_DENSITY_KG_M3_BITS) ||
+        !same_bits(output.temperature_k, W5_PARITY_ATMOSPHERE_TEMPERATURE_K_BITS)) {
         return fail("atmosphere: nrlmsise00 nominal", 1);
     }
 
@@ -638,14 +684,16 @@ static int exercise_atmosphere(void) {
     }
     SidereonAtmosphereOutput aph_output;
     if (sidereon_atmosphere_nrlmsise00(&aph, &aph_output) != SIDEREON_STATUS_OK ||
-        !(aph_output.density_kg_m3 > 0.0) || !(aph_output.temperature_k > 0.0)) {
+        !same_bits(aph_output.density_kg_m3, W5_PARITY_ATMOSPHERE_AP_HISTORY_DENSITY_KG_M3_BITS) ||
+        !same_bits(aph_output.temperature_k, W5_PARITY_ATMOSPHERE_AP_HISTORY_TEMPERATURE_K_BITS)) {
         return fail("atmosphere: nrlmsise00 ap-history", 1);
     }
 
     SidereonAtmosphereInput bad = input;
     bad.alt_km = 5000.0; /* above the documented 1000 km domain */
     SidereonAtmosphereOutput discard;
-    if (sidereon_atmosphere_nrlmsise00(&bad, &discard) != SIDEREON_STATUS_INVALID_ARGUMENT) {
+    if (W5_PARITY_ATMOSPHERE_5000_KM_OK ||
+        sidereon_atmosphere_nrlmsise00(&bad, &discard) != SIDEREON_STATUS_INVALID_ARGUMENT) {
         return fail("atmosphere: out-of-domain not rejected", 1);
     }
 

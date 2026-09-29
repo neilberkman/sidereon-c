@@ -1,4 +1,7 @@
 use super::*;
+use crate::terrain::{
+    no_terrain_lookup_error, record_terrain_lookup_error, terrain_lookup_error_to_c,
+};
 
 /// Memory-mappable terrain reader backed by terrain store bytes. Create with
 /// sidereon_mmap_terrain_from_bytes, sidereon_mmap_terrain_from_vec, or
@@ -146,6 +149,11 @@ pub unsafe extern "C" fn sidereon_mmap_terrain_from_path_attested(
 /// Query one bilinear terrain height. Inputs are longitude, latitude degrees.
 /// The returned value is orthometric height H in metres.
 ///
+/// A query no tile covers, or one that gives nonzero weight to a stored null
+/// posting (an unknown elevation) that no neighbouring tile answers, returns
+/// SIDEREON_STATUS_INVALID_ARGUMENT; sidereon_last_terrain_lookup_error reports
+/// it typed. The same holds for every single-point orthometric lookup below.
+///
 /// Safety: terrain must be a live handle; out_height_m must point to a
 /// SidereonOrthometricHeightM.
 #[no_mangle]
@@ -165,7 +173,7 @@ pub unsafe extern "C" fn sidereon_mmap_terrain_height_m(
                 "out_height_m"
             ));
             *out = SidereonOrthometricHeightM { value_m: 0.0 };
-            let terrain = c_try!(require_out(
+            let terrain = c_try!(require_mut(
                 terrain,
                 "sidereon_mmap_terrain_height_m",
                 "terrain"
@@ -205,7 +213,7 @@ pub unsafe extern "C" fn sidereon_mmap_terrain_height_m_with_options(
                 "out_height_m"
             ));
             *out = SidereonOrthometricHeightM { value_m: 0.0 };
-            let terrain = c_try!(require_out(
+            let terrain = c_try!(require_mut(
                 terrain,
                 "sidereon_mmap_terrain_height_m_with_options",
                 "terrain"
@@ -337,7 +345,8 @@ pub unsafe extern "C" fn sidereon_mmap_terrain_orthometric_height_m_with_options
 
 /// Query many terrain points as orthometric heights H in metres. Points are
 /// longitude, latitude degrees. Per-point failures are written into
-/// `out[i].status`.
+/// `out[i].status` and `out[i].error` (their texts through
+/// sidereon_last_terrain_batch_error_text).
 ///
 /// Safety: terrain must be a live handle; points must point to count
 /// SidereonLonLatDeg values; options must point to SidereonDtedLookupOptions;
@@ -355,7 +364,7 @@ pub unsafe extern "C" fn sidereon_mmap_terrain_height_batch(
         "sidereon_mmap_terrain_height_batch",
         SidereonStatus::Panic,
         || {
-            let terrain = c_try!(require_out(
+            let terrain = c_try!(require_mut(
                 terrain,
                 "sidereon_mmap_terrain_height_batch",
                 "terrain"
@@ -389,14 +398,19 @@ pub unsafe extern "C" fn sidereon_mmap_terrain_height_batch(
                     status: SidereonStatus::InvalidArgument,
                     has_orthometric_height_m: false,
                     orthometric_height_m: SidereonOrthometricHeightM { value_m: 0.0 },
+                    error: no_terrain_lookup_error(),
                 });
             }
             let points: Vec<(f64, f64)> = raw_points
                 .iter()
                 .map(|point| (point.lon_deg, point.lat_deg))
                 .collect();
+            crate::terrain::reset_terrain_batch_texts(count);
             let results = terrain.inner.height_batch(&points, options);
             for (idx, result) in results.into_iter().enumerate() {
+                if let Err(err) = &result {
+                    crate::terrain::record_terrain_batch_row_texts(idx, err);
+                }
                 out.add(idx).write(terrain_height_result_from_f64(result));
             }
             SidereonStatus::Ok
@@ -406,7 +420,8 @@ pub unsafe extern "C" fn sidereon_mmap_terrain_height_batch(
 
 /// Query many terrain points as typed orthometric heights H in metres. Points
 /// are longitude, latitude degrees. Per-point failures are written into
-/// `out[i].status`.
+/// `out[i].status` and `out[i].error` (their texts through
+/// sidereon_last_terrain_batch_error_text).
 ///
 /// Safety: terrain must be a live handle; points must point to count
 /// SidereonLonLatDeg values; options must point to SidereonDtedLookupOptions;
@@ -458,14 +473,19 @@ pub unsafe extern "C" fn sidereon_mmap_terrain_orthometric_height_batch(
                     status: SidereonStatus::InvalidArgument,
                     has_orthometric_height_m: false,
                     orthometric_height_m: SidereonOrthometricHeightM { value_m: 0.0 },
+                    error: no_terrain_lookup_error(),
                 });
             }
             let points: Vec<(f64, f64)> = raw_points
                 .iter()
                 .map(|point| (point.lon_deg, point.lat_deg))
                 .collect();
+            crate::terrain::reset_terrain_batch_texts(count);
             let results = terrain.inner.orthometric_height_batch(&points, options);
             for (idx, result) in results.into_iter().enumerate() {
+                if let Err(err) = &result {
+                    crate::terrain::record_terrain_batch_row_texts(idx, err);
+                }
                 out.add(idx)
                     .write(terrain_height_result_from_orthometric(result));
             }
@@ -791,7 +811,7 @@ pub unsafe extern "C" fn sidereon_mmap_terrain_verify(
         "sidereon_mmap_terrain_verify",
         SidereonStatus::Panic,
         || {
-            let terrain = c_try!(require_out(
+            let terrain = c_try!(require_mut(
                 terrain,
                 "sidereon_mmap_terrain_verify",
                 "terrain"
@@ -855,8 +875,7 @@ pub unsafe extern "C" fn sidereon_mmap_terrain_free(terrain: *mut SidereonMmapTe
 }
 
 fn map_terrain_core_error(fn_name: &str, err: CoreError) -> SidereonStatus {
-    set_last_error(format!("{fn_name}: {err}"));
-    SidereonStatus::InvalidArgument
+    record_terrain_lookup_error(fn_name, &err)
 }
 
 fn ellipsoidal_height_to_c(
@@ -875,11 +894,13 @@ fn terrain_height_result_from_f64(
             status: SidereonStatus::Ok,
             has_orthometric_height_m: true,
             orthometric_height_m: SidereonOrthometricHeightM { value_m },
+            error: no_terrain_lookup_error(),
         },
-        Err(_) => SidereonTerrainHeightResult {
+        Err(err) => SidereonTerrainHeightResult {
             status: SidereonStatus::InvalidArgument,
             has_orthometric_height_m: false,
             orthometric_height_m: SidereonOrthometricHeightM { value_m: 0.0 },
+            error: terrain_lookup_error_to_c(&err),
         },
     }
 }
@@ -892,11 +913,13 @@ fn terrain_height_result_from_orthometric(
             status: SidereonStatus::Ok,
             has_orthometric_height_m: true,
             orthometric_height_m: orthometric_height_to_c(value),
+            error: no_terrain_lookup_error(),
         },
-        Err(_) => SidereonTerrainHeightResult {
+        Err(err) => SidereonTerrainHeightResult {
             status: SidereonStatus::InvalidArgument,
             has_orthometric_height_m: false,
             orthometric_height_m: SidereonOrthometricHeightM { value_m: 0.0 },
+            error: terrain_lookup_error_to_c(&err),
         },
     }
 }
@@ -1027,6 +1050,21 @@ mod tests {
         corrupt[DATA_OFFSET + 1] ^= 1;
         let store = TempStore::write("corrupt-terrain.tmm", &corrupt);
         let path = store.c_path();
+        let claim = 0x0123_4567_89ab_cdef;
+        // sidereon-core's own outcomes for the same file: a verified open
+        // refuses the payload checksum, an attested open defers it to verify.
+        assert!(matches!(
+            CoreMmapTerrain::from_path(&store.0),
+            Err(TerrainStoreError::Checksum { .. })
+        ));
+        let mut core_attested =
+            CoreMmapTerrain::from_path_attested(&store.0, claim).expect("core attested open");
+        let core_provenance = digest_provenance_to_c(core_attested.digest_provenance());
+        assert!(matches!(
+            core_attested.verify(),
+            Err(TerrainStoreError::Checksum { .. })
+        ));
+        let core_provenance_after = digest_provenance_to_c(core_attested.digest_provenance());
 
         let mut verified = ptr::null_mut();
         let status = unsafe { sidereon_mmap_terrain_from_path(path.as_ptr(), &mut verified) };
@@ -1039,7 +1077,6 @@ mod tests {
         );
         assert_eq!(typed.kind, SidereonTerrainStoreErrorKind::Checksum as u32);
 
-        let claim = 0x0123_4567_89ab_cdef;
         let mut attested = ptr::null_mut();
         let status = unsafe {
             sidereon_mmap_terrain_from_path_attested(path.as_ptr(), claim, &mut attested)
@@ -1052,7 +1089,7 @@ mod tests {
             unsafe { sidereon_mmap_terrain_digest_provenance(attested, &mut provenance) },
             SidereonStatus::Ok
         );
-        assert_eq!(provenance, SidereonDigestProvenance::Attested);
+        assert_eq!(provenance, core_provenance);
         let mut checksum = 0;
         assert_eq!(
             unsafe { sidereon_mmap_terrain_checksum64(attested, &mut checksum) },
@@ -1073,7 +1110,7 @@ mod tests {
             unsafe { sidereon_mmap_terrain_digest_provenance(attested, &mut provenance) },
             SidereonStatus::Ok
         );
-        assert_eq!(provenance, SidereonDigestProvenance::Attested);
+        assert_eq!(provenance, core_provenance_after);
         unsafe { sidereon_mmap_terrain_free(attested) };
     }
 
@@ -1083,6 +1120,24 @@ mod tests {
         let claim = core_terrain_store_checksum64(&bytes);
         let store = TempStore::write("pristine-terrain.tmm", &bytes);
         let path = store.c_path();
+        // sidereon-core's own outcomes: a matching claim verifies and the
+        // provenance escalates; a wrong claim fails verify with both sums.
+        let mut core_attested =
+            CoreMmapTerrain::from_path_attested(&store.0, claim).expect("core attested open");
+        core_attested
+            .verify()
+            .expect("core verifies the pristine store");
+        let core_provenance = digest_provenance_to_c(core_attested.digest_provenance());
+        let wrong_claim = claim ^ 1;
+        let mut core_wrong =
+            CoreMmapTerrain::from_path_attested(&store.0, wrong_claim).expect("core attested open");
+        let Err(TerrainStoreError::AttestedChecksumMismatch {
+            expected: core_expected,
+            found: core_found,
+        }) = core_wrong.verify()
+        else {
+            panic!("sidereon-core verifies a wrong claim");
+        };
 
         let mut verified = ptr::null_mut();
         let mut attested = ptr::null_mut();
@@ -1127,14 +1182,13 @@ mod tests {
             unsafe { sidereon_mmap_terrain_digest_provenance(attested, &mut provenance) },
             SidereonStatus::Ok
         );
-        assert_eq!(provenance, SidereonDigestProvenance::Verified);
+        assert_eq!(provenance, core_provenance);
 
         unsafe {
             sidereon_mmap_terrain_free(verified);
             sidereon_mmap_terrain_free(attested);
         }
 
-        let wrong_claim = claim ^ 1;
         let mut wrong = ptr::null_mut();
         assert_eq!(
             unsafe {
@@ -1155,8 +1209,8 @@ mod tests {
             typed.kind,
             SidereonTerrainStoreErrorKind::AttestedChecksumMismatch as u32
         );
-        assert_eq!(typed.expected_checksum64, wrong_claim);
-        assert_eq!(typed.found_checksum64, claim);
+        assert_eq!(typed.expected_checksum64, core_expected);
+        assert_eq!(typed.found_checksum64, core_found);
         unsafe { sidereon_mmap_terrain_free(wrong) };
     }
 }

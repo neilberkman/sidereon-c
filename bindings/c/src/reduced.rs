@@ -1,4 +1,110 @@
 use super::*;
+use crate::engine_error::{
+    degrade_reason_name, engine_error_operation_boundary, record_engine_error,
+    SidereonEngineErrorFamily,
+};
+use serde_json::{json, Value};
+
+fn reduced_node(kind: &str, fields: Value) -> Value {
+    json!({
+        "kind": kind,
+        "fields": fields,
+    })
+}
+
+pub(crate) fn solve_error_value(
+    error: &sidereon_core::astro::math::least_squares::SolveError,
+) -> Value {
+    use sidereon_core::astro::math::least_squares::SolveError as E;
+    match error {
+        E::SingularJacobian => reduced_node("singular_jacobian", json!({})),
+        E::InvalidInput { field, reason } => {
+            reduced_node("invalid_input", json!({"field": field, "reason": reason}))
+        }
+    }
+}
+
+pub(crate) fn reduced_orbit_error_value(error: &ReducedOrbitError) -> Value {
+    match error {
+        ReducedOrbitError::TooFewSamples { got, required } => reduced_node(
+            "too_few_samples",
+            json!({
+                "got": got,
+                "required": required,
+            }),
+        ),
+        ReducedOrbitError::InvalidWindow => reduced_node("invalid_window", json!({})),
+        ReducedOrbitError::SingularPlaneFit => reduced_node("singular_plane_fit", json!({})),
+        ReducedOrbitError::RaanAmbiguous => reduced_node("raan_ambiguous", json!({})),
+        ReducedOrbitError::Singular(source) => reduced_node(
+            "singular",
+            json!({
+                "cause": solve_error_value(source),
+            }),
+        ),
+        ReducedOrbitError::FitDidNotConverge => reduced_node("fit_did_not_converge", json!({})),
+        ReducedOrbitError::InvalidInput { field, reason } => reduced_node(
+            "invalid_input",
+            json!({
+                "field": field,
+                "reason": reason,
+            }),
+        ),
+        ReducedOrbitError::Ut1OutsideCoverage(reason) => reduced_node(
+            "ut1_outside_coverage",
+            json!({
+                "reason": degrade_reason_name(*reason),
+            }),
+        ),
+    }
+}
+
+pub(crate) fn piecewise_orbit_error_value(error: &PiecewiseOrbitError) -> Value {
+    match error {
+        PiecewiseOrbitError::InvalidSegment => reduced_node("invalid_segment", json!({})),
+        PiecewiseOrbitError::OutOfRange => reduced_node("out_of_range", json!({})),
+        PiecewiseOrbitError::TooFewSamples { got, required } => reduced_node(
+            "too_few_samples",
+            json!({
+                "got": got,
+                "required": required,
+            }),
+        ),
+        PiecewiseOrbitError::Reduced(source) => reduced_node(
+            "reduced",
+            json!({
+                "cause": reduced_orbit_error_value(source),
+            }),
+        ),
+    }
+}
+
+pub(crate) fn reduced_orbit_source_error_value(error: &ReducedOrbitSourceError) -> Value {
+    match error {
+        ReducedOrbitSourceError::InvalidWindow => reduced_node("invalid_window", json!({})),
+        ReducedOrbitSourceError::InvalidCadence => reduced_node("invalid_cadence", json!({})),
+        ReducedOrbitSourceError::InvalidSegment => reduced_node("invalid_segment", json!({})),
+        ReducedOrbitSourceError::TooFewSamples { got, required } => reduced_node(
+            "too_few_samples",
+            json!({
+                "got": got,
+                "required": required,
+            }),
+        ),
+        ReducedOrbitSourceError::Reduced(source) => reduced_node(
+            "reduced",
+            json!({
+                "cause": reduced_orbit_error_value(source),
+            }),
+        ),
+        ReducedOrbitSourceError::Piecewise(source) => reduced_node(
+            "piecewise",
+            json!({
+                "cause": piecewise_orbit_error_value(source),
+            }),
+        ),
+    }
+}
 
 // ===========================================================================
 
@@ -195,7 +301,7 @@ pub unsafe extern "C" fn sidereon_reduced_orbit_fit(
     out_elements: *mut SidereonReducedOrbitElements,
     out_stats: *mut SidereonReducedOrbitFitStats,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_reduced_orbit_fit", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_reduced_orbit_fit", SidereonStatus::Panic, || {
         let out_elements = c_try!(require_out(
             out_elements,
             "sidereon_reduced_orbit_fit",
@@ -251,7 +357,7 @@ pub unsafe extern "C" fn sidereon_reduced_orbit_fit_sp3_source(
     out_elements: *mut SidereonReducedOrbitElements,
     out_stats: *mut SidereonReducedOrbitSourceFitStats,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_reduced_orbit_fit_sp3_source",
         SidereonStatus::Panic,
         || {
@@ -293,7 +399,7 @@ pub unsafe extern "C" fn sidereon_reduced_orbit_fit_sp3_source(
                     return map_reduced_orbit_source_error(
                         "sidereon_reduced_orbit_fit_sp3_source",
                         err,
-                    )
+                    );
                 }
             };
             *out_elements = reduced_orbit_elements_to_c(&fit.orbit.elements);
@@ -322,7 +428,7 @@ pub unsafe extern "C" fn sidereon_reduced_orbit_fit_tle_source(
     out_elements: *mut SidereonReducedOrbitElements,
     out_stats: *mut SidereonReducedOrbitSourceFitStats,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_reduced_orbit_fit_tle_source",
         SidereonStatus::Panic,
         || {
@@ -359,7 +465,7 @@ pub unsafe extern "C" fn sidereon_reduced_orbit_fit_tle_source(
                     return map_reduced_orbit_source_error(
                         "sidereon_reduced_orbit_fit_tle_source",
                         err,
-                    )
+                    );
                 }
             };
             *out_elements = reduced_orbit_elements_to_c(&fit.orbit.elements);
@@ -393,7 +499,7 @@ pub unsafe extern "C" fn sidereon_reduced_orbit_position(
     out_xyz: *mut f64,
     len: usize,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_reduced_orbit_position",
         SidereonStatus::Panic,
         || {
@@ -459,7 +565,7 @@ pub unsafe extern "C" fn sidereon_reduced_orbit_position_velocity(
     out_pos: *mut f64,
     out_vel: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_reduced_orbit_position_velocity",
         SidereonStatus::Panic,
         || {
@@ -495,7 +601,10 @@ pub unsafe extern "C" fn sidereon_reduced_orbit_position_velocity(
             ) {
                 Ok(pair) => pair,
                 Err(err) => {
-                    return map_reduced_orbit_error("sidereon_reduced_orbit_position_velocity", err)
+                    return map_reduced_orbit_error(
+                        "sidereon_reduced_orbit_position_velocity",
+                        err,
+                    );
                 }
             };
             c_try!(copy_exact_f64s(
@@ -535,7 +644,7 @@ pub unsafe extern "C" fn sidereon_reduced_orbit_drift(
     threshold_m: f64,
     out_report: *mut *mut SidereonReducedOrbitDriftReport,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_reduced_orbit_drift",
         SidereonStatus::Panic,
         || {
@@ -598,7 +707,7 @@ pub unsafe extern "C" fn sidereon_reduced_orbit_drift_sp3_source(
     options: *const SidereonReducedOrbitSourceDriftOptions,
     out_report: *mut *mut SidereonReducedOrbitDriftReport,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_reduced_orbit_drift_sp3_source",
         SidereonStatus::Panic,
         || {
@@ -642,7 +751,7 @@ pub unsafe extern "C" fn sidereon_reduced_orbit_drift_sp3_source(
                     return map_reduced_orbit_source_error(
                         "sidereon_reduced_orbit_drift_sp3_source",
                         err,
-                    )
+                    );
                 }
             };
             write_boxed_handle(
@@ -671,7 +780,7 @@ pub unsafe extern "C" fn sidereon_reduced_orbit_drift_tle_source(
     options: *const SidereonReducedOrbitSourceDriftOptions,
     out_report: *mut *mut SidereonReducedOrbitDriftReport,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_reduced_orbit_drift_tle_source",
         SidereonStatus::Panic,
         || {
@@ -710,7 +819,7 @@ pub unsafe extern "C" fn sidereon_reduced_orbit_drift_tle_source(
                     return map_reduced_orbit_source_error(
                         "sidereon_reduced_orbit_drift_tle_source",
                         err,
-                    )
+                    );
                 }
             };
             write_boxed_handle(
@@ -925,7 +1034,7 @@ pub unsafe extern "C" fn sidereon_reduced_orbit_fit_piecewise(
     segment_s: i64,
     out: *mut *mut SidereonReducedOrbitPiecewise,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_reduced_orbit_fit_piecewise",
         SidereonStatus::Panic,
         || {
@@ -972,7 +1081,7 @@ pub unsafe extern "C" fn sidereon_reduced_orbit_fit_piecewise(
             ) {
                 Ok(inner) => inner,
                 Err(err) => {
-                    return map_piecewise_orbit_error("sidereon_reduced_orbit_fit_piecewise", err)
+                    return map_piecewise_orbit_error("sidereon_reduced_orbit_fit_piecewise", err);
                 }
             };
             write_boxed_handle(out, SidereonReducedOrbitPiecewise { inner, scale });
@@ -1070,7 +1179,7 @@ pub unsafe extern "C" fn sidereon_reduced_orbit_piecewise_select_segment(
     out_index: *mut usize,
     out_segment: *mut SidereonReducedOrbitPiecewiseSegment,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_reduced_orbit_piecewise_select_segment",
         SidereonStatus::Panic,
         || {
@@ -1104,7 +1213,7 @@ pub unsafe extern "C" fn sidereon_reduced_orbit_piecewise_select_segment(
                     return map_piecewise_orbit_error(
                         "sidereon_reduced_orbit_piecewise_select_segment",
                         err,
-                    )
+                    );
                 }
             };
             let index = piecewise
@@ -1133,7 +1242,7 @@ pub unsafe extern "C" fn sidereon_reduced_orbit_piecewise_position(
     out_xyz: *mut f64,
     len: usize,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_reduced_orbit_piecewise_position",
         SidereonStatus::Panic,
         || {
@@ -1163,7 +1272,7 @@ pub unsafe extern "C" fn sidereon_reduced_orbit_piecewise_position(
                     return map_piecewise_orbit_error(
                         "sidereon_reduced_orbit_piecewise_position",
                         err,
-                    )
+                    );
                 }
             };
             c_try!(copy_exact_f64s(
@@ -1191,7 +1300,7 @@ pub unsafe extern "C" fn sidereon_reduced_orbit_piecewise_position_velocity(
     out_pos: *mut f64,
     out_vel: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_reduced_orbit_piecewise_position_velocity",
         SidereonStatus::Panic,
         || {
@@ -1221,7 +1330,7 @@ pub unsafe extern "C" fn sidereon_reduced_orbit_piecewise_position_velocity(
                     return map_piecewise_orbit_error(
                         "sidereon_reduced_orbit_piecewise_position_velocity",
                         err,
-                    )
+                    );
                 }
             };
             c_try!(copy_exact_f64s(
@@ -1257,7 +1366,7 @@ pub unsafe extern "C" fn sidereon_reduced_orbit_piecewise_drift(
     threshold_m: f64,
     out_report: *mut *mut SidereonReducedOrbitDriftReport,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_reduced_orbit_piecewise_drift",
         SidereonStatus::Panic,
         || {
@@ -1287,7 +1396,10 @@ pub unsafe extern "C" fn sidereon_reduced_orbit_piecewise_drift(
             ) {
                 Ok(report) => report,
                 Err(err) => {
-                    return map_piecewise_orbit_error("sidereon_reduced_orbit_piecewise_drift", err)
+                    return map_piecewise_orbit_error(
+                        "sidereon_reduced_orbit_piecewise_drift",
+                        err,
+                    );
                 }
             };
             write_boxed_handle(
@@ -1317,7 +1429,7 @@ pub unsafe extern "C" fn sidereon_reduced_orbit_fit_piecewise_sp3_source(
     out_piecewise: *mut *mut SidereonReducedOrbitPiecewise,
     out_stats: *mut SidereonReducedOrbitPiecewiseSourceFitStats,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_reduced_orbit_fit_piecewise_sp3_source",
         SidereonStatus::Panic,
         || {
@@ -1365,7 +1477,7 @@ pub unsafe extern "C" fn sidereon_reduced_orbit_fit_piecewise_sp3_source(
                     return map_reduced_orbit_source_error(
                         "sidereon_reduced_orbit_fit_piecewise_sp3_source",
                         err,
-                    )
+                    );
                 }
             };
             *out_stats = SidereonReducedOrbitPiecewiseSourceFitStats {
@@ -1397,7 +1509,7 @@ pub unsafe extern "C" fn sidereon_reduced_orbit_fit_piecewise_tle_source(
     out_piecewise: *mut *mut SidereonReducedOrbitPiecewise,
     out_stats: *mut SidereonReducedOrbitPiecewiseSourceFitStats,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_reduced_orbit_fit_piecewise_tle_source",
         SidereonStatus::Panic,
         || {
@@ -1440,7 +1552,7 @@ pub unsafe extern "C" fn sidereon_reduced_orbit_fit_piecewise_tle_source(
                     return map_reduced_orbit_source_error(
                         "sidereon_reduced_orbit_fit_piecewise_tle_source",
                         err,
-                    )
+                    );
                 }
             };
             *out_stats = SidereonReducedOrbitPiecewiseSourceFitStats {
@@ -1474,7 +1586,7 @@ pub unsafe extern "C" fn sidereon_reduced_orbit_piecewise_drift_sp3_source(
     options: *const SidereonReducedOrbitSourceDriftOptions,
     out_report: *mut *mut SidereonReducedOrbitDriftReport,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_reduced_orbit_piecewise_drift_sp3_source",
         SidereonStatus::Panic,
         || {
@@ -1518,7 +1630,7 @@ pub unsafe extern "C" fn sidereon_reduced_orbit_piecewise_drift_sp3_source(
                     return map_reduced_orbit_source_error(
                         "sidereon_reduced_orbit_piecewise_drift_sp3_source",
                         err,
-                    )
+                    );
                 }
             };
             write_boxed_handle(
@@ -1545,7 +1657,7 @@ pub unsafe extern "C" fn sidereon_reduced_orbit_piecewise_drift_tle_source(
     options: *const SidereonReducedOrbitSourceDriftOptions,
     out_report: *mut *mut SidereonReducedOrbitDriftReport,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_reduced_orbit_piecewise_drift_tle_source",
         SidereonStatus::Panic,
         || {
@@ -1584,7 +1696,7 @@ pub unsafe extern "C" fn sidereon_reduced_orbit_piecewise_drift_tle_source(
                     return map_reduced_orbit_source_error(
                         "sidereon_reduced_orbit_piecewise_drift_tle_source",
                         err,
-                    )
+                    );
                 }
             };
             write_boxed_handle(
@@ -1617,15 +1729,26 @@ pub unsafe extern "C" fn sidereon_reduced_orbit_piecewise_free(
 // sidereon_core::astro::atmosphere::nrlmsise00_with_lst.
 
 fn map_reduced_orbit_source_error(fn_name: &str, err: ReducedOrbitSourceError) -> SidereonStatus {
+    record_engine_error(
+        SidereonEngineErrorFamily::ReducedOrbitSource,
+        fn_name,
+        reduced_orbit_source_error_value(&err),
+    );
     set_last_error(format!("{fn_name}: {err}"));
     match err {
         ReducedOrbitSourceError::InvalidWindow
         | ReducedOrbitSourceError::InvalidCadence
         | ReducedOrbitSourceError::InvalidSegment
+        | ReducedOrbitSourceError::Piecewise(PiecewiseOrbitError::InvalidSegment)
         | ReducedOrbitSourceError::Reduced(ReducedOrbitError::InvalidInput { .. }) => {
             SidereonStatus::InvalidArgument
         }
-        _ => SidereonStatus::Solve,
+        ReducedOrbitSourceError::Reduced(ReducedOrbitError::Ut1OutsideCoverage(_)) => {
+            SidereonStatus::Ut1OutsideCoverage
+        }
+        ReducedOrbitSourceError::TooFewSamples { .. }
+        | ReducedOrbitSourceError::Reduced(_)
+        | ReducedOrbitSourceError::Piecewise { .. } => SidereonStatus::Solve,
     }
 }
 
@@ -1719,7 +1842,12 @@ fn ecef_sample_from_c(sample: &SidereonEcefSample) -> EcefSample {
 }
 
 fn map_piecewise_orbit_error(fn_name: &str, err: PiecewiseOrbitError) -> SidereonStatus {
-    match err {
+    record_engine_error(
+        SidereonEngineErrorFamily::PiecewiseOrbit,
+        fn_name,
+        piecewise_orbit_error_value(&err),
+    );
+    match &err {
         PiecewiseOrbitError::InvalidSegment => {
             set_last_error(format!(
                 "{fn_name}: piecewise segment length is missing, non-positive, or rounds below one second"
@@ -1738,7 +1866,19 @@ fn map_piecewise_orbit_error(fn_name: &str, err: PiecewiseOrbitError) -> Sidereo
             ));
             SidereonStatus::Solve
         }
-        PiecewiseOrbitError::Reduced(inner) => map_reduced_orbit_error(fn_name, inner),
+        PiecewiseOrbitError::Reduced(inner) => {
+            set_last_error(format!("{fn_name}: {inner}"));
+            match inner {
+                ReducedOrbitError::InvalidInput { .. } => SidereonStatus::InvalidArgument,
+                ReducedOrbitError::Ut1OutsideCoverage(_) => SidereonStatus::Ut1OutsideCoverage,
+                ReducedOrbitError::TooFewSamples { .. }
+                | ReducedOrbitError::InvalidWindow
+                | ReducedOrbitError::SingularPlaneFit
+                | ReducedOrbitError::RaanAmbiguous
+                | ReducedOrbitError::Singular(_)
+                | ReducedOrbitError::FitDidNotConverge => SidereonStatus::Solve,
+            }
+        }
     }
 }
 
@@ -1771,10 +1911,21 @@ fn reduced_orbit_piecewise_segment_to_c(
 }
 
 fn map_reduced_orbit_error(fn_name: &str, err: ReducedOrbitError) -> SidereonStatus {
+    record_engine_error(
+        SidereonEngineErrorFamily::ReducedOrbit,
+        fn_name,
+        reduced_orbit_error_value(&err),
+    );
     set_last_error(format!("{fn_name}: {err}"));
     match err {
         ReducedOrbitError::InvalidInput { .. } => SidereonStatus::InvalidArgument,
-        _ => SidereonStatus::Solve,
+        ReducedOrbitError::Ut1OutsideCoverage(_) => SidereonStatus::Ut1OutsideCoverage,
+        ReducedOrbitError::TooFewSamples { .. }
+        | ReducedOrbitError::InvalidWindow
+        | ReducedOrbitError::SingularPlaneFit
+        | ReducedOrbitError::RaanAmbiguous
+        | ReducedOrbitError::Singular(_)
+        | ReducedOrbitError::FitDidNotConverge => SidereonStatus::Solve,
     }
 }
 
@@ -1822,5 +1973,677 @@ fn reduced_orbit_elements_to_c(elements: &ReducedOrbitElements) -> SidereonReduc
         h: elements.h,
         k: elements.k,
         arg_perigee_rad: elements.arg_perigee_rad,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine_error::{
+        clear_engine_error, sidereon_last_engine_error_info, sidereon_last_engine_error_payload,
+        SidereonEngineErrorFamily, SidereonEngineErrorInfo,
+    };
+    use std::ptr;
+
+    const SP3_BYTES: &[u8] = include_bytes!("../tests/fixtures/sp3/GAP_G01_20201760000_15M.sp3");
+
+    #[test]
+    fn table_driven_reduced_orbit_error_mapping() {
+        use sidereon_core::astro::math::least_squares::SolveError as LS;
+        use sidereon_core::astro::time::DegradeReason;
+        use sidereon_core::orbit::{
+            PiecewiseOrbitError as POE, ReducedOrbitError as ROE, ReducedOrbitSourceError as RSE,
+        };
+
+        // 1. SolveError
+        let ls_cases = vec![
+            (LS::SingularJacobian, "singular_jacobian"),
+            (
+                LS::InvalidInput {
+                    field: "jacobian",
+                    reason: "rank deficient",
+                },
+                "invalid_input",
+            ),
+        ];
+        for (err, kind) in ls_cases {
+            let val = solve_error_value(&err);
+            assert_eq!(val["kind"], kind);
+            if let LS::InvalidInput { field, reason } = err {
+                assert_eq!(val["fields"]["field"], field);
+                assert_eq!(val["fields"]["reason"], reason);
+            }
+        }
+
+        // 2. ReducedOrbitError
+        let roe_cases: Vec<(ROE, &'static str)> = vec![
+            (
+                ROE::TooFewSamples {
+                    got: 3,
+                    required: 6,
+                },
+                "too_few_samples",
+            ),
+            (ROE::InvalidWindow, "invalid_window"),
+            (ROE::SingularPlaneFit, "singular_plane_fit"),
+            (ROE::RaanAmbiguous, "raan_ambiguous"),
+            (ROE::Singular(LS::SingularJacobian), "singular"),
+            (ROE::FitDidNotConverge, "fit_did_not_converge"),
+            (
+                ROE::InvalidInput {
+                    field: "epoch",
+                    reason: "non-finite",
+                },
+                "invalid_input",
+            ),
+            (
+                ROE::Ut1OutsideCoverage(DegradeReason::AfterCoverage),
+                "ut1_outside_coverage",
+            ),
+            (
+                ROE::Ut1OutsideCoverage(DegradeReason::BeforeCoverage),
+                "ut1_outside_coverage",
+            ),
+        ];
+        for (err, kind) in roe_cases {
+            let val = reduced_orbit_error_value(&err);
+            assert_eq!(val["kind"], kind);
+            match &err {
+                ROE::TooFewSamples { got, required } => {
+                    assert_eq!(val["fields"]["got"], *got);
+                    assert_eq!(val["fields"]["required"], *required);
+                }
+                ROE::Singular(_) => {
+                    assert_eq!(val["fields"]["cause"]["kind"], "singular_jacobian");
+                }
+                ROE::InvalidInput { field, reason } => {
+                    assert_eq!(val["fields"]["field"], *field);
+                    assert_eq!(val["fields"]["reason"], *reason);
+                }
+                ROE::Ut1OutsideCoverage(reason) => {
+                    assert_eq!(val["fields"]["reason"], degrade_reason_name(*reason));
+                }
+                _ => {}
+            }
+        }
+
+        // 3. PiecewiseOrbitError
+        let poe_cases: Vec<(POE, &'static str)> = vec![
+            (POE::InvalidSegment, "invalid_segment"),
+            (POE::OutOfRange, "out_of_range"),
+            (
+                POE::TooFewSamples {
+                    got: 2,
+                    required: 6,
+                },
+                "too_few_samples",
+            ),
+            (POE::Reduced(ROE::InvalidWindow), "reduced"),
+        ];
+        for (err, kind) in poe_cases {
+            let val = piecewise_orbit_error_value(&err);
+            assert_eq!(val["kind"], kind);
+            match &err {
+                POE::TooFewSamples { got, required } => {
+                    assert_eq!(val["fields"]["got"], *got);
+                    assert_eq!(val["fields"]["required"], *required);
+                }
+                POE::Reduced(_) => {
+                    assert_eq!(val["fields"]["cause"]["kind"], "invalid_window");
+                }
+                _ => {}
+            }
+        }
+
+        // 4. ReducedOrbitSourceError
+        let rse_cases: Vec<(RSE, &'static str)> = vec![
+            (RSE::InvalidWindow, "invalid_window"),
+            (RSE::InvalidCadence, "invalid_cadence"),
+            (RSE::InvalidSegment, "invalid_segment"),
+            (
+                RSE::TooFewSamples {
+                    got: 1,
+                    required: 4,
+                },
+                "too_few_samples",
+            ),
+            (RSE::Reduced(ROE::SingularPlaneFit), "reduced"),
+            (RSE::Piecewise(POE::OutOfRange), "piecewise"),
+        ];
+        for (err, kind) in rse_cases {
+            let val = reduced_orbit_source_error_value(&err);
+            assert_eq!(val["kind"], kind);
+            match &err {
+                RSE::TooFewSamples { got, required } => {
+                    assert_eq!(val["fields"]["got"], *got);
+                    assert_eq!(val["fields"]["required"], *required);
+                }
+                RSE::Reduced(_) => {
+                    assert_eq!(val["fields"]["cause"]["kind"], "singular_plane_fit");
+                }
+                RSE::Piecewise(_) => {
+                    assert_eq!(val["fields"]["cause"]["kind"], "out_of_range");
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn reduced_orbit_public_producer_control_and_refusals() {
+        clear_engine_error();
+
+        // 6 synthetic samples forming a circular LEO orbit
+        let samples: [SidereonEcefSample; 6] = [
+            SidereonEcefSample {
+                epoch: SidereonCalendarEpoch {
+                    year: 2020,
+                    month: 6,
+                    day: 24,
+                    hour: 0,
+                    minute: 0,
+                    second: 0.0,
+                },
+                x_m: 6878137.0,
+                y_m: 0.0,
+                z_m: 0.0,
+            },
+            SidereonEcefSample {
+                epoch: SidereonCalendarEpoch {
+                    year: 2020,
+                    month: 6,
+                    day: 24,
+                    hour: 0,
+                    minute: 15,
+                    second: 0.0,
+                },
+                x_m: 4863580.0,
+                y_m: 4863580.0,
+                z_m: 0.0,
+            },
+            SidereonEcefSample {
+                epoch: SidereonCalendarEpoch {
+                    year: 2020,
+                    month: 6,
+                    day: 24,
+                    hour: 0,
+                    minute: 30,
+                    second: 0.0,
+                },
+                x_m: 0.0,
+                y_m: 6878137.0,
+                z_m: 0.0,
+            },
+            SidereonEcefSample {
+                epoch: SidereonCalendarEpoch {
+                    year: 2020,
+                    month: 6,
+                    day: 24,
+                    hour: 0,
+                    minute: 45,
+                    second: 0.0,
+                },
+                x_m: -4863580.0,
+                y_m: 4863580.0,
+                z_m: 0.0,
+            },
+            SidereonEcefSample {
+                epoch: SidereonCalendarEpoch {
+                    year: 2020,
+                    month: 6,
+                    day: 24,
+                    hour: 1,
+                    minute: 0,
+                    second: 0.0,
+                },
+                x_m: -6878137.0,
+                y_m: 0.0,
+                z_m: 0.0,
+            },
+            SidereonEcefSample {
+                epoch: SidereonCalendarEpoch {
+                    year: 2020,
+                    month: 6,
+                    day: 24,
+                    hour: 1,
+                    minute: 15,
+                    second: 0.0,
+                },
+                x_m: -4863580.0,
+                y_m: -4863580.0,
+                z_m: 0.0,
+            },
+        ];
+
+        // 1. ReducedOrbit family valid control
+        unsafe {
+            let mut elements: SidereonReducedOrbitElements = std::mem::zeroed();
+            let mut stats: SidereonReducedOrbitFitStats = std::mem::zeroed();
+            assert_eq!(
+                sidereon_reduced_orbit_fit(
+                    samples.as_ptr(),
+                    samples.len(),
+                    SidereonTimeScale::Gpst as u32,
+                    0, // CircularSecular
+                    &mut elements,
+                    &mut stats,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(stats.n_samples, 6);
+
+            let mut info = SidereonEngineErrorInfo {
+                family: SidereonEngineErrorFamily::ReducedOrbit,
+                payload_len: 999,
+            };
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+            assert_eq!(info.payload_len, 0);
+
+            // Valid evaluation resets / keeps None
+            let mut pos = [0.0; 3];
+            assert_eq!(
+                sidereon_reduced_orbit_position(
+                    &elements,
+                    &samples[0].epoch,
+                    SidereonTimeScale::Gpst as u32,
+                    0,
+                    pos.as_mut_ptr(),
+                    3,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+
+            // Real public refusal for ReducedOrbit: fit with fewer than MIN_SAMPLES=4 (e.g. 3)
+            assert_eq!(
+                sidereon_reduced_orbit_fit(
+                    samples.as_ptr(),
+                    3,
+                    SidereonTimeScale::Gpst as u32,
+                    0,
+                    &mut elements,
+                    &mut stats,
+                ),
+                SidereonStatus::Solve
+            );
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::ReducedOrbit);
+            assert!(info.payload_len > 0);
+            let expected_len = info.payload_len;
+
+            // Two-pass retrieval: Pass 1 query with null/0 buffer
+            let mut written = 999;
+            let mut required = 0;
+            assert_eq!(
+                sidereon_last_engine_error_payload(ptr::null_mut(), 0, &mut written, &mut required),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, 0);
+            assert_eq!(required, expected_len);
+
+            // Short buffer query returns InvalidArgument, 0 written, full required, and retains
+            let mut short_buf = vec![0u8; expected_len - 1];
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    short_buf.as_mut_ptr(),
+                    short_buf.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::InvalidArgument
+            );
+            assert_eq!(written, 0);
+            assert_eq!(required, expected_len);
+
+            // Pass 2: Exact buffer query succeeds
+            let mut buf = vec![0u8; expected_len];
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    buf.as_mut_ptr(),
+                    buf.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, expected_len);
+            assert_eq!(required, expected_len);
+
+            let payload: serde_json::Value =
+                serde_json::from_slice(&buf).expect("valid json payload");
+            assert_eq!(payload["schema_version"], 1);
+            assert_eq!(payload["operation"], "sidereon_reduced_orbit_fit");
+            assert_eq!(payload["error"]["kind"], "too_few_samples");
+            assert_eq!(payload["error"]["fields"]["got"], 3);
+            assert_eq!(payload["error"]["fields"]["required"], 4);
+
+            // Early null detail reset
+            assert_eq!(
+                sidereon_reduced_orbit_fit(
+                    samples.as_ptr(),
+                    samples.len(),
+                    SidereonTimeScale::Gpst as u32,
+                    0,
+                    ptr::null_mut(),
+                    &mut stats,
+                ),
+                SidereonStatus::NullPointer
+            );
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+            assert_eq!(info.payload_len, 0);
+
+            // Re-seed public refusal to test explicit seeded-success reset
+            assert_eq!(
+                sidereon_reduced_orbit_fit(
+                    samples.as_ptr(),
+                    3,
+                    SidereonTimeScale::Gpst as u32,
+                    0,
+                    &mut elements,
+                    &mut stats,
+                ),
+                SidereonStatus::Solve
+            );
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::ReducedOrbit);
+            assert!(info.payload_len > 0);
+
+            // Direct ReducedOrbit seeded-success reset explicit control
+            assert_eq!(
+                sidereon_reduced_orbit_fit(
+                    samples.as_ptr(),
+                    samples.len(),
+                    SidereonTimeScale::Gpst as u32,
+                    0,
+                    &mut elements,
+                    &mut stats,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+            assert_eq!(info.payload_len, 0);
+
+            // Valid evaluation resets / keeps None
+            assert_eq!(
+                sidereon_reduced_orbit_position(
+                    &elements,
+                    &samples[0].epoch,
+                    SidereonTimeScale::Gpst as u32,
+                    0,
+                    pos.as_mut_ptr(),
+                    3,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+            assert_eq!(info.payload_len, 0);
+        }
+
+        // 2. ReducedOrbitSource and PiecewiseOrbit family controls & refusals
+        unsafe {
+            let mut sp3: *mut SidereonSp3 = ptr::null_mut();
+            assert_eq!(
+                crate::sp3::sidereon_sp3_load(SP3_BYTES.as_ptr(), SP3_BYTES.len(), &mut sp3),
+                SidereonStatus::Ok
+            );
+            assert!(!sp3.is_null());
+
+            let fit_options = SidereonReducedOrbitSourceFitOptions {
+                sampling: SidereonReducedOrbitSourceSampling {
+                    t0: SidereonCalendarEpoch {
+                        year: 2020,
+                        month: 6,
+                        day: 24,
+                        hour: 0,
+                        minute: 0,
+                        second: 0.0,
+                    },
+                    t1: SidereonCalendarEpoch {
+                        year: 2020,
+                        month: 6,
+                        day: 24,
+                        hour: 3,
+                        minute: 0,
+                        second: 0.0,
+                    },
+                    cadence_s: 900.0,
+                },
+                model: 0, // CircularSecular
+            };
+
+            let mut elements: SidereonReducedOrbitElements = std::mem::zeroed();
+            let mut stats: SidereonReducedOrbitSourceFitStats = std::mem::zeroed();
+
+            // Valid control for ReducedOrbitSource
+            assert_eq!(
+                sidereon_reduced_orbit_fit_sp3_source(
+                    sp3,
+                    c"G01".as_ptr(),
+                    &fit_options,
+                    &mut elements,
+                    &mut stats,
+                ),
+                SidereonStatus::Ok
+            );
+            let mut info = SidereonEngineErrorInfo {
+                family: SidereonEngineErrorFamily::None,
+                payload_len: 0,
+            };
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+
+            // Real public refusal for ReducedOrbitSource: invalid cadence (negative)
+            let bad_fit_options = SidereonReducedOrbitSourceFitOptions {
+                sampling: SidereonReducedOrbitSourceSampling {
+                    t0: SidereonCalendarEpoch {
+                        year: 2020,
+                        month: 6,
+                        day: 24,
+                        hour: 0,
+                        minute: 0,
+                        second: 0.0,
+                    },
+                    t1: SidereonCalendarEpoch {
+                        year: 2020,
+                        month: 6,
+                        day: 24,
+                        hour: 3,
+                        minute: 0,
+                        second: 0.0,
+                    },
+                    cadence_s: -900.0,
+                },
+                model: 0,
+            };
+            assert_eq!(
+                sidereon_reduced_orbit_fit_sp3_source(
+                    sp3,
+                    c"G01".as_ptr(),
+                    &bad_fit_options,
+                    &mut elements,
+                    &mut stats,
+                ),
+                SidereonStatus::InvalidArgument
+            );
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::ReducedOrbitSource);
+            assert!(info.payload_len > 0);
+
+            let mut written = 0;
+            let mut required = 0;
+            let mut buf = vec![0u8; info.payload_len];
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    buf.as_mut_ptr(),
+                    buf.len(),
+                    &mut written,
+                    &mut required
+                ),
+                SidereonStatus::Ok
+            );
+            let payload: serde_json::Value = serde_json::from_slice(&buf).expect("valid json");
+            assert_eq!(
+                payload["operation"],
+                "sidereon_reduced_orbit_fit_sp3_source"
+            );
+            assert_eq!(payload["error"]["kind"], "invalid_cadence");
+
+            // Valid control for PiecewiseOrbit
+            let mut piecewise: *mut SidereonReducedOrbitPiecewise = ptr::null_mut();
+            let mut pw_stats: SidereonReducedOrbitPiecewiseSourceFitStats = std::mem::zeroed();
+            assert_eq!(
+                sidereon_reduced_orbit_fit_piecewise_sp3_source(
+                    sp3,
+                    c"G01".as_ptr(),
+                    &fit_options,
+                    3600.0,
+                    &mut piecewise,
+                    &mut pw_stats,
+                ),
+                SidereonStatus::Ok
+            );
+            assert!(!piecewise.is_null());
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+
+            // Keep piecewise alive and trigger real public refusal for PiecewiseOrbit:
+            // query epoch outside coverage
+            let out_of_range_epoch = SidereonCalendarEpoch {
+                year: 1990,
+                month: 1,
+                day: 1,
+                hour: 0,
+                minute: 0,
+                second: 0.0,
+            };
+            let mut seg_index = 999;
+            let mut segment: SidereonReducedOrbitPiecewiseSegment = std::mem::zeroed();
+            assert_eq!(
+                sidereon_reduced_orbit_piecewise_select_segment(
+                    piecewise,
+                    &out_of_range_epoch,
+                    &mut seg_index,
+                    &mut segment,
+                ),
+                SidereonStatus::InvalidArgument
+            );
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::PiecewiseOrbit);
+            assert!(info.payload_len > 0);
+            let pw_expected_len = info.payload_len;
+
+            // Capture owned payload
+            let mut captured_pw_payload = vec![0u8; pw_expected_len];
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    captured_pw_payload.as_mut_ptr(),
+                    captured_pw_payload.len(),
+                    &mut written,
+                    &mut required
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, pw_expected_len);
+            assert_eq!(required, pw_expected_len);
+
+            let payload: serde_json::Value =
+                serde_json::from_slice(&captured_pw_payload).expect("valid json");
+            assert_eq!(
+                payload["operation"],
+                "sidereon_reduced_orbit_piecewise_select_segment"
+            );
+            assert_eq!(payload["error"]["kind"], "out_of_range");
+
+            // Piecewise info inspection getter retains active error state and payload
+            let mut pw_info: SidereonReducedOrbitPiecewiseInfo = std::mem::zeroed();
+            assert_eq!(
+                sidereon_reduced_orbit_piecewise_info(piecewise, &mut pw_info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(pw_info.n_segments, 3);
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::PiecewiseOrbit);
+            assert_eq!(info.payload_len, pw_expected_len);
+            let mut verify_pw_buf = vec![0u8; pw_expected_len];
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    verify_pw_buf.as_mut_ptr(),
+                    verify_pw_buf.len(),
+                    &mut written,
+                    &mut required
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(verify_pw_buf, captured_pw_payload);
+
+            // Live handle free retains the active error and payload
+            sidereon_reduced_orbit_piecewise_free(piecewise);
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::PiecewiseOrbit);
+            assert_eq!(info.payload_len, pw_expected_len);
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    verify_pw_buf.as_mut_ptr(),
+                    verify_pw_buf.len(),
+                    &mut written,
+                    &mut required
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(verify_pw_buf, captured_pw_payload);
+
+            // Freeing sp3 retains error and payload
+            crate::sp3::sidereon_sp3_free(sp3);
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::PiecewiseOrbit);
+            assert_eq!(info.payload_len, pw_expected_len);
+        }
     }
 }

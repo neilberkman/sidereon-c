@@ -1,0 +1,31 @@
+# Fixture generator for engine values the C smoke tests pin. Not part of the
+# binding workspace (own empty [workspace] table), so a plain `cargo build` /
+# `cargo test` of the binding never pulls it in. tests/run_generators.sh runs it
+# from the binding root:
+#
+#     cargo run --release --manifest-path tests/pingen/Cargo.toml \
+#         > tests/engine_pins_fixture.h
+#
+# It reproduces, with sidereon-core's own types, the inputs of C smoke checks
+# and prints the engine's values, floating-point values as exact IEEE-754 bit
+# patterns: the first transmit-time satellite positions of the
+# single-frequency WTZR/WTZZ RINEX RTK arc (rinex_rtk_dted_smoke.c), the base
+# antenna reference point and the carrier static reference-station solve on
+# the same stations (rtk_rinex_smoke.c), the first row of the synthetic
+# scenario (domain018_smoke.c), whose JSON it reads from that test's source,
+# the TLE fit and observation QC of round2_parity_smoke.c, the broadcast
+# store count and NAV writer length of rinex_nav_clock_smoke.c, and the merged
+# GPS constellation catalog, its CSV and its SP3-id validation (smoke.c).
+[package]
+name = "pingen"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+# The sidereon-core revision tests/CORE_REVISION names; tests/run_generators.sh
+# checks that every generator pins the same one.
+sidereon-core = { version = "3.0.0", git = "https://github.com/neilberkman/sidereon", rev = "e2fb3dfdc392d23087ed8aa1ee028a0056b4021b" }
+serde_json = "1"

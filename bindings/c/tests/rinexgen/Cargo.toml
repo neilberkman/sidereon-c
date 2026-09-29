@@ -1,5 +1,6 @@
 # Manual fixture generator for the C RINEX-OBS smoke test. Own empty
-# [workspace] so a plain binding build never pulls it in. Regenerate with:
+# [workspace] so a plain binding build never pulls it in. tests/run_generators.sh
+# runs it:
 #
 #     cargo run --release --manifest-path bindings/c/tests/rinexgen/Cargo.toml \
 #         > bindings/c/tests/rinex_fixture.h
@@ -16,7 +17,7 @@ publish = false
 [workspace]
 
 [dependencies]
-# Same published core the binding consumes, so regenerated fixtures match the
-# engine the binding builds against and regeneration is reproducible from this
-# repo alone.
-sidereon-core = "1.1.0"
+# The sidereon-core revision tests/CORE_REVISION names; tests/run_generators.sh
+# checks that every generator pins the same one.
+sidereon-core = { version = "3.0.0", git = "https://github.com/neilberkman/sidereon", rev = "e2fb3dfdc392d23087ed8aa1ee028a0056b4021b" }
+serde_json = "1"

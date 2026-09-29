@@ -11,10 +11,30 @@
 #include <string.h>
 
 #include "sidereon.h"
+#include "w4_c012_pins.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
+
+/* Copy one text of the last terrain error into a NUL-terminated buffer
+ * through the two-call convention. Returns false when the call fails or the
+ * text does not fit. */
+static bool last_terrain_text(uint32_t family, uint32_t part, char *buf, size_t cap) {
+    size_t written = 0;
+    size_t required = 0;
+    if (sidereon_last_terrain_error_text(family, part, NULL, 0, &written, &required) !=
+            SIDEREON_STATUS_OK ||
+        required + 1 > cap) {
+        return false;
+    }
+    if (sidereon_last_terrain_error_text(family, part, (uint8_t *)buf, required, &written,
+                                         &required) != SIDEREON_STATUS_OK) {
+        return false;
+    }
+    buf[written] = 0;
+    return true;
+}
 
 static int failures = 0;
 
@@ -59,6 +79,10 @@ static uint64_t f64_bits(double value) {
     uint64_t bits;
     memcpy(&bits, &value, sizeof(bits));
     return bits;
+}
+
+static void check_bits(double got, uint64_t expected, const char *what) {
+    check(f64_bits(got) == expected, what);
 }
 
 static bool f64_same(double a, double b) {
@@ -258,7 +282,17 @@ static void test_terrain_batch(const char *dted_root) {
                   f64_same(batch[i].height_m, scalar),
               "terrain batch scalar parity");
     }
-    check(batch[2].status == SIDEREON_STATUS_INVALID_ARGUMENT && !batch[2].has_height_m,
+    /* The engine's per-point outcomes (tests/valgen w4_c012); the binding
+     * writes an engine refusal as SIDEREON_STATUS_INVALID_ARGUMENT with the
+     * typed kind, and a height with kind NONE (src/dted.rs
+     * dted_height_result_from_core). */
+    check(W4_C012_DTED_BATCH0_OK && W4_C012_DTED_BATCH1_OK && !W4_C012_DTED_BATCH2_OK,
+          "terrain batch engine outcomes");
+    check_bits(batch[0].height_m, W4_C012_DTED_BATCH0_HEIGHT_BITS, "terrain batch height 0");
+    check_bits(batch[1].height_m, W4_C012_DTED_BATCH1_HEIGHT_BITS, "terrain batch height 1");
+    check(batch[2].status == SIDEREON_STATUS_INVALID_ARGUMENT && !batch[2].has_height_m &&
+              batch[2].error.kind == W4_C012_DTED_BATCH2_ERROR_KIND &&
+              batch[0].error.kind == SIDEREON_TERRAIN_LOOKUP_ERROR_KIND_NONE,
           "terrain batch per-point error");
     sidereon_dted_terrain_free(terrain);
 
@@ -351,7 +385,9 @@ static void test_mmap_terrain_store(const char *dted_root) {
     if (index != NULL) {
         check(sidereon_mmap_terrain_tile_index(mmap, index, required, &written, &required) ==
                       SIDEREON_STATUS_OK &&
-                  written == required && index[0].lon_count > 1 && index[0].lat_count > 1 &&
+                  written == required && required == W4_C012_TILE_INDEX_COUNT &&
+                  index[0].lon_count == W4_C012_TILE0_LON_COUNT &&
+                  index[0].lat_count == W4_C012_TILE0_LAT_COUNT &&
                   index[0].vertical_datum == SIDEREON_VERTICAL_DATUM_EGM96_MSL_ORTHOMETRIC,
               "mmap terrain tile index copy");
         free(index);
@@ -396,18 +432,26 @@ static void test_mmap_terrain_store(const char *dted_root) {
     check(sidereon_mmap_terrain_orthometric_height_batch(mmap, points, 3, &options, batch) ==
               SIDEREON_STATUS_OK,
           "mmap terrain orthometric batch");
+    check(W4_C012_MMAP_BATCH0_OK && W4_C012_MMAP_BATCH1_OK && !W4_C012_MMAP_BATCH2_OK,
+          "mmap terrain batch engine outcomes");
     check(batch[0].status == SIDEREON_STATUS_OK && batch[0].has_orthometric_height_m,
           "mmap terrain batch first result");
+    check_bits(batch[0].orthometric_height_m.value_m, W4_C012_MMAP_BATCH0_HEIGHT_BITS,
+               "mmap terrain batch height 0");
+    check_bits(batch[1].orthometric_height_m.value_m, W4_C012_MMAP_BATCH1_HEIGHT_BITS,
+               "mmap terrain batch height 1");
     check(batch[2].status == SIDEREON_STATUS_INVALID_ARGUMENT &&
-              !batch[2].has_orthometric_height_m,
+              !batch[2].has_orthometric_height_m &&
+              batch[2].error.kind == W4_C012_MMAP_BATCH2_ERROR_KIND,
           "mmap terrain batch per-point error");
 
     SidereonEllipsoidalHeightM ellipsoidal = {0.0};
     check(sidereon_mmap_terrain_ellipsoidal_height_m_with_model(
               mmap, -106.5, 36.5, &options, SIDEREON_TERRAIN_GEOID_MODEL_EGM96_ONE_DEGREE, NULL,
-              &ellipsoidal) == SIDEREON_STATUS_OK &&
-              isfinite(ellipsoidal.value_m),
+              &ellipsoidal) == SIDEREON_STATUS_OK,
           "mmap terrain ellipsoidal one-degree");
+    check_bits(ellipsoidal.value_m, W4_C012_ELLIPSOIDAL_ONE_DEGREE_BITS,
+               "mmap terrain ellipsoidal one-degree value");
 
     char missing_dac[512];
     int missing_len = snprintf(missing_dac, sizeof(missing_dac), "%s/WW15MGH.DAC", dted_root);
@@ -420,10 +464,18 @@ static void test_mmap_terrain_store(const char *dted_root) {
           "mmap terrain missing 15-minute geoid");
     SidereonTerrainDatumError datum_error;
     memset(&datum_error, 0, sizeof(datum_error));
+    char datum_path[4096];
+    char datum_remediation[4096];
     check(sidereon_last_terrain_datum_error(&datum_error) == SIDEREON_STATUS_OK &&
               datum_error.kind == SIDEREON_TERRAIN_DATUM_ERROR_KIND_MISSING_EGM96_DAC &&
-              strstr((const char *)datum_error.path, "WW15MGH.DAC") != NULL &&
-              strstr((const char *)datum_error.remediation, "WW15MGH.DAC") != NULL,
+              last_terrain_text(SIDEREON_TERRAIN_ERROR_FAMILY_TERRAIN_DATUM,
+                                SIDEREON_TERRAIN_ERROR_TEXT_PATH, datum_path,
+                                sizeof(datum_path)) &&
+              last_terrain_text(SIDEREON_TERRAIN_ERROR_FAMILY_TERRAIN_DATUM,
+                                SIDEREON_TERRAIN_ERROR_TEXT_REMEDIATION, datum_remediation,
+                                sizeof(datum_remediation)) &&
+              strcmp(datum_path, missing_dac) == 0 &&
+              strcmp(datum_remediation, W4_C012_MISSING_DAC_REMEDIATION) == 0,
           "mmap terrain missing DAC typed error");
     sidereon_egm96_15m_geoid_free(geoid);
 
@@ -607,6 +659,8 @@ static void test_sbas_decode(void) {
     const char *hex = "5366819010029EE7ED83018202819BBE1A08BF8008FFA00000004066C0";
     uint8_t body[32];
     size_t body_len = hex_to_bytes(hex, body, sizeof(body));
+    /* The hex vector above is 58 digits, 29 bytes: the 226-bit body and its
+     * six trailing bits (core012_smoke.c, the hex literal in this function). */
     check(body_len == 29, "SBAS vector decode");
 
     SidereonSbasBlock *block = NULL;
@@ -620,29 +674,56 @@ static void test_sbas_decode(void) {
 
     SidereonSbasMessageInfo info;
     check(sidereon_sbas_block_info(block, &info) == SIDEREON_STATUS_OK &&
-              info.kind == SIDEREON_SBAS_MESSAGE_KIND_LONG_TERM_CORRECTIONS &&
-              info.message_type == 25 && info.long_term_count == 2,
+              info.kind == W4_C012_SBAS_KIND &&
+              info.message_type == W4_C012_SBAS_MESSAGE_TYPE &&
+              info.long_term_count == W4_C012_SBAS_LONG_TERM_COUNT,
           "SBAS long-term info");
 
-    const uint8_t expected_index[2] = {16, 31};
-    const uint8_t expected_iode[2] = {50, 13};
-    const int32_t expected_delta[2][3] = {{16, 20, -71}, {34, -16, 8}};
-    const int32_t expected_rate[2][3] = {{6, 3, 4}, {0, 0, 0}};
-    const int32_t expected_af0[2] = {-37, -3};
-    const int32_t expected_af1[2] = {5, 2};
+    /* Every decoded field is sidereon-core's reading of the vector
+     * (tests/valgen w4_c012). */
+    const bool expected_velocity_code[2] = {W4_C012_SBAS_HALF0_VELOCITY_CODE,
+                                            W4_C012_SBAS_HALF1_VELOCITY_CODE};
+    const int expected_iodp[2] = {W4_C012_SBAS_HALF0_IODP, W4_C012_SBAS_HALF1_IODP};
+    const size_t expected_count[2] = {W4_C012_SBAS_HALF0_RECORD_COUNT,
+                                      W4_C012_SBAS_HALF1_RECORD_COUNT};
+    const int expected_index[2] = {W4_C012_SBAS_HALF0_RECORD0_MONITORED_INDEX,
+                                   W4_C012_SBAS_HALF1_RECORD0_MONITORED_INDEX};
+    const int expected_iode[2] = {W4_C012_SBAS_HALF0_RECORD0_IODE,
+                                  W4_C012_SBAS_HALF1_RECORD0_IODE};
+    const int32_t expected_delta[2][3] = {
+        {W4_C012_SBAS_HALF0_RECORD0_DELTA_X, W4_C012_SBAS_HALF0_RECORD0_DELTA_Y,
+         W4_C012_SBAS_HALF0_RECORD0_DELTA_Z},
+        {W4_C012_SBAS_HALF1_RECORD0_DELTA_X, W4_C012_SBAS_HALF1_RECORD0_DELTA_Y,
+         W4_C012_SBAS_HALF1_RECORD0_DELTA_Z}};
+    const int32_t expected_rate[2][3] = {
+        {W4_C012_SBAS_HALF0_RECORD0_DELTA_X_RATE, W4_C012_SBAS_HALF0_RECORD0_DELTA_Y_RATE,
+         W4_C012_SBAS_HALF0_RECORD0_DELTA_Z_RATE},
+        {W4_C012_SBAS_HALF1_RECORD0_DELTA_X_RATE, W4_C012_SBAS_HALF1_RECORD0_DELTA_Y_RATE,
+         W4_C012_SBAS_HALF1_RECORD0_DELTA_Z_RATE}};
+    const int32_t expected_af0[2] = {W4_C012_SBAS_HALF0_RECORD0_DELTA_A_F0,
+                                     W4_C012_SBAS_HALF1_RECORD0_DELTA_A_F0};
+    const int32_t expected_af1[2] = {W4_C012_SBAS_HALF0_RECORD0_DELTA_A_F1,
+                                     W4_C012_SBAS_HALF1_RECORD0_DELTA_A_F1};
+    const bool expected_has_tod[2] = {W4_C012_SBAS_HALF0_RECORD0_HAS_TIME_OF_DAY,
+                                      W4_C012_SBAS_HALF1_RECORD0_HAS_TIME_OF_DAY};
+    const uint32_t expected_tod[2] = {W4_C012_SBAS_HALF0_RECORD0_TIME_OF_DAY_S,
+                                      W4_C012_SBAS_HALF1_RECORD0_TIME_OF_DAY_S};
     for (size_t half_index = 0; half_index < 2; half_index++) {
         bool present = false;
         SidereonSbasLongTermHalfInfo half;
         check(sidereon_sbas_block_long_term_half_info(block, half_index, &present, &half) ==
                   SIDEREON_STATUS_OK &&
-                  present && half.velocity_code && half.iodp == 3 && half.record_count == 1,
+                  present && half.velocity_code == expected_velocity_code[half_index] &&
+                  half.iodp == expected_iodp[half_index] &&
+                  half.record_count == expected_count[half_index],
               "SBAS long-term half info");
         SidereonSbasLongTermRecord records[2];
         size_t written = 0;
         size_t required = 0;
         check(sidereon_sbas_block_long_term_records(block, half_index, records, 2, &written,
                                                     &required) == SIDEREON_STATUS_OK &&
-                  written == 1 && required == 1,
+                  written == expected_count[half_index] &&
+                  required == expected_count[half_index],
               "SBAS long-term records");
         check(records[0].monitored_index == expected_index[half_index] &&
                   records[0].iode == expected_iode[half_index] &&
@@ -654,7 +735,8 @@ static void test_sbas_decode(void) {
                   records[0].delta_z_rate == expected_rate[half_index][2] &&
                   records[0].delta_a_f0 == expected_af0[half_index] &&
                   records[0].delta_a_f1 == expected_af1[half_index] &&
-                  records[0].has_time_of_day_s && records[0].time_of_day_s == 102,
+                  records[0].has_time_of_day_s == expected_has_tod[half_index] &&
+                  records[0].time_of_day_s == expected_tod[half_index],
               "SBAS long-term record vector");
     }
 
@@ -746,22 +828,34 @@ static void test_araim(void) {
     SidereonAraimSummary summary;
     check(sidereon_araim_result_summary(result, &summary) == SIDEREON_STATUS_OK,
           "ARAIM summary");
-    check(summary.available && summary.availability && summary.fault_mode_count == 13,
+    check(summary.available == W4_C012_ARAIM_AVAILABLE &&
+              summary.availability == W4_C012_ARAIM_AVAILABLE &&
+              summary.fault_mode_count == W4_C012_ARAIM_FAULT_MODE_COUNT,
           "ARAIM summary status");
+    check_bits(summary.vpl_m, W4_C012_ARAIM_VPL_BITS, "ARAIM VPL");
+    check_bits(summary.hpl_m, W4_C012_ARAIM_HPL_BITS, "ARAIM HPL");
+    check_bits(summary.emt_m, W4_C012_ARAIM_EMT_BITS, "ARAIM EMT");
+    check_bits(summary.sigma_acc_v_m, W4_C012_ARAIM_SIGMA_ACC_V_BITS, "ARAIM vertical sigma");
+    /* The WG-C ARAIM TSG report, Appendix D, publishes this case to one
+     * decimal (two for sigma); the engine's values agree to that printing.
+     * These are an external reference, not engine output. */
     check_close(summary.vpl_m, 19.2, 0.05, "ARAIM VPL published reference");
     check_close(summary.hpl_m, 14.5, 0.05, "ARAIM HPL published reference");
     check_close(summary.emt_m, 7.8, 0.05, "ARAIM EMT published reference");
     check_close(summary.sigma_acc_v_m, 1.47, 0.02, "ARAIM vertical sigma published reference");
 
-    SidereonAraimFaultMode modes[13];
+    SidereonAraimFaultMode modes[W4_C012_ARAIM_FAULT_MODE_COUNT];
     size_t written = 0;
     size_t required = 0;
-    check(sidereon_araim_result_fault_modes(result, modes, 13, &written, &required) ==
-                  SIDEREON_STATUS_OK &&
-              written == 13 && required == 13,
+    check(sidereon_araim_result_fault_modes(result, modes, W4_C012_ARAIM_FAULT_MODE_COUNT,
+                                            &written, &required) == SIDEREON_STATUS_OK &&
+              written == W4_C012_ARAIM_FAULT_MODE_COUNT &&
+              required == W4_C012_ARAIM_FAULT_MODE_COUNT,
           "ARAIM fault modes");
-    check(modes[0].monitorable && modes[0].excluded_count == 0 &&
-              !modes[0].has_excluded_constellation,
+    check(modes[0].monitorable == W4_C012_ARAIM_MODE0_MONITORABLE &&
+              modes[0].excluded_count == W4_C012_ARAIM_MODE0_EXCLUDED_COUNT &&
+              modes[0].has_excluded_constellation ==
+                  W4_C012_ARAIM_MODE0_HAS_EXCLUDED_CONSTELLATION,
           "ARAIM fault-free mode");
     sidereon_araim_result_free(result);
 
@@ -811,10 +905,12 @@ static void test_araim(void) {
         check(sidereon_araim_result_summary(sparse_result, &sparse_summary) ==
                   SIDEREON_STATUS_OK,
               "sparse ARAIM summary");
-        check(!sparse_summary.available && !sparse_summary.availability,
+        check(sparse_summary.available == W4_C012_SPARSE_AVAILABLE &&
+                  sparse_summary.availability == W4_C012_SPARSE_AVAILABLE &&
+                  sparse_summary.fault_mode_count == W4_C012_SPARSE_FAULT_MODE_COUNT,
               "sparse ARAIM unavailable status");
-        check(isinf(sparse_summary.hpl_m) && isinf(sparse_summary.vpl_m),
-              "sparse ARAIM infinite protection levels");
+        check_bits(sparse_summary.hpl_m, W4_C012_SPARSE_HPL_BITS, "sparse ARAIM HPL");
+        check_bits(sparse_summary.vpl_m, W4_C012_SPARSE_VPL_BITS, "sparse ARAIM VPL");
         sidereon_araim_result_free(sparse_result);
     }
 
@@ -835,9 +931,9 @@ static void test_astro_angles(void) {
           "position angle east");
     check(sidereon_position_angle_deg(0.0, 0.0, 0.0, 10.0, &north) == SIDEREON_STATUS_OK,
           "position angle north");
-    check_close(sep, 90.0, 1.0e-12, "angle separation reference");
-    check_close(pa, 90.0, 1.0e-12, "position angle east reference");
-    check_close(north, 0.0, 1.0e-12, "position angle north reference");
+    check_bits(sep, W4_C012_SEPARATION_BITS, "angle separation");
+    check_bits(pa, W4_C012_POSITION_ANGLE_EAST_BITS, "position angle east");
+    check_bits(north, W4_C012_POSITION_ANGLE_NORTH_BITS, "position angle north");
 
     if (failures == start) {
         printf("astro_angles_smoke: OK (2 position-angle vectors)\n");

@@ -74,6 +74,24 @@ pub struct SidereonPppObservation {
     pub freq1_hz: f64,
     /// Second raw carrier frequency in Hz, or 0 when not supplied.
     pub freq2_hz: f64,
+    /// Tracking code of the first pseudorange as a null-terminated RINEX 3
+    /// band and attribute ("1C") or observation code ("C1C"), in the RINEX
+    /// 3.04 convention. The four signal fields are all NULL, which leaves the
+    /// observation's signals unstated, or all set. An SSR/HAS bias applies
+    /// only to an observation formed from the bias's exact signal, so an
+    /// observation with unstated signals receives none.
+    pub code1_signal: *const c_char,
+    /// Tracking code of the second pseudorange, as code1_signal.
+    pub code2_signal: *const c_char,
+    /// Tracking code of the first carrier phase, as code1_signal.
+    pub phase1_signal: *const c_char,
+    /// Tracking code of the second carrier phase, as code1_signal.
+    pub phase2_signal: *const c_char,
+    /// Whether `glonass_channel` is set.
+    pub has_glonass_channel: bool,
+    /// GLONASS FDMA frequency channel of the satellite, which resolves its
+    /// carriers where the frequencies are not given.
+    pub glonass_channel: i8,
 }
 
 /// One static PPP epoch.
@@ -435,6 +453,321 @@ pub struct SidereonPppFloatMetadata {
     pub residual_count: usize,
     /// Number of used satellite or ambiguity ids.
     pub used_sat_count: usize,
+    /// Number of solved epochs (sidereon_ppp_float_solution_solved_epochs).
+    /// An input epoch left with no observations is not solved.
+    pub solved_epoch_count: usize,
+    /// Number of observations left out because an SSR/HAS bias they require
+    /// was not resolved (sidereon_ppp_float_solution_ssr_bias_exclusions).
+    pub ssr_bias_exclusion_count: usize,
+    /// Number of observations left out before the solve because no
+    /// transmission epoch can be placed from them
+    /// (sidereon_ppp_float_solution_unplaced_observations).
+    pub unplaced_observation_count: usize,
+    /// Whether the solve ran the residual screen.
+    pub residual_screen: bool,
+    /// Number of observations the residual screen removed
+    /// (sidereon_ppp_float_solution_residual_screen_removals).
+    pub residual_screen_removal_count: usize,
+    /// The iteration and convergence options the solve ran with.
+    pub solve_options: SidereonPppFloatOptions,
+}
+
+/// Why a PPP observation places no transmission epoch. Mirrors
+/// sidereon_core::precise_positioning::UnplacedObservationReason.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonPppUnplacedObservationReason {
+    /// The code is zero or negative. RTKLIB reads a zero pseudorange as none
+    /// and places no satellite for it (`satposs`); a negative code places the
+    /// satellite at no meaningful epoch.
+    CodeNotPositive = 0,
+    /// A reason a later engine adds that this binding has no code for yet;
+    /// unknown_variant names it.
+    Unknown = 999,
+    /// Strict SSR size policy refused an orbit/clock correction; use the V2
+    /// record to read its magnitudes.
+    SsrCorrectionExceedsLimit = 1,
+}
+
+/// An observation left out of a PPP solve before it solves because no
+/// transmission epoch can be placed from it.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonPppUnplacedObservation {
+    /// Zero-based index of the observation's epoch in the solve's input
+    /// epochs.
+    pub epoch_index: usize,
+    /// Satellite id of the observation.
+    pub satellite_id: SidereonPppId,
+    /// Ambiguity id of the observation.
+    pub ambiguity_id: SidereonPppId,
+    /// Why no transmission epoch can be placed from it.
+    pub reason: SidereonPppUnplacedObservationReason,
+    /// The engine's name for the reason when `reason` is UNKNOWN; empty
+    /// otherwise.
+    pub unknown_variant: [c_char; SIDEREON_UNKNOWN_VARIANT_C_BYTES],
+}
+
+/// Unplaced observation with optional strict-SSR refusal magnitudes.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonPppUnplacedObservationV2 {
+    /// Zero-based input epoch index.
+    pub epoch_index: usize,
+    /// Satellite identifier.
+    pub satellite_id: SidereonPppId,
+    /// Ambiguity-state identifier.
+    pub ambiguity_id: SidereonPppId,
+    /// Typed reason no transmission epoch could be placed.
+    pub reason: SidereonPppUnplacedObservationReason,
+    /// Unknown reason name when `reason` is `Unknown`; zero-filled otherwise.
+    pub unknown_variant: [c_char; SIDEREON_UNKNOWN_VARIANT_C_BYTES],
+    /// Whether the reason carries SSR correction magnitudes.
+    pub has_size: bool,
+    /// Refused orbit correction magnitude in metres; zero when absent.
+    pub orbit_m: f64,
+    /// Refused clock correction in metres, preserving its sign; zero when absent.
+    pub clock_m: f64,
+}
+
+/// An observation left out of a PPP solve because an SSR/HAS bias it requires
+/// was not resolved.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonPppSsrBiasExclusion {
+    /// Zero-based index of the observation's epoch in the solve's input
+    /// epochs.
+    pub epoch_index: usize,
+    /// Satellite id of the observation.
+    pub satellite_id: SidereonPppId,
+    /// Ambiguity id of the observation.
+    pub ambiguity_id: SidereonPppId,
+    /// A required SSR code bias is absent.
+    pub code_bias_missing: bool,
+    /// A required SSR phase bias is absent.
+    pub phase_bias_missing: bool,
+    /// Why the recorded biases do not hold at the observation's transmission
+    /// time, when the lookup has them but the solve's source does not apply
+    /// them there; kind NONE otherwise.
+    pub transmit_time_failure: SidereonPppTransmitTimeFailure,
+    /// The row the SSR/HAS bias lookup reported for this observation, whose
+    /// code and phase statuses state why the bias was not resolved; `present`
+    /// is false when the lookup has no row for it.
+    pub application: SidereonPppSsrApplication,
+}
+
+/// Which kind of transmission-time failure an SSR/HAS bias exclusion carries.
+/// Mirrors sidereon_core::precise_positioning::SsrTransmitTimeFailure.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonPppTransmitTimeFailureKind {
+    /// No transmission-time failure.
+    None = 0,
+    /// The solve's ephemeris source applies no SSR corrections.
+    SourceWithoutSsrCorrections = 1,
+    /// The transmission time could not be predicted from the solve's source.
+    TransmitTimeUnavailable = 2,
+    /// The source applies orbit and clock corrections of another solution, or
+    /// none, at the transmission time (`applied`).
+    OrbitClockSolution = 3,
+    /// A recorded bias is not the record available at the transmission time
+    /// (`signal`, `bias_status`).
+    BiasRecord = 4,
+    /// The ephemeris source failed with an error this check has no case for;
+    /// sidereon_ppp_*_solution_ssr_bias_exclusion_error_text copies it.
+    Source = 5,
+    /// A failure a later engine adds; unknown_variant names it.
+    Unknown = 999,
+}
+
+/// Status of an SSR bias query. Mirrors sidereon_core::ssr::SsrBiasStatus.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonSsrBiasStatus {
+    Available = 0,
+    Missing = 1,
+    Unavailable = 2,
+    NotYetValid = 3,
+    Expired = 4,
+    Excluded = 5,
+    InvalidEpoch = 6,
+    PhaseDiscontinuityNeedsReset = 7,
+    UnknownSignal = 8,
+    /// A status a later engine adds; the struct's unknown_variant names it.
+    Unknown = 999,
+}
+
+/// Status of an SSR ionosphere-free bias combination. Mirrors
+/// sidereon_core::precise_positioning::SsrIfCombinationStatus.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonPppSsrIfCombinationStatus {
+    Applied = 0,
+    OptedOut = 1,
+    SignalUnavailable = 2,
+    InvalidFrequencies = 3,
+    ObservationSignalsUnknown = 4,
+    CarrierUnresolved = 5,
+    ObservationFrequencyMismatch = 6,
+    IncompatibleSourceOrSolution = 7,
+    IncompatibleIod = 8,
+    OrbitClockSolutionUnavailable = 9,
+    OrbitClockSolutionMismatch = 10,
+    SatelliteExcluded = 11,
+    TransmitTimeUnavailable = 12,
+    PhaseDiscontinuityNeedsReset = 13,
+    /// The satellite state read UT1 outside the UT1 table; the struct's
+    /// `*_status_ut1` field names the side.
+    Ut1OutsideCoverage = 14,
+    /// A status a later engine adds; the struct's unknown_variant names it.
+    Unknown = 999,
+}
+
+/// An SSR orbit/clock/bias solution identity.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonSsrSolutionId {
+    /// 0 for RTCM SSR, 1 for Galileo HAS, 2 for IGS SSR.
+    pub source: u32,
+    /// Provider id.
+    pub provider_id: u16,
+    /// Solution id.
+    pub solution_id: u8,
+}
+
+/// An SSR bias signal key: a physical signal, or a raw index its source's
+/// table assigns no physical signal.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonSsrSignalKey {
+    /// True for a physical signal (`system` and `code`), false for a raw index
+    /// (`system`, `source` and `index`).
+    pub is_physical: bool,
+    /// The GNSS, a SidereonGnssSystem value.
+    pub system: u32,
+    /// The RINEX 3 band and attribute of a physical signal, null-terminated.
+    pub code: [c_char; 3],
+    /// Source of a raw index: 0 for RTCM SSR, 1 for Galileo HAS, 2 for IGS SSR.
+    pub source: u32,
+    /// The raw index.
+    pub index: u8,
+}
+
+/// Transmission-time failure of an SSR/HAS bias exclusion.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonPppTransmitTimeFailure {
+    /// Which failure, a SidereonPppTransmitTimeFailureKind value.
+    pub kind: u32,
+    /// Whether `transmit_time_j2000_s` is present.
+    pub has_transmit_time: bool,
+    /// Transmission time, seconds since J2000.
+    pub transmit_time_j2000_s: f64,
+    /// Whether `applied` is present (ORBIT_CLOCK_SOLUTION).
+    pub has_applied: bool,
+    /// Solution the source applies at the transmission time.
+    pub applied: SidereonSsrSolutionId,
+    /// Whether `signal` and `bias_status` are present (BIAS_RECORD).
+    pub has_signal: bool,
+    /// Signal of the record.
+    pub signal: SidereonSsrSignalKey,
+    /// Status of the query for that signal, a SidereonSsrBiasStatus value.
+    pub bias_status: u32,
+    /// The engine's name for the first value here that reads UNKNOWN.
+    pub unknown_variant: [c_char; SIDEREON_UNKNOWN_VARIANT_C_BYTES],
+}
+
+/// One signal's bias query in an SSR application report.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonPppSsrSignalReport {
+    /// Whether the report is present.
+    pub present: bool,
+    /// The requested physical signal (`is_physical` is true).
+    pub signal: SidereonSsrSignalKey,
+    /// Query status, a SidereonSsrBiasStatus value.
+    pub status: u32,
+    /// Whether `source_signal` is present.
+    pub has_source_signal: bool,
+    /// The raw index of the record found.
+    pub source_signal: SidereonSsrSignalKey,
+    /// Whether `bias_m` is present.
+    pub has_bias_m: bool,
+    /// Bias, metres.
+    pub bias_m: f64,
+    /// Whether `bias_cycles` is present (phase only).
+    pub has_bias_cycles: bool,
+    /// Bias, cycles (phase only).
+    pub bias_cycles: f64,
+    /// Whether `solution` is present.
+    pub has_solution: bool,
+    /// Solution of the record found.
+    pub solution: SidereonSsrSolutionId,
+    /// Whether `iod_ssr` is present.
+    pub has_iod_ssr: bool,
+    /// IOD SSR of the record found.
+    pub iod_ssr: u8,
+    /// The engine's name for `status` when it reads UNKNOWN.
+    pub unknown_variant: [c_char; SIDEREON_UNKNOWN_VARIANT_C_BYTES],
+}
+
+/// The SSR/HAS bias lookup's row for one observation.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonPppSsrApplication {
+    /// Whether the row is present.
+    pub present: bool,
+    /// Whether `transmit_time_j2000_s` is present.
+    pub has_transmit_time: bool,
+    /// Transmission time the biases were evaluated at, seconds since J2000.
+    pub transmit_time_j2000_s: f64,
+    /// Whether `applied_orbit_clock_solution` is present.
+    pub has_applied_orbit_clock_solution: bool,
+    /// Solution of the orbit and clock corrections the source applies.
+    pub applied_orbit_clock_solution: SidereonSsrSolutionId,
+    /// Whether the observation states its signals (the four codes below).
+    pub has_observation_signals: bool,
+    /// Tracking codes of the first and second code and carrier phase.
+    pub code1_signal: [c_char; 3],
+    pub code2_signal: [c_char; 3],
+    pub phase1_signal: [c_char; 3],
+    pub phase2_signal: [c_char; 3],
+    /// Code combination status, a SidereonPppSsrIfCombinationStatus value.
+    pub code_status: u32,
+    /// For a UT1_OUTSIDE_COVERAGE code status, the side, a
+    /// SidereonUt1Degradation value.
+    pub code_status_ut1: u32,
+    /// Whether `applied_code_if_m` is present.
+    pub has_applied_code_if_m: bool,
+    /// Applied code ionosphere-free bias, metres.
+    pub applied_code_if_m: f64,
+    /// First and second code signal queries.
+    pub code1: SidereonPppSsrSignalReport,
+    pub code2: SidereonPppSsrSignalReport,
+    /// Phase combination status, a SidereonPppSsrIfCombinationStatus value.
+    pub phase_status: u32,
+    /// For a UT1_OUTSIDE_COVERAGE phase status, the side.
+    pub phase_status_ut1: u32,
+    /// Whether `applied_phase_if_m` is present.
+    pub has_applied_phase_if_m: bool,
+    /// Applied phase ionosphere-free bias, metres.
+    pub applied_phase_if_m: f64,
+    /// First and second phase signal queries.
+    pub phase1: SidereonPppSsrSignalReport,
+    pub phase2: SidereonPppSsrSignalReport,
+    /// The engine's name for the first status here that reads UNKNOWN.
+    pub unknown_variant: [c_char; SIDEREON_UNKNOWN_VARIANT_C_BYTES],
+}
+
+/// One observation of a PPP solve named by its input epoch and ambiguity id.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonPppEpochObservation {
+    /// Zero-based index of the observation's epoch in the solve's input
+    /// epochs.
+    pub epoch_index: usize,
+    /// Ambiguity id of the observation.
+    pub ambiguity_id: SidereonPppId,
 }
 
 /// Summary scalars and integer-search metadata for a PPP fixed solution.
@@ -475,6 +808,17 @@ pub struct SidereonPppFixedMetadata {
     pub integer_second_best_score: f64,
     /// Number of integer candidates evaluated by the search.
     pub integer_candidates: usize,
+    /// Number of solved epochs of the fixed re-solve
+    /// (sidereon_ppp_fixed_solution_solved_epochs).
+    pub solved_epoch_count: usize,
+    /// Number of observations the fixed re-solve left out because an SSR/HAS
+    /// bias they require was not resolved
+    /// (sidereon_ppp_fixed_solution_ssr_bias_exclusions).
+    pub ssr_bias_exclusion_count: usize,
+    /// Number of observations the fixed re-solve left out because no
+    /// transmission epoch can be placed from them
+    /// (sidereon_ppp_fixed_solution_unplaced_observations).
+    pub unplaced_observation_count: usize,
 }
 
 /// Initialize PPP measurement weights with engine binding defaults.
@@ -576,12 +920,12 @@ pub unsafe extern "C" fn sidereon_ppp_fixed_ambiguity_options_init(
         "sidereon_ppp_fixed_ambiguity_options_init",
         SidereonStatus::Panic,
         || {
-            let out_options = c_try!(require_out(
+            let out_options = c_try!(require_uninit_out(
                 out_options,
                 "sidereon_ppp_fixed_ambiguity_options_init",
                 "out_options"
             ));
-            *out_options = default_ppp_fixed_ambiguity_options();
+            out_options.write(default_ppp_fixed_ambiguity_options());
             SidereonStatus::Ok
         },
     )
@@ -749,6 +1093,14 @@ pub unsafe extern "C" fn sidereon_ppp_float_solution_metadata(
                 ambiguity_count: 0,
                 residual_count: 0,
                 used_sat_count: 0,
+                solved_epoch_count: 0,
+                ssr_bias_exclusion_count: 0,
+                unplaced_observation_count: 0,
+                residual_screen: false,
+                residual_screen_removal_count: 0,
+                solve_options: ppp_float_solve_options_to_c(
+                    &sidereon_core::precise_positioning::FloatSolveOptions::default(),
+                ),
             };
             let sol = c_try!(require_ref(
                 sol,
@@ -1106,6 +1458,9 @@ pub unsafe extern "C" fn sidereon_ppp_fixed_solution_metadata(
                 has_integer_second_best_score: false,
                 integer_second_best_score: 0.0,
                 integer_candidates: 0,
+                solved_epoch_count: 0,
+                ssr_bias_exclusion_count: 0,
+                unplaced_observation_count: 0,
             };
             let sol = c_try!(require_ref(
                 sol,
@@ -1258,6 +1613,488 @@ pub unsafe extern "C" fn sidereon_ppp_fixed_solution_used_sat_ids(
             SidereonStatus::Ok
         },
     )
+}
+
+/// Copy the input epoch index of each solved epoch, ascending. An input epoch left with no
+/// observations by the elevation cutoff, SSR/HAS bias exclusion or the residual screen is not
+/// solved and is absent. Uses the variable-length output contract documented at the top of
+/// the header.
+///
+/// Safety: sol must be a live solution handle; out must point to at least len
+/// writable entries or be NULL when len is 0; out_written and out_required must
+/// point to size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_float_solution_solved_epochs(
+    sol: *const SidereonPppFloatSolution,
+    out: *mut usize,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    let fn_name = "sidereon_ppp_float_solution_solved_epochs";
+    ffi_boundary(fn_name, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(fn_name, out_written, out_required));
+        let sol = c_try!(require_ref(sol, fn_name, "solution"));
+        let values = sol.inner.solved_epoch_indices.clone();
+        c_try!(copy_prefix_to_c(
+            fn_name,
+            "out",
+            &values,
+            out,
+            len,
+            out_written,
+            out_required,
+        ));
+        SidereonStatus::Ok
+    })
+}
+
+/// Copy the receiver clock, metres, of each solved epoch, in the order of
+/// the solved epochs. Uses the variable-length output contract documented at the top of
+/// the header.
+///
+/// Safety: sol must be a live solution handle; out must point to at least len
+/// writable entries or be NULL when len is 0; out_written and out_required must
+/// point to size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_float_solution_epoch_clocks(
+    sol: *const SidereonPppFloatSolution,
+    out: *mut f64,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    let fn_name = "sidereon_ppp_float_solution_epoch_clocks";
+    ffi_boundary(fn_name, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(fn_name, out_written, out_required));
+        let sol = c_try!(require_ref(sol, fn_name, "solution"));
+        let values = sol.inner.epoch_clocks_m.clone();
+        c_try!(copy_prefix_to_c(
+            fn_name,
+            "out",
+            &values,
+            out,
+            len,
+            out_written,
+            out_required,
+        ));
+        SidereonStatus::Ok
+    })
+}
+
+/// Copy the observations left out because an SSR/HAS bias they require was
+/// not resolved, in epoch and observation order. Uses the variable-length output contract documented at the top of
+/// the header.
+///
+/// Safety: sol must be a live solution handle; out must point to at least len
+/// writable entries or be NULL when len is 0; out_written and out_required must
+/// point to size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_float_solution_ssr_bias_exclusions(
+    sol: *const SidereonPppFloatSolution,
+    out: *mut SidereonPppSsrBiasExclusion,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    let fn_name = "sidereon_ppp_float_solution_ssr_bias_exclusions";
+    ffi_boundary(fn_name, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(fn_name, out_written, out_required));
+        let sol = c_try!(require_ref(sol, fn_name, "solution"));
+        let values = c_try!(sol
+            .inner
+            .ssr_bias_exclusions
+            .iter()
+            .map(|value| ppp_ssr_bias_exclusion_to_c(fn_name, value))
+            .collect::<Result<Vec<_>, _>>());
+        c_try!(copy_prefix_to_c(
+            fn_name,
+            "out",
+            &values,
+            out,
+            len,
+            out_written,
+            out_required,
+        ));
+        SidereonStatus::Ok
+    })
+}
+
+/// Copy the input epoch index of each solved epoch, ascending. An input epoch left with no
+/// observations by the elevation cutoff, SSR/HAS bias exclusion or the residual screen is not
+/// solved and is absent. Uses the variable-length output contract documented at the top of
+/// the header.
+///
+/// Safety: sol must be a live solution handle; out must point to at least len
+/// writable entries or be NULL when len is 0; out_written and out_required must
+/// point to size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_fixed_solution_solved_epochs(
+    sol: *const SidereonPppFixedSolution,
+    out: *mut usize,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    let fn_name = "sidereon_ppp_fixed_solution_solved_epochs";
+    ffi_boundary(fn_name, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(fn_name, out_written, out_required));
+        let sol = c_try!(require_ref(sol, fn_name, "solution"));
+        let values = sol.inner.solved_epoch_indices.clone();
+        c_try!(copy_prefix_to_c(
+            fn_name,
+            "out",
+            &values,
+            out,
+            len,
+            out_written,
+            out_required,
+        ));
+        SidereonStatus::Ok
+    })
+}
+
+/// Copy the receiver clock, metres, of each solved epoch, in the order of
+/// the solved epochs. Uses the variable-length output contract documented at the top of
+/// the header.
+///
+/// Safety: sol must be a live solution handle; out must point to at least len
+/// writable entries or be NULL when len is 0; out_written and out_required must
+/// point to size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_fixed_solution_epoch_clocks(
+    sol: *const SidereonPppFixedSolution,
+    out: *mut f64,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    let fn_name = "sidereon_ppp_fixed_solution_epoch_clocks";
+    ffi_boundary(fn_name, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(fn_name, out_written, out_required));
+        let sol = c_try!(require_ref(sol, fn_name, "solution"));
+        let values = sol.inner.epoch_clocks_m.clone();
+        c_try!(copy_prefix_to_c(
+            fn_name,
+            "out",
+            &values,
+            out,
+            len,
+            out_written,
+            out_required,
+        ));
+        SidereonStatus::Ok
+    })
+}
+
+/// Copy the observations left out because an SSR/HAS bias they require was
+/// not resolved, in epoch and observation order. Uses the variable-length output contract documented at the top of
+/// the header.
+///
+/// Safety: sol must be a live solution handle; out must point to at least len
+/// writable entries or be NULL when len is 0; out_written and out_required must
+/// point to size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_fixed_solution_ssr_bias_exclusions(
+    sol: *const SidereonPppFixedSolution,
+    out: *mut SidereonPppSsrBiasExclusion,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    let fn_name = "sidereon_ppp_fixed_solution_ssr_bias_exclusions";
+    ffi_boundary(fn_name, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(fn_name, out_written, out_required));
+        let sol = c_try!(require_ref(sol, fn_name, "solution"));
+        let values = c_try!(sol
+            .inner
+            .ssr_bias_exclusions
+            .iter()
+            .map(|value| ppp_ssr_bias_exclusion_to_c(fn_name, value))
+            .collect::<Result<Vec<_>, _>>());
+        c_try!(copy_prefix_to_c(
+            fn_name,
+            "out",
+            &values,
+            out,
+            len,
+            out_written,
+            out_required,
+        ));
+        SidereonStatus::Ok
+    })
+}
+
+/// Copy the observations the solve left out before solving because no
+/// transmission epoch can be placed from them, with the reason. Uses the
+/// variable-length output contract documented at the top of the header.
+///
+/// Safety: sol must be a live solution handle; out must point to at least len
+/// writable entries or be NULL when len is 0; out_written and out_required must
+/// point to size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_float_solution_unplaced_observations(
+    sol: *const SidereonPppFloatSolution,
+    out: *mut SidereonPppUnplacedObservation,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    let fn_name = "sidereon_ppp_float_solution_unplaced_observations";
+    ffi_boundary(fn_name, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(fn_name, out_written, out_required));
+        let sol = c_try!(require_ref(sol, fn_name, "solution"));
+        let values = c_try!(ppp_unplaced_observations_to_c(
+            fn_name,
+            &sol.inner.unplaced_observations
+        ));
+        c_try!(copy_prefix_to_c(
+            fn_name,
+            "out",
+            &values,
+            out,
+            len,
+            out_written,
+            out_required,
+        ));
+        SidereonStatus::Ok
+    })
+}
+
+/// Copy unplaced float-solve observations with optional strict-SSR size values.
+/// The existing record and accessor retain their ABI.
+///
+/// # Safety
+/// `sol` must be live; output and count pointers must meet the variable-length
+/// buffer contract.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_float_solution_unplaced_observations_v2(
+    sol: *const SidereonPppFloatSolution,
+    out: *mut SidereonPppUnplacedObservationV2,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_float_solution_unplaced_observations_v2";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(FN, out_written, out_required));
+        let sol = c_try!(require_ref(sol, FN, "solution"));
+        let values = c_try!(ppp_unplaced_observations_v2_to_c(
+            FN,
+            &sol.inner.unplaced_observations
+        ));
+        c_try!(copy_prefix_to_c(
+            FN,
+            "out",
+            &values,
+            out,
+            len,
+            out_written,
+            out_required
+        ));
+        SidereonStatus::Ok
+    })
+}
+
+/// Copy the observations the solve left out before solving because no
+/// transmission epoch can be placed from them, with the reason. Uses the
+/// variable-length output contract documented at the top of the header.
+///
+/// Safety: sol must be a live solution handle; out must point to at least len
+/// writable entries or be NULL when len is 0; out_written and out_required must
+/// point to size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_fixed_solution_unplaced_observations(
+    sol: *const SidereonPppFixedSolution,
+    out: *mut SidereonPppUnplacedObservation,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    let fn_name = "sidereon_ppp_fixed_solution_unplaced_observations";
+    ffi_boundary(fn_name, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(fn_name, out_written, out_required));
+        let sol = c_try!(require_ref(sol, fn_name, "solution"));
+        let values = c_try!(ppp_unplaced_observations_to_c(
+            fn_name,
+            &sol.inner.unplaced_observations
+        ));
+        c_try!(copy_prefix_to_c(
+            fn_name,
+            "out",
+            &values,
+            out,
+            len,
+            out_written,
+            out_required,
+        ));
+        SidereonStatus::Ok
+    })
+}
+
+/// Copy unplaced fixed-solve observations with optional strict-SSR size values.
+/// The existing record and accessor retain their ABI.
+///
+/// # Safety
+/// `sol` must be live; output and count pointers must meet the variable-length
+/// buffer contract.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_fixed_solution_unplaced_observations_v2(
+    sol: *const SidereonPppFixedSolution,
+    out: *mut SidereonPppUnplacedObservationV2,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_fixed_solution_unplaced_observations_v2";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(FN, out_written, out_required));
+        let sol = c_try!(require_ref(sol, FN, "solution"));
+        let values = c_try!(ppp_unplaced_observations_v2_to_c(
+            FN,
+            &sol.inner.unplaced_observations
+        ));
+        c_try!(copy_prefix_to_c(
+            FN,
+            "out",
+            &values,
+            out,
+            len,
+            out_written,
+            out_required
+        ));
+        SidereonStatus::Ok
+    })
+}
+
+/// Copy the source error of SSR/HAS bias exclusion `index` (kind SOURCE), not
+/// null-terminated, under the variable-length output contract. Empty for any
+/// other kind.
+///
+/// Safety: sol must be a live solution handle; out must point to at least len
+/// writable bytes or be NULL when len is 0; out_written and out_required must
+/// point to size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_float_solution_ssr_bias_exclusion_error_text(
+    sol: *const SidereonPppFloatSolution,
+    index: usize,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    let fn_name = "sidereon_ppp_float_solution_ssr_bias_exclusion_error_text";
+    ffi_boundary(fn_name, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(fn_name, out_written, out_required));
+        let sol = c_try!(require_ref(sol, fn_name, "solution"));
+        let Some(exclusion) = sol.inner.ssr_bias_exclusions.get(index) else {
+            set_last_error(format!(
+                "{fn_name}: index {index} out of range ({} exclusions)",
+                sol.inner.ssr_bias_exclusions.len()
+            ));
+            return SidereonStatus::InvalidArgument;
+        };
+        let text = match &exclusion.transmit_time_failure {
+            Some(sidereon_core::precise_positioning::SsrTransmitTimeFailure::Source {
+                error,
+                ..
+            }) => error.to_string(),
+            _ => String::new(),
+        };
+        c_try!(copy_prefix_to_c(
+            fn_name,
+            "out",
+            text.as_bytes(),
+            out,
+            len,
+            out_written,
+            out_required,
+        ));
+        SidereonStatus::Ok
+    })
+}
+
+/// Copy the source error of SSR/HAS bias exclusion `index` (kind SOURCE), not
+/// null-terminated, under the variable-length output contract. Empty for any
+/// other kind.
+///
+/// Safety: sol must be a live solution handle; out must point to at least len
+/// writable bytes or be NULL when len is 0; out_written and out_required must
+/// point to size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_fixed_solution_ssr_bias_exclusion_error_text(
+    sol: *const SidereonPppFixedSolution,
+    index: usize,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    let fn_name = "sidereon_ppp_fixed_solution_ssr_bias_exclusion_error_text";
+    ffi_boundary(fn_name, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(fn_name, out_written, out_required));
+        let sol = c_try!(require_ref(sol, fn_name, "solution"));
+        let Some(exclusion) = sol.inner.ssr_bias_exclusions.get(index) else {
+            set_last_error(format!(
+                "{fn_name}: index {index} out of range ({} exclusions)",
+                sol.inner.ssr_bias_exclusions.len()
+            ));
+            return SidereonStatus::InvalidArgument;
+        };
+        let text = match &exclusion.transmit_time_failure {
+            Some(sidereon_core::precise_positioning::SsrTransmitTimeFailure::Source {
+                error,
+                ..
+            }) => error.to_string(),
+            _ => String::new(),
+        };
+        c_try!(copy_prefix_to_c(
+            fn_name,
+            "out",
+            text.as_bytes(),
+            out,
+            len,
+            out_written,
+            out_required,
+        ));
+        SidereonStatus::Ok
+    })
+}
+
+/// Copy the observations the residual screen removed from the accepted
+/// solution. The fixed solve leaves them out too. Uses the variable-length output contract documented at the top of
+/// the header.
+///
+/// Safety: sol must be a live solution handle; out must point to at least len
+/// writable entries or be NULL when len is 0; out_written and out_required must
+/// point to size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_float_solution_residual_screen_removals(
+    sol: *const SidereonPppFloatSolution,
+    out: *mut SidereonPppEpochObservation,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    let fn_name = "sidereon_ppp_float_solution_residual_screen_removals";
+    ffi_boundary(fn_name, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(fn_name, out_written, out_required));
+        let sol = c_try!(require_ref(sol, fn_name, "solution"));
+        let values = c_try!(ppp_epoch_observations_to_c(
+            fn_name,
+            &sol.inner.residual_screen_removals
+        ));
+        c_try!(copy_prefix_to_c(
+            fn_name,
+            "out",
+            &values,
+            out,
+            len,
+            out_written,
+            out_required,
+        ));
+        SidereonStatus::Ok
+    })
 }
 
 /// Release a PPP float solution handle. Null is a no-op. A non-null handle must
@@ -1481,6 +2318,30 @@ pub struct SidereonSatVectorCorrection {
 /// sidereon_ppp_corrections_free.
 pub struct SidereonPppCorrections {
     pub(crate) inner: PppCorrectionsInner,
+    pub(crate) degraded: SidereonPppCorrectionsDegradeReason,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonPppCorrectionsDegradeReason {
+    None = 0,
+    BeforeCoverage = 1,
+    AfterCoverage = 2,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonPppCorrectionsErrorKind {
+    None = 0,
+    InvalidInput = 1,
+    Epoch = 2,
+    Tide = 3,
+    PoleTide = 4,
+    OceanLoading = 5,
+    WindupFrequency = 6,
+    SatelliteAntennaFrequency = 7,
+    Bias = 8,
+    CodeBiasObservable = 9,
 }
 
 /// Build static PPP correction tables for a precise-orbit (SP3) arc. On success
@@ -1529,13 +2390,142 @@ pub unsafe extern "C" fn sidereon_ppp_corrections_build(
             ));
             match sidereon_core::ppp_corrections::build(&sp3.inner, &epochs, receiver, &opts) {
                 Ok(inner) => {
-                    write_boxed_handle(out, SidereonPppCorrections { inner });
+                    write_boxed_handle(
+                        out,
+                        SidereonPppCorrections {
+                            inner,
+                            degraded: SidereonPppCorrectionsDegradeReason::None,
+                        },
+                    );
                     SidereonStatus::Ok
                 }
                 Err(err) => extra_invalid_arg("sidereon_ppp_corrections_build", err),
             }
         },
     )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_corrections_build_with_validity_and_tide_constants(
+    sp3: *const SidereonSp3,
+    epochs: *const SidereonPppCorrectionEpoch,
+    epoch_count: usize,
+    receiver_ecef_m: *const f64,
+    options: *const SidereonPppCorrectionsOptions,
+    validity_mode: u32,
+    tide_constants: u32,
+    out_error_kind: *mut SidereonPppCorrectionsErrorKind,
+    out: *mut *mut SidereonPppCorrections,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_corrections_build_with_validity_and_tide_constants";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        let out_error_kind = c_try!(require_out(out_error_kind, FN, "out_error_kind"));
+        *out_error_kind = SidereonPppCorrectionsErrorKind::None;
+        let out = c_try!(require_out(out, FN, "out"));
+        *out = ptr::null_mut();
+        let sp3 = c_try!(require_ref(sp3, FN, "sp3"));
+        let receiver = c_try!(read_vec3(FN, "receiver_ecef_m", receiver_ecef_m));
+        let options = c_try!(require_ref(options, FN, "options"));
+        let epochs = c_try!(ppp_corr_epochs_from_c(FN, epochs, epoch_count));
+        let options = c_try!(ppp_corrections_options_from_c(FN, options));
+        let validity_mode = match validity_mode {
+            value if value == SidereonStationTideValidityMode::Strict as u32 => {
+                sidereon_core::astro::time::ValidityMode::Strict
+            }
+            value if value == SidereonStationTideValidityMode::Permissive as u32 => {
+                sidereon_core::astro::time::ValidityMode::Permissive
+            }
+            other => {
+                set_last_error(format!("{FN}: invalid validity_mode {other}"));
+                *out_error_kind = SidereonPppCorrectionsErrorKind::InvalidInput;
+                return SidereonStatus::InvalidArgument;
+            }
+        };
+        let tide_constants = match tide_constants {
+            value if value == SidereonStationTideConstants::Conventions as u32 => {
+                sidereon_core::tides::StationTideConstants::Conventions
+            }
+            value if value == SidereonStationTideConstants::IersRoutine as u32 => {
+                sidereon_core::tides::StationTideConstants::IersRoutine
+            }
+            other => {
+                set_last_error(format!("{FN}: invalid tide_constants {other}"));
+                *out_error_kind = SidereonPppCorrectionsErrorKind::InvalidInput;
+                return SidereonStatus::InvalidArgument;
+            }
+        };
+        match sidereon_core::ppp_corrections::build_with_validity_and_tide_constants(
+            &sp3.inner,
+            &epochs,
+            receiver,
+            &options,
+            validity_mode,
+            tide_constants,
+        ) {
+            Ok(validated) => {
+                let degraded = match validated.degraded {
+                    None => SidereonPppCorrectionsDegradeReason::None,
+                    Some(sidereon_core::astro::time::DegradeReason::BeforeCoverage) => {
+                        SidereonPppCorrectionsDegradeReason::BeforeCoverage
+                    }
+                    Some(sidereon_core::astro::time::DegradeReason::AfterCoverage) => {
+                        SidereonPppCorrectionsDegradeReason::AfterCoverage
+                    }
+                };
+                write_boxed_handle(
+                    out,
+                    SidereonPppCorrections {
+                        inner: validated.value,
+                        degraded,
+                    },
+                );
+                SidereonStatus::Ok
+            }
+            Err(error) => {
+                *out_error_kind = ppp_corrections_error_kind(&error);
+                set_last_error(format!("{FN}: {error}"));
+                if ut1_refusal(&error) {
+                    SidereonStatus::Ut1OutsideCoverage
+                } else {
+                    SidereonStatus::InvalidArgument
+                }
+            }
+        }
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_corrections_degraded_reason(
+    corrections: *const SidereonPppCorrections,
+    out_reason: *mut SidereonPppCorrectionsDegradeReason,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_corrections_degraded_reason";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out_reason, FN, "out_reason"));
+        *out = SidereonPppCorrectionsDegradeReason::None;
+        let corrections = c_try!(require_ref(corrections, FN, "corrections"));
+        *out = corrections.degraded;
+        SidereonStatus::Ok
+    })
+}
+
+fn ppp_corrections_error_kind(
+    error: &sidereon_core::ppp_corrections::PppCorrectionsError,
+) -> SidereonPppCorrectionsErrorKind {
+    use sidereon_core::ppp_corrections::PppCorrectionsError as Error;
+    match error {
+        Error::InvalidInput { .. } => SidereonPppCorrectionsErrorKind::InvalidInput,
+        Error::Epoch { .. } => SidereonPppCorrectionsErrorKind::Epoch,
+        Error::Tide { .. } => SidereonPppCorrectionsErrorKind::Tide,
+        Error::PoleTide { .. } => SidereonPppCorrectionsErrorKind::PoleTide,
+        Error::OceanLoading { .. } => SidereonPppCorrectionsErrorKind::OceanLoading,
+        Error::WindupFrequency { .. } => SidereonPppCorrectionsErrorKind::WindupFrequency,
+        Error::SatelliteAntennaFrequency { .. } => {
+            SidereonPppCorrectionsErrorKind::SatelliteAntennaFrequency
+        }
+        Error::Bias { .. } => SidereonPppCorrectionsErrorKind::Bias,
+        Error::CodeBiasObservable { .. } => SidereonPppCorrectionsErrorKind::CodeBiasObservable,
+    }
 }
 
 /// Release a PPP corrections handle.
@@ -1882,6 +2872,134 @@ pub unsafe extern "C" fn sidereon_ppp_auto_init_options_init(
     )
 }
 
+fn ppp_float_solve_options_to_c(
+    options: &sidereon_core::precise_positioning::FloatSolveOptions,
+) -> SidereonPppFloatOptions {
+    SidereonPppFloatOptions {
+        max_iterations: options.max_iterations,
+        position_tolerance_m: options.position_tolerance_m,
+        clock_tolerance_m: options.clock_tolerance_m,
+        ambiguity_tolerance_m: options.ambiguity_tolerance_m,
+        ztd_tolerance_m: options.ztd_tolerance_m,
+    }
+}
+
+fn ppp_ssr_bias_exclusion_to_c(
+    fn_name: &str,
+    value: &sidereon_core::precise_positioning::SsrBiasExclusion,
+) -> Result<SidereonPppSsrBiasExclusion, SidereonStatus> {
+    Ok(SidereonPppSsrBiasExclusion {
+        epoch_index: value.epoch_index,
+        satellite_id: ppp_id_checked(fn_name, "satellite_id", &value.satellite_id)?,
+        ambiguity_id: ppp_id_checked(fn_name, "ambiguity_id", &value.ambiguity_id)?,
+        code_bias_missing: value.code_bias_missing,
+        phase_bias_missing: value.phase_bias_missing,
+        transmit_time_failure: ssr_transmit_time_failure_to_c(value.transmit_time_failure.as_ref()),
+        application: value
+            .application
+            .as_ref()
+            .map_or_else(empty_ssr_application, ssr_application_to_c),
+    })
+}
+
+fn ppp_id_checked(fn_name: &str, field: &str, id: &str) -> Result<SidereonPppId, SidereonStatus> {
+    if id.len() > MAX_PPP_ID_BYTES {
+        set_last_error(format!(
+            "{fn_name}: {field} is {} bytes; maximum PPP id length is {MAX_PPP_ID_BYTES} bytes",
+            id.len()
+        ));
+        return Err(SidereonStatus::InvalidArgument);
+    }
+    Ok(ppp_id_token(id))
+}
+
+fn ppp_unplaced_observations_to_c(
+    fn_name: &str,
+    values: &[sidereon_core::precise_positioning::UnplacedObservation],
+) -> Result<Vec<SidereonPppUnplacedObservation>, SidereonStatus> {
+    use sidereon_core::precise_positioning::UnplacedObservationReason as Reason;
+    values
+        .iter()
+        .map(|value| {
+            let (reason, unknown_variant) = match value.reason {
+                Reason::CodeNotPositive => (
+                    SidereonPppUnplacedObservationReason::CodeNotPositive,
+                    [0; SIDEREON_UNKNOWN_VARIANT_C_BYTES],
+                ),
+                Reason::SsrCorrectionExceedsLimit(_) => (
+                    SidereonPppUnplacedObservationReason::SsrCorrectionExceedsLimit,
+                    [0; SIDEREON_UNKNOWN_VARIANT_C_BYTES],
+                ),
+                other => (
+                    SidereonPppUnplacedObservationReason::Unknown,
+                    unknown_variant_name(&other),
+                ),
+            };
+            Ok(SidereonPppUnplacedObservation {
+                epoch_index: value.epoch_index,
+                satellite_id: ppp_id_checked(fn_name, "satellite_id", &value.satellite_id)?,
+                ambiguity_id: ppp_id_checked(fn_name, "ambiguity_id", &value.ambiguity_id)?,
+                reason,
+                unknown_variant,
+            })
+        })
+        .collect()
+}
+
+fn ppp_unplaced_observations_v2_to_c(
+    fn_name: &str,
+    values: &[sidereon_core::precise_positioning::UnplacedObservation],
+) -> Result<Vec<SidereonPppUnplacedObservationV2>, SidereonStatus> {
+    use sidereon_core::precise_positioning::UnplacedObservationReason as Reason;
+    values
+        .iter()
+        .map(|value| {
+            let (reason, unknown_variant, size) = match value.reason {
+                Reason::CodeNotPositive => (
+                    SidereonPppUnplacedObservationReason::CodeNotPositive,
+                    [0; SIDEREON_UNKNOWN_VARIANT_C_BYTES],
+                    None,
+                ),
+                Reason::SsrCorrectionExceedsLimit(size) => (
+                    SidereonPppUnplacedObservationReason::SsrCorrectionExceedsLimit,
+                    [0; SIDEREON_UNKNOWN_VARIANT_C_BYTES],
+                    Some(size),
+                ),
+                other => (
+                    SidereonPppUnplacedObservationReason::Unknown,
+                    unknown_variant_name(&other),
+                    None,
+                ),
+            };
+            Ok(SidereonPppUnplacedObservationV2 {
+                epoch_index: value.epoch_index,
+                satellite_id: ppp_id_checked(fn_name, "satellite_id", &value.satellite_id)?,
+                ambiguity_id: ppp_id_checked(fn_name, "ambiguity_id", &value.ambiguity_id)?,
+                reason,
+                unknown_variant,
+                has_size: size.is_some(),
+                orbit_m: size.map_or(0.0, |value| value.orbit_m),
+                clock_m: size.map_or(0.0, |value| value.clock_m),
+            })
+        })
+        .collect()
+}
+
+fn ppp_epoch_observations_to_c(
+    fn_name: &str,
+    values: &[(usize, String)],
+) -> Result<Vec<SidereonPppEpochObservation>, SidereonStatus> {
+    values
+        .iter()
+        .map(|(epoch_index, id)| {
+            Ok(SidereonPppEpochObservation {
+                epoch_index: *epoch_index,
+                ambiguity_id: ppp_id_checked(fn_name, "ambiguity_id", id)?,
+            })
+        })
+        .collect()
+}
+
 fn ppp_float_metadata(solution: &PppFloatSolutionInner) -> SidereonPppFloatMetadata {
     SidereonPppFloatMetadata {
         iterations: solution.iterations,
@@ -1895,6 +3013,12 @@ fn ppp_float_metadata(solution: &PppFloatSolutionInner) -> SidereonPppFloatMetad
         ambiguity_count: solution.ambiguities_m.len(),
         residual_count: solution.residuals_m.len(),
         used_sat_count: solution.used_sats.len(),
+        solved_epoch_count: solution.solved_epoch_indices.len(),
+        ssr_bias_exclusion_count: solution.ssr_bias_exclusions.len(),
+        unplaced_observation_count: solution.unplaced_observations.len(),
+        residual_screen: solution.residual_screen,
+        residual_screen_removal_count: solution.residual_screen_removals.len(),
+        solve_options: ppp_float_solve_options_to_c(&solution.solve_options),
     }
 }
 
@@ -2028,6 +3152,9 @@ fn ppp_fixed_metadata(solution: &PppFixedSolutionInner) -> SidereonPppFixedMetad
         has_integer_second_best_score: solution.integer.integer_second_best_score.is_some(),
         integer_second_best_score: solution.integer.integer_second_best_score.unwrap_or(0.0),
         integer_candidates: solution.integer.integer_candidates,
+        solved_epoch_count: solution.solved_epoch_indices.len(),
+        ssr_bias_exclusion_count: solution.ssr_bias_exclusions.len(),
+        unplaced_observation_count: solution.unplaced_observations.len(),
     }
 }
 
@@ -2435,9 +3562,417 @@ unsafe fn ppp_code_bias_satellite_pairs_from_c(
     Ok(out)
 }
 
+fn ssr_source_code(source: sidereon_core::ssr::SsrSource) -> u32 {
+    match source {
+        sidereon_core::ssr::SsrSource::RtcmSsr => 0,
+        sidereon_core::ssr::SsrSource::GalileoHas => 1,
+        sidereon_core::ssr::SsrSource::IgsSsr => 2,
+    }
+}
+
+fn ssr_solution_id_to_c(solution: &sidereon_core::ssr::SsrSolution) -> SidereonSsrSolutionId {
+    SidereonSsrSolutionId {
+        source: ssr_source_code(solution.source),
+        provider_id: solution.provider_id,
+        solution_id: solution.solution_id,
+    }
+}
+
+fn empty_ssr_solution_id() -> SidereonSsrSolutionId {
+    SidereonSsrSolutionId {
+        source: 0,
+        provider_id: 0,
+        solution_id: 0,
+    }
+}
+
+fn signal_code_text(code: sidereon_core::ssr::SignalCode) -> [c_char; 3] {
+    [code.band() as c_char, code.attribute() as c_char, 0]
+}
+
+fn empty_ssr_signal_key() -> SidereonSsrSignalKey {
+    SidereonSsrSignalKey {
+        is_physical: false,
+        system: 0,
+        code: [0; 3],
+        source: 0,
+        index: 0,
+    }
+}
+
+fn gnss_signal_to_c(signal: sidereon_core::ssr::GnssSignal) -> SidereonSsrSignalKey {
+    SidereonSsrSignalKey {
+        is_physical: true,
+        system: gnss_system_to_c(signal.system()) as u32,
+        code: signal_code_text(signal.code()),
+        ..empty_ssr_signal_key()
+    }
+}
+
+fn raw_signal_to_c(signal: sidereon_core::ssr::SsrRawSignal) -> SidereonSsrSignalKey {
+    SidereonSsrSignalKey {
+        is_physical: false,
+        system: gnss_system_to_c(signal.system()) as u32,
+        source: ssr_source_code(signal.source()),
+        index: signal.index(),
+        ..empty_ssr_signal_key()
+    }
+}
+
+fn ssr_signal_key_to_c(key: sidereon_core::ssr::SsrSignalKey) -> SidereonSsrSignalKey {
+    match key {
+        sidereon_core::ssr::SsrSignalKey::Physical(signal) => gnss_signal_to_c(signal),
+        sidereon_core::ssr::SsrSignalKey::Unknown(raw) => raw_signal_to_c(raw),
+    }
+}
+
+fn ssr_bias_status_to_c(
+    status: sidereon_core::ssr::SsrBiasStatus,
+    unknown: &mut [c_char; SIDEREON_UNKNOWN_VARIANT_C_BYTES],
+) -> u32 {
+    use sidereon_core::ssr::SsrBiasStatus as S;
+    let code = match status {
+        S::Available => SidereonSsrBiasStatus::Available,
+        S::Missing => SidereonSsrBiasStatus::Missing,
+        S::Unavailable => SidereonSsrBiasStatus::Unavailable,
+        S::NotYetValid => SidereonSsrBiasStatus::NotYetValid,
+        S::Expired => SidereonSsrBiasStatus::Expired,
+        S::Excluded => SidereonSsrBiasStatus::Excluded,
+        S::InvalidEpoch => SidereonSsrBiasStatus::InvalidEpoch,
+        S::PhaseDiscontinuityNeedsReset => SidereonSsrBiasStatus::PhaseDiscontinuityNeedsReset,
+        S::UnknownSignal => SidereonSsrBiasStatus::UnknownSignal,
+        #[allow(unreachable_patterns)]
+        other => {
+            note_unknown_variant(unknown, 999, 999, &other);
+            SidereonSsrBiasStatus::Unknown
+        }
+    };
+    code as u32
+}
+
+fn ssr_transmit_time_failure_to_c(
+    failure: Option<&sidereon_core::precise_positioning::SsrTransmitTimeFailure>,
+) -> SidereonPppTransmitTimeFailure {
+    use sidereon_core::precise_positioning::SsrTransmitTimeFailure as F;
+    let mut out = SidereonPppTransmitTimeFailure {
+        kind: SidereonPppTransmitTimeFailureKind::None as u32,
+        has_transmit_time: false,
+        transmit_time_j2000_s: f64::NAN,
+        has_applied: false,
+        applied: empty_ssr_solution_id(),
+        has_signal: false,
+        signal: empty_ssr_signal_key(),
+        bias_status: 0,
+        unknown_variant: [0; SIDEREON_UNKNOWN_VARIANT_C_BYTES],
+    };
+    let Some(failure) = failure else {
+        return out;
+    };
+    let kind = match failure {
+        F::SourceWithoutSsrCorrections => {
+            SidereonPppTransmitTimeFailureKind::SourceWithoutSsrCorrections
+        }
+        F::TransmitTimeUnavailable => SidereonPppTransmitTimeFailureKind::TransmitTimeUnavailable,
+        F::OrbitClockSolution {
+            transmit_time_j2000_s,
+            applied,
+        } => {
+            out.has_transmit_time = true;
+            out.transmit_time_j2000_s = *transmit_time_j2000_s;
+            out.has_applied = applied.is_some();
+            out.applied = applied
+                .as_ref()
+                .map_or_else(empty_ssr_solution_id, ssr_solution_id_to_c);
+            SidereonPppTransmitTimeFailureKind::OrbitClockSolution
+        }
+        F::BiasRecord {
+            transmit_time_j2000_s,
+            signal,
+            status,
+        } => {
+            out.has_transmit_time = true;
+            out.transmit_time_j2000_s = *transmit_time_j2000_s;
+            out.has_signal = true;
+            out.signal = ssr_signal_key_to_c(*signal);
+            out.bias_status = ssr_bias_status_to_c(*status, &mut out.unknown_variant);
+            SidereonPppTransmitTimeFailureKind::BiasRecord
+        }
+        F::Source {
+            transmit_time_j2000_s,
+            ..
+        } => {
+            out.has_transmit_time = true;
+            out.transmit_time_j2000_s = *transmit_time_j2000_s;
+            SidereonPppTransmitTimeFailureKind::Source
+        }
+        #[allow(unreachable_patterns)]
+        other => {
+            out.unknown_variant = unknown_variant_name(other);
+            SidereonPppTransmitTimeFailureKind::Unknown
+        }
+    };
+    out.kind = kind as u32;
+    out
+}
+
+fn if_combination_status_to_c(
+    status: &sidereon_core::precise_positioning::SsrIfCombinationStatus,
+    ut1: &mut u32,
+    unknown: &mut [c_char; SIDEREON_UNKNOWN_VARIANT_C_BYTES],
+) -> u32 {
+    use sidereon_core::precise_positioning::SsrIfCombinationStatus as S;
+    use SidereonPppSsrIfCombinationStatus as C;
+    let code = match status {
+        S::Applied => C::Applied,
+        S::OptedOut => C::OptedOut,
+        S::SignalUnavailable => C::SignalUnavailable,
+        S::InvalidFrequencies => C::InvalidFrequencies,
+        S::ObservationSignalsUnknown => C::ObservationSignalsUnknown,
+        S::CarrierUnresolved => C::CarrierUnresolved,
+        S::ObservationFrequencyMismatch => C::ObservationFrequencyMismatch,
+        S::IncompatibleSourceOrSolution => C::IncompatibleSourceOrSolution,
+        S::IncompatibleIod => C::IncompatibleIod,
+        S::OrbitClockSolutionUnavailable => C::OrbitClockSolutionUnavailable,
+        S::OrbitClockSolutionMismatch => C::OrbitClockSolutionMismatch,
+        S::SatelliteExcluded => C::SatelliteExcluded,
+        S::TransmitTimeUnavailable => C::TransmitTimeUnavailable,
+        S::PhaseDiscontinuityNeedsReset => C::PhaseDiscontinuityNeedsReset,
+        S::Ut1OutsideCoverage(reason) => {
+            *ut1 = SidereonUt1Degradation::from_core(Some(*reason)) as u32;
+            C::Ut1OutsideCoverage
+        }
+        #[allow(unreachable_patterns)]
+        other => {
+            note_unknown_variant(unknown, 999, 999, other);
+            C::Unknown
+        }
+    };
+    code as u32
+}
+
+fn empty_ssr_signal_report() -> SidereonPppSsrSignalReport {
+    SidereonPppSsrSignalReport {
+        present: false,
+        signal: empty_ssr_signal_key(),
+        status: 0,
+        has_source_signal: false,
+        source_signal: empty_ssr_signal_key(),
+        has_bias_m: false,
+        bias_m: f64::NAN,
+        has_bias_cycles: false,
+        bias_cycles: f64::NAN,
+        has_solution: false,
+        solution: empty_ssr_solution_id(),
+        has_iod_ssr: false,
+        iod_ssr: 0,
+        unknown_variant: [0; SIDEREON_UNKNOWN_VARIANT_C_BYTES],
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ssr_signal_report_to_c(
+    signal: sidereon_core::ssr::GnssSignal,
+    status: sidereon_core::ssr::SsrBiasStatus,
+    source_signal: Option<sidereon_core::ssr::SsrRawSignal>,
+    bias_m: Option<f64>,
+    bias_cycles: Option<f64>,
+    solution: Option<&sidereon_core::ssr::SsrSolution>,
+    iod_ssr: Option<u8>,
+) -> SidereonPppSsrSignalReport {
+    let mut out = empty_ssr_signal_report();
+    out.present = true;
+    out.signal = gnss_signal_to_c(signal);
+    out.status = ssr_bias_status_to_c(status, &mut out.unknown_variant);
+    out.has_source_signal = source_signal.is_some();
+    out.source_signal = source_signal.map_or_else(empty_ssr_signal_key, raw_signal_to_c);
+    out.has_bias_m = bias_m.is_some();
+    out.bias_m = bias_m.unwrap_or(f64::NAN);
+    out.has_bias_cycles = bias_cycles.is_some();
+    out.bias_cycles = bias_cycles.unwrap_or(f64::NAN);
+    out.has_solution = solution.is_some();
+    out.solution = solution.map_or_else(empty_ssr_solution_id, ssr_solution_id_to_c);
+    out.has_iod_ssr = iod_ssr.is_some();
+    out.iod_ssr = iod_ssr.unwrap_or(0);
+    out
+}
+
+fn empty_ssr_application() -> SidereonPppSsrApplication {
+    SidereonPppSsrApplication {
+        present: false,
+        has_transmit_time: false,
+        transmit_time_j2000_s: f64::NAN,
+        has_applied_orbit_clock_solution: false,
+        applied_orbit_clock_solution: empty_ssr_solution_id(),
+        has_observation_signals: false,
+        code1_signal: [0; 3],
+        code2_signal: [0; 3],
+        phase1_signal: [0; 3],
+        phase2_signal: [0; 3],
+        code_status: 0,
+        code_status_ut1: SidereonUt1Degradation::None as u32,
+        has_applied_code_if_m: false,
+        applied_code_if_m: f64::NAN,
+        code1: empty_ssr_signal_report(),
+        code2: empty_ssr_signal_report(),
+        phase_status: 0,
+        phase_status_ut1: SidereonUt1Degradation::None as u32,
+        has_applied_phase_if_m: false,
+        applied_phase_if_m: f64::NAN,
+        phase1: empty_ssr_signal_report(),
+        phase2: empty_ssr_signal_report(),
+        unknown_variant: [0; SIDEREON_UNKNOWN_VARIANT_C_BYTES],
+    }
+}
+
+fn ssr_application_to_c(
+    report: &sidereon_core::precise_positioning::SsrObsApplicationReport,
+) -> SidereonPppSsrApplication {
+    let mut out = empty_ssr_application();
+    out.present = true;
+    out.has_transmit_time = report.transmit_time_j2000_s.is_some();
+    out.transmit_time_j2000_s = report.transmit_time_j2000_s.unwrap_or(f64::NAN);
+    out.has_applied_orbit_clock_solution = report.applied_orbit_clock_solution.is_some();
+    out.applied_orbit_clock_solution = report
+        .applied_orbit_clock_solution
+        .as_ref()
+        .map_or_else(empty_ssr_solution_id, ssr_solution_id_to_c);
+    if let Some(signals) = &report.observation_signals {
+        out.has_observation_signals = true;
+        out.code1_signal = signal_code_text(signals.code1);
+        out.code2_signal = signal_code_text(signals.code2);
+        out.phase1_signal = signal_code_text(signals.phase1);
+        out.phase2_signal = signal_code_text(signals.phase2);
+    }
+    out.code_status = if_combination_status_to_c(
+        &report.code_status,
+        &mut out.code_status_ut1,
+        &mut out.unknown_variant,
+    );
+    out.has_applied_code_if_m = report.applied_code_if_m.is_some();
+    out.applied_code_if_m = report.applied_code_if_m.unwrap_or(f64::NAN);
+    let code = |r: &Option<
+        sidereon_core::precise_positioning::SsrObsSignalReport<
+            sidereon_core::ssr::SsrCodeBiasQueryResult,
+        >,
+    >| {
+        r.as_ref().map_or_else(empty_ssr_signal_report, |r| {
+            let q = &r.query_result;
+            ssr_signal_report_to_c(
+                r.signal,
+                q.status,
+                q.source_signal,
+                q.bias_m,
+                None,
+                q.solution.as_ref(),
+                q.iod_ssr,
+            )
+        })
+    };
+    let phase = |r: &Option<
+        sidereon_core::precise_positioning::SsrObsSignalReport<
+            sidereon_core::ssr::SsrPhaseBiasQueryResult,
+        >,
+    >| {
+        r.as_ref().map_or_else(empty_ssr_signal_report, |r| {
+            let q = &r.query_result;
+            ssr_signal_report_to_c(
+                r.signal,
+                q.status,
+                q.source_signal,
+                q.bias_m,
+                q.bias_cycles,
+                q.solution.as_ref(),
+                q.iod_ssr,
+            )
+        })
+    };
+    out.code1 = code(&report.code1_report);
+    out.code2 = code(&report.code2_report);
+    out.phase_status = if_combination_status_to_c(
+        &report.phase_status,
+        &mut out.phase_status_ut1,
+        &mut out.unknown_variant,
+    );
+    out.has_applied_phase_if_m = report.applied_phase_if_m.is_some();
+    out.applied_phase_if_m = report.applied_phase_if_m.unwrap_or(f64::NAN);
+    out.phase1 = phase(&report.phase1_report);
+    out.phase2 = phase(&report.phase2_report);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unplaced_observation_v2_keeps_ssr_size_in_owned_variable_buffer() {
+        let source = [sidereon_core::precise_positioning::UnplacedObservation {
+            epoch_index: 4,
+            satellite_id: "G07".to_owned(),
+            ambiguity_id: "G07:L1C".to_owned(),
+            reason: sidereon_core::precise_positioning::UnplacedObservationReason::SsrCorrectionExceedsLimit(
+                sidereon_core::ssr::SsrCorrectionSize {
+                    orbit_m: 126.75,
+                    clock_m: -60.125,
+                },
+            ),
+        }];
+        let converted = ppp_unplaced_observations_v2_to_c("test", &source).unwrap();
+        drop(source);
+        assert_eq!(converted.len(), 1);
+        assert_eq!(converted[0].epoch_index, 4);
+        assert_eq!(
+            converted[0].reason,
+            SidereonPppUnplacedObservationReason::SsrCorrectionExceedsLimit
+        );
+        assert!(converted[0].has_size);
+        assert_eq!(converted[0].orbit_m, 126.75);
+        assert_eq!(converted[0].clock_m, -60.125);
+
+        let mut output = [SidereonPppUnplacedObservationV2 {
+            epoch_index: 0,
+            satellite_id: ppp_id_token(""),
+            ambiguity_id: ppp_id_token(""),
+            reason: SidereonPppUnplacedObservationReason::Unknown,
+            unknown_variant: [0; SIDEREON_UNKNOWN_VARIANT_C_BYTES],
+            has_size: false,
+            orbit_m: 0.0,
+            clock_m: 0.0,
+        }];
+        let mut written = 0;
+        let mut required = 0;
+        unsafe {
+            copy_prefix_to_c(
+                "test",
+                "out",
+                &converted,
+                ptr::null_mut(),
+                0,
+                &mut written,
+                &mut required,
+            )
+        }
+        .unwrap();
+        assert_eq!((written, required), (0, 1));
+        unsafe {
+            copy_prefix_to_c(
+                "test",
+                "out",
+                &converted,
+                output.as_mut_ptr(),
+                output.len(),
+                &mut written,
+                &mut required,
+            )
+        }
+        .unwrap();
+        assert_eq!((written, required), (1, 1));
+        assert_eq!(output[0].satellite_id.bytes[0], b'G' as c_char);
+        assert_eq!(output[0].satellite_id.bytes[1], b'0' as c_char);
+        assert_eq!(output[0].satellite_id.bytes[2], b'7' as c_char);
+        assert_eq!(output[0].satellite_id.bytes[3], 0);
+        assert_eq!(output[0].clock_m.to_bits(), (-60.125f64).to_bits());
+    }
 
     fn core_position_covariance(offset: f64) -> sidereon_core::geometry::PositionCovariance {
         sidereon_core::geometry::PositionCovariance {
@@ -2492,7 +4027,146 @@ mod tests {
             code_rms_m: 0.0,
             phase_rms_m: 0.0,
             weighted_rms_m: 0.0,
+            ssr_bias_exclusions: vec![sidereon_core::precise_positioning::SsrBiasExclusion {
+                epoch_index: 0,
+                satellite_id: "G03".to_owned(),
+                ambiguity_id: "G03".to_owned(),
+                code_bias_missing: true,
+                phase_bias_missing: false,
+                transmit_time_failure: None,
+                application: None,
+            }],
+            unplaced_observations: vec![sidereon_core::precise_positioning::UnplacedObservation {
+                epoch_index: 0,
+                satellite_id: "G04".to_owned(),
+                ambiguity_id: "G04".to_owned(),
+                reason:
+                    sidereon_core::precise_positioning::UnplacedObservationReason::CodeNotPositive,
+            }],
+            solved_epoch_indices: vec![0],
+            residual_screen: true,
+            solve_options: sidereon_core::precise_positioning::FloatSolveOptions::default(),
+            residual_screen_removals: vec![(0, "G02".to_owned())],
         }
+    }
+
+    #[test]
+    fn ppp_float_solution_carries_every_solve_record() {
+        let inner = core_float_solution();
+        let solution = SidereonPppFloatSolution {
+            inner: inner.clone(),
+        };
+        let metadata = ppp_float_metadata(&solution.inner);
+        assert_eq!(
+            metadata.solved_epoch_count,
+            inner.solved_epoch_indices.len()
+        );
+        assert_eq!(
+            metadata.ssr_bias_exclusion_count,
+            inner.ssr_bias_exclusions.len()
+        );
+        assert_eq!(
+            metadata.unplaced_observation_count,
+            inner.unplaced_observations.len()
+        );
+        assert_eq!(metadata.residual_screen, inner.residual_screen);
+        assert_eq!(
+            metadata.residual_screen_removal_count,
+            inner.residual_screen_removals.len()
+        );
+        assert_eq!(
+            metadata.solve_options.max_iterations,
+            inner.solve_options.max_iterations
+        );
+
+        let mut written = 0;
+        let mut required = 0;
+        let mut epochs = [usize::MAX; 2];
+        let status = unsafe {
+            sidereon_ppp_float_solution_solved_epochs(
+                &solution,
+                epochs.as_mut_ptr(),
+                epochs.len(),
+                &mut written,
+                &mut required,
+            )
+        };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert_eq!(
+            (written, required, epochs[0]),
+            (
+                inner.solved_epoch_indices.len(),
+                inner.solved_epoch_indices.len(),
+                inner.solved_epoch_indices[0]
+            )
+        );
+
+        let mut exclusion = std::mem::MaybeUninit::<SidereonPppSsrBiasExclusion>::uninit();
+        let status = unsafe {
+            sidereon_ppp_float_solution_ssr_bias_exclusions(
+                &solution,
+                exclusion.as_mut_ptr(),
+                1,
+                &mut written,
+                &mut required,
+            )
+        };
+        assert_eq!(status, SidereonStatus::Ok);
+        let exclusion = unsafe { exclusion.assume_init() };
+        let core_exclusion = &inner.ssr_bias_exclusions[0];
+        assert_eq!(
+            (exclusion.code_bias_missing, exclusion.phase_bias_missing),
+            (
+                core_exclusion.code_bias_missing,
+                core_exclusion.phase_bias_missing
+            )
+        );
+
+        let mut unplaced = std::mem::MaybeUninit::<SidereonPppUnplacedObservation>::uninit();
+        let status = unsafe {
+            sidereon_ppp_float_solution_unplaced_observations(
+                &solution,
+                unplaced.as_mut_ptr(),
+                1,
+                &mut written,
+                &mut required,
+            )
+        };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert_eq!(
+            (written, required),
+            (
+                inner.unplaced_observations.len(),
+                inner.unplaced_observations.len()
+            )
+        );
+        let unplaced = unsafe { unplaced.assume_init() };
+        assert_eq!(
+            unplaced.epoch_index,
+            inner.unplaced_observations[0].epoch_index
+        );
+        assert_eq!(
+            unplaced.reason,
+            SidereonPppUnplacedObservationReason::CodeNotPositive
+        );
+
+        let mut removal = std::mem::MaybeUninit::<SidereonPppEpochObservation>::uninit();
+        let status = unsafe {
+            sidereon_ppp_float_solution_residual_screen_removals(
+                &solution,
+                removal.as_mut_ptr(),
+                1,
+                &mut written,
+                &mut required,
+            )
+        };
+        assert_eq!(status, SidereonStatus::Ok);
+        let removal = unsafe { removal.assume_init() };
+        assert_eq!(removal.epoch_index, inner.residual_screen_removals[0].0);
+        assert_eq!(
+            removal.ambiguity_id.bytes[..3],
+            [b'G' as c_char, b'0' as c_char, b'2' as c_char]
+        );
     }
 
     #[test]
@@ -2538,22 +4212,55 @@ mod tests {
             inner.temporal_correlation.lag1_autocorrelation
         );
         assert!(temporal.has_decorrelation_time_s);
-        assert_eq!(temporal.decorrelation_time_s, 45.0);
-        assert_eq!(temporal.nominal_sample_count, 18);
-        assert_eq!(temporal.effective_sample_count, 9.5);
-        assert_eq!(temporal.variance_inflation_factor, 1.9);
-        assert_eq!(temporal.arcs_used, 6);
+        let core_temporal = &inner.temporal_correlation;
+        assert_eq!(
+            temporal.decorrelation_time_s.to_bits(),
+            core_temporal
+                .decorrelation_time_s
+                .expect("decorrelation time")
+                .to_bits()
+        );
+        assert_eq!(
+            temporal.nominal_sample_count,
+            core_temporal.nominal_sample_count
+        );
+        assert_eq!(
+            temporal.effective_sample_count.to_bits(),
+            core_temporal.effective_sample_count.to_bits()
+        );
+        assert_eq!(
+            temporal.variance_inflation_factor.to_bits(),
+            core_temporal.variance_inflation_factor.to_bits()
+        );
+        assert_eq!(temporal.arcs_used, core_temporal.arcs_used);
 
         let mut gradient = empty_ppp_tropo_gradient();
         let status =
             unsafe { sidereon_ppp_float_solution_tropo_gradient(&solution, &mut gradient) };
         assert_eq!(status, SidereonStatus::Ok);
         assert!(gradient.has_gradient);
-        assert_eq!(gradient.north_m, 0.012);
-        assert_eq!(gradient.east_m, -0.034);
+        assert_eq!(
+            gradient.north_m.to_bits(),
+            inner.tropo_gradient_north_m.expect("north").to_bits()
+        );
+        assert_eq!(
+            gradient.east_m.to_bits(),
+            inner.tropo_gradient_east_m.expect("east").to_bits()
+        );
+        let flat = |m: [[f64; 2]; 2]| [m[0][0], m[0][1], m[1][0], m[1][1]].map(f64::to_bits);
         assert!(gradient.has_covariance_m2);
-        assert_eq!(gradient.covariance_m2, [0.1, 0.02, 0.02, 0.2]);
+        assert_eq!(
+            gradient.covariance_m2.map(f64::to_bits),
+            flat(inner.tropo_gradient_covariance_m2.expect("covariance"))
+        );
         assert!(gradient.has_formal_covariance_m2);
-        assert_eq!(gradient.formal_covariance_m2, [0.3, 0.04, 0.04, 0.4]);
+        assert_eq!(
+            gradient.formal_covariance_m2.map(f64::to_bits),
+            flat(
+                inner
+                    .formal_tropo_gradient_covariance_m2
+                    .expect("formal covariance")
+            )
+        );
     }
 }

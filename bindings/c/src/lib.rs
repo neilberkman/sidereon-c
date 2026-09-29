@@ -13,6 +13,11 @@
 //! they never allocate on the caller's behalf. A failed call sets a thread-local
 //! message retrievable with [`sidereon_last_error_message`].
 //!
+//! All simultaneously writable output ranges passed to one C call must be
+//! disjoint, including count outputs, data buffers, and multiple output arrays.
+//! For variable-length outputs, only entries actually written are part of the
+//! output range; unused capacity need not be disjoint from another output.
+//!
 //! The header is generated from this source with cbindgen (see `cbindgen.toml`)
 //! into `include/sidereon.h`.
 
@@ -41,11 +46,13 @@ use sidereon::propagator::{
     ForceModelComponents, ForceModelKind, IntegratorKind, PropagationConfig, PropagationForceModel,
 };
 use sidereon::sgp4::{
-    parse_tle_file_with_opsmode, DecayLatch, DecayLatchedError, Error as Sgp4Error,
-    MinutesSinceEpoch, NamedSatellite, OpsMode, Prediction, Satellite,
+    DecayLatch, DecayLatchedError, Error as Sgp4Error, MinutesSinceEpoch, NamedSatellite, OpsMode,
+    Prediction, Satellite,
 };
 use sidereon::state::CartesianState;
-use sidereon::tle::{self as sidereon_tle, ChecksumWarning, TleElements};
+use sidereon::tle::{
+    self as sidereon_tle, ChecksumWarning, ChecksumWarningKind, TleElements, TlePolicy,
+};
 use sidereon_core::antex::{Antenna, Antex, AntexError};
 use sidereon_core::araim::{
     araim as core_araim, AraimError, AraimGeometry, AraimResult as CoreAraimResult, AraimRow,
@@ -68,8 +75,8 @@ use sidereon_core::astro::forces::SpaceWeatherSource;
 use sidereon_core::astro::forces::{
     ForceModel, J2Gravity, SchwarzschildRelativity, SolarRadiationPressure,
     SolidEarthPoleTideGravity, SolidEarthTideGravity, SphericalHarmonicGravityConfig,
-    ThirdBodyBodies, ThirdBodyGravity, TwoBodyGravity, ZonalCoefficients, ZonalDegrees,
-    ZonalGravity,
+    ThirdBodyBodies, ThirdBodyGravity, TideSystem as CoreTideSystem, TwoBodyGravity,
+    ZonalCoefficients, ZonalDegrees, ZonalGravity,
 };
 use sidereon_core::astro::frames::transforms::FrameTransformError;
 use sidereon_core::astro::frames::TdbEarthOrientationProvider;
@@ -98,18 +105,22 @@ use sidereon_core::astro::time::{
     split_julian_date_from_j2000_seconds, timescale_offset_at_s, timescale_offset_s, GnssWeekTow,
     Instant, InstantRepr, JulianDateSplit, TimeOffsetError, TimeScale,
 };
-use sidereon_core::astro::{Spk, SpkError, SpkState};
+use sidereon_core::astro::{Spk, SpkState};
 use sidereon_core::atmosphere::ionosphere::{
-    galileo_nequick_g_native, ionex_slant_delay_with_policy, klobuchar_native, nequick_g_delay_m,
-    nequick_g_stec_tecu, GalileoNequickCoeffs, GalileoNequickEval, Ionex, IonexCoverageError,
-    IonexCoveragePolicy, IonexSlantDelayEvaluation, IonexSlantDelayStatus, KlobucharParams,
-    NequickGRayEval, TecGridSamples as CoreTecGridSamples, TecSample as CoreTecSample,
-    TecSamplesError,
+    galileo_nequick_g_native, ionex_slant_delay_results, ionex_slant_delay_with_policy,
+    ionex_slant_delays, klobuchar_native, nequick_g_delay_m, nequick_g_stec_tecu,
+    GalileoNequickCoeffs, GalileoNequickEval, Ionex, IonexAssumedMapping, IonexCoverageError,
+    IonexCoveragePolicy, IonexHeader, IonexMappingDeclaration, IonexMappingFunction,
+    IonexMappingPolicy, IonexMissingNodePolicy, IonexMissingNodes, IonexNodeGap,
+    IonexSlantDelayEvaluation, IonexSlantPolicy, IonexSlantRefusal, IonexSlantRequest,
+    IonexWarning, KlobucharParams, NequickGRayEval, TecGrid, TecGridEpoch, TecGridError,
+    TecGridSamples as CoreTecGridSamples, TecSample as CoreTecSample, TecSamplesError,
 };
 use sidereon_core::atmosphere::troposphere::{MappingModel, Met};
 use sidereon_core::bias::{
-    bias_epoch_instant, BiasEpoch, BiasKind, BiasMode, BiasRecord, BiasSet, BiasTarget,
-    ClockReferenceObservables, CodeDcbOptions,
+    bias_epoch_instant, BiasEpoch, BiasKind, BiasLookup, BiasMode, BiasObservableFamily,
+    BiasReadPolicy, BiasRecord, BiasSet, BiasTarget, BiasUnit, ClockReferenceObservables,
+    CodeDcbOptions,
 };
 use sidereon_core::clock_stability::{
     allan_deviation as core_allan_deviation,
@@ -245,8 +256,9 @@ use sidereon_core::quality::{
     reliability_design as core_reliability_design, spp_robust_fde_driver,
     validate_receiver_solution,
     wtest_noncentrality_components as core_wtest_noncentrality_components, FdeError, FdeOptions,
-    FdeSppError, FdeSppOptions, ObservationReliability as CoreObservationReliability, QualityError,
-    RaimOptions, RaimWeights, RangeFdeOptions, RangeFdeResult, RangeFdeRow,
+    FdeResult, FdeSppError, FdeSppOptions, FdeUnresolved, FdeUnresolvedReason,
+    ObservationReliability as CoreObservationReliability, QualityError, RaimOptions, RaimResult,
+    RaimWeights, RangeFdeOptions, RangeFdeResult, RangeFdeRow,
     RangeReliabilityRow as CoreRangeReliabilityRow, ReliabilityOptions as CoreReliabilityOptions,
     ReliabilityReport as CoreReliabilityReport, ReliabilitySummary as CoreReliabilitySummary,
     SolutionValidationOptions,
@@ -260,16 +272,29 @@ use sidereon_core::rinex::observations::{
 };
 use sidereon_core::rtcm::{
     self as core_rtcm, AntennaDescriptor as RtcmAntennaDescriptor,
-    BeidouEphemeris as RtcmBeidouEphemeris, GalileoFnavEphemeris as RtcmGalileoFnavEphemeris,
-    GalileoInavEphemeris as RtcmGalileoInavEphemeris, GlonassEphemeris as RtcmGlonassEphemeris,
-    GpsEphemeris as RtcmGpsEphemeris, LockTimeTracker as RtcmLockTimeTracker,
-    Message as RtcmMessage, MsmKind as RtcmMsmKind, MsmMessage as RtcmMsmMessage,
-    MsmSatellite as RtcmMsmSatellite, MsmSignal as RtcmMsmSignal, PreviousLock as RtcmPreviousLock,
-    QzssEphemeris as RtcmQzssEphemeris, SsrClockRecord as RtcmSsrClockRecord,
+    BeidouEphemeris as RtcmBeidouEphemeris, FkpGradient as RtcmFkpGradient,
+    FkpGradients as RtcmFkpGradients, GalileoFnavEphemeris as RtcmGalileoFnavEphemeris,
+    GalileoInavEphemeris as RtcmGalileoInavEphemeris,
+    GlonassCodePhaseBiases as RtcmGlonassCodePhaseBiases, GlonassEphemeris as RtcmGlonassEphemeris,
+    GpsEphemeris as RtcmGpsEphemeris, GridResidual as RtcmGridResidual,
+    HelmertTransformation as RtcmHelmertTransformation, LegacyL1 as RtcmLegacyL1,
+    LegacyL2 as RtcmLegacyL2, LegacyObservations as RtcmLegacyObservations,
+    LegacySatellite as RtcmLegacySatellite, LockTimeTracker as RtcmLockTimeTracker,
+    Message as RtcmMessage, MessageAnnouncement as RtcmMessageAnnouncement, MsmKind as RtcmMsmKind,
+    MsmMessage as RtcmMsmMessage, MsmSatellite as RtcmMsmSatellite, MsmSignal as RtcmMsmSignal,
+    NavicEphemeris as RtcmNavicEphemeris, NetworkAuxiliaryStation as RtcmNetworkAuxiliaryStation,
+    NetworkCorrectionDifference as RtcmNetworkCorrectionDifference,
+    NetworkCorrectionDifferences as RtcmNetworkCorrectionDifferences,
+    NetworkResidual as RtcmNetworkResidual, NetworkResiduals as RtcmNetworkResiduals,
+    PhysicalReferenceStation as RtcmPhysicalReferenceStation, PreviousLock as RtcmPreviousLock,
+    Projection as RtcmProjection, ProjectionParameters as RtcmProjectionParameters,
+    QzssEphemeris as RtcmQzssEphemeris, ResidualGrid as RtcmResidualGrid,
+    RotationPoint as RtcmRotationPoint, SsrClockRecord as RtcmSsrClockRecord,
     SsrCodeBiasRecord as RtcmSsrCodeBiasRecord, SsrHeader as RtcmSsrHeader, SsrKind as RtcmSsrKind,
     SsrMessage as RtcmSsrMessage, SsrOrbitRecord as RtcmSsrOrbitRecord,
     SsrPhaseBiasRecord as RtcmSsrPhaseBiasRecord, SsrPhaseBiasSignal as RtcmSsrPhaseBiasSignal,
     StationCoordinates as RtcmStationCoordinates, StreamDiagnostics as RtcmStreamDiagnostics,
+    SystemParameters as RtcmSystemParameters, TextMessage as RtcmTextMessage,
     LLI_HALF_CYCLE as RTCM_LLI_HALF_CYCLE, LLI_LOSS_OF_LOCK as RTCM_LLI_LOSS_OF_LOCK,
 };
 use sidereon_core::rtk::{BaselineReferenceSelection, CycleSlipReceiver};
@@ -316,6 +341,7 @@ use sidereon_core::sbas_pl::{
 use sidereon_core::ssr::{
     MissingCorrectionAction, OrbitReferencePoint, RegionalPolicy, SsrClockCorrection,
     SsrCorrectedEphemeris, SsrCorrectionStore, SsrFallbackPolicy, SsrOrbitCorrection,
+    SsrVtecQuery as CoreSsrVtecQuery,
 };
 use sidereon_core::staleness::{
     select_ionex_over_range, select_sp3_over_range, DegradationKind, SelectionError,
@@ -374,6 +400,121 @@ pub enum SidereonStatus {
     Panic = 6,
     /// A bounded wait expired before the requested operation could proceed.
     Timeout = 7,
+    /// The call reads UT1 at an instant outside the UT1 table and its UT1
+    /// policy refuses the long-term delta-T value there
+    /// (Ut1OutsideCoverage in the engine error).
+    Ut1OutsideCoverage = 8,
+}
+
+/// Stable kind of the most recent `sidereon_core::quality::QualityError` from a
+/// quality-producing C operation on this OS thread. Read immediately after one
+/// of those producers; unrelated calls intentionally retain this value.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonQualityErrorKind {
+    /// No QualityError was recorded by the most recent quality producer.
+    None = 0,
+    InvalidElevation = 1,
+    MissingCn0 = 2,
+    InvalidParameter = 3,
+    InvalidProbability = 4,
+    InvalidSystemCount = 5,
+    InvalidDof = 6,
+    InvalidWeight = 7,
+    InvalidReliabilityParameter = 8,
+    InvalidResiduals = 9,
+    InvalidDesign = 10,
+    SingularGeometry = 11,
+    MissingVariances = 12,
+    InvalidVariance = 13,
+    /// A future core QualityError variant not listed above.
+    Unknown = 999,
+}
+
+thread_local! {
+    static LAST_QUALITY_ERROR_KIND: std::cell::Cell<SidereonQualityErrorKind> =
+        const { std::cell::Cell::new(SidereonQualityErrorKind::None) };
+}
+
+fn quality_error_kind(error: QualityError) -> SidereonQualityErrorKind {
+    match error {
+        QualityError::InvalidElevation => SidereonQualityErrorKind::InvalidElevation,
+        QualityError::MissingCn0 => SidereonQualityErrorKind::MissingCn0,
+        QualityError::InvalidParameter => SidereonQualityErrorKind::InvalidParameter,
+        QualityError::InvalidProbability => SidereonQualityErrorKind::InvalidProbability,
+        QualityError::InvalidSystemCount => SidereonQualityErrorKind::InvalidSystemCount,
+        QualityError::InvalidDof => SidereonQualityErrorKind::InvalidDof,
+        QualityError::InvalidWeight => SidereonQualityErrorKind::InvalidWeight,
+        QualityError::InvalidReliabilityParameter => {
+            SidereonQualityErrorKind::InvalidReliabilityParameter
+        }
+        QualityError::InvalidResiduals => SidereonQualityErrorKind::InvalidResiduals,
+        QualityError::InvalidDesign => SidereonQualityErrorKind::InvalidDesign,
+        QualityError::SingularGeometry => SidereonQualityErrorKind::SingularGeometry,
+        QualityError::MissingVariances => SidereonQualityErrorKind::MissingVariances,
+        QualityError::InvalidVariance => SidereonQualityErrorKind::InvalidVariance,
+    }
+}
+
+fn record_quality_error_kind(error: QualityError) {
+    let kind = quality_error_kind(error);
+    LAST_QUALITY_ERROR_KIND.with(|slot| slot.set(kind));
+}
+
+/// Read and retain the QualityError kind from the latest quality-producing
+/// operation on this OS thread. Call immediately after that operation; other
+/// operations do not clear this slot.
+#[no_mangle]
+pub extern "C" fn sidereon_last_quality_error_kind() -> SidereonQualityErrorKind {
+    LAST_QUALITY_ERROR_KIND.with(std::cell::Cell::get)
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonDegradeReason {
+    None = 0,
+    BeforeCoverage = 1,
+    AfterCoverage = 2,
+}
+
+thread_local! {
+    static LAST_DEGRADE_REASON: std::cell::Cell<SidereonDegradeReason> = const { std::cell::Cell::new(SidereonDegradeReason::None) };
+}
+
+fn record_degrade_reason(reason: Option<sidereon_core::astro::time::DegradeReason>) {
+    let value = match reason {
+        None => SidereonDegradeReason::None,
+        Some(sidereon_core::astro::time::DegradeReason::BeforeCoverage) => {
+            SidereonDegradeReason::BeforeCoverage
+        }
+        Some(sidereon_core::astro::time::DegradeReason::AfterCoverage) => {
+            SidereonDegradeReason::AfterCoverage
+        }
+    };
+    LAST_DEGRADE_REASON.with(|slot| slot.set(value));
+}
+
+/// Read the degradation reason recorded by the most recent ephemeris source
+/// state or transmit-clock query on this operating-system thread. After output
+/// pointer validation, each such query clears the record before source lookup
+/// and writes its result before returning; call this getter before another
+/// source query on the same thread.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_last_degrade_reason(
+    out_reason: *mut SidereonDegradeReason,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_last_degrade_reason",
+        SidereonStatus::Panic,
+        || {
+            let out = match require_out(out_reason, "sidereon_last_degrade_reason", "out_reason") {
+                Ok(out) => out,
+                Err(status) => return status,
+            };
+            *out = LAST_DEGRADE_REASON.with(std::cell::Cell::get);
+            SidereonStatus::Ok
+        },
+    )
 }
 
 /// Observability and covariance-validation tier for an estimation geometry.
@@ -470,6 +611,101 @@ fn ffi_boundary<T>(fn_name: &str, panic_value: T, body: impl FnOnce() -> T) -> T
     }
 }
 
+fn quality_operation_boundary<T>(fn_name: &str, panic_value: T, body: impl FnOnce() -> T) -> T {
+    LAST_QUALITY_ERROR_KIND.with(|slot| slot.set(SidereonQualityErrorKind::None));
+    ffi_boundary(fn_name, panic_value, body)
+}
+
+fn map_quality_error(fn_name: &str, error: QualityError) -> SidereonStatus {
+    record_quality_error_kind(error);
+    set_last_error(format!("{fn_name}: {error}"));
+    match error {
+        QualityError::SingularGeometry => SidereonStatus::Solve,
+        QualityError::InvalidElevation
+        | QualityError::MissingCn0
+        | QualityError::InvalidParameter
+        | QualityError::InvalidProbability
+        | QualityError::InvalidSystemCount
+        | QualityError::InvalidDof
+        | QualityError::InvalidWeight
+        | QualityError::InvalidReliabilityParameter
+        | QualityError::InvalidResiduals
+        | QualityError::InvalidDesign
+        | QualityError::MissingVariances
+        | QualityError::InvalidVariance => SidereonStatus::InvalidArgument,
+    }
+}
+
+#[cfg(test)]
+mod quality_error_kind_tests {
+    use super::{quality_error_kind, QualityError, SidereonQualityErrorKind};
+
+    #[test]
+    fn every_current_quality_error_has_its_stable_distinct_kind() {
+        let cases = [
+            (
+                QualityError::InvalidElevation,
+                SidereonQualityErrorKind::InvalidElevation,
+            ),
+            (
+                QualityError::MissingCn0,
+                SidereonQualityErrorKind::MissingCn0,
+            ),
+            (
+                QualityError::InvalidParameter,
+                SidereonQualityErrorKind::InvalidParameter,
+            ),
+            (
+                QualityError::InvalidProbability,
+                SidereonQualityErrorKind::InvalidProbability,
+            ),
+            (
+                QualityError::InvalidSystemCount,
+                SidereonQualityErrorKind::InvalidSystemCount,
+            ),
+            (
+                QualityError::InvalidDof,
+                SidereonQualityErrorKind::InvalidDof,
+            ),
+            (
+                QualityError::InvalidWeight,
+                SidereonQualityErrorKind::InvalidWeight,
+            ),
+            (
+                QualityError::InvalidReliabilityParameter,
+                SidereonQualityErrorKind::InvalidReliabilityParameter,
+            ),
+            (
+                QualityError::InvalidResiduals,
+                SidereonQualityErrorKind::InvalidResiduals,
+            ),
+            (
+                QualityError::InvalidDesign,
+                SidereonQualityErrorKind::InvalidDesign,
+            ),
+            (
+                QualityError::SingularGeometry,
+                SidereonQualityErrorKind::SingularGeometry,
+            ),
+            (
+                QualityError::MissingVariances,
+                SidereonQualityErrorKind::MissingVariances,
+            ),
+            (
+                QualityError::InvalidVariance,
+                SidereonQualityErrorKind::InvalidVariance,
+            ),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(quality_error_kind(error), expected);
+        }
+        let mut values: Vec<_> = cases.iter().map(|(_, kind)| *kind as u32).collect();
+        values.sort_unstable();
+        values.dedup();
+        assert_eq!(values.len(), cases.len());
+    }
+}
+
 macro_rules! c_try {
     ($expr:expr) => {
         match $expr {
@@ -503,6 +739,7 @@ mod antex;
 mod araim;
 mod atmosphere;
 mod bias;
+mod blq;
 mod broadcast;
 mod cdm;
 mod clock;
@@ -517,6 +754,7 @@ mod dop;
 mod doppler;
 mod drag;
 mod dted;
+mod engine_error;
 mod ephemeris;
 mod error_metrics;
 mod estimation;
@@ -532,6 +770,7 @@ mod geoid;
 mod geometry;
 mod glonass;
 mod ils;
+mod inertial;
 mod iod;
 mod ionex;
 mod mmap;
@@ -546,6 +785,8 @@ mod opm;
 mod orbit;
 mod orbit_fit;
 mod ppp;
+#[cfg(test)]
+mod ppp_fixture_parity;
 mod precise;
 mod precise_artifact;
 mod raim;
@@ -554,6 +795,7 @@ mod reduced;
 mod reliability;
 mod rf;
 mod rinex;
+mod rinex_clock;
 mod rtcm;
 mod rtk;
 mod satellite;
@@ -567,6 +809,7 @@ mod solve;
 mod source_localization;
 mod sourced;
 mod sp3;
+mod sp3_merge_report;
 mod space_weather;
 mod spk;
 mod spp;
@@ -576,6 +819,7 @@ mod static_positioning;
 mod tca;
 mod tdm;
 mod terrain;
+mod tides;
 mod time;
 mod tle;
 mod trls;
@@ -587,6 +831,7 @@ pub use antex::*;
 pub use araim::*;
 pub use atmosphere::*;
 pub use bias::*;
+pub use blq::*;
 pub use broadcast::*;
 pub use cdm::*;
 pub use clock::*;
@@ -601,6 +846,7 @@ pub use dop::*;
 pub use doppler::*;
 pub use drag::*;
 pub use dted::*;
+pub use engine_error::*;
 pub use ephemeris::*;
 pub use error_metrics::*;
 pub use estimation::*;
@@ -616,6 +862,7 @@ pub use geoid::*;
 pub use geometry::*;
 pub use glonass::*;
 pub use ils::*;
+pub use inertial::*;
 pub use iod::*;
 pub use ionex::*;
 pub use mmap::*;
@@ -638,6 +885,7 @@ pub use reduced::*;
 pub use reliability::*;
 pub use rf::*;
 pub use rinex::*;
+pub use rinex_clock::*;
 pub use rtcm::*;
 pub use rtk::*;
 pub use satellite::*;
@@ -651,6 +899,7 @@ pub use solve::*;
 pub use source_localization::*;
 pub use sourced::*;
 pub use sp3::*;
+pub use sp3_merge_report::*;
 pub use space_weather::*;
 pub use spk::*;
 pub use spp::*;
@@ -660,6 +909,7 @@ pub use static_positioning::*;
 pub use tca::*;
 pub use tdm::*;
 pub use terrain::*;
+pub use tides::*;
 pub use time::*;
 pub use tle::*;
 pub use trls::*;
@@ -667,18 +917,150 @@ pub use tropo::*;
 pub use velocity::*;
 
 /// Run a fallible body, mapping any `sidereon` error to a status code while
-/// recording its `Display` message verbatim.
-fn guard<T>(
+/// recording its `Display` message verbatim and capturing its typed engine error.
+pub(crate) fn guard<T>(
+    fn_name: &str,
     status_on_err: SidereonStatus,
     body: impl FnOnce() -> sidereon::Result<T>,
 ) -> Result<T, SidereonStatus> {
+    guard_result(fn_name, status_on_err, body)
+}
+
+pub(crate) fn guard_result<T, E>(
+    fn_name: &str,
+    status_on_err: SidereonStatus,
+    body: impl FnOnce() -> Result<T, E>,
+) -> Result<T, SidereonStatus>
+where
+    E: RecordEngineError + std::error::Error + 'static,
+{
     match body() {
         Ok(value) => Ok(value),
         Err(err) => {
+            E::record_engine_error(fn_name, &err);
             set_last_error(err.to_string());
-            Err(status_on_err)
+            if ut1_refusal(&err) {
+                Err(SidereonStatus::Ut1OutsideCoverage)
+            } else {
+                Err(status_on_err)
+            }
         }
     }
+}
+
+/// Whether an engine error, or any error it wraps, is a UT1 refusal: an
+/// instant outside the UT1 table under a strict UT1 policy. Every error type
+/// that carries a `Ut1OutsideCoverage` variant is read here, and so is every
+/// wrapper that holds one of them, so the refusal keeps its status whatever
+/// route it reached the binding through.
+pub(crate) fn ut1_refusal(err: &(dyn std::error::Error + 'static)) -> bool {
+    use sidereon_core::positioning::{
+        FallbackError, FdeSppError, SolvePolicyError, SppError, StaticReferenceModeError,
+        StaticSolveError,
+    };
+    use sidereon_core::precise_positioning::{
+        FixedSolveError, FloatSolveError, KinematicSolveError,
+    };
+    fn spp(e: &SppError) -> bool {
+        matches!(e, SppError::Ut1OutsideCoverage(_))
+    }
+    fn float(e: &FloatSolveError) -> bool {
+        matches!(e, FloatSolveError::Ut1OutsideCoverage(_))
+    }
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    while let Some(e) = current {
+        let found = if let Some(e) = e.downcast_ref::<sidereon::Error>() {
+            match e {
+                sidereon::Error::Spp(inner) => {
+                    matches!(inner, SolvePolicyError::Solve(s) if spp(s))
+                }
+                sidereon::Error::PppFloat(inner) => float(inner),
+                sidereon::Error::PppFixed(inner) => {
+                    matches!(inner, FixedSolveError::Float(f) if float(f))
+                }
+                _ => false,
+            }
+        } else if let Some(e) = e.downcast_ref::<CoreError>() {
+            matches!(e, CoreError::Ut1OutsideCoverage(_))
+        } else if let Some(e) = e.downcast_ref::<SppError>() {
+            spp(e)
+        } else if let Some(e) = e.downcast_ref::<SolvePolicyError>() {
+            matches!(e, SolvePolicyError::Solve(inner) if spp(inner))
+        } else if let Some(e) = e.downcast_ref::<FallbackError>() {
+            match e {
+                FallbackError::Precise(inner) | FallbackError::Broadcast(inner) => spp(inner),
+            }
+        } else if let Some(e) = e.downcast_ref::<FdeSppError>() {
+            matches!(e, FdeSppError::Spp(inner) if spp(inner))
+        } else if let Some(e) = e.downcast_ref::<StaticSolveError>() {
+            matches!(e, StaticSolveError::Ut1OutsideCoverage(_))
+        } else if let Some(e) = e.downcast_ref::<StaticReferenceModeError>() {
+            matches!(e, StaticReferenceModeError::Ut1OutsideCoverage(_))
+        } else if let Some(e) = e.downcast_ref::<FloatSolveError>() {
+            float(e)
+        } else if let Some(e) = e.downcast_ref::<FixedSolveError>() {
+            matches!(e, FixedSolveError::Float(inner) if float(inner))
+        } else if let Some(e) = e.downcast_ref::<KinematicSolveError>() {
+            matches!(e, KinematicSolveError::Ut1OutsideCoverage(_))
+        } else if let Some(e) = e.downcast_ref::<sidereon_core::dgnss::DgnssError>() {
+            match e {
+                sidereon_core::dgnss::DgnssError::Ut1OutsideCoverage(_) => true,
+                sidereon_core::dgnss::DgnssError::Spp(inner) => spp(inner),
+                _ => false,
+            }
+        } else if let Some(e) = e.downcast_ref::<sidereon_core::fusion::FusionError>() {
+            matches!(e, sidereon_core::fusion::FusionError::Ut1OutsideCoverage(_))
+        } else if let Some(e) = e.downcast_ref::<sidereon_core::scenario::ScenarioError>() {
+            matches!(
+                e,
+                sidereon_core::scenario::ScenarioError::Ut1OutsideCoverage { .. }
+            )
+        } else if let Some(e) = e.downcast_ref::<AraimError>() {
+            matches!(e, AraimError::Ut1OutsideCoverage(_))
+        } else if let Some(e) = e.downcast_ref::<CoreSbasPlError>() {
+            matches!(e, CoreSbasPlError::Ut1OutsideCoverage(_))
+        } else if let Some(e) = e.downcast_ref::<sidereon_core::ephemeris::OrbitFitError>() {
+            matches!(
+                e,
+                sidereon_core::ephemeris::OrbitFitError::Ut1OutsideCoverage(_)
+            )
+        } else if let Some(e) = e.downcast_ref::<ReducedOrbitError>() {
+            matches!(e, ReducedOrbitError::Ut1OutsideCoverage(_))
+        } else if let Some(e) = e.downcast_ref::<sidereon_core::rtk_filter::RtkRinexArcError>() {
+            matches!(
+                e,
+                sidereon_core::rtk_filter::RtkRinexArcError::Ut1OutsideCoverage(_)
+            )
+        } else if let Some(e) = e.downcast_ref::<PropagationError>() {
+            matches!(e, PropagationError::Ut1OutsideCoverage(_))
+        } else if let Some(e) = e.downcast_ref::<DecayError>() {
+            matches!(
+                e,
+                DecayError::Propagation(PropagationError::Ut1OutsideCoverage(_))
+            )
+        } else if let Some(e) = e.downcast_ref::<PassError>() {
+            matches!(e, PassError::Ut1OutsideCoverage(_))
+        } else if let Some(e) = e.downcast_ref::<FrameTransformError>() {
+            matches!(e, FrameTransformError::Ut1OutsideCoverage { .. })
+        } else if let Some(e) = e.downcast_ref::<sidereon_core::astro::almanac::AlmanacError>() {
+            matches!(
+                e,
+                sidereon_core::astro::almanac::AlmanacError::Ut1OutsideCoverage(_)
+            )
+        } else if let Some(e) = e.downcast_ref::<sidereon_core::astro::events::EventFinderError>() {
+            matches!(
+                e,
+                sidereon_core::astro::events::EventFinderError::Ut1OutsideCoverage(_)
+            )
+        } else {
+            false
+        };
+        if found {
+            return true;
+        }
+        current = e.source();
+    }
+    false
 }
 
 fn guard_core<T>(
@@ -727,15 +1109,54 @@ unsafe fn require_mut<'a, T>(
     })
 }
 
-unsafe fn require_out<'a, T>(
+unsafe fn require_out<T: Copy>(
     ptr: *mut T,
     fn_name: &str,
     arg_name: &str,
-) -> Result<&'a mut T, SidereonStatus> {
-    ptr.as_mut().ok_or_else(|| {
+) -> Result<*mut T, SidereonStatus> {
+    if ptr.is_null() {
         set_last_error(format!("{fn_name}: null {arg_name}"));
-        SidereonStatus::NullPointer
-    })
+        Err(SidereonStatus::NullPointer)
+    } else {
+        Ok(ptr)
+    }
+}
+
+/// Validate a caller's uninitialized output slot without creating a reference
+/// or dropping any preexisting value. The caller must initialize it with
+/// `ptr.write(value)` before reading the output.
+unsafe fn require_uninit_out<T>(
+    ptr: *mut T,
+    fn_name: &str,
+    arg_name: &str,
+) -> Result<*mut T, SidereonStatus> {
+    if ptr.is_null() {
+        set_last_error(format!("{fn_name}: null {arg_name}"));
+        Err(SidereonStatus::NullPointer)
+    } else {
+        Ok(ptr)
+    }
+}
+
+/// A caller's `const double *` that points to `N` doubles, read as one array.
+/// NULL is refused with SIDEREON_STATUS_NULL_POINTER.
+unsafe fn require_f64_array<'a, const N: usize>(
+    ptr: *const f64,
+    fn_name: &str,
+    arg_name: &str,
+) -> Result<&'a [f64; N], SidereonStatus> {
+    // `[f64; N]` has the layout and alignment of `N` consecutive doubles.
+    require_ref(ptr.cast::<[f64; N]>(), fn_name, arg_name)
+}
+
+/// A caller's `double *` that points to `N` writable doubles, as one array.
+/// NULL is refused with SIDEREON_STATUS_NULL_POINTER.
+unsafe fn require_out_f64_array<const N: usize>(
+    ptr: *mut f64,
+    fn_name: &str,
+    arg_name: &str,
+) -> Result<*mut [f64; N], SidereonStatus> {
+    require_out(ptr.cast::<[f64; N]>(), fn_name, arg_name)
 }
 
 unsafe fn require_slice<'a, T>(
@@ -794,8 +1215,8 @@ fn insert_unique_string_key<T>(
     }
 }
 
-fn write_boxed_handle<T>(out: &mut *mut T, value: T) {
-    *out = Box::into_raw(Box::new(value));
+unsafe fn write_boxed_handle<T>(out: *mut *mut T, value: T) {
+    out.write(Box::into_raw(Box::new(value)));
 }
 
 unsafe fn free_boxed<T>(ptr: *mut T) {
@@ -821,8 +1242,10 @@ unsafe fn copy_exact_f64s(
         set_last_error(format!("{fn_name}: null {arg_name}"));
         return Err(SidereonStatus::NullPointer);
     }
-    zero_f64_prefix(out, len, values.len());
     validate_element_count::<f64>(fn_name, "len", len)?;
+    let write_count = len.min(values.len());
+    let _written_range = checked_output_range(fn_name, out, write_count, arg_name)?;
+    zero_f64_prefix(out, len, values.len());
     if len < values.len() {
         set_last_error(format!(
             "{fn_name}: {arg_name} needs room for {} doubles",
@@ -843,11 +1266,31 @@ unsafe fn copy_prefix_to_c<T: Copy>(
     out_written: *mut usize,
     out_required: *mut usize,
 ) -> Result<(), SidereonStatus> {
-    let out_written = require_out(out_written, fn_name, "out_written")?;
-    *out_written = 0;
-    let out_required = require_out(out_required, fn_name, "out_required")?;
-    *out_required = 0;
     validate_element_count::<T>(fn_name, "required", values.len())?;
+    let len_is_valid = len <= isize::MAX as usize / size_of::<T>().max(1);
+    if !out.is_null() && len_is_valid && len >= values.len() && !values.is_empty() {
+        let written_range = checked_output_range(fn_name, out_written, 1, "out_written")?;
+        let required_range = checked_output_range(fn_name, out_required, 1, "out_required")?;
+        let data_range = checked_output_range(fn_name, out, values.len(), out_name)?;
+        reject_overlapping_outputs(
+            fn_name,
+            written_range,
+            required_range,
+            "out_written",
+            "out_required",
+        )?;
+        reject_overlapping_outputs(fn_name, written_range, data_range, "out_written", out_name)?;
+        reject_overlapping_outputs(
+            fn_name,
+            required_range,
+            data_range,
+            "out_required",
+            out_name,
+        )?;
+    }
+    init_copy_counts(fn_name, out_written, out_required)?;
+    let out_written = require_out(out_written, fn_name, "out_written")?;
+    let out_required = require_out(out_required, fn_name, "out_required")?;
     *out_required = values.len();
     validate_element_count::<T>(fn_name, "len", len)?;
     if out.is_null() {
@@ -896,11 +1339,25 @@ unsafe fn copy_flattened_rows_to_c<Row, T: Copy>(
     out_written: *mut usize,
     out_required: *mut usize,
 ) -> Result<(), SidereonStatus> {
-    let out_written = require_out(out_written, fn_name, "out_written")?;
-    *out_written = 0;
-    let out_required = require_out(out_required, fn_name, "out_required")?;
-    *out_required = 0;
     let required = checked_flattened_count::<T>(fn_name, "required", rows.iter().map(Vec::len))?;
+    let len_is_valid = len <= isize::MAX as usize / size_of::<T>().max(1);
+    if !out.is_null() && len_is_valid && len >= required && required != 0 {
+        let written_range = checked_output_range(fn_name, out_written, 1, "out_written")?;
+        let required_range = checked_output_range(fn_name, out_required, 1, "out_required")?;
+        let data_range = checked_output_range(fn_name, out, required, "out")?;
+        reject_overlapping_outputs(
+            fn_name,
+            written_range,
+            required_range,
+            "out_written",
+            "out_required",
+        )?;
+        reject_overlapping_outputs(fn_name, written_range, data_range, "out_written", "out")?;
+        reject_overlapping_outputs(fn_name, required_range, data_range, "out_required", "out")?;
+    }
+    init_copy_counts(fn_name, out_written, out_required)?;
+    let out_written = require_out(out_written, fn_name, "out_written")?;
+    let out_required = require_out(out_required, fn_name, "out_required")?;
     *out_required = required;
     validate_element_count::<T>(fn_name, "len", len)?;
     if out.is_null() {
@@ -930,10 +1387,142 @@ unsafe fn init_copy_counts(
     out_written: *mut usize,
     out_required: *mut usize,
 ) -> Result<(), SidereonStatus> {
-    let out_written = require_out(out_written, fn_name, "out_written")?;
-    *out_written = 0;
-    let out_required = require_out(out_required, fn_name, "out_required")?;
-    *out_required = 0;
+    if !out_written.is_null() && !out_required.is_null() {
+        let written = checked_output_range(fn_name, out_written, 1, "out_written")?;
+        let required = checked_output_range(fn_name, out_required, 1, "out_required")?;
+        reject_overlapping_outputs(fn_name, written, required, "out_written", "out_required")?;
+    }
+    // Preserve the API's historical behavior: a writable sibling count is
+    // cleared even when the other count pointer is null.
+    if !out_written.is_null() {
+        ptr::write(out_written, 0);
+    }
+    if !out_required.is_null() {
+        ptr::write(out_required, 0);
+    }
+    require_out(out_written, fn_name, "out_written")?;
+    require_out(out_required, fn_name, "out_required")?;
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct OutputRange {
+    start: usize,
+    end: usize,
+}
+
+unsafe fn checked_output_range<T>(
+    fn_name: &str,
+    output: *mut T,
+    count: usize,
+    name: &str,
+) -> Result<OutputRange, SidereonStatus> {
+    if output.is_null() {
+        set_last_error(format!("{fn_name}: null {name}"));
+        return Err(SidereonStatus::NullPointer);
+    }
+    validate_element_count::<T>(fn_name, name, count)?;
+    let bytes = count.checked_mul(size_of::<T>()).ok_or_else(|| {
+        set_last_error(format!("{fn_name}: {name} is too large"));
+        SidereonStatus::InvalidArgument
+    })?;
+    let start = output as usize;
+    let end = start.checked_add(bytes).ok_or_else(|| {
+        set_last_error(format!("{fn_name}: {name} address range overflows"));
+        SidereonStatus::InvalidArgument
+    })?;
+    Ok(OutputRange { start, end })
+}
+
+/// Refuse an output slot that overlaps an opaque handle before either output
+/// initialization or borrowing the handle. Opaque handles must never be
+/// copied or overwritten through an aliased result pointer.
+unsafe fn reject_output_overlaps_handle<O, H>(
+    fn_name: &str,
+    output: *mut O,
+    output_name: &str,
+    handle: *const H,
+    handle_name: &str,
+) -> Result<(), SidereonStatus> {
+    if output.is_null() || handle.is_null() {
+        return Ok(());
+    }
+    let output_range = checked_output_range(fn_name, output, 1, output_name)?;
+    let handle_range = checked_output_range(fn_name, handle.cast_mut(), 1, handle_name)?;
+    reject_overlapping_outputs(
+        fn_name,
+        output_range,
+        handle_range,
+        output_name,
+        handle_name,
+    )
+}
+
+unsafe fn reject_outputs_overlapping_handle<H>(
+    fn_name: &str,
+    outputs: &[(*mut std::ffi::c_void, usize, usize, &str)],
+    handle: *const H,
+    handle_name: &str,
+) -> Result<(), SidereonStatus> {
+    if handle.is_null() {
+        return Ok(());
+    }
+    let handle_range = checked_output_range(fn_name, handle.cast_mut(), 1, handle_name)?;
+    for (output, element_size, count, output_name) in outputs {
+        if output.is_null() || *count == 0 {
+            continue;
+        }
+        let bytes = element_size.checked_mul(*count).ok_or_else(|| {
+            set_last_error(format!("{fn_name}: {output_name} is too large"));
+            SidereonStatus::InvalidArgument
+        })?;
+        let start = *output as usize;
+        let end = start.checked_add(bytes).ok_or_else(|| {
+            set_last_error(format!("{fn_name}: {output_name} address range overflows"));
+            SidereonStatus::InvalidArgument
+        })?;
+        reject_overlapping_outputs(
+            fn_name,
+            OutputRange { start, end },
+            handle_range,
+            output_name,
+            handle_name,
+        )?;
+    }
+    Ok(())
+}
+
+fn reject_overlapping_outputs(
+    fn_name: &str,
+    left: OutputRange,
+    right: OutputRange,
+    left_name: &str,
+    right_name: &str,
+) -> Result<(), SidereonStatus> {
+    if left.start < right.end && right.start < left.end {
+        set_last_error(format!("{fn_name}: {left_name} overlaps {right_name}"));
+        return Err(SidereonStatus::InvalidArgument);
+    }
+    Ok(())
+}
+
+fn reject_overlapping_optional_outputs(
+    fn_name: &str,
+    outputs: &[Option<(OutputRange, &str)>],
+) -> Result<(), SidereonStatus> {
+    for (left_index, left_output) in outputs.iter().enumerate() {
+        if let Some((left_range, left_name)) = left_output {
+            for (right_range, right_name) in outputs.iter().skip(left_index + 1).flatten() {
+                reject_overlapping_outputs(
+                    fn_name,
+                    *left_range,
+                    *right_range,
+                    left_name,
+                    right_name,
+                )?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1259,6 +1848,7 @@ fn default_spp_inputs_v2() -> SidereonSppInputsV2 {
             temperature_k: 0.0,
             relative_humidity: 0.0,
             with_geodetic: false,
+            pseudorange_code: SidereonPseudorangeCode::SingleFrequency as u32,
         },
         beidou_klobuchar_enabled: false,
         beidou_klobuchar_alpha: [0.0; 4],
@@ -1321,7 +1911,10 @@ unsafe fn build_spp_solve_inputs(
             temperature_k: inputs.temperature_k,
             relative_humidity: inputs.relative_humidity,
         },
+        troposphere_model: sidereon_core::positioning::TroposphereModel::Rtklib,
         robust,
+        pseudorange_code: pseudorange_code_from_c(fn_name, inputs.pseudorange_code)?,
+        qzss_clock: sidereon_core::positioning::QzssClock::Gps,
     })
 }
 
@@ -1832,6 +2425,33 @@ fn ppp_fixed_ambiguity_rows_to_c(
         .collect()
 }
 
+/// Byte size of an `unknown_variant` field, terminator included.
+pub const SIDEREON_UNKNOWN_VARIANT_C_BYTES: usize = 65;
+
+/// The variant name of an engine value (its `Debug` text up to the first
+/// field), for the `unknown_variant` field of a struct whose code for it reads
+/// UNKNOWN.
+fn unknown_variant_name<T: std::fmt::Debug>(
+    value: &T,
+) -> [c_char; SIDEREON_UNKNOWN_VARIANT_C_BYTES] {
+    let text = format!("{value:?}");
+    let end = text.find(['{', '(', ' ']).unwrap_or(text.len());
+    fixed_c_chars(&text[..end])
+}
+
+/// Record `value`'s variant name in `slot` when its code reads UNKNOWN and no
+/// earlier value of the struct did.
+fn note_unknown_variant<T: std::fmt::Debug>(
+    slot: &mut [c_char; SIDEREON_UNKNOWN_VARIANT_C_BYTES],
+    code: u32,
+    unknown: u32,
+    value: &T,
+) {
+    if code == unknown && slot[0] == 0 {
+        *slot = unknown_variant_name(value);
+    }
+}
+
 fn fixed_c_chars<const N: usize>(text: &str) -> [c_char; N] {
     let mut out = [0; N];
     if N == 0 {
@@ -1880,9 +2500,25 @@ fn propagation_force_model_from_c(
     }
 }
 
+fn gravity_tide_system_from_c(
+    fn_name: &str,
+    tide_system: u32,
+) -> Result<CoreTideSystem, SidereonStatus> {
+    match tide_system {
+        0 => Ok(CoreTideSystem::TideFree),
+        1 => Ok(CoreTideSystem::ZeroTide),
+        2 => Ok(CoreTideSystem::MeanTide),
+        _ => {
+            set_last_error(format!("{fn_name}: invalid gravity tide-system selector"));
+            Err(SidereonStatus::InvalidArgument)
+        }
+    }
+}
+
 fn propagation_force_model_kind_from_c(
     fn_name: &str,
     config: &SidereonStatePropagationConfig,
+    tide_system: CoreTideSystem,
 ) -> Result<ForceModelKind, SidereonStatus> {
     match config.force_model {
         value if value == SidereonPropagationForceModel::TwoBody as u32 => {
@@ -1906,7 +2542,7 @@ fn propagation_force_model_kind_from_c(
             })
         }
         value if value == SidereonPropagationForceModel::Composite as u32 => {
-            composite_force_model_from_c(fn_name, config)
+            composite_force_model_from_c(fn_name, config, tide_system)
         }
         value if value == SidereonPropagationForceModel::EarthPhaseA as u32 => {
             let srp = if config.force_components.has_solar_radiation_pressure {
@@ -2002,6 +2638,11 @@ fn drag_parameters_from_c(
         value.cutoff_altitude_km,
     )
     .map_err(|err| {
+        crate::engine_error::record_engine_error(
+            crate::engine_error::SidereonEngineErrorFamily::Propagation,
+            fn_name,
+            crate::orbit_fit::propagation_error_value(&err),
+        );
         set_last_error(format!("{fn_name}: {err}"));
         SidereonStatus::InvalidArgument
     })
@@ -2011,11 +2652,19 @@ fn state_propagator_from_c(
     fn_name: &str,
     config: &SidereonStatePropagationConfig,
 ) -> Result<StatePropagator, SidereonStatus> {
+    state_propagator_from_c_with_tide_system(fn_name, config, CoreTideSystem::TideFree)
+}
+
+fn state_propagator_from_c_with_tide_system(
+    fn_name: &str,
+    config: &SidereonStatePropagationConfig,
+    tide_system: CoreTideSystem,
+) -> Result<StatePropagator, SidereonStatus> {
     if config.initial_step_s <= 0.0 {
         set_last_error(format!("{fn_name}: initial_step_s must be positive"));
         return Err(SidereonStatus::InvalidArgument);
     }
-    let force_model = propagation_force_model_kind_from_c(fn_name, config)?;
+    let force_model = propagation_force_model_kind_from_c(fn_name, config, tide_system)?;
     let integrator = propagation_integrator_from_c(fn_name, config.integrator)?;
     let mut options = IntegratorOptions::default();
     options.abs_tol = config.abs_tol;
@@ -2060,6 +2709,7 @@ fn propagation_force_model_needs_body_fixed_frame(config: &SidereonStatePropagat
 fn composite_force_model_from_c(
     fn_name: &str,
     config: &SidereonStatePropagationConfig,
+    tide_system: CoreTideSystem,
 ) -> Result<ForceModelKind, SidereonStatus> {
     let components = config.force_components;
     let effective_mu = if config.mu_km3_s2_enabled {
@@ -2107,7 +2757,10 @@ fn composite_force_model_from_c(
             effective_mu,
             sidereon_core::astro::constants::RE_EARTH,
             degrees,
-            ZonalCoefficients::default(),
+            ZonalCoefficients {
+                tide_system,
+                ..ZonalCoefficients::default()
+            },
         ));
     }
     if components.has_spherical_harmonic {
@@ -2137,7 +2790,10 @@ fn composite_force_model_from_c(
         force_components = force_components.with_spherical_harmonic(spherical_harmonic);
     }
     if components.has_solid_earth_tide {
-        force_components = force_components.with_solid_earth_tide(SolidEarthTideGravity::default());
+        force_components = force_components.with_solid_earth_tide(SolidEarthTideGravity {
+            tide_system,
+            ..SolidEarthTideGravity::default()
+        });
     }
     if components.has_solid_earth_pole_tide {
         force_components =
@@ -2245,17 +2901,48 @@ unsafe fn times_from_c<'a>(
     Ok(times)
 }
 
-fn map_pass_error(fn_name: &str, err: PassError) -> SidereonStatus {
-    set_last_error(format!("{fn_name}: {err}"));
-    match err {
-        PassError::InvalidInput { .. } => SidereonStatus::InvalidArgument,
+pub(crate) fn pass_error_value(error: &PassError) -> serde_json::Value {
+    use sidereon_core::astro::passes::PassError as E;
+    match error {
+        E::InvalidInput { field, reason } => serde_json::json!({
+            "kind": "invalid_input",
+            "fields": {
+                "field": field,
+                "reason": reason,
+            },
+        }),
+        E::Ut1OutsideCoverage(reason) => serde_json::json!({
+            "kind": "ut1_outside_coverage",
+            "fields": {
+                "reason": crate::engine_error::degrade_reason_name(*reason),
+            },
+        }),
     }
 }
 
-fn map_frame_transform_error(fn_name: &str, err: FrameTransformError) -> SidereonStatus {
+pub(crate) fn map_pass_error(fn_name: &str, err: PassError) -> SidereonStatus {
+    crate::engine_error::record_engine_error(
+        crate::engine_error::SidereonEngineErrorFamily::Pass,
+        fn_name,
+        pass_error_value(&err),
+    );
+    set_last_error(format!("{fn_name}: {err}"));
+    match err {
+        PassError::InvalidInput { .. } => SidereonStatus::InvalidArgument,
+        PassError::Ut1OutsideCoverage(_) => SidereonStatus::Ut1OutsideCoverage,
+    }
+}
+
+pub(crate) fn map_frame_transform_error(fn_name: &str, err: FrameTransformError) -> SidereonStatus {
+    crate::engine_error::record_engine_error(
+        crate::engine_error::SidereonEngineErrorFamily::FrameTransform,
+        fn_name,
+        crate::orbit_fit::frame_transform_error_value(&err),
+    );
     set_last_error(format!("{fn_name}: {err}"));
     match err {
         FrameTransformError::InvalidInput { .. } => SidereonStatus::InvalidArgument,
+        FrameTransformError::Ut1OutsideCoverage { .. } => SidereonStatus::Ut1OutsideCoverage,
     }
 }
 
@@ -2331,6 +3018,7 @@ fn sp3_merge_flag_slice<'a>(
         value if value == SidereonSp3MergeFlagKind::ClockOutlier as u32 => {
             Ok(&report.clock_outliers)
         }
+        value if value == SidereonSp3MergeFlagKind::ArcWithheld as u32 => Ok(&report.arc_withheld),
         _ => {
             set_last_error(format!("{fn_name}: invalid merge report flag kind"));
             Err(SidereonStatus::InvalidArgument)
@@ -2342,6 +3030,7 @@ fn sp3_merge_flag_slice<'a>(
 /// bare 2-line set) and the initialized TLE handle for that element set.
 struct SidereonTleFileRecord {
     name: String,
+    line_number: usize,
     tle: SidereonTle,
 }
 
@@ -2509,6 +3198,7 @@ pub extern "C" fn sidereon_status_message(status: SidereonStatus) -> *const c_ch
         SidereonStatus::Solve => c"solve failed",
         SidereonStatus::Panic => c"internal panic contained at the FFI boundary",
         SidereonStatus::Timeout => c"operation timed out",
+        SidereonStatus::Ut1OutsideCoverage => c"UT1 outside the UT1 table coverage",
     };
     text.as_ptr()
 }
@@ -2567,6 +3257,11 @@ fn dop_to_c(dop: Dop) -> SidereonDop {
 /// (well-formed inputs the engine simply cannot turn into a finite DOP) reports
 /// SIDEREON_STATUS_SOLVE.
 fn map_dop_error(fn_name: &str, err: DopError) -> SidereonStatus {
+    crate::engine_error::record_engine_error(
+        crate::engine_error::SidereonEngineErrorFamily::Dop,
+        fn_name,
+        crate::engine_error::dop_error_value(&err),
+    );
     set_last_error(format!("{fn_name}: {err}"));
     match err {
         DopError::InvalidInput { .. } => SidereonStatus::InvalidArgument,
@@ -2581,12 +3276,13 @@ const MAX_ANTEX_ID_BYTES: usize = 256;
 /// Maximum byte length accepted for an ANTEX frequency code (e.g. `G01`).
 const MAX_ANTEX_FREQUENCY_BYTES: usize = 32;
 
-/// Map an ANTEX parse or lookup error to a status code. Every ANTEX error is a
-/// malformed-input condition, so they all report SIDEREON_STATUS_INVALID_ARGUMENT
-/// with the detail available via sidereon_last_error_message.
+/// Map an ANTEX parse, lookup or write error to a status code. Every ANTEX error
+/// is a malformed-input condition, so they all report
+/// SIDEREON_STATUS_INVALID_ARGUMENT, with the text available via
+/// sidereon_last_error_message and the typed failure via
+/// sidereon_last_antex_error.
 fn map_antex_error(fn_name: &str, err: AntexError) -> SidereonStatus {
-    set_last_error(format!("{fn_name}: {err}"));
-    SidereonStatus::InvalidArgument
+    antex::record_antex_error(fn_name, err)
 }
 
 fn velocity_observable_from_c(
@@ -2745,6 +3441,7 @@ fn selection_error_to_status(err: &SelectionError) -> SidereonSelectionStatus {
         SelectionError::InvalidProduct(_) => SidereonSelectionStatus::InvalidProduct,
         SelectionError::InvalidPolicy { .. } => SidereonSelectionStatus::InvalidPolicy,
         SelectionError::Overflow { .. } => SidereonSelectionStatus::Overflow,
+        SelectionError::IonexEpoch(_) => SidereonSelectionStatus::IonexEpoch,
     }
 }
 
@@ -2752,6 +3449,11 @@ fn selection_error_to_status(err: &SelectionError) -> SidereonSelectionStatus {
 /// its Display (which carries the structured detail) for
 /// sidereon_last_error_message.
 fn map_selection_error(fn_name: &str, err: &SelectionError) -> SidereonSelectionStatus {
+    crate::engine_error::record_engine_error(
+        crate::engine_error::SidereonEngineErrorFamily::Selection,
+        fn_name,
+        crate::sourced::selection_error_detail(err),
+    );
     set_last_error(format!("{fn_name}: {err}"));
     selection_error_to_status(err)
 }
@@ -2766,7 +3468,8 @@ fn marshal_status_to_selection(status: SidereonStatus) -> SidereonSelectionStatu
         SidereonStatus::InvalidArgument
         | SidereonStatus::Sp3Parse
         | SidereonStatus::Solve
-        | SidereonStatus::Timeout => SidereonSelectionStatus::InvalidArgument,
+        | SidereonStatus::Timeout
+        | SidereonStatus::Ut1OutsideCoverage => SidereonSelectionStatus::InvalidArgument,
     }
 }
 
@@ -2781,6 +3484,7 @@ fn marshal_status_to_fallback(status: SidereonStatus) -> SidereonFallbackStatus 
         | SidereonStatus::Sp3Parse
         | SidereonStatus::Solve
         | SidereonStatus::Timeout => SidereonFallbackStatus::InvalidArgument,
+        SidereonStatus::Ut1OutsideCoverage => SidereonFallbackStatus::Ut1OutsideCoverage,
     }
 }
 
@@ -2826,6 +3530,11 @@ fn guard_dop<T>(
 }
 
 fn map_observables_error(fn_name: &str, err: ObservablesError) -> SidereonStatus {
+    crate::engine_error::record_engine_error(
+        crate::engine_error::SidereonEngineErrorFamily::Observables,
+        fn_name,
+        crate::engine_error::observables_error_value(&err),
+    );
     set_last_error(format!("{fn_name}: {err}"));
     match err {
         ObservablesError::InvalidInput { .. } | ObservablesError::Media(_) => {
@@ -2914,8 +3623,8 @@ fn gnss_week_tow_from_c(
 ) -> Result<GnssWeekTow, SidereonStatus> {
     let system = time_scale_from_c_code(fn_name, "value.system", value.system)?;
     GnssWeekTow::new(system, value.week, value.tow_s).map_err(|err| {
-        set_last_error(format!("{fn_name}: {err}"));
-        SidereonStatus::InvalidArgument
+        let legacy_message = format!("{fn_name}: {err}");
+        crate::engine_error::time_model_error(fn_name, err, legacy_message)
     })
 }
 
@@ -3012,6 +3721,11 @@ unsafe fn observable_state_common(
             SidereonStatus::Ok
         }
         Err(err) => {
+            crate::engine_error::record_engine_error(
+                crate::engine_error::SidereonEngineErrorFamily::Observables,
+                fn_name,
+                crate::engine_error::observables_error_value(&err),
+            );
             set_last_error(format!("{fn_name}: {err}"));
             SidereonStatus::Solve
         }
@@ -3340,38 +4054,59 @@ thread_local! {
 fn empty_terrain_store_error() -> SidereonTerrainStoreError {
     SidereonTerrainStoreError {
         kind: SidereonTerrainStoreErrorKind::None as u32,
-        path: [0; SIDEREON_TERRAIN_ERROR_TEXT_C_BYTES],
-        message: [0; SIDEREON_TERRAIN_ERROR_TEXT_C_BYTES],
-        reason: [0; SIDEREON_TERRAIN_ERROR_TEXT_C_BYTES],
         version: 0,
         tag: 0,
         lat_index: 0,
         lon_index: 0,
+        expected_tile_id: SidereonTerrainTileId {
+            lat_index: 0,
+            lon_index: 0,
+        },
+        found_tile_id: SidereonTerrainTileId {
+            lat_index: 0,
+            lon_index: 0,
+        },
         expected_checksum64: 0,
         found_checksum64: 0,
+        field: [0; SIDEREON_TERRAIN_ERROR_FIELD_C_BYTES],
+        has_horizontal_datum: false,
+        horizontal_datum: terrain::no_terrain_lookup_error().horizontal_datum,
+        has_tile_error: false,
+        tile_error: dted::no_dted_tile_error(),
     }
 }
 
 fn empty_terrain_datum_error() -> SidereonTerrainDatumError {
     SidereonTerrainDatumError {
         kind: SidereonTerrainDatumErrorKind::None as u32,
-        path: [0; SIDEREON_TERRAIN_ERROR_TEXT_C_BYTES],
-        message: [0; SIDEREON_TERRAIN_ERROR_TEXT_C_BYTES],
-        remediation: [0; SIDEREON_TERRAIN_ERROR_TEXT_C_BYTES],
+        terrain: terrain::no_terrain_lookup_error(),
+        geoid: geoid::no_geoid_error(),
     }
 }
 
-fn terrain_store_error_to_c(err: &TerrainStoreError) -> SidereonTerrainStoreError {
+fn terrain_store_error_to_c(
+    err: &TerrainStoreError,
+) -> (SidereonTerrainStoreError, Vec<(u32, String)>) {
+    let mut texts = Vec::new();
     let mut out = empty_terrain_store_error();
     match err {
         TerrainStoreError::Io { path, message } => {
             out.kind = SidereonTerrainStoreErrorKind::Io as u32;
-            out.path = fixed_c_chars(&path.display().to_string());
-            out.message = fixed_c_chars(message);
+            texts.push((
+                SidereonTerrainErrorText::Path as u32,
+                path.display().to_string(),
+            ));
+            texts.push((
+                SidereonTerrainErrorText::Message as u32,
+                String::from(message),
+            ));
         }
         TerrainStoreError::Parse { reason } => {
             out.kind = SidereonTerrainStoreErrorKind::Parse as u32;
-            out.reason = fixed_c_chars(reason);
+            texts.push((
+                SidereonTerrainErrorText::Reason as u32,
+                String::from(reason),
+            ));
         }
         TerrainStoreError::UnsupportedVersion { version } => {
             out.kind = SidereonTerrainStoreErrorKind::UnsupportedVersion as u32;
@@ -3395,8 +4130,22 @@ fn terrain_store_error_to_c(err: &TerrainStoreError) -> SidereonTerrainStoreErro
             found,
         } => {
             out.kind = SidereonTerrainStoreErrorKind::TileIdMismatch as u32;
-            out.path = fixed_c_chars(&path.display().to_string());
-            out.message = fixed_c_chars(&format!("expected tile {expected:?}, parsed {found:?}"));
+            out.expected_tile_id = SidereonTerrainTileId {
+                lat_index: expected.lat_index,
+                lon_index: expected.lon_index,
+            };
+            out.found_tile_id = SidereonTerrainTileId {
+                lat_index: found.lat_index,
+                lon_index: found.lon_index,
+            };
+            texts.push((
+                SidereonTerrainErrorText::Path as u32,
+                path.display().to_string(),
+            ));
+            texts.push((
+                SidereonTerrainErrorText::Message as u32,
+                String::from(&format!("expected tile {expected:?}, parsed {found:?}")),
+            ));
         }
         TerrainStoreError::Checksum {
             lat_index,
@@ -3415,8 +4164,48 @@ fn terrain_store_error_to_c(err: &TerrainStoreError) -> SidereonTerrainStoreErro
             out.expected_checksum64 = *expected;
             out.found_checksum64 = *found;
         }
+        TerrainStoreError::TileIdOutOfRange {
+            lat_index,
+            lon_index,
+        } => {
+            out.kind = SidereonTerrainStoreErrorKind::TileIdOutOfRange as u32;
+            out.lat_index = *lat_index;
+            out.lon_index = *lon_index;
+        }
+        TerrainStoreError::TileBoundsMismatch {
+            lat_index,
+            lon_index,
+            field,
+        } => {
+            out.kind = SidereonTerrainStoreErrorKind::TileBoundsMismatch as u32;
+            out.lat_index = *lat_index;
+            out.lon_index = *lon_index;
+            out.field = fixed_c_chars(field);
+        }
+        TerrainStoreError::NonWgs84Tile { path, datum } => {
+            out.kind = SidereonTerrainStoreErrorKind::NonWgs84Tile as u32;
+            texts.push((
+                SidereonTerrainErrorText::Path as u32,
+                path.display().to_string(),
+            ));
+            out.has_horizontal_datum = true;
+            out.horizontal_datum = terrain::dted_horizontal_datum_to_c(datum);
+        }
+        TerrainStoreError::Tile { path, error } => {
+            out.kind = SidereonTerrainStoreErrorKind::Tile as u32;
+            texts.push((
+                SidereonTerrainErrorText::Path as u32,
+                path.display().to_string(),
+            ));
+            out.has_tile_error = true;
+            out.tile_error = dted::dted_tile_error_to_c(error).0;
+        }
+        other => {
+            out.kind = SidereonTerrainStoreErrorKind::Unknown as u32;
+            texts.push((SidereonTerrainErrorText::Message as u32, other.to_string()));
+        }
     }
-    out
+    (out, texts)
 }
 
 fn digest_provenance_to_c(value: CoreDigestProvenance) -> SidereonDigestProvenance {
@@ -3426,40 +4215,83 @@ fn digest_provenance_to_c(value: CoreDigestProvenance) -> SidereonDigestProvenan
     }
 }
 
-fn terrain_datum_error_to_c(err: &TerrainDatumError) -> SidereonTerrainDatumError {
+fn terrain_datum_error_to_c(
+    err: &TerrainDatumError,
+) -> (SidereonTerrainDatumError, Vec<(u32, String)>) {
+    let mut texts = Vec::new();
     let mut out = empty_terrain_datum_error();
     match err {
         TerrainDatumError::Terrain(err) => {
             out.kind = SidereonTerrainDatumErrorKind::Terrain as u32;
-            out.message = fixed_c_chars(&err.to_string());
+            texts.push((
+                SidereonTerrainErrorText::Message as u32,
+                String::from(&err.to_string()),
+            ));
+            out.terrain = terrain::terrain_lookup_error_to_c(err);
+            // A TileOrigin file or a Tile failure's file keeps its path.
+            texts.extend(
+                terrain::terrain_lookup_error_texts(err)
+                    .into_iter()
+                    .filter(|(part, _)| *part == SidereonTerrainErrorText::Path as u32),
+            );
         }
         TerrainDatumError::Geoid(err) => {
             out.kind = SidereonTerrainDatumErrorKind::Geoid as u32;
-            out.message = fixed_c_chars(&err.to_string());
+            out.geoid = geoid::geoid_error_to_c(err).0;
+            texts.push((
+                SidereonTerrainErrorText::Message as u32,
+                String::from(&err.to_string()),
+            ));
         }
         TerrainDatumError::Io { path, message } => {
             out.kind = SidereonTerrainDatumErrorKind::Io as u32;
-            out.path = fixed_c_chars(&path.display().to_string());
-            out.message = fixed_c_chars(message);
+            texts.push((
+                SidereonTerrainErrorText::Path as u32,
+                path.display().to_string(),
+            ));
+            texts.push((
+                SidereonTerrainErrorText::Message as u32,
+                String::from(message),
+            ));
         }
         TerrainDatumError::MissingEgm96Dac { path, remediation } => {
             out.kind = SidereonTerrainDatumErrorKind::MissingEgm96Dac as u32;
-            out.path = fixed_c_chars(&path.display().to_string());
-            out.remediation = fixed_c_chars(remediation);
+            texts.push((
+                SidereonTerrainErrorText::Path as u32,
+                path.display().to_string(),
+            ));
+            texts.push((
+                SidereonTerrainErrorText::Remediation as u32,
+                (*remediation).to_string(),
+            ));
         }
     }
-    out
+    (out, texts)
 }
 
 fn map_terrain_store_error(fn_name: &str, err: TerrainStoreError) -> SidereonStatus {
-    let typed = terrain_store_error_to_c(&err);
+    let (typed, texts) = terrain_store_error_to_c(&err);
     LAST_TERRAIN_STORE_ERROR.with(|slot| *slot.borrow_mut() = Some(typed));
+    terrain::record_terrain_error_texts(SidereonTerrainErrorFamily::TerrainStore, texts);
+    if let TerrainStoreError::Tile { error, .. } = &err {
+        // The nested tile failure's own texts (its path and message) live in
+        // the DTED-tile family, as for a failed sidereon_dted_tile_load.
+        dted::record_dted_tile_error(error);
+    }
     set_last_error(format!("{fn_name}: {err}"));
     SidereonStatus::InvalidArgument
 }
 
 fn map_terrain_datum_error(fn_name: &str, err: TerrainDatumError) -> SidereonStatus {
-    let typed = terrain_datum_error_to_c(&err);
+    let (typed, texts) = terrain_datum_error_to_c(&err);
+    terrain::record_terrain_error_texts(SidereonTerrainErrorFamily::TerrainDatum, texts);
+    if let TerrainDatumError::Terrain(CoreError::TerrainTile { error, .. }) = &err {
+        // The nested tile failure's own texts live in the DTED-tile family.
+        dted::record_dted_tile_error(error);
+    }
+    if let TerrainDatumError::Geoid(error) = &err {
+        geoid::record_geoid_error(error);
+    }
     LAST_TERRAIN_DATUM_ERROR.with(|slot| *slot.borrow_mut() = Some(typed));
     set_last_error(format!("{fn_name}: {err}"));
     SidereonStatus::InvalidArgument
@@ -3592,7 +4424,7 @@ unsafe fn rtk_reference_selection_from_c(
                 let system = gnss_system_to_letter(gnss_system_from_c_code(
                     fn_name,
                     "reference_per_system.system",
-                    entry.system as u32,
+                    entry.system,
                 )?)
                 .to_owned();
                 let sat = parse_satellite_token(fn_name, entry.sat_id)?.to_string();
@@ -3922,8 +4754,8 @@ fn instant_from_j2000_seconds(
     let (jd_whole, day_fraction) = split_julian_date_from_j2000_seconds(whole_s as i64);
     let fraction = day_fraction + (j2000_s - whole_s) / SECONDS_PER_DAY;
     let split = JulianDateSplit::new(jd_whole, fraction).map_err(|err| {
-        set_last_error(format!("{fn_name}: {arg_name} epoch: {err}"));
-        SidereonStatus::InvalidArgument
+        let legacy_message = format!("{fn_name}: {arg_name} epoch: {err}");
+        crate::engine_error::time_model_error(fn_name, err, legacy_message)
     })?;
     Ok(Instant::from_julian_date(scale, split))
 }
@@ -4044,7 +4876,7 @@ unsafe fn predict_ranges_into(
     options: *const SidereonObservablesOptions,
     out: *mut SidereonRangePrediction,
 ) -> SidereonStatus {
-    let raw = c_try!(require_slice(requests, count, fn_name, "requests"));
+    let raw = c_try!(require_slice(requests, count, fn_name, "requests")).to_vec();
     // Validate the caller-owned output pointer directly. The C contract only
     // guarantees `out` is writable, not readable or initialized, so we must not
     // form a `&[T]`/`&mut [T]` over it (that would assert initialized elements
@@ -4060,11 +4892,15 @@ unsafe fn predict_ranges_into(
     ));
     // Pre-zero the output via raw writes so an aborted batch leaves defined
     // values, never reading the uninitialized destination.
+    let inputs_result = (|| {
+        let opts = predict_options_from_c(fn_name, options)?;
+        let parsed = range_prediction_requests_from_c(fn_name, &raw)?;
+        Ok((opts, parsed))
+    })();
     for idx in 0..count {
         out.add(idx).write(zero_range_prediction());
     }
-    let opts = c_try!(predict_options_from_c(fn_name, options));
-    let parsed = c_try!(range_prediction_requests_from_c(fn_name, raw));
+    let (opts, parsed) = c_try!(inputs_result);
     let mut results = vec![zero_range_prediction_core(); count];
     match observables_predict_ranges(source, &parsed, opts, &mut results) {
         Ok(()) => {}
@@ -4127,6 +4963,37 @@ unsafe fn initialize_observable_state_outputs(
     require_out_array(out_has_clocks_s, count, fn_name, "out_has_clocks_s")?;
     require_out_array(out_element_statuses, count, fn_name, "out_element_statuses")?;
     require_out_array(out_result_statuses, count, fn_name, "out_result_statuses")?;
+
+    if count != 0 {
+        let outputs = [
+            Some((
+                checked_output_range(
+                    fn_name,
+                    out_positions_ecef_m,
+                    position_values,
+                    "out_positions_ecef_m",
+                )?,
+                "out_positions_ecef_m",
+            )),
+            Some((
+                checked_output_range(fn_name, out_clocks_s, count, "out_clocks_s")?,
+                "out_clocks_s",
+            )),
+            Some((
+                checked_output_range(fn_name, out_has_clocks_s, count, "out_has_clocks_s")?,
+                "out_has_clocks_s",
+            )),
+            Some((
+                checked_output_range(fn_name, out_element_statuses, count, "out_element_statuses")?,
+                "out_element_statuses",
+            )),
+            Some((
+                checked_output_range(fn_name, out_result_statuses, count, "out_result_statuses")?,
+                "out_result_statuses",
+            )),
+        ];
+        reject_overlapping_optional_outputs(fn_name, &outputs)?;
+    }
 
     for idx in 0..count {
         let base = idx * 3;
@@ -4191,9 +5058,11 @@ unsafe fn write_observable_state_batch(
         out_element_statuses
             .add(idx)
             .write(observable_state_element_status_to_c(element_status));
-        out_result_statuses
-            .add(idx)
-            .write(observable_state_result_status(&batch.element_results[idx]));
+        let result_status = observable_state_result_status(&batch.element_results[idx]);
+        if let Err(error) = &batch.element_results[idx] {
+            crate::engine_error::record_observable_row_error(fn_name, idx, result_status, error);
+        }
+        out_result_statuses.add(idx).write(result_status);
     }
     SidereonStatus::Ok
 }
@@ -4211,6 +5080,11 @@ unsafe fn observable_states_at_j2000_s_common(
     out_element_statuses: *mut SidereonObservableStateElementStatus,
     out_result_statuses: *mut SidereonStatus,
 ) -> SidereonStatus {
+    let inputs_result = (|| {
+        let satellites = satellites_from_c_tokens(fn_name, satellites, count)?;
+        let epochs = require_slice(epochs_j2000_s, count, fn_name, "epochs_j2000_s")?.to_vec();
+        Ok((satellites, epochs))
+    })();
     c_try!(initialize_observable_state_outputs(
         fn_name,
         count,
@@ -4220,14 +5094,8 @@ unsafe fn observable_states_at_j2000_s_common(
         out_element_statuses,
         out_result_statuses,
     ));
-    let sats = c_try!(satellites_from_c_tokens(fn_name, satellites, count));
-    let epochs = c_try!(require_slice(
-        epochs_j2000_s,
-        count,
-        fn_name,
-        "epochs_j2000_s"
-    ));
-    let batch = match source.observable_states_at_j2000_s(&sats, epochs) {
+    let (sats, epochs) = c_try!(inputs_result);
+    let batch = match source.observable_states_at_j2000_s(&sats, &epochs) {
         Ok(batch) => batch,
         Err(err) => return map_observables_error(fn_name, err),
     };
@@ -4256,6 +5124,7 @@ unsafe fn observable_states_at_shared_j2000_s_common(
     out_element_statuses: *mut SidereonObservableStateElementStatus,
     out_result_statuses: *mut SidereonStatus,
 ) -> SidereonStatus {
+    let sats_result = satellites_from_c_tokens(fn_name, satellites, satellite_count);
     c_try!(initialize_observable_state_outputs(
         fn_name,
         satellite_count,
@@ -4265,11 +5134,7 @@ unsafe fn observable_states_at_shared_j2000_s_common(
         out_element_statuses,
         out_result_statuses,
     ));
-    let sats = c_try!(satellites_from_c_tokens(
-        fn_name,
-        satellites,
-        satellite_count
-    ));
+    let sats = c_try!(sats_result);
     let batch = source.observable_states_at_shared_j2000_s(&sats, epoch_j2000_s);
     write_observable_state_batch(
         fn_name,
@@ -4407,6 +5272,28 @@ mod tests {
     }
 
     #[test]
+    fn observable_state_outputs_reject_overlap_before_mutating() {
+        #[repr(align(8))]
+        struct Aligned([u8; 64]);
+        let mut storage = Aligned([0xa5u8; 64]);
+        let output = storage.0.as_mut_ptr();
+        let status = unsafe {
+            initialize_observable_state_outputs(
+                "test_observable_overlap",
+                1,
+                output.cast::<f64>(),
+                output.cast::<f64>(),
+                output.cast::<bool>(),
+                output.cast::<SidereonObservableStateElementStatus>(),
+                output.cast::<SidereonStatus>(),
+            )
+        };
+        assert_eq!(status, Err(SidereonStatus::InvalidArgument));
+        assert!(storage.0.iter().all(|byte| *byte == 0xa5));
+        assert!(last_error().contains("overlaps"));
+    }
+
+    #[test]
     fn batch_flattened_count_rejects_oversized_required_count() {
         let too_many = isize::MAX as usize / size_of::<SidereonTemeState>() + 1;
         let err = checked_flattened_count::<SidereonTemeState>(
@@ -4425,8 +5312,7 @@ mod tests {
     #[test]
     fn tle_find_passes_uses_loaded_opsmode() {
         const LINE1: &str = "1 23599U 95029B   06171.76535463  .00085586  12891-6  12956-2 0  2905";
-        const LINE2: &str =
-            "2 23599   6.9327   0.2849 5782022 274.4436  25.2425  4.47796565123555      0.0       720.0         20.00";
+        const LINE2: &str = "2 23599   6.9327   0.2849 5782022 274.4436  25.2425  4.47796565123555      0.0       720.0         20.00";
         const START_UNIX_US: i64 = 1_150_914_126_640_038;
         const END_UNIX_US: i64 = 1_150_957_326_640_038;
 
@@ -4708,12 +5594,16 @@ mod tests {
             StalenessPolicy::default().max_staleness_s
         );
         assert_eq!(
-            sidereon_staleness_policy_days(2.0).max_staleness_s,
-            2.0 * 86_400.0
+            sidereon_staleness_policy_days(2.0)
+                .max_staleness_s
+                .to_bits(),
+            StalenessPolicy::days(2.0).max_staleness_s.to_bits()
         );
         assert_eq!(
-            sidereon_staleness_policy_seconds(42.0).max_staleness_s,
-            42.0
+            sidereon_staleness_policy_seconds(42.0)
+                .max_staleness_s
+                .to_bits(),
+            StalenessPolicy::seconds(42.0).max_staleness_s.to_bits()
         );
     }
 
@@ -4826,5 +5716,365 @@ mod tests {
             marshal_status_to_fallback(SidereonStatus::InvalidToken),
             SidereonFallbackStatus::InvalidToken
         );
+    }
+}
+
+#[cfg(test)]
+mod ut1_status_tests {
+    use super::*;
+    use sidereon_core::astro::time::DegradeReason;
+    use sidereon_core::positioning::{SolvePolicyError, SppError};
+    use sidereon_core::precise_positioning::{FixedSolveError, FloatSolveError};
+
+    fn status_of(err: sidereon::Error) -> SidereonStatus {
+        guard::<()>("ut1_status_tests::status_of", SidereonStatus::Solve, || {
+            Err(err)
+        })
+        .unwrap_err()
+    }
+
+    /// The SPP routes (sidereon_solve_spp, _v2, the SBAS and SSR broadcast
+    /// solves) and the PPP routes all pass the facade error through `guard`,
+    /// which reads a UT1 refusal wherever the error chain holds it.
+    #[test]
+    fn spp_and_ppp_ut1_refusals_return_status_8() {
+        let spp = sidereon::Error::Spp(SolvePolicyError::Solve(SppError::Ut1OutsideCoverage(
+            DegradeReason::AfterCoverage,
+        )));
+        assert_eq!(status_of(spp), SidereonStatus::Ut1OutsideCoverage);
+        assert_eq!(SidereonStatus::Ut1OutsideCoverage as u32, 8);
+
+        let float = sidereon::Error::PppFloat(FloatSolveError::Ut1OutsideCoverage(
+            DegradeReason::BeforeCoverage,
+        ));
+        assert_eq!(status_of(float), SidereonStatus::Ut1OutsideCoverage);
+
+        let fixed = sidereon::Error::PppFixed(FixedSolveError::Float(
+            FloatSolveError::Ut1OutsideCoverage(DegradeReason::AfterCoverage),
+        ));
+        assert_eq!(status_of(fixed), SidereonStatus::Ut1OutsideCoverage);
+
+        let other = sidereon::Error::Spp(SolvePolicyError::NoCoarseSolution);
+        assert_eq!(status_of(other), SidereonStatus::Solve);
+
+        let prop_ut1 = PropagationError::Ut1OutsideCoverage(DegradeReason::AfterCoverage);
+        assert!(ut1_refusal(&prop_ut1));
+        let prop_non_ut1 = PropagationError::InvalidInput("test".to_string());
+        assert!(!ut1_refusal(&prop_non_ut1));
+
+        let decay_ut1 = DecayError::Propagation(PropagationError::Ut1OutsideCoverage(
+            DegradeReason::AfterCoverage,
+        ));
+        assert!(ut1_refusal(&decay_ut1));
+        let decay_non_ut1 = DecayError::InvalidConfig("test");
+        assert!(!ut1_refusal(&decay_non_ut1));
+    }
+}
+
+#[cfg(test)]
+mod terrain_store_typed_error_tests {
+    use super::*;
+    use sidereon_core::terrain_store::TerrainTileId;
+
+    #[test]
+    fn tile_id_mismatch_preserves_both_signed_ids() {
+        let expected = TerrainTileId::new(36, -107);
+        let found = TerrainTileId::new(36, -106);
+        let (typed, _) = terrain_store_error_to_c(&TerrainStoreError::TileIdMismatch {
+            path: std::path::PathBuf::from("fixture.dt2"),
+            expected,
+            found,
+        });
+        assert_eq!(
+            typed.kind,
+            SidereonTerrainStoreErrorKind::TileIdMismatch as u32
+        );
+        assert_eq!(
+            typed.expected_tile_id,
+            SidereonTerrainTileId {
+                lat_index: 36,
+                lon_index: -107,
+            }
+        );
+        assert_eq!(
+            typed.found_tile_id,
+            SidereonTerrainTileId {
+                lat_index: 36,
+                lon_index: -106,
+            }
+        );
+    }
+
+    #[test]
+    fn test_pass_error_value_variants() {
+        let cases = [
+            (
+                PassError::InvalidInput {
+                    field: "min_elevation_deg",
+                    reason: "out of range",
+                },
+                serde_json::json!({
+                    "kind": "invalid_input",
+                    "fields": {
+                        "field": "min_elevation_deg",
+                        "reason": "out of range",
+                    }
+                }),
+            ),
+            (
+                PassError::Ut1OutsideCoverage(
+                    sidereon_core::astro::time::DegradeReason::BeforeCoverage,
+                ),
+                serde_json::json!({
+                    "kind": "ut1_outside_coverage",
+                    "fields": {
+                        "reason": "before_coverage",
+                    }
+                }),
+            ),
+            (
+                PassError::Ut1OutsideCoverage(
+                    sidereon_core::astro::time::DegradeReason::AfterCoverage,
+                ),
+                serde_json::json!({
+                    "kind": "ut1_outside_coverage",
+                    "fields": {
+                        "reason": "after_coverage",
+                    }
+                }),
+            ),
+        ];
+
+        for (err, expected) in cases {
+            assert_eq!(pass_error_value(&err), expected);
+        }
+    }
+
+    #[test]
+    fn test_map_pass_error_and_frame_transform_error_records_engine_error() {
+        crate::engine_error::clear_engine_error();
+
+        let pass_err = PassError::InvalidInput {
+            field: "step_seconds",
+            reason: "not positive",
+        };
+        let status = map_pass_error("test_pass_op", pass_err);
+        assert_eq!(status, SidereonStatus::InvalidArgument);
+        let (info, payload) =
+            crate::engine_error::snapshot_engine_error_for_test().expect("pass error recorded");
+        assert_eq!(
+            info.family,
+            crate::engine_error::SidereonEngineErrorFamily::Pass
+        );
+        let v: serde_json::Value = serde_json::from_str(&payload).expect("valid json");
+        assert_eq!(v["family"], "pass");
+        assert_eq!(v["operation"], "test_pass_op");
+        assert_eq!(v["error"]["kind"], "invalid_input");
+        assert_eq!(v["error"]["fields"]["field"], "step_seconds");
+        assert_eq!(v["error"]["fields"]["reason"], "not positive");
+
+        let ft_err = FrameTransformError::Ut1OutsideCoverage {
+            reason: sidereon_core::astro::time::DegradeReason::BeforeCoverage,
+        };
+        let status = map_frame_transform_error("test_frame_op", ft_err);
+        assert_eq!(status, SidereonStatus::Ut1OutsideCoverage);
+        let (info, payload) = crate::engine_error::snapshot_engine_error_for_test()
+            .expect("frame transform error recorded");
+        assert_eq!(
+            info.family,
+            crate::engine_error::SidereonEngineErrorFamily::FrameTransform
+        );
+        let v: serde_json::Value = serde_json::from_str(&payload).expect("valid json");
+        assert_eq!(v["family"], "frame_transform");
+        assert_eq!(v["operation"], "test_frame_op");
+        assert_eq!(v["error"]["kind"], "ut1_outside_coverage");
+        assert_eq!(v["error"]["fields"]["reason"], "before_coverage");
+    }
+
+    #[test]
+    fn test_frame_real_refusal_valid_control_and_early_null_reset() {
+        crate::engine_error::clear_engine_error();
+
+        let mut ts_bad = std::mem::MaybeUninit::<SidereonTimeScales>::uninit();
+        let status =
+            unsafe { sidereon_timescales_from_utc(1960, 1, 1, 0, 0, 0.0, ts_bad.as_mut_ptr()) };
+        assert_eq!(status, SidereonStatus::Ok);
+        let ts_bad = unsafe { ts_bad.assume_init() };
+
+        let mut ts_good = std::mem::MaybeUninit::<SidereonTimeScales>::uninit();
+        let status =
+            unsafe { sidereon_timescales_from_utc(2024, 1, 1, 0, 0, 0.0, ts_good.as_mut_ptr()) };
+        assert_eq!(status, SidereonStatus::Ok);
+        let ts_good = unsafe { ts_good.assume_init() };
+
+        let pos = [7000.0, 0.0, 0.0];
+        let mut out = [0.0; 3];
+
+        // 1. Real frame refusal: epoch outside UT1 coverage
+        let status =
+            unsafe { sidereon_frame_gcrs_to_itrs(pos.as_ptr(), &ts_bad, false, out.as_mut_ptr()) };
+        assert_eq!(status, SidereonStatus::Ut1OutsideCoverage);
+
+        let (info, payload) =
+            crate::engine_error::snapshot_engine_error_for_test().expect("frame error recorded");
+        assert_eq!(
+            info.family,
+            crate::engine_error::SidereonEngineErrorFamily::FrameTransform
+        );
+        let v: serde_json::Value = serde_json::from_str(&payload).expect("valid json");
+        assert_eq!(v["family"], "frame_transform");
+        assert_eq!(v["operation"], "sidereon_frame_gcrs_to_itrs");
+        assert_eq!(v["error"]["kind"], "ut1_outside_coverage");
+        assert_eq!(v["error"]["fields"]["reason"], "before_coverage");
+
+        // 2. Valid frame operation resets engine error
+        let status =
+            unsafe { sidereon_frame_gcrs_to_itrs(pos.as_ptr(), &ts_good, false, out.as_mut_ptr()) };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert!(crate::engine_error::snapshot_engine_error_for_test().is_none());
+
+        // 3. Real frame refusal again
+        let status =
+            unsafe { sidereon_frame_gcrs_to_itrs(pos.as_ptr(), &ts_bad, false, out.as_mut_ptr()) };
+        assert_eq!(status, SidereonStatus::Ut1OutsideCoverage);
+
+        // Verify full payload before reset
+        let (info2, payload2) = crate::engine_error::snapshot_engine_error_for_test()
+            .expect("frame error recorded before reset");
+        assert_eq!(
+            info2.family,
+            crate::engine_error::SidereonEngineErrorFamily::FrameTransform
+        );
+        let v2: serde_json::Value = serde_json::from_str(&payload2).expect("valid json");
+        assert_eq!(v2["family"], "frame_transform");
+        assert_eq!(v2["operation"], "sidereon_frame_gcrs_to_itrs");
+        assert_eq!(v2["error"]["kind"], "ut1_outside_coverage");
+        assert_eq!(v2["error"]["fields"]["reason"], "before_coverage");
+
+        // 4. Early-null operation resets engine error
+        let status = unsafe {
+            sidereon_frame_gcrs_to_itrs(pos.as_ptr(), std::ptr::null(), false, out.as_mut_ptr())
+        };
+        assert_eq!(status, SidereonStatus::NullPointer);
+        assert!(crate::engine_error::snapshot_engine_error_for_test().is_none());
+    }
+
+    #[test]
+    fn test_constellation_visible_real_refusal_valid_control_and_early_null_reset() {
+        crate::engine_error::clear_engine_error();
+
+        let l1 = b"1 25544U 98067A   18184.80969102  .00001614  00000-0  31745-4 0  9993\0";
+        let l2 = b"2 25544  51.6414 295.8524 0003435 262.6267 204.2868 15.54005638121106\0";
+
+        let mut tle: *mut SidereonTle = std::ptr::null_mut();
+        let status = unsafe {
+            sidereon_tle_load(
+                l1.as_ptr() as *const std::ffi::c_char,
+                l2.as_ptr() as *const std::ffi::c_char,
+                0,
+                &mut tle,
+            )
+        };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert!(!tle.is_null());
+
+        let tles = [tle as *const SidereonTle];
+        let mut constell: *mut SidereonSatelliteConstellation = std::ptr::null_mut();
+        let status =
+            unsafe { sidereon_satellite_constellation_build(tles.as_ptr(), 1, &mut constell) };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert!(!constell.is_null());
+
+        let station = SidereonGroundStation {
+            latitude_deg: 51.5074,
+            longitude_deg: -0.1278,
+            altitude_m: 80.0,
+        };
+        let epoch_unix_us = 1_530_619_200_000_000i64; // 2018-07-03 12:00:00 UTC
+
+        // 1. Real refusal: min_elevation_deg out of range (999.0 deg)
+        let mut visible: *mut SidereonVisibleList = std::ptr::null_mut();
+        let status = unsafe {
+            sidereon_satellite_constellation_visible(
+                constell,
+                &station,
+                epoch_unix_us,
+                999.0,
+                &mut visible,
+            )
+        };
+        assert_eq!(status, SidereonStatus::InvalidArgument);
+        assert!(visible.is_null());
+
+        let (info, payload) = crate::engine_error::snapshot_engine_error_for_test()
+            .expect("constellation visible error recorded");
+        assert_eq!(
+            info.family,
+            crate::engine_error::SidereonEngineErrorFamily::Pass
+        );
+        let v: serde_json::Value = serde_json::from_str(&payload).expect("valid json");
+        assert_eq!(v["family"], "pass");
+        assert_eq!(v["operation"], "sidereon_satellite_constellation_visible");
+        assert_eq!(v["error"]["kind"], "invalid_input");
+        assert_eq!(v["error"]["fields"]["field"], "min_elevation_deg");
+        assert_eq!(v["error"]["fields"]["reason"], "out of range");
+
+        // 2. Valid control resets engine error
+        let status = unsafe {
+            sidereon_satellite_constellation_visible(
+                constell,
+                &station,
+                epoch_unix_us,
+                10.0,
+                &mut visible,
+            )
+        };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert!(!visible.is_null());
+        assert!(crate::engine_error::snapshot_engine_error_for_test().is_none());
+        unsafe { sidereon_visible_list_free(visible) };
+
+        // 3. Real refusal again
+        let mut visible_fail: *mut SidereonVisibleList = std::ptr::null_mut();
+        let status = unsafe {
+            sidereon_satellite_constellation_visible(
+                constell,
+                &station,
+                epoch_unix_us,
+                999.0,
+                &mut visible_fail,
+            )
+        };
+        assert_eq!(status, SidereonStatus::InvalidArgument);
+
+        // Verify full payload before reset
+        let (info2, payload2) = crate::engine_error::snapshot_engine_error_for_test()
+            .expect("constellation visible error recorded before reset");
+        assert_eq!(
+            info2.family,
+            crate::engine_error::SidereonEngineErrorFamily::Pass
+        );
+        let v2: serde_json::Value = serde_json::from_str(&payload2).expect("valid json");
+        assert_eq!(v2["family"], "pass");
+        assert_eq!(v2["operation"], "sidereon_satellite_constellation_visible");
+        assert_eq!(v2["error"]["kind"], "invalid_input");
+        assert_eq!(v2["error"]["fields"]["field"], "min_elevation_deg");
+        assert_eq!(v2["error"]["fields"]["reason"], "out of range");
+
+        // 4. Early-null operation resets engine error
+        let status = unsafe {
+            sidereon_satellite_constellation_visible(
+                constell,
+                std::ptr::null(),
+                epoch_unix_us,
+                10.0,
+                &mut visible_fail,
+            )
+        };
+        assert_eq!(status, SidereonStatus::NullPointer);
+        assert!(crate::engine_error::snapshot_engine_error_for_test().is_none());
+
+        unsafe { sidereon_satellite_constellation_free(constell) };
+        unsafe { sidereon_tle_free(tle) };
     }
 }

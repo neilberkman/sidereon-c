@@ -7,6 +7,8 @@ use sidereon_core::positioning::{
 };
 use sidereon_core::rtk_filter::{
     RtkRinexArc as CoreRtkRinexArc, RtkRinexDualFrequencyArc as CoreRtkRinexDualFrequencyArc,
+    RtkRinexReceiver as CoreRtkRinexReceiver,
+    RtkRinexUnresolvedCarrier as CoreRtkRinexUnresolvedCarrier,
 };
 
 /// The result of an RTK float solve. Opaque to C. Create with
@@ -1042,6 +1044,14 @@ pub struct SidereonRtkArcEpoch {
     pub prediction_time_s: f64,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonRtkArcEpochV2 {
+    pub legacy: SidereonRtkArcEpoch,
+    pub has_prediction_epoch: bool,
+    pub prediction_epoch: *const SidereonExactEpoch,
+}
+
 /// Reference-satellite selection mode for an RTK arc, mirroring
 /// sidereon_core::rtk::BaselineReferenceSelection. Pass in
 /// SidereonRtkArcConfig.reference_mode as a uint32_t.
@@ -1085,8 +1095,8 @@ pub enum SidereonRtkCycleSlipReceiver {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct SidereonRtkArcReferenceEntry {
-    /// Constellation, a SidereonGnssSystem value.
-    pub system: SidereonGnssSystem,
+    /// Constellation, a SidereonGnssSystem value; an unknown value is refused.
+    pub system: u32,
     /// Reference satellite id token for that constellation, e.g. "G04".
     pub sat_id: *const c_char,
 }
@@ -1358,6 +1368,40 @@ pub struct SidereonRtkRinexDualFrequencyArc {
     pub(crate) inner: CoreRtkRinexDualFrequencyArc,
 }
 
+/// The receiver whose observation file a RINEX RTK arc report comes from.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonRtkRinexReceiver {
+    /// The base receiver's file.
+    Base = 0,
+    /// The rover receiver's file.
+    Rover = 1,
+}
+
+/// A satellite's measurement a RINEX RTK arc builder left out of one epoch
+/// because no configured signal pair whose values the epoch holds has every
+/// carrier frequency resolved: a GLONASS slot with no `GLONASS SLOT / FRQ #`
+/// channel, or a channel outside the -7..=6 FDMA allocation, such as the 7
+/// real IGS headers give R28, when no configured CDMA pair covers it. Only that
+/// satellite is left out of that epoch, as RTKLIB leaves out a measurement
+/// whose carrier frequency is zero; the rest of the epoch and the arc are built
+/// as usual. A satellite whose first held pair does not resolve but a later
+/// configured pair does is not reported: its measurement is formed from the
+/// later pair.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonRtkRinexUnresolvedCarrier {
+    /// The receiver whose file holds the measurement.
+    pub receiver: SidereonRtkRinexReceiver,
+    /// Index of the epoch in that receiver's file.
+    pub epoch_index: usize,
+    /// Satellite token.
+    pub sat_id: SidereonSatelliteToken,
+    /// Null-terminated RINEX phase observable with no carrier frequency, exactly
+    /// as the configured signal pair names it.
+    pub observable_code: [c_char; RINEX_OBS_CODE_C_BYTES],
+}
+
 /// Static RTK solve config for paired raw RINEX OBS plus SP3. Initialize with
 /// sidereon_rtk_rinex_static_baseline_config_init.
 #[repr(C)]
@@ -1512,6 +1556,16 @@ pub struct SidereonRtkDualFrequencyArcEpoch {
     pub has_prediction_time: bool,
     /// Epoch time coordinate (seconds) for downstream prediction.
     pub prediction_time_s: f64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonRtkDualFrequencyArcEpochV2 {
+    pub legacy: SidereonRtkDualFrequencyArcEpoch,
+    pub has_gap_epoch: bool,
+    pub gap_epoch: *const SidereonExactEpoch,
+    pub has_prediction_epoch: bool,
+    pub prediction_epoch: *const SidereonExactEpoch,
 }
 
 /// Dual-frequency cycle-slip preprocessing config for a wide-lane RTK arc.
@@ -4291,7 +4345,7 @@ pub unsafe extern "C" fn sidereon_build_rinex_rtk_arc(
     options: *const SidereonRtkRinexArcOptions,
     out_arc: *mut *mut SidereonRtkRinexArc,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_build_rinex_rtk_arc",
         SidereonStatus::Panic,
         || {
@@ -4346,7 +4400,7 @@ pub unsafe extern "C" fn sidereon_build_dual_frequency_rinex_rtk_arc(
     options: *const SidereonRtkRinexDualArcOptions,
     out_arc: *mut *mut SidereonRtkRinexDualFrequencyArc,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_build_dual_frequency_rinex_rtk_arc",
         SidereonStatus::Panic,
         || {
@@ -4453,6 +4507,43 @@ pub unsafe extern "C" fn sidereon_rtk_rinex_arc_skipped_epoch_count(
             SidereonStatus::Ok
         },
     )
+}
+
+/// Copy the measurements the single-frequency RINEX RTK arc builder left out
+/// for want of a carrier frequency, in the order the builder met them: epoch by
+/// epoch, base before rover, satellites in token order. Uses the
+/// variable-length output contract documented at the top of the header.
+///
+/// Safety: arc must be a live handle; out must point to len writable
+/// SidereonRtkRinexUnresolvedCarrier values or be NULL when len is 0;
+/// out_written and out_required must point to size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtk_rinex_arc_unresolved_carriers(
+    arc: *const SidereonRtkRinexArc,
+    out: *mut SidereonRtkRinexUnresolvedCarrier,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_rtk_rinex_arc_unresolved_carriers";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(FN_NAME, out_written, out_required));
+        let arc = c_try!(require_ref(arc, FN_NAME, "arc"));
+        let rows = c_try!(rtk_rinex_unresolved_carriers_to_c(
+            FN_NAME,
+            &arc.inner.unresolved_carriers
+        ));
+        c_try!(copy_prefix_to_c(
+            FN_NAME,
+            "out",
+            &rows,
+            out,
+            len,
+            out_written,
+            out_required,
+        ));
+        SidereonStatus::Ok
+    })
 }
 
 /// Copy one single-frequency RINEX RTK arc epoch's counts and optional fields.
@@ -4797,6 +4888,44 @@ pub unsafe extern "C" fn sidereon_rtk_rinex_dual_frequency_arc_skipped_epoch_cou
     )
 }
 
+/// Copy the measurements the dual-frequency RINEX RTK arc builder left out for
+/// want of a carrier frequency, in the order the builder met them: epoch by
+/// epoch, base before rover, satellites in token order. A pair names two phase
+/// observables; each one without a frequency is reported once. Uses the
+/// variable-length output contract documented at the top of the header.
+///
+/// Safety: arc must be a live handle; out must point to len writable
+/// SidereonRtkRinexUnresolvedCarrier values or be NULL when len is 0;
+/// out_written and out_required must point to size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtk_rinex_dual_frequency_arc_unresolved_carriers(
+    arc: *const SidereonRtkRinexDualFrequencyArc,
+    out: *mut SidereonRtkRinexUnresolvedCarrier,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_rtk_rinex_dual_frequency_arc_unresolved_carriers";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(FN_NAME, out_written, out_required));
+        let arc = c_try!(require_ref(arc, FN_NAME, "arc"));
+        let rows = c_try!(rtk_rinex_unresolved_carriers_to_c(
+            FN_NAME,
+            &arc.inner.unresolved_carriers
+        ));
+        c_try!(copy_prefix_to_c(
+            FN_NAME,
+            "out",
+            &rows,
+            out,
+            len,
+            out_written,
+            out_required,
+        ));
+        SidereonStatus::Ok
+    })
+}
+
 /// Copy one dual-frequency RINEX RTK arc epoch's time, counts, and optional
 /// fields into *out. The optional sort key is copied separately.
 ///
@@ -5039,7 +5168,7 @@ pub unsafe extern "C" fn sidereon_solve_static_rinex_rtk_baseline(
     config: *const SidereonRtkRinexStaticBaselineConfig,
     out_solution: *mut *mut SidereonRtkStaticArcSolution,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_solve_static_rinex_rtk_baseline",
         SidereonStatus::Panic,
         || {
@@ -5084,7 +5213,7 @@ pub unsafe extern "C" fn sidereon_solve_static_rinex_rtk_baseline(
                     return map_rtk_rinex_arc_error(
                         "sidereon_solve_static_rinex_rtk_baseline",
                         &err,
-                    )
+                    );
                 }
             };
             let core_config = c_try!(rtk_rinex_static_config_from_c(
@@ -5121,7 +5250,7 @@ pub unsafe extern "C" fn sidereon_solve_static_reference_station_rinex(
     config: *const SidereonStaticReferenceStationRinexConfig,
     out_solution: *mut *mut SidereonStaticReferenceStationSolution,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_solve_static_reference_station_rinex",
         SidereonStatus::Panic,
         || {
@@ -5214,7 +5343,7 @@ pub unsafe extern "C" fn sidereon_solve_wide_lane_fixed_rinex_rtk_baseline(
     config: *const SidereonRtkRinexWideLaneFixedConfig,
     out_solution: *mut *mut SidereonRtkWideLaneFixedRinexSolution,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_solve_wide_lane_fixed_rinex_rtk_baseline",
         SidereonStatus::Panic,
         || {
@@ -5259,7 +5388,7 @@ pub unsafe extern "C" fn sidereon_solve_wide_lane_fixed_rinex_rtk_baseline(
                     return map_rtk_rinex_arc_error(
                         "sidereon_solve_wide_lane_fixed_rinex_rtk_baseline",
                         &err,
-                    )
+                    );
                 }
             };
             let core_config = c_try!(rtk_rinex_wide_lane_fixed_config_from_c(
@@ -5305,7 +5434,7 @@ pub unsafe extern "C" fn sidereon_fix_wide_lane_rtk_arc(
     config: *const SidereonRtkWideLaneArcConfig,
     out_solution: *mut *mut SidereonRtkWideLaneArcSolution,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_fix_wide_lane_rtk_arc",
         SidereonStatus::Panic,
         || {
@@ -5340,6 +5469,34 @@ pub unsafe extern "C" fn sidereon_fix_wide_lane_rtk_arc(
     )
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_fix_wide_lane_rtk_arc_v2(
+    epochs: *const SidereonRtkDualFrequencyArcEpochV2,
+    epoch_count: usize,
+    config: *const SidereonRtkWideLaneArcConfig,
+    out_solution: *mut *mut SidereonRtkWideLaneArcSolution,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_fix_wide_lane_rtk_arc_v2";
+    engine_error_operation_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let out_solution = c_try!(require_out(out_solution, FN_NAME, "out_solution"));
+        *out_solution = ptr::null_mut();
+        let config = c_try!(require_ref(config, FN_NAME, "config"));
+        let core_config = c_try!(rtk_wide_lane_arc_config_from_c(FN_NAME, config));
+        let core_epochs = c_try!(rtk_dual_frequency_arc_epochs_v2_from_c(
+            FN_NAME,
+            epochs,
+            epoch_count,
+        ));
+        match fix_wide_lane_rtk_arc(&core_epochs, &core_config) {
+            Ok(inner) => {
+                write_boxed_handle(out_solution, SidereonRtkWideLaneArcSolution { inner });
+                SidereonStatus::Ok
+            }
+            Err(error) => map_rtk_wide_lane_arc_error(FN_NAME, &error),
+        }
+    })
+}
+
 /// Prepare an ionosphere-free single-frequency RTK arc from dual-frequency input
 /// and fixed wide-lane cycles. On success writes a newly owned solution handle to
 /// *out_solution. Release it with sidereon_rtk_ionosphere_free_arc_solution_free.
@@ -5358,7 +5515,7 @@ pub unsafe extern "C" fn sidereon_prepare_ionosphere_free_rtk_arc(
     config: *const SidereonRtkIonosphereFreeArcConfig,
     out_solution: *mut *mut SidereonRtkIonosphereFreeArcSolution,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_prepare_ionosphere_free_rtk_arc",
         SidereonStatus::Panic,
         || {
@@ -5402,6 +5559,41 @@ pub unsafe extern "C" fn sidereon_prepare_ionosphere_free_rtk_arc(
             }
         },
     )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_prepare_ionosphere_free_rtk_arc_v2(
+    epochs: *const SidereonRtkDualFrequencyArcEpochV2,
+    epoch_count: usize,
+    wide_lane_cycles: *const SidereonRtkWideLaneCycle,
+    wide_lane_cycle_count: usize,
+    config: *const SidereonRtkIonosphereFreeArcConfig,
+    out_solution: *mut *mut SidereonRtkIonosphereFreeArcSolution,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_prepare_ionosphere_free_rtk_arc_v2";
+    engine_error_operation_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let out_solution = c_try!(require_out(out_solution, FN_NAME, "out_solution"));
+        *out_solution = ptr::null_mut();
+        let config = c_try!(require_ref(config, FN_NAME, "config"));
+        let core_config = c_try!(rtk_ionosphere_free_arc_config_from_c(FN_NAME, config));
+        let core_epochs = c_try!(rtk_dual_frequency_arc_epochs_v2_from_c(
+            FN_NAME,
+            epochs,
+            epoch_count,
+        ));
+        let core_cycles = c_try!(rtk_wide_lane_cycles_from_c(
+            FN_NAME,
+            wide_lane_cycles,
+            wide_lane_cycle_count,
+        ));
+        match prepare_ionosphere_free_rtk_arc(&core_epochs, &core_cycles, &core_config) {
+            Ok(inner) => {
+                write_boxed_handle(out_solution, SidereonRtkIonosphereFreeArcSolution { inner });
+                SidereonStatus::Ok
+            }
+            Err(error) => map_rtk_ionosphere_free_arc_error(FN_NAME, &error),
+        }
+    })
 }
 
 fn rtk_fixed_metadata(solution: &ValidatedFixedBaselineSolution) -> SidereonRtkFixedMetadata {
@@ -5884,15 +6076,65 @@ unsafe fn rtk_dual_frequency_arc_epochs_from_c(
                 MAX_RTK_ID_BYTES,
             )?,
             gap_time_s: epoch.has_gap_time_s.then_some(epoch.gap_time_s),
+            gap_epoch: None,
             observations,
             satellite_positions_m,
             base_satellite_positions_m,
             rover_satellite_positions_m,
             velocity_mps: epoch.has_velocity_mps.then_some(epoch.velocity_mps),
             prediction_time_s: epoch.has_prediction_time.then_some(epoch.prediction_time_s),
+            prediction_epoch: None,
         });
     }
     Ok(out)
+}
+
+unsafe fn rtk_dual_frequency_arc_epochs_v2_from_c(
+    fn_name: &str,
+    epochs: *const SidereonRtkDualFrequencyArcEpochV2,
+    epoch_count: usize,
+) -> Result<Vec<RtkDualFrequencyArcEpoch>, SidereonStatus> {
+    let raw_epochs = require_slice(epochs, epoch_count, fn_name, "epochs")?;
+    validate_element_count::<SidereonRtkDualFrequencyArcEpochV2>(
+        fn_name,
+        "epoch_count",
+        raw_epochs.len(),
+    )?;
+    let mut converted = Vec::with_capacity(raw_epochs.len());
+    for (index, epoch) in raw_epochs.iter().enumerate() {
+        let mut core_epoch = rtk_dual_frequency_arc_epochs_from_c(fn_name, &epoch.legacy, 1)?
+            .pop()
+            .ok_or_else(|| {
+                set_last_error(format!("{fn_name}: missing converted epoch {index}"));
+                SidereonStatus::InvalidArgument
+            })?;
+        core_epoch.gap_epoch = if epoch.has_gap_epoch {
+            Some(
+                require_ref(
+                    epoch.gap_epoch,
+                    fn_name,
+                    &format!("epochs[{index}].gap_epoch"),
+                )?
+                .inner,
+            )
+        } else {
+            None
+        };
+        core_epoch.prediction_epoch = if epoch.has_prediction_epoch {
+            Some(
+                require_ref(
+                    epoch.prediction_epoch,
+                    fn_name,
+                    &format!("epochs[{index}].prediction_epoch"),
+                )?
+                .inner,
+            )
+        } else {
+            None
+        };
+        converted.push(core_epoch);
+    }
+    Ok(converted)
 }
 
 unsafe fn rtk_wide_lane_arc_config_from_c(
@@ -6106,6 +6348,11 @@ fn static_reference_mode_report_to_c(
 
 fn map_static_reference_error(fn_name: &str, err: &StaticReferenceStationError) -> SidereonStatus {
     set_last_error(format!("{fn_name}: {err}"));
+    crate::engine_error::record_engine_error(
+        crate::engine_error::SidereonEngineErrorFamily::StaticReference,
+        fn_name,
+        crate::engine_error::static_reference_station_error_value(err),
+    );
     match err {
         StaticReferenceStationError::InvalidInput { .. }
         | StaticReferenceStationError::NoEnabledModes => SidereonStatus::InvalidArgument,
@@ -6115,12 +6362,19 @@ fn map_static_reference_error(fn_name: &str, err: &StaticReferenceStationError) 
 
 fn map_rtk_wide_lane_arc_error(fn_name: &str, err: &RtkWideLaneArcError) -> SidereonStatus {
     set_last_error(format!("{fn_name}: {err}"));
+    crate::engine_error::record_engine_error(
+        crate::engine_error::SidereonEngineErrorFamily::Rtk,
+        fn_name,
+        crate::engine_error::rtk_wide_lane_arc_error_value(err),
+    );
     match err {
         RtkWideLaneArcError::EmptyEpochs
         | RtkWideLaneArcError::WideLane(WideLaneError::InvalidInput { .. }) => {
             SidereonStatus::InvalidArgument
         }
-        _ => SidereonStatus::Solve,
+        RtkWideLaneArcError::Reference { .. }
+        | RtkWideLaneArcError::CycleSlipPrep { .. }
+        | RtkWideLaneArcError::WideLane(_) => SidereonStatus::Solve,
     }
 }
 
@@ -6129,22 +6383,34 @@ fn map_rtk_rinex_arc_error(
     err: &sidereon_core::rtk_filter::RtkRinexArcError,
 ) -> SidereonStatus {
     set_last_error(format!("{fn_name}: {err}"));
+    crate::engine_error::record_engine_error(
+        crate::engine_error::SidereonEngineErrorFamily::Rtk,
+        fn_name,
+        crate::engine_error::rtk_rinex_arc_error_value(err),
+    );
     match err {
         sidereon_core::rtk_filter::RtkRinexArcError::InvalidInput { .. }
         | sidereon_core::rtk_filter::RtkRinexArcError::NoSignalPairs
-        | sidereon_core::rtk_filter::RtkRinexArcError::NoUsableEpochs
-        | sidereon_core::rtk_filter::RtkRinexArcError::MissingFrequency { .. } => {
+        | sidereon_core::rtk_filter::RtkRinexArcError::NoUsableEpochs => {
             SidereonStatus::InvalidArgument
         }
         sidereon_core::rtk_filter::RtkRinexArcError::Observation(_) => {
             SidereonStatus::InvalidArgument
         }
         sidereon_core::rtk_filter::RtkRinexArcError::Ephemeris { .. } => SidereonStatus::Solve,
+        sidereon_core::rtk_filter::RtkRinexArcError::Ut1OutsideCoverage(_) => {
+            SidereonStatus::Ut1OutsideCoverage
+        }
     }
 }
 
 fn map_rtk_static_arc_error(fn_name: &str, err: &RtkStaticArcError) -> SidereonStatus {
     set_last_error(format!("{fn_name}: {err}"));
+    crate::engine_error::record_engine_error(
+        crate::engine_error::SidereonEngineErrorFamily::Rtk,
+        fn_name,
+        crate::engine_error::rtk_static_arc_error_value(err),
+    );
     SidereonStatus::Solve
 }
 
@@ -6152,14 +6418,36 @@ fn map_rtk_wide_lane_fixed_arc_error(
     fn_name: &str,
     err: &RtkWideLaneFixedArcError,
 ) -> SidereonStatus {
+    use sidereon_core::rtk_filter::IonosphereFreeBaselineError;
     set_last_error(format!("{fn_name}: {err}"));
+    crate::engine_error::record_engine_error(
+        crate::engine_error::SidereonEngineErrorFamily::Rtk,
+        fn_name,
+        crate::engine_error::rtk_wide_lane_fixed_arc_error_value(err),
+    );
     match err {
         RtkWideLaneFixedArcError::UnsupportedMultiGnss => SidereonStatus::InvalidArgument,
-        RtkWideLaneFixedArcError::WideLane(inner) => map_rtk_wide_lane_arc_error(fn_name, inner),
-        RtkWideLaneFixedArcError::IonosphereFree(inner) => {
-            map_rtk_ionosphere_free_arc_error(fn_name, inner)
+        RtkWideLaneFixedArcError::WideLane(inner) => match inner {
+            RtkWideLaneArcError::EmptyEpochs
+            | RtkWideLaneArcError::WideLane(WideLaneError::InvalidInput { .. }) => {
+                SidereonStatus::InvalidArgument
+            }
+            RtkWideLaneArcError::Reference { .. }
+            | RtkWideLaneArcError::CycleSlipPrep { .. }
+            | RtkWideLaneArcError::WideLane(_) => SidereonStatus::Solve,
+        },
+        RtkWideLaneFixedArcError::IonosphereFree(inner) => match inner {
+            RtkIonosphereFreeArcError::EmptyEpochs
+            | RtkIonosphereFreeArcError::IonosphereFree(
+                IonosphereFreeBaselineError::InvalidInput { .. }
+                | IonosphereFreeBaselineError::NoEpochs,
+            ) => SidereonStatus::InvalidArgument,
+            RtkIonosphereFreeArcError::Reference { .. }
+            | RtkIonosphereFreeArcError::IonosphereFree(_) => SidereonStatus::Solve,
+        },
+        RtkWideLaneFixedArcError::Static { .. } | RtkWideLaneFixedArcError::Sequential { .. } => {
+            SidereonStatus::Solve
         }
-        _ => SidereonStatus::Solve,
     }
 }
 
@@ -6169,13 +6457,19 @@ fn map_rtk_ionosphere_free_arc_error(
 ) -> SidereonStatus {
     use sidereon_core::rtk_filter::IonosphereFreeBaselineError;
     set_last_error(format!("{fn_name}: {err}"));
+    crate::engine_error::record_engine_error(
+        crate::engine_error::SidereonEngineErrorFamily::Rtk,
+        fn_name,
+        crate::engine_error::rtk_ionosphere_free_arc_error_value(err),
+    );
     match err {
         RtkIonosphereFreeArcError::EmptyEpochs
         | RtkIonosphereFreeArcError::IonosphereFree(
             IonosphereFreeBaselineError::InvalidInput { .. }
             | IonosphereFreeBaselineError::NoEpochs,
         ) => SidereonStatus::InvalidArgument,
-        _ => SidereonStatus::Solve,
+        RtkIonosphereFreeArcError::Reference { .. }
+        | RtkIonosphereFreeArcError::IonosphereFree(_) => SidereonStatus::Solve,
     }
 }
 
@@ -6524,6 +6818,41 @@ unsafe fn copy_rinex_dual_frequency_arc_epoch_positions(
     SidereonStatus::Ok
 }
 
+fn rtk_rinex_receiver_to_c(receiver: CoreRtkRinexReceiver) -> SidereonRtkRinexReceiver {
+    match receiver {
+        CoreRtkRinexReceiver::Base => SidereonRtkRinexReceiver::Base,
+        CoreRtkRinexReceiver::Rover => SidereonRtkRinexReceiver::Rover,
+    }
+}
+
+/// Marshal the unresolved-carrier reports. A satellite token or observable too
+/// long for its fixed field is refused by name rather than cut short.
+fn rtk_rinex_unresolved_carriers_to_c(
+    fn_name: &str,
+    rows: &[CoreRtkRinexUnresolvedCarrier],
+) -> Result<Vec<SidereonRtkRinexUnresolvedCarrier>, SidereonStatus> {
+    rows.iter()
+        .enumerate()
+        .map(|(index, row)| {
+            if row.satellite_id.len() > MAX_SATELLITE_TOKEN_BYTES
+                || row.observable_code.len() >= RINEX_OBS_CODE_C_BYTES
+            {
+                set_last_error(format!(
+                    "{fn_name}: unresolved carrier {index} ({} {}) does not fit its fixed fields",
+                    row.satellite_id, row.observable_code
+                ));
+                return Err(SidereonStatus::InvalidArgument);
+            }
+            Ok(SidereonRtkRinexUnresolvedCarrier {
+                receiver: rtk_rinex_receiver_to_c(row.receiver),
+                epoch_index: row.epoch_index,
+                sat_id: satellite_token_from_text(&row.satellite_id),
+                observable_code: fixed_c_chars(&row.observable_code),
+            })
+        })
+        .collect()
+}
+
 fn rtk_cycle_slip_receiver_to_c(receiver: CycleSlipReceiver) -> SidereonRtkCycleSlipReceiver {
     match receiver {
         CycleSlipReceiver::Base => SidereonRtkCycleSlipReceiver::Base,
@@ -6534,6 +6863,70 @@ fn rtk_cycle_slip_receiver_to_c(receiver: CycleSlipReceiver) -> SidereonRtkCycle
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dual_frequency_v2_preserves_exact_gap_and_prediction_epochs() {
+        let gap_epoch = SidereonExactEpoch {
+            inner: sidereon_core::astro::time::ExactEpoch::new(20_000, 123).unwrap(),
+        };
+        let prediction_epoch = SidereonExactEpoch {
+            inner: sidereon_core::astro::time::ExactEpoch::new(20_030, 456).unwrap(),
+        };
+        let row = SidereonRtkDualFrequencyArcEpochV2 {
+            legacy: SidereonRtkDualFrequencyArcEpoch {
+                jd_whole: 2_451_545.0,
+                jd_fraction: 0.0,
+                epoch_sort_key: ptr::null(),
+                has_gap_time_s: true,
+                gap_time_s: 20_000.0,
+                observations: ptr::null(),
+                observation_count: 0,
+                satellite_positions: ptr::null(),
+                satellite_position_count: 0,
+                base_satellite_positions: ptr::null(),
+                base_satellite_position_count: 0,
+                rover_satellite_positions: ptr::null(),
+                rover_satellite_position_count: 0,
+                has_velocity_mps: true,
+                velocity_mps: [1.0, 2.0, 3.0],
+                has_prediction_time: true,
+                prediction_time_s: 20_030.0,
+            },
+            has_gap_epoch: true,
+            gap_epoch: &gap_epoch,
+            has_prediction_epoch: true,
+            prediction_epoch: &prediction_epoch,
+        };
+        let converted = unsafe { rtk_dual_frequency_arc_epochs_v2_from_c("test", &row, 1) }
+            .expect("exact dual-frequency epoch conversion");
+        assert_eq!(converted[0].gap_epoch, Some(gap_epoch.inner));
+        assert_eq!(converted[0].prediction_epoch, Some(prediction_epoch.inner));
+        assert_eq!(converted[0].gap_time_s, Some(20_000.0));
+        assert_eq!(converted[0].prediction_time_s, Some(20_030.0));
+
+        let absent = SidereonRtkDualFrequencyArcEpochV2 {
+            has_gap_epoch: false,
+            gap_epoch: ptr::null(),
+            has_prediction_epoch: false,
+            prediction_epoch: ptr::null(),
+            ..row
+        };
+        let converted = unsafe { rtk_dual_frequency_arc_epochs_v2_from_c("test", &absent, 1) }
+            .expect("explicitly absent dual-frequency exact epochs");
+        assert_eq!(converted[0].gap_epoch, None);
+        assert_eq!(converted[0].prediction_epoch, None);
+        assert_eq!(converted[0].gap_time_s, Some(20_000.0));
+        assert_eq!(converted[0].prediction_time_s, Some(20_030.0));
+
+        let invalid = SidereonRtkDualFrequencyArcEpochV2 {
+            gap_epoch: ptr::null(),
+            ..row
+        };
+        assert_eq!(
+            unsafe { rtk_dual_frequency_arc_epochs_v2_from_c("test", &invalid, 1) },
+            Err(SidereonStatus::NullPointer)
+        );
+    }
 
     fn single_arc() -> CoreRtkRinexArc {
         let observation = RtkArcObservation {
@@ -6553,10 +6946,17 @@ mod tests {
                 rover_satellite_positions_m: positions,
                 velocity_mps: Some([4.0, 5.0, 6.0]),
                 prediction_time_s: Some(7.0),
+                prediction_epoch: None,
             }],
             wavelengths_m: BTreeMap::from([("G05".to_string(), 0.19)]),
             offsets_m: BTreeMap::from([("G05".to_string(), 0.0)]),
             skipped_epoch_count: 3,
+            unresolved_carriers: vec![CoreRtkRinexUnresolvedCarrier {
+                receiver: CoreRtkRinexReceiver::Rover,
+                epoch_index: 4,
+                satellite_id: "R28".to_string(),
+                observable_code: "L1C".to_string(),
+            }],
         }
     }
 
@@ -6579,6 +6979,7 @@ mod tests {
                 jd_fraction: 0.25,
                 epoch_sort_key: Some("2020-06-25T00:00:00".to_string()),
                 gap_time_s: Some(10.0),
+                gap_epoch: None,
                 observations: vec![RtkDualFrequencySatelliteObservation {
                     satellite_id: "G05".to_string(),
                     base: observation.clone(),
@@ -6589,29 +6990,46 @@ mod tests {
                 rover_satellite_positions_m: positions,
                 velocity_mps: None,
                 prediction_time_s: Some(11.0),
+                prediction_epoch: None,
             }],
             skipped_epoch_count: 2,
+            unresolved_carriers: vec![
+                CoreRtkRinexUnresolvedCarrier {
+                    receiver: CoreRtkRinexReceiver::Base,
+                    epoch_index: 0,
+                    satellite_id: "R28".to_string(),
+                    observable_code: "L1C".to_string(),
+                },
+                CoreRtkRinexUnresolvedCarrier {
+                    receiver: CoreRtkRinexReceiver::Base,
+                    epoch_index: 0,
+                    satellite_id: "R28".to_string(),
+                    observable_code: "L2C".to_string(),
+                },
+            ],
         }
     }
 
     #[test]
     fn rinex_arc_accessors_preserve_fields_and_checked_buffers() {
-        let handle = Box::into_raw(Box::new(SidereonRtkRinexArc {
-            inner: single_arc(),
-        }));
+        // The accessors copy the arc's own fields; each expected value is read
+        // from the same arc.
+        let arc = single_arc();
+        let epoch = &arc.epochs[0];
+        let handle = Box::into_raw(Box::new(SidereonRtkRinexArc { inner: arc.clone() }));
         let mut count = 0;
         assert_eq!(
             unsafe { sidereon_rtk_rinex_arc_epoch_count(handle, &mut count) },
             SidereonStatus::Ok
         );
-        assert_eq!(count, 1);
+        assert_eq!(count, arc.epochs.len());
 
         let mut skipped = 0;
         assert_eq!(
             unsafe { sidereon_rtk_rinex_arc_skipped_epoch_count(handle, &mut skipped) },
             SidereonStatus::Ok
         );
-        assert_eq!(skipped, 3);
+        assert_eq!(skipped, arc.skipped_epoch_count);
 
         let mut metadata = SidereonRtkArcEpochOutMetadata {
             base_count: 0,
@@ -6628,10 +7046,16 @@ mod tests {
             unsafe { sidereon_rtk_rinex_arc_epoch_metadata(handle, 0, &mut metadata) },
             SidereonStatus::Ok
         );
-        assert_eq!(metadata.base_count, 1);
+        assert_eq!(metadata.base_count, epoch.base.len());
         assert!(metadata.has_velocity_mps);
-        assert_eq!(metadata.velocity_mps, [4.0, 5.0, 6.0]);
-        assert!(metadata.has_prediction_time);
+        assert_eq!(
+            metadata.velocity_mps.map(f64::to_bits),
+            epoch.velocity_mps.expect("velocity").map(f64::to_bits)
+        );
+        assert_eq!(
+            metadata.has_prediction_time,
+            epoch.prediction_time_s.is_some()
+        );
 
         let mut written = usize::MAX;
         let mut required = 0;
@@ -6648,7 +7072,7 @@ mod tests {
             },
             SidereonStatus::Ok
         );
-        assert_eq!((written, required), (0, 1));
+        assert_eq!((written, required), (0, epoch.base.len()));
         let mut observations = vec![unsafe { std::mem::zeroed::<SidereonRtkArcObservationOut>() }];
         assert_eq!(
             unsafe {
@@ -6663,8 +7087,11 @@ mod tests {
             },
             SidereonStatus::Ok
         );
-        assert_eq!(observations[0].code_m, 20_000_000.0);
-        assert!(observations[0].has_lli);
+        assert_eq!(
+            observations[0].code_m.to_bits(),
+            epoch.base[0].code_m.to_bits()
+        );
+        assert_eq!(observations[0].has_lli, epoch.base[0].lli.is_some());
 
         assert_eq!(
             unsafe {
@@ -6693,7 +7120,7 @@ mod tests {
             },
             SidereonStatus::Ok
         );
-        assert_eq!(maps[0].value, 0.19);
+        assert_eq!(maps[0].value.to_bits(), arc.wavelengths_m["G05"].to_bits());
 
         unsafe {
             sidereon_rtk_rinex_arc_free(handle);
@@ -6703,8 +7130,10 @@ mod tests {
 
     #[test]
     fn dual_rinex_arc_accessors_preserve_time_sort_key_and_lli_presence() {
+        let arc = dual_arc();
+        let epoch = &arc.epochs[0];
         let handle = Box::into_raw(Box::new(SidereonRtkRinexDualFrequencyArc {
-            inner: dual_arc(),
+            inner: arc.clone(),
         }));
         let mut metadata = SidereonRtkRinexDualFrequencyArcEpochOutMetadata {
             jd_whole: 0.0,
@@ -6726,9 +7155,13 @@ mod tests {
             },
             SidereonStatus::Ok
         );
-        assert_eq!(metadata.observation_count, 1);
-        assert_eq!(metadata.jd_fraction, 0.25);
-        assert!(metadata.has_gap_time_s && metadata.has_prediction_time);
+        assert_eq!(metadata.observation_count, epoch.observations.len());
+        assert_eq!(metadata.jd_fraction.to_bits(), epoch.jd_fraction.to_bits());
+        assert_eq!(metadata.has_gap_time_s, epoch.gap_time_s.is_some());
+        assert_eq!(
+            metadata.has_prediction_time,
+            epoch.prediction_time_s.is_some()
+        );
 
         let mut written = 0;
         let mut required = 0;
@@ -6745,7 +7178,10 @@ mod tests {
             },
             SidereonStatus::Ok
         );
-        assert_eq!(required, "2020-06-25T00:00:00".len());
+        assert_eq!(
+            required,
+            epoch.epoch_sort_key.as_deref().expect("sort key").len()
+        );
         let mut rows =
             vec![unsafe { std::mem::zeroed::<SidereonRtkDualFrequencySatelliteObservationOut>() }];
         assert_eq!(
@@ -6761,9 +7197,10 @@ mod tests {
             },
             SidereonStatus::Ok
         );
-        assert_eq!(rows[0].base.p1_m, 20_000_000.0);
-        assert!(rows[0].base.has_lli1);
-        assert!(!rows[0].base.has_lli2);
+        let base = &epoch.observations[0].base;
+        assert_eq!(rows[0].base.p1_m.to_bits(), base.p1_m.to_bits());
+        assert_eq!(rows[0].base.has_lli1, base.lli1.is_some());
+        assert_eq!(rows[0].base.has_lli2, base.lli2.is_some());
         unsafe {
             sidereon_rtk_rinex_dual_frequency_arc_free(handle);
             sidereon_rtk_rinex_dual_frequency_arc_free(ptr::null_mut());
@@ -6783,5 +7220,1232 @@ mod tests {
         let error = unsafe { rtk_rinex_arc_options_from_c("test_rinex_arc_options", &options) }
             .expect_err("nonzero signal-pair count must require a pointer");
         assert_eq!(error, SidereonStatus::NullPointer);
+    }
+
+    fn observable_text(bytes: &[c_char; RINEX_OBS_CODE_C_BYTES]) -> String {
+        let end = bytes
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(bytes.len());
+        bytes[..end]
+            .iter()
+            .map(|byte| *byte as u8 as char)
+            .collect()
+    }
+
+    fn token_text(token: SidereonSatelliteToken) -> String {
+        let end = token
+            .bytes
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(token.bytes.len());
+        token.bytes[..end]
+            .iter()
+            .map(|byte| *byte as u8 as char)
+            .collect()
+    }
+
+    #[test]
+    fn rinex_arcs_report_every_unresolved_carrier_with_its_receiver_and_epoch() {
+        let single = Box::into_raw(Box::new(SidereonRtkRinexArc {
+            inner: single_arc(),
+        }));
+        let dual = Box::into_raw(Box::new(SidereonRtkRinexDualFrequencyArc {
+            inner: dual_arc(),
+        }));
+        let empty = unsafe { std::mem::zeroed::<SidereonRtkRinexUnresolvedCarrier>() };
+        let mut written = usize::MAX;
+        let mut required = usize::MAX;
+        assert_eq!(
+            unsafe {
+                sidereon_rtk_rinex_arc_unresolved_carriers(
+                    single,
+                    ptr::null_mut(),
+                    0,
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!((written, required), (0, 1));
+        let mut rows = [empty; 1];
+        assert_eq!(
+            unsafe {
+                sidereon_rtk_rinex_arc_unresolved_carriers(
+                    single,
+                    rows.as_mut_ptr(),
+                    rows.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(written, 1);
+        assert_eq!(rows[0].receiver, SidereonRtkRinexReceiver::Rover);
+        assert_eq!(rows[0].epoch_index, 4);
+        assert_eq!(token_text(rows[0].sat_id), "R28");
+        assert_eq!(observable_text(&rows[0].observable_code), "L1C");
+
+        let mut dual_rows = [empty; 2];
+        assert_eq!(
+            unsafe {
+                sidereon_rtk_rinex_dual_frequency_arc_unresolved_carriers(
+                    dual,
+                    dual_rows.as_mut_ptr(),
+                    1,
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+        assert_eq!((written, required), (0, 2));
+        assert_eq!(
+            unsafe {
+                sidereon_rtk_rinex_dual_frequency_arc_unresolved_carriers(
+                    dual,
+                    dual_rows.as_mut_ptr(),
+                    dual_rows.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(written, 2);
+        assert_eq!(dual_rows[0].receiver, SidereonRtkRinexReceiver::Base);
+        assert_eq!(observable_text(&dual_rows[0].observable_code), "L1C");
+        assert_eq!(observable_text(&dual_rows[1].observable_code), "L2C");
+        unsafe {
+            sidereon_rtk_rinex_arc_free(single);
+            sidereon_rtk_rinex_dual_frequency_arc_free(dual);
+        }
+    }
+
+    #[test]
+    fn rtk_and_static_reference_producers_reset_before_early_validation_and_refuse_reliably() {
+        use crate::engine_error::{
+            clear_engine_error, record_engine_error, sidereon_last_engine_error_info,
+            sidereon_last_engine_error_payload, SidereonEngineErrorFamily, SidereonEngineErrorInfo,
+        };
+
+        let preload = || {
+            clear_engine_error();
+            record_engine_error(
+                SidereonEngineErrorFamily::Ils,
+                "preload",
+                serde_json::json!({
+                    "schema_version": 1,
+                    "family": "ils",
+                    "kind": "preloaded",
+                }),
+            );
+        };
+
+        let get_info = || {
+            let mut info = SidereonEngineErrorInfo {
+                family: SidereonEngineErrorFamily::Unknown,
+                payload_len: 0,
+            };
+            assert_eq!(
+                unsafe { sidereon_last_engine_error_info(&mut info) },
+                SidereonStatus::Ok
+            );
+            info
+        };
+
+        let read_payload = || {
+            let mut written = 0;
+            let mut required = 0;
+            assert_eq!(
+                unsafe {
+                    sidereon_last_engine_error_payload(
+                        ptr::null_mut(),
+                        0,
+                        &mut written,
+                        &mut required,
+                    )
+                },
+                SidereonStatus::Ok
+            );
+            let mut buf = vec![0u8; required];
+            assert_eq!(
+                unsafe {
+                    sidereon_last_engine_error_payload(
+                        buf.as_mut_ptr(),
+                        buf.len(),
+                        &mut written,
+                        &mut required,
+                    )
+                },
+                SidereonStatus::Ok
+            );
+            serde_json::from_slice::<serde_json::Value>(&buf).unwrap()
+        };
+
+        let wl_config = SidereonRtkWideLaneArcConfig {
+            base_m: [0.0; 3],
+            reference_mode: SidereonRtkArcReferenceMode::Auto as u32,
+            reference_satellite: ptr::null(),
+            reference_per_system: ptr::null(),
+            reference_per_system_count: 0,
+            options: SidereonRtkWideLaneOptions {
+                min_epochs: 1,
+                tolerance_cycles: 0.25,
+                skip_short_fragments: false,
+            },
+            has_cycle_slip: false,
+            cycle_slip: unsafe { std::mem::zeroed() },
+        };
+
+        let if_config = SidereonRtkIonosphereFreeArcConfig {
+            base_m: [0.0; 3],
+            initial_baseline_m: [0.0; 3],
+            reference_mode: SidereonRtkArcReferenceMode::Auto as u32,
+            reference_satellite: ptr::null(),
+            reference_per_system: ptr::null(),
+            reference_per_system_count: 0,
+            apply_troposphere: false,
+        };
+
+        // 1. sidereon_fix_wide_lane_rtk_arc
+        // 1a: Early invalid (null pointer to out_solution) clears generic engine error
+        preload();
+        let status =
+            unsafe { sidereon_fix_wide_lane_rtk_arc(ptr::null(), 0, &wl_config, ptr::null_mut()) };
+        assert_eq!(status, SidereonStatus::NullPointer);
+        let info = get_info();
+        assert_eq!(info.family, SidereonEngineErrorFamily::None);
+        assert_eq!(info.payload_len, 0);
+
+        // 1b: Genuine core error (empty epochs) records RTK empty_epochs
+        let mut out_wl = ptr::null_mut();
+        let status =
+            unsafe { sidereon_fix_wide_lane_rtk_arc(ptr::null(), 0, &wl_config, &mut out_wl) };
+        assert_eq!(status, SidereonStatus::InvalidArgument);
+        let info = get_info();
+        assert_eq!(info.family, SidereonEngineErrorFamily::Rtk);
+        assert!(info.payload_len > 0);
+        let payload = read_payload();
+        assert_eq!(payload["schema_version"], 1);
+        assert_eq!(payload["family"], "rtk");
+        assert_eq!(payload["operation"], "sidereon_fix_wide_lane_rtk_arc");
+        assert_eq!(payload["error"]["kind"], "empty_epochs");
+
+        // 2. sidereon_fix_wide_lane_rtk_arc_v2
+        preload();
+        let status = unsafe {
+            sidereon_fix_wide_lane_rtk_arc_v2(ptr::null(), 0, &wl_config, ptr::null_mut())
+        };
+        assert_eq!(status, SidereonStatus::NullPointer);
+        let info = get_info();
+        assert_eq!(info.family, SidereonEngineErrorFamily::None);
+        assert_eq!(info.payload_len, 0);
+
+        let mut out_wl_v2 = ptr::null_mut();
+        let status = unsafe {
+            sidereon_fix_wide_lane_rtk_arc_v2(ptr::null(), 0, &wl_config, &mut out_wl_v2)
+        };
+        assert_eq!(status, SidereonStatus::InvalidArgument);
+        let info = get_info();
+        assert_eq!(info.family, SidereonEngineErrorFamily::Rtk);
+        assert!(info.payload_len > 0);
+        let payload = read_payload();
+        assert_eq!(payload["schema_version"], 1);
+        assert_eq!(payload["family"], "rtk");
+        assert_eq!(payload["operation"], "sidereon_fix_wide_lane_rtk_arc_v2");
+        assert_eq!(payload["error"]["kind"], "empty_epochs");
+
+        // 3. sidereon_prepare_ionosphere_free_rtk_arc
+        preload();
+        let status = unsafe {
+            sidereon_prepare_ionosphere_free_rtk_arc(
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                &if_config,
+                ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, SidereonStatus::NullPointer);
+        let info = get_info();
+        assert_eq!(info.family, SidereonEngineErrorFamily::None);
+        assert_eq!(info.payload_len, 0);
+
+        let mut out_if = ptr::null_mut();
+        let status = unsafe {
+            sidereon_prepare_ionosphere_free_rtk_arc(
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                &if_config,
+                &mut out_if,
+            )
+        };
+        assert_eq!(status, SidereonStatus::InvalidArgument);
+        let info = get_info();
+        assert_eq!(info.family, SidereonEngineErrorFamily::Rtk);
+        assert!(info.payload_len > 0);
+        let payload = read_payload();
+        assert_eq!(payload["schema_version"], 1);
+        assert_eq!(payload["family"], "rtk");
+        assert_eq!(
+            payload["operation"],
+            "sidereon_prepare_ionosphere_free_rtk_arc"
+        );
+        assert_eq!(payload["error"]["kind"], "empty_epochs");
+
+        // 4. sidereon_prepare_ionosphere_free_rtk_arc_v2
+        preload();
+        let status = unsafe {
+            sidereon_prepare_ionosphere_free_rtk_arc_v2(
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                &if_config,
+                ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, SidereonStatus::NullPointer);
+        let info = get_info();
+        assert_eq!(info.family, SidereonEngineErrorFamily::None);
+        assert_eq!(info.payload_len, 0);
+
+        let mut out_if_v2 = ptr::null_mut();
+        let status = unsafe {
+            sidereon_prepare_ionosphere_free_rtk_arc_v2(
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                &if_config,
+                &mut out_if_v2,
+            )
+        };
+        assert_eq!(status, SidereonStatus::InvalidArgument);
+        let info = get_info();
+        assert_eq!(info.family, SidereonEngineErrorFamily::Rtk);
+        assert!(info.payload_len > 0);
+        let payload = read_payload();
+        assert_eq!(payload["schema_version"], 1);
+        assert_eq!(payload["family"], "rtk");
+        assert_eq!(
+            payload["operation"],
+            "sidereon_prepare_ionosphere_free_rtk_arc_v2"
+        );
+        assert_eq!(payload["error"]["kind"], "empty_epochs");
+
+        // 5. Early null resets across other producing entry points
+        preload();
+        assert_eq!(
+            unsafe {
+                sidereon_build_rinex_rtk_arc(
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null_mut(),
+                )
+            },
+            SidereonStatus::NullPointer
+        );
+        assert_eq!(get_info().family, SidereonEngineErrorFamily::None);
+        assert_eq!(get_info().payload_len, 0);
+
+        preload();
+        assert_eq!(
+            unsafe {
+                sidereon_build_dual_frequency_rinex_rtk_arc(
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null_mut(),
+                )
+            },
+            SidereonStatus::NullPointer
+        );
+        assert_eq!(get_info().family, SidereonEngineErrorFamily::None);
+        assert_eq!(get_info().payload_len, 0);
+
+        preload();
+        assert_eq!(
+            unsafe {
+                sidereon_solve_static_rinex_rtk_baseline(
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null_mut(),
+                )
+            },
+            SidereonStatus::NullPointer
+        );
+        assert_eq!(get_info().family, SidereonEngineErrorFamily::None);
+        assert_eq!(get_info().payload_len, 0);
+
+        preload();
+        assert_eq!(
+            unsafe {
+                sidereon_solve_static_reference_station_rinex(
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null_mut(),
+                )
+            },
+            SidereonStatus::NullPointer
+        );
+        assert_eq!(get_info().family, SidereonEngineErrorFamily::None);
+        assert_eq!(get_info().payload_len, 0);
+
+        preload();
+        assert_eq!(
+            unsafe {
+                sidereon_solve_wide_lane_fixed_rinex_rtk_baseline(
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null_mut(),
+                )
+            },
+            SidereonStatus::NullPointer
+        );
+        assert_eq!(get_info().family, SidereonEngineErrorFamily::None);
+        assert_eq!(get_info().payload_len, 0);
+
+        // 6. Getters and frees retain error
+        clear_engine_error();
+        record_engine_error(
+            SidereonEngineErrorFamily::StaticReference,
+            "test_retention",
+            serde_json::json!({
+                "schema_version": 1,
+                "family": "static_reference",
+                "kind": "preloaded_retention",
+            }),
+        );
+
+        unsafe {
+            sidereon_rtk_static_arc_solution_free(ptr::null_mut());
+            sidereon_rtk_wide_lane_arc_solution_free(ptr::null_mut());
+            sidereon_rtk_ionosphere_free_arc_solution_free(ptr::null_mut());
+            sidereon_rtk_wide_lane_fixed_rinex_solution_free(ptr::null_mut());
+            sidereon_static_reference_station_solution_free(ptr::null_mut());
+            sidereon_rtk_rinex_arc_free(ptr::null_mut());
+            sidereon_rtk_rinex_dual_frequency_arc_free(ptr::null_mut());
+        }
+
+        let info = get_info();
+        assert_eq!(info.family, SidereonEngineErrorFamily::StaticReference);
+        assert!(info.payload_len > 0);
+
+        // Two-pass payload copy also retains
+        let mut written = 0;
+        let mut required = 0;
+        assert_eq!(
+            unsafe {
+                sidereon_last_engine_error_payload(ptr::null_mut(), 0, &mut written, &mut required)
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(written, 0);
+        assert!(required > 0);
+
+        let mut buf = vec![0u8; required];
+        assert_eq!(
+            unsafe {
+                sidereon_last_engine_error_payload(
+                    buf.as_mut_ptr(),
+                    buf.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(written, required);
+
+        let payload: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(payload["family"], "static_reference");
+        assert_eq!(payload["operation"], "test_retention");
+        assert_eq!(payload["error"]["kind"], "preloaded_retention");
+
+        let info_after = get_info();
+        assert_eq!(
+            info_after.family,
+            SidereonEngineErrorFamily::StaticReference
+        );
+        assert_eq!(info_after.payload_len, required);
+    }
+
+    #[test]
+    fn static_reference_error_mapping_preserves_full_mode_reports_and_provenance() {
+        use crate::engine_error::{
+            sidereon_last_engine_error_info, sidereon_last_engine_error_payload,
+            SidereonEngineErrorFamily, SidereonEngineErrorInfo,
+        };
+        use sidereon_core::positioning::{
+            StaticReferenceModeError, StaticReferenceModeReport, StaticReferenceModeStatus,
+            StaticReferenceStationError, StaticReferenceStationMode,
+        };
+        use sidereon_core::rtk_filter::{
+            RtkRinexReceiver as CoreRtkRinexReceiver,
+            RtkRinexUnresolvedCarrier as CoreRtkRinexUnresolvedCarrier,
+        };
+
+        let read_payload = || {
+            let mut written = 0;
+            let mut required = 0;
+            assert_eq!(
+                unsafe {
+                    sidereon_last_engine_error_payload(
+                        ptr::null_mut(),
+                        0,
+                        &mut written,
+                        &mut required,
+                    )
+                },
+                SidereonStatus::Ok
+            );
+            let mut buf = vec![0u8; required];
+            assert_eq!(
+                unsafe {
+                    sidereon_last_engine_error_payload(
+                        buf.as_mut_ptr(),
+                        buf.len(),
+                        &mut written,
+                        &mut required,
+                    )
+                },
+                SidereonStatus::Ok
+            );
+            serde_json::from_slice::<serde_json::Value>(&buf).unwrap()
+        };
+
+        // 1. InvalidInput
+        let err = StaticReferenceStationError::InvalidInput {
+            field: "reference_position_m",
+            reason: "nonfinite coordinates",
+        };
+        assert_eq!(
+            map_static_reference_error("test_static_ref", &err),
+            SidereonStatus::InvalidArgument
+        );
+        let payload = read_payload();
+        assert_eq!(payload["schema_version"], 1);
+        assert_eq!(payload["family"], "static_reference");
+        assert_eq!(payload["operation"], "test_static_ref");
+        assert_eq!(payload["error"]["kind"], "invalid_input");
+        assert_eq!(payload["error"]["fields"]["field"], "reference_position_m");
+        assert_eq!(
+            payload["error"]["fields"]["reason"],
+            "nonfinite coordinates"
+        );
+
+        // 2. NoEnabledModes
+        let err = StaticReferenceStationError::NoEnabledModes;
+        assert_eq!(
+            map_static_reference_error("test_static_ref", &err),
+            SidereonStatus::InvalidArgument
+        );
+        let payload = read_payload();
+        assert_eq!(payload["schema_version"], 1);
+        assert_eq!(payload["family"], "static_reference");
+        assert_eq!(payload["operation"], "test_static_ref");
+        assert_eq!(payload["error"]["kind"], "no_enabled_modes");
+
+        // 3. AllModesFailed with complete reports, errors, and unresolved carriers
+        let report_code = StaticReferenceModeReport {
+            mode: StaticReferenceStationMode::CodeDgnss,
+            status: StaticReferenceModeStatus::Failed,
+            used_epochs: 15,
+            skipped_epochs: 2,
+            used_measurements: 60,
+            error: Some(StaticReferenceModeError::RinexAssembly {
+                side: "rover",
+                reason: "insufficient code satellites".to_string(),
+            }),
+            unresolved_carriers: Vec::new(),
+        };
+
+        let report_carrier = StaticReferenceModeReport {
+            mode: StaticReferenceStationMode::CarrierFloat,
+            status: StaticReferenceModeStatus::Failed,
+            used_epochs: 0,
+            skipped_epochs: 17,
+            used_measurements: 0,
+            error: Some(StaticReferenceModeError::CarrierArc {
+                reason: "no usable epochs".to_string(),
+            }),
+            unresolved_carriers: vec![
+                CoreRtkRinexUnresolvedCarrier {
+                    receiver: CoreRtkRinexReceiver::Rover,
+                    epoch_index: 2,
+                    satellite_id: "G12".to_string(),
+                    observable_code: "L1C".to_string(),
+                },
+                CoreRtkRinexUnresolvedCarrier {
+                    receiver: CoreRtkRinexReceiver::Base,
+                    epoch_index: 5,
+                    satellite_id: "R03".to_string(),
+                    observable_code: "L2P".to_string(),
+                },
+            ],
+        };
+
+        let err = StaticReferenceStationError::AllModesFailed {
+            mode_reports: vec![report_code, report_carrier],
+        };
+
+        assert_eq!(
+            map_static_reference_error("test_static_ref", &err),
+            SidereonStatus::Solve
+        );
+
+        let mut info = SidereonEngineErrorInfo {
+            family: SidereonEngineErrorFamily::Unknown,
+            payload_len: 0,
+        };
+        assert_eq!(
+            unsafe { sidereon_last_engine_error_info(&mut info) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(info.family, SidereonEngineErrorFamily::StaticReference);
+        assert!(info.payload_len > 0);
+
+        let payload = read_payload();
+        assert_eq!(payload["schema_version"], 1);
+        assert_eq!(payload["family"], "static_reference");
+        assert_eq!(payload["operation"], "test_static_ref");
+        assert_eq!(payload["error"]["kind"], "all_modes_failed");
+
+        let reports = payload["error"]["fields"]["mode_reports"]
+            .as_array()
+            .expect("mode_reports array");
+        assert_eq!(reports.len(), 2);
+
+        assert_eq!(reports[0]["mode"], "code_dgnss");
+        assert_eq!(reports[0]["status"], "failed");
+        assert_eq!(reports[0]["used_epochs"], 15);
+        assert_eq!(reports[0]["skipped_epochs"], 2);
+        assert_eq!(reports[0]["used_measurements"], 60);
+        assert_eq!(reports[0]["error"]["kind"], "rinex_assembly");
+        assert_eq!(reports[0]["error"]["fields"]["side"], "rover");
+        assert_eq!(
+            reports[0]["error"]["fields"]["reason"],
+            "insufficient code satellites"
+        );
+        assert_eq!(
+            reports[0]["unresolved_carriers"].as_array().unwrap().len(),
+            0
+        );
+
+        assert_eq!(reports[1]["mode"], "carrier_float");
+        assert_eq!(reports[1]["status"], "failed");
+        assert_eq!(reports[1]["used_epochs"], 0);
+        assert_eq!(reports[1]["skipped_epochs"], 17);
+        assert_eq!(reports[1]["used_measurements"], 0);
+        assert_eq!(reports[1]["error"]["kind"], "carrier_arc");
+        assert_eq!(reports[1]["error"]["fields"]["reason"], "no usable epochs");
+
+        let uc = reports[1]["unresolved_carriers"]
+            .as_array()
+            .expect("unresolved carriers");
+        assert_eq!(uc.len(), 2);
+        assert_eq!(uc[0]["receiver"], "rover");
+        assert_eq!(uc[0]["epoch_index"], 2);
+        assert_eq!(uc[0]["satellite_id"], "G12");
+        assert_eq!(uc[0]["observable_code"], "L1C");
+
+        assert_eq!(uc[1]["receiver"], "base");
+        assert_eq!(uc[1]["epoch_index"], 5);
+        assert_eq!(uc[1]["satellite_id"], "R03");
+        assert_eq!(uc[1]["observable_code"], "L2P");
+    }
+
+    #[test]
+    fn wide_lane_fixed_error_mapping_preserves_stage_distinction() {
+        use crate::engine_error::{
+            sidereon_last_engine_error_info, sidereon_last_engine_error_payload,
+            SidereonEngineErrorFamily, SidereonEngineErrorInfo,
+        };
+        use sidereon_core::rtk::DoubleDifferenceError;
+        use sidereon_core::rtk_filter::{
+            FloatSolveError, IonosphereFreeBaselineError, RtkArcError, RtkIonosphereFreeArcError,
+            RtkStaticArcError, RtkWideLaneArcError, RtkWideLaneFixedArcError, WideLaneError,
+        };
+
+        let read_payload = || {
+            let mut written = 0;
+            let mut required = 0;
+            assert_eq!(
+                unsafe {
+                    sidereon_last_engine_error_payload(
+                        ptr::null_mut(),
+                        0,
+                        &mut written,
+                        &mut required,
+                    )
+                },
+                SidereonStatus::Ok
+            );
+            let mut buf = vec![0u8; required];
+            assert_eq!(
+                unsafe {
+                    sidereon_last_engine_error_payload(
+                        buf.as_mut_ptr(),
+                        buf.len(),
+                        &mut written,
+                        &mut required,
+                    )
+                },
+                SidereonStatus::Ok
+            );
+            serde_json::from_slice::<serde_json::Value>(&buf).unwrap()
+        };
+
+        struct TestCase {
+            err: RtkWideLaneFixedArcError,
+            expected_status: SidereonStatus,
+            expected_kind: &'static str,
+            expected_nested_kind: Option<&'static str>,
+        }
+
+        let cases = vec![
+            TestCase {
+                err: RtkWideLaneFixedArcError::UnsupportedMultiGnss,
+                expected_status: SidereonStatus::InvalidArgument,
+                expected_kind: "unsupported_multi_gnss",
+                expected_nested_kind: None,
+            },
+            TestCase {
+                err: RtkWideLaneFixedArcError::WideLane(RtkWideLaneArcError::EmptyEpochs),
+                expected_status: SidereonStatus::InvalidArgument,
+                expected_kind: "wide_lane",
+                expected_nested_kind: Some("empty_epochs"),
+            },
+            TestCase {
+                err: RtkWideLaneFixedArcError::WideLane(RtkWideLaneArcError::Reference(
+                    DoubleDifferenceError::TooFewCommonSatellites {
+                        count: 1,
+                        minimum: 2,
+                    },
+                )),
+                expected_status: SidereonStatus::Solve,
+                expected_kind: "wide_lane",
+                expected_nested_kind: Some("reference"),
+            },
+            TestCase {
+                err: RtkWideLaneFixedArcError::WideLane(RtkWideLaneArcError::WideLane(
+                    WideLaneError::InvalidInput {
+                        field: "options",
+                        reason: "bad wl input",
+                    },
+                )),
+                expected_status: SidereonStatus::InvalidArgument,
+                expected_kind: "wide_lane",
+                expected_nested_kind: Some("wide_lane"),
+            },
+            TestCase {
+                err: RtkWideLaneFixedArcError::IonosphereFree(
+                    RtkIonosphereFreeArcError::EmptyEpochs,
+                ),
+                expected_status: SidereonStatus::InvalidArgument,
+                expected_kind: "ionosphere_free",
+                expected_nested_kind: Some("empty_epochs"),
+            },
+            TestCase {
+                err: RtkWideLaneFixedArcError::IonosphereFree(
+                    RtkIonosphereFreeArcError::Reference(
+                        DoubleDifferenceError::ReferenceSatelliteMissing("G01".to_string()),
+                    ),
+                ),
+                expected_status: SidereonStatus::Solve,
+                expected_kind: "ionosphere_free",
+                expected_nested_kind: Some("reference"),
+            },
+            TestCase {
+                err: RtkWideLaneFixedArcError::IonosphereFree(
+                    RtkIonosphereFreeArcError::IonosphereFree(
+                        IonosphereFreeBaselineError::InvalidInput {
+                            field: "setup",
+                            reason: "bad if input",
+                        },
+                    ),
+                ),
+                expected_status: SidereonStatus::InvalidArgument,
+                expected_kind: "ionosphere_free",
+                expected_nested_kind: Some("ionosphere_free"),
+            },
+            TestCase {
+                err: RtkWideLaneFixedArcError::Static(RtkStaticArcError::Float(
+                    FloatSolveError::SingularGeometry,
+                )),
+                expected_status: SidereonStatus::Solve,
+                expected_kind: "static",
+                expected_nested_kind: Some("float"),
+            },
+            TestCase {
+                err: RtkWideLaneFixedArcError::Sequential(RtkArcError::EmptyEpochs),
+                expected_status: SidereonStatus::Solve,
+                expected_kind: "sequential",
+                expected_nested_kind: Some("empty_epochs"),
+            },
+        ];
+
+        for case in cases {
+            let status = map_rtk_wide_lane_fixed_arc_error("test_wl_fixed", &case.err);
+            assert_eq!(status, case.expected_status);
+
+            let mut info = SidereonEngineErrorInfo {
+                family: SidereonEngineErrorFamily::Unknown,
+                payload_len: 0,
+            };
+            assert_eq!(
+                unsafe { sidereon_last_engine_error_info(&mut info) },
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::Rtk);
+
+            let payload = read_payload();
+            assert_eq!(payload["schema_version"], 1);
+            assert_eq!(payload["family"], "rtk");
+            assert_eq!(payload["operation"], "test_wl_fixed");
+            assert_eq!(payload["error"]["kind"], case.expected_kind);
+
+            if let Some(nested_kind) = case.expected_nested_kind {
+                assert_eq!(payload["error"]["fields"]["cause"]["kind"], nested_kind);
+            }
+        }
+    }
+
+    #[test]
+    fn rtk_rinex_and_combinations_error_mapping_variants() {
+        use crate::engine_error::sidereon_last_engine_error_payload;
+        use sidereon_core::rtk::DoubleDifferenceError;
+        use sidereon_core::rtk_filter::{
+            IonosphereFreeBaselineError, RtkIonosphereFreeArcError, RtkRinexArcError,
+            RtkWideLaneArcError, WideLaneError,
+        };
+
+        let read_payload = || {
+            let mut written = 0;
+            let mut required = 0;
+            assert_eq!(
+                unsafe {
+                    sidereon_last_engine_error_payload(
+                        ptr::null_mut(),
+                        0,
+                        &mut written,
+                        &mut required,
+                    )
+                },
+                SidereonStatus::Ok
+            );
+            let mut buf = vec![0u8; required];
+            assert_eq!(
+                unsafe {
+                    sidereon_last_engine_error_payload(
+                        buf.as_mut_ptr(),
+                        buf.len(),
+                        &mut written,
+                        &mut required,
+                    )
+                },
+                SidereonStatus::Ok
+            );
+            serde_json::from_slice::<serde_json::Value>(&buf).unwrap()
+        };
+
+        // 1. RINEX Arc errors
+        let rinex_cases = vec![
+            (
+                RtkRinexArcError::InvalidInput {
+                    field: "min_common_satellites",
+                    reason: "must be positive",
+                },
+                SidereonStatus::InvalidArgument,
+                "invalid_input",
+            ),
+            (
+                RtkRinexArcError::NoSignalPairs,
+                SidereonStatus::InvalidArgument,
+                "no_signal_pairs",
+            ),
+            (
+                RtkRinexArcError::NoUsableEpochs,
+                SidereonStatus::InvalidArgument,
+                "no_usable_epochs",
+            ),
+            (
+                RtkRinexArcError::Observation(sidereon_core::Error::Parse("bad obs".to_string())),
+                SidereonStatus::InvalidArgument,
+                "observation",
+            ),
+            (
+                RtkRinexArcError::Observation(sidereon_core::Error::MissingGlonassChannel),
+                SidereonStatus::InvalidArgument,
+                "observation",
+            ),
+            (
+                RtkRinexArcError::Ephemeris {
+                    satellite_id: "G05".to_string(),
+                    epoch_j2000_s: 123.456,
+                    reason: "out of range".to_string(),
+                },
+                SidereonStatus::Solve,
+                "ephemeris",
+            ),
+            (
+                RtkRinexArcError::Ut1OutsideCoverage(
+                    sidereon_core::astro::time::DegradeReason::AfterCoverage,
+                ),
+                SidereonStatus::Ut1OutsideCoverage,
+                "ut1_outside_coverage",
+            ),
+        ];
+
+        for (err, expected_status, expected_kind) in rinex_cases {
+            assert_eq!(map_rtk_rinex_arc_error("test_rinex", &err), expected_status);
+            let payload = read_payload();
+            assert_eq!(payload["schema_version"], 1);
+            assert_eq!(payload["family"], "rtk");
+            assert_eq!(payload["operation"], "test_rinex");
+            assert_eq!(payload["error"]["kind"], expected_kind);
+            if expected_kind == "ephemeris" {
+                assert_eq!(payload["error"]["fields"]["satellite_id"], "G05");
+                assert_eq!(
+                    payload["error"]["fields"]["epoch_j2000_s"]["bits_hex"],
+                    format!("{:016x}", 123.456f64.to_bits())
+                );
+                assert_eq!(payload["error"]["fields"]["reason"], "out of range");
+            } else if expected_kind == "ut1_outside_coverage" {
+                assert_eq!(payload["error"]["fields"]["reason"], "after_coverage");
+            } else if expected_kind == "observation" {
+                match &err {
+                    RtkRinexArcError::Observation(sidereon_core::Error::Parse(msg)) => {
+                        assert_eq!(payload["error"]["fields"]["cause"]["kind"], "parse");
+                        assert_eq!(
+                            payload["error"]["fields"]["cause"]["fields"]["message"],
+                            msg.as_str()
+                        );
+                    }
+                    RtkRinexArcError::Observation(sidereon_core::Error::MissingGlonassChannel) => {
+                        assert_eq!(
+                            payload["error"]["fields"]["cause"]["kind"],
+                            "missing_glonass_channel"
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // 2. Ionosphere-free Arc errors
+        let if_cases = vec![
+            (
+                RtkIonosphereFreeArcError::EmptyEpochs,
+                SidereonStatus::InvalidArgument,
+                "empty_epochs",
+            ),
+            (
+                RtkIonosphereFreeArcError::Reference(
+                    DoubleDifferenceError::TooFewCommonSatellites {
+                        count: 1,
+                        minimum: 2,
+                    },
+                ),
+                SidereonStatus::Solve,
+                "reference",
+            ),
+            (
+                RtkIonosphereFreeArcError::IonosphereFree(
+                    IonosphereFreeBaselineError::InvalidInput {
+                        field: "options",
+                        reason: "bad input",
+                    },
+                ),
+                SidereonStatus::InvalidArgument,
+                "ionosphere_free",
+            ),
+            (
+                RtkIonosphereFreeArcError::IonosphereFree(IonosphereFreeBaselineError::NoEpochs),
+                SidereonStatus::InvalidArgument,
+                "ionosphere_free",
+            ),
+            (
+                RtkIonosphereFreeArcError::IonosphereFree(
+                    IonosphereFreeBaselineError::InconsistentFrequencies("G02".to_string()),
+                ),
+                SidereonStatus::Solve,
+                "ionosphere_free",
+            ),
+        ];
+
+        for (err, expected_status, expected_kind) in if_cases {
+            assert_eq!(
+                map_rtk_ionosphere_free_arc_error("test_if", &err),
+                expected_status
+            );
+            let payload = read_payload();
+            assert_eq!(payload["schema_version"], 1);
+            assert_eq!(payload["family"], "rtk");
+            assert_eq!(payload["operation"], "test_if");
+            assert_eq!(payload["error"]["kind"], expected_kind);
+        }
+
+        // 3. Wide-lane Arc errors
+        let wl_cases = vec![
+            (
+                RtkWideLaneArcError::EmptyEpochs,
+                SidereonStatus::InvalidArgument,
+                "empty_epochs",
+            ),
+            (
+                RtkWideLaneArcError::Reference(DoubleDifferenceError::ReferenceSatelliteMissing(
+                    "G03".to_string(),
+                )),
+                SidereonStatus::Solve,
+                "reference",
+            ),
+            (
+                RtkWideLaneArcError::CycleSlipPrep(
+                    sidereon_core::rtk::CycleSlipPrepError::InvalidInput {
+                        field: "epochs",
+                        reason: "bad slip",
+                    },
+                ),
+                SidereonStatus::Solve,
+                "cycle_slip_prep",
+            ),
+            (
+                RtkWideLaneArcError::WideLane(WideLaneError::InvalidInput {
+                    field: "options",
+                    reason: "bad wl",
+                }),
+                SidereonStatus::InvalidArgument,
+                "wide_lane",
+            ),
+        ];
+
+        for (err, expected_status, expected_kind) in wl_cases {
+            assert_eq!(
+                map_rtk_wide_lane_arc_error("test_wl", &err),
+                expected_status
+            );
+            let payload = read_payload();
+            assert_eq!(payload["schema_version"], 1);
+            assert_eq!(payload["family"], "rtk");
+            assert_eq!(payload["operation"], "test_wl");
+            assert_eq!(payload["error"]["kind"], expected_kind);
+        }
+    }
+
+    #[test]
+    fn static_reference_station_producer_controls() {
+        use crate::engine_error::{
+            clear_engine_error, record_engine_error, sidereon_last_engine_error_info,
+            sidereon_last_engine_error_payload, SidereonEngineErrorFamily, SidereonEngineErrorInfo,
+        };
+        use crate::rinex::{sidereon_rinex_obs_free, sidereon_rinex_obs_parse};
+        use crate::sp3::{sidereon_sp3_free, sidereon_sp3_load};
+        use serde_json::Value;
+        use std::path::Path;
+
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let sp3_path =
+            manifest_dir.join("tests/fixtures/sp3/GBM0MGXRAP_20201770000_01D_05M_ORB_120epoch.sp3");
+        let wtzr_path =
+            manifest_dir.join("tests/fixtures/obs/WTZR00DEU_R_20201770000_01D_30S_MO_120epoch.rnx");
+        let algo_path = manifest_dir.join("tests/fixtures/obs/algo0010_2015001_v1_trim.rnx");
+        let wtzz_path =
+            manifest_dir.join("tests/fixtures/obs/WTZZ00DEU_R_20201770000_01D_30S_MO_120epoch.rnx");
+
+        let sp3_bytes = std::fs::read(&sp3_path).expect("read sp3 fixture");
+        let wtzr_bytes = std::fs::read(&wtzr_path).expect("read wtzr fixture");
+        let algo_bytes = std::fs::read(&algo_path).expect("read algo fixture");
+        let wtzz_bytes = std::fs::read(&wtzz_path).expect("read wtzz fixture");
+
+        unsafe {
+            let mut sp3 = ptr::null_mut();
+            assert_eq!(
+                sidereon_sp3_load(sp3_bytes.as_ptr(), sp3_bytes.len(), &mut sp3),
+                SidereonStatus::Ok
+            );
+            assert!(!sp3.is_null());
+
+            let mut base_obs = ptr::null_mut();
+            assert_eq!(
+                sidereon_rinex_obs_parse(wtzr_bytes.as_ptr(), wtzr_bytes.len(), &mut base_obs),
+                SidereonStatus::Ok
+            );
+            assert!(!base_obs.is_null());
+
+            let mut rover_algo = ptr::null_mut();
+            assert_eq!(
+                sidereon_rinex_obs_parse(algo_bytes.as_ptr(), algo_bytes.len(), &mut rover_algo),
+                SidereonStatus::Ok
+            );
+            assert!(!rover_algo.is_null());
+
+            let mut rover_wtzz = ptr::null_mut();
+            assert_eq!(
+                sidereon_rinex_obs_parse(wtzz_bytes.as_ptr(), wtzz_bytes.len(), &mut rover_wtzz),
+                SidereonStatus::Ok
+            );
+            assert!(!rover_wtzz.is_null());
+
+            let mut config = std::mem::zeroed();
+            assert_eq!(
+                sidereon_static_reference_station_rinex_config_init(&mut config),
+                SidereonStatus::Ok
+            );
+            config.reference_position_m = [4075580.4851, 931853.5954, 4801569.9576];
+            config.enable_code_dgnss = true;
+            config.enable_carrier_rtk = true;
+
+            // 1. Real all-modes-fail producer control with mismatched epochs (2020 vs 2015)
+            clear_engine_error();
+            record_engine_error(
+                SidereonEngineErrorFamily::Rtk,
+                "preloaded_mismatch",
+                serde_json::json!({"kind": "preloaded_mismatch"}),
+            );
+
+            let mut out_sol = ptr::null_mut();
+            let status = sidereon_solve_static_reference_station_rinex(
+                sp3,
+                base_obs,
+                rover_algo,
+                &config,
+                &mut out_sol,
+            );
+            assert_eq!(status, SidereonStatus::Solve);
+            assert!(out_sol.is_null());
+
+            let mut info = SidereonEngineErrorInfo {
+                family: SidereonEngineErrorFamily::None,
+                payload_len: 0,
+            };
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::StaticReference);
+            assert!(info.payload_len > 0);
+
+            let mut buf = vec![0u8; info.payload_len];
+            let mut written = 0;
+            let mut required = 0;
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    buf.as_mut_ptr(),
+                    buf.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            let payload: Value = serde_json::from_slice(&buf).expect("valid JSON payload");
+            assert_eq!(payload["schema_version"], 1);
+            assert_eq!(payload["family"], "static_reference");
+            assert_eq!(
+                payload["operation"],
+                "sidereon_solve_static_reference_station_rinex"
+            );
+            assert_eq!(payload["error"]["kind"], "all_modes_failed");
+
+            let reports = payload["error"]["fields"]["mode_reports"]
+                .as_array()
+                .expect("mode_reports array");
+            assert_eq!(reports.len(), 2);
+            assert_eq!(reports[0]["mode"], "code_dgnss");
+            assert_eq!(reports[0]["status"], "failed");
+            assert_eq!(reports[0]["error"]["kind"], "no_matched_code_epochs");
+
+            assert_eq!(reports[1]["mode"], "carrier_fixed");
+            assert_eq!(reports[1]["status"], "failed");
+            assert_eq!(reports[1]["error"]["kind"], "carrier_arc");
+
+            // 2. Real successful producer control clearing preloaded error and retained through free
+            record_engine_error(
+                SidereonEngineErrorFamily::Rtk,
+                "preloaded_wtzz",
+                serde_json::json!({"kind": "preloaded_wtzz"}),
+            );
+
+            // Bounded regression fixture preparation: truncate parsed WTZR and WTZZ handles to 24 epochs,
+            // matching core oracle tests/static_reference_station.rs (wettzell_reference_station_static_returns_coordinate_and_covariance).
+            assert!((*base_obs).inner.epochs.len() >= 24);
+            (*base_obs).inner.epochs.truncate(24);
+            assert_eq!((*base_obs).inner.epochs.len(), 24);
+
+            assert!((*rover_wtzz).inner.epochs.len() >= 24);
+            (*rover_wtzz).inner.epochs.truncate(24);
+            assert_eq!((*rover_wtzz).inner.epochs.len(), 24);
+
+            config.carrier.arc_options.has_max_epochs = true;
+            config.carrier.arc_options.max_epochs = 24;
+            config.carrier.arc_options.include_prediction_time = false;
+            // Established carrier measurement model and preprocessing options aligned with core
+            // oracle tests/static_reference_station.rs (simple_model, carrier_options):
+            config.carrier.model.code_sigma_m = 2.0;
+            config.carrier.model.phase_sigma_m = 0.01;
+            config.carrier.model.sagnac = true;
+            config.carrier.model.stochastic = SidereonRtkStochasticModel::Simple as u32;
+            config.carrier.model.elevation_weighting = true;
+            config.carrier.preprocessing.has_cycle_slip = true;
+            config.carrier.preprocessing.cycle_slip = SidereonRtkCycleSlipPolicy::SplitArc as u32;
+            config.carrier.float_options.position_tol_m = 1.0e-4;
+            config.carrier.float_options.ambiguity_tol_m = 1.0e-4;
+            config.carrier.float_options.max_iterations = 10;
+            config.carrier.fixed_options.position_tol_m = 1.0e-4;
+            config.carrier.fixed_options.ambiguity_tol_m = 1.0e-4;
+            config.carrier.fixed_options.max_iterations = 10;
+            config.carrier.fixed_options.ratio_threshold = 3.0;
+            config.carrier.fixed_options.partial_ambiguity_resolution = true;
+            config.carrier.fixed_options.partial_min_ambiguities = 4;
+
+            let mut success_sol = ptr::null_mut();
+            let status = sidereon_solve_static_reference_station_rinex(
+                sp3,
+                base_obs,
+                rover_wtzz,
+                &config,
+                &mut success_sol,
+            );
+            assert_eq!(status, SidereonStatus::Ok);
+            assert!(!success_sol.is_null());
+
+            // Successful producer clears generic error slot
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+            assert_eq!(info.payload_len, 0);
+
+            // Free retains cleared slot
+            sidereon_static_reference_station_solution_free(success_sol);
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+            assert_eq!(info.payload_len, 0);
+
+            sidereon_sp3_free(sp3);
+            sidereon_rinex_obs_free(base_obs);
+            sidereon_rinex_obs_free(rover_algo);
+            sidereon_rinex_obs_free(rover_wtzz);
+        }
     }
 }

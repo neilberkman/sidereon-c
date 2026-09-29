@@ -1,5 +1,73 @@
 use super::*;
 
+fn tropo_core_error(fn_name: &str, error: sidereon_core::Error) -> SidereonStatus {
+    crate::engine_error::record_engine_error(
+        crate::engine_error::SidereonEngineErrorFamily::Atmosphere,
+        fn_name,
+        crate::engine_error::core_error_value(&error),
+    );
+    extra_invalid_arg(fn_name, error)
+}
+
+fn tropo_frame_error(
+    fn_name: &str,
+    field: &str,
+    error: sidereon_core::FrameValueError,
+) -> SidereonStatus {
+    let message = error.to_string();
+    match error {
+        sidereon_core::FrameValueError::InvalidInput {
+            field: input_field,
+            reason,
+        } => {
+            crate::engine_error::record_engine_error(
+                crate::engine_error::SidereonEngineErrorFamily::Atmosphere,
+                fn_name,
+                serde_json::json!({
+                    "kind": "frame_value_invalid_input",
+                    "message": message.clone(),
+                    "field": input_field,
+                    "reason": reason,
+                }),
+            );
+            set_last_error(format!("{fn_name}: {field}: {message}"));
+            SidereonStatus::InvalidArgument
+        }
+    }
+}
+
+fn tropo_time_error(
+    fn_name: &str,
+    error: sidereon_core::astro::time::model::TimeModelError,
+) -> SidereonStatus {
+    let message = error.to_string();
+    match error {
+        sidereon_core::astro::time::model::TimeModelError::InvalidInput { field, reason } => {
+            crate::engine_error::record_engine_error(
+                crate::engine_error::SidereonEngineErrorFamily::Atmosphere,
+                fn_name,
+                serde_json::json!({
+                    "kind": "time_model_invalid_input",
+                    "message": message.clone(),
+                    "field": field,
+                    "reason": reason,
+                }),
+            );
+            set_last_error(format!("{fn_name}: {message}"));
+            SidereonStatus::InvalidArgument
+        }
+    }
+}
+
+fn tropo_receiver(
+    fn_name: &str,
+    field: &str,
+    receiver: SidereonGeodetic,
+) -> Result<Wgs84Geodetic, SidereonStatus> {
+    Wgs84Geodetic::new(receiver.lat_rad, receiver.lon_rad, receiver.height_m)
+        .map_err(|error| tropo_frame_error(fn_name, field, error))
+}
+
 // --- Troposphere (sidereon_core::atmosphere::troposphere) --------------------
 
 /// Surface meteorology, mirroring sidereon_core::atmosphere::troposphere::Met.
@@ -15,7 +83,7 @@ pub struct SidereonMet {
 }
 
 /// Initialize a SidereonMet with the engine's standard-atmosphere defaults,
-/// sourced from sidereon_core::spp::SurfaceMet::default() (1013.25 hPa, 288.15 K,
+/// sourced from sidereon_core::positioning::SurfaceMet::default() (1013.25 hPa, 288.15 K,
 /// 0.5 relative humidity) so C callers draw the standard atmosphere from the same
 /// core source as the other bindings.
 ///
@@ -93,13 +161,13 @@ pub unsafe extern "C" fn sidereon_tropo_zenith_delay(
     met: *const SidereonMet,
     out: *mut SidereonZenithDelay,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_tropo_zenith_delay", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_tropo_zenith_delay", SidereonStatus::Panic, || {
         let out = c_try!(require_out(out, "sidereon_tropo_zenith_delay", "out"));
         *out = SidereonZenithDelay {
             dry_m: 0.0,
             wet_m: 0.0,
         };
-        let receiver = c_try!(geodetic_to_wgs84(
+        let receiver = c_try!(tropo_receiver(
             "sidereon_tropo_zenith_delay",
             "receiver",
             receiver
@@ -118,7 +186,7 @@ pub unsafe extern "C" fn sidereon_tropo_zenith_delay(
                 };
                 SidereonStatus::Ok
             }
-            Err(err) => extra_invalid_arg("sidereon_tropo_zenith_delay", err),
+            Err(err) => tropo_core_error("sidereon_tropo_zenith_delay", err),
         }
     })
 }
@@ -138,7 +206,7 @@ pub unsafe extern "C" fn sidereon_tropo_mapping_factors(
     jd_fraction: f64,
     out: *mut SidereonMappingFactors,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_tropo_mapping_factors",
         SidereonStatus::Panic,
         || {
@@ -172,7 +240,7 @@ pub unsafe extern "C" fn sidereon_tropo_mapping_factors_checked(
     out: *mut SidereonMappingFactors,
     out_error: *mut SidereonTropoMappingError,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_tropo_mapping_factors_checked",
         SidereonStatus::Panic,
         || {
@@ -212,10 +280,10 @@ pub unsafe extern "C" fn sidereon_tropo_slant_delay(
     jd_fraction: f64,
     out: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_tropo_slant_delay", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_tropo_slant_delay", SidereonStatus::Panic, || {
         let out = c_try!(require_out(out, "sidereon_tropo_slant_delay", "out"));
         *out = 0.0;
-        let receiver = c_try!(geodetic_to_wgs84(
+        let receiver = c_try!(tropo_receiver(
             "sidereon_tropo_slant_delay",
             "receiver",
             receiver
@@ -238,7 +306,7 @@ pub unsafe extern "C" fn sidereon_tropo_slant_delay(
                 *out = v;
                 SidereonStatus::Ok
             }
-            Err(err) => extra_invalid_arg("sidereon_tropo_slant_delay", err),
+            Err(err) => tropo_core_error("sidereon_tropo_slant_delay", err),
         }
     })
 }
@@ -252,7 +320,7 @@ fn met_from_c(
         met.temperature_k,
         met.relative_humidity,
     )
-    .map_err(|err| extra_invalid_arg(fn_name, err))
+    .map_err(|err| tropo_core_error(fn_name, err))
 }
 
 fn instant_from_jd_c(
@@ -263,7 +331,7 @@ fn instant_from_jd_c(
 ) -> Result<Instant, SidereonStatus> {
     let scale = time_scale_from_c_code(fn_name, "scale", scale)?;
     let jd = sidereon_core::astro::time::JulianDateSplit::new(jd_whole, jd_fraction)
-        .map_err(|err| extra_invalid_arg(fn_name, err))?;
+        .map_err(|err| tropo_time_error(fn_name, err))?;
     Ok(Instant::from_julian_date(scale, jd))
 }
 
@@ -308,7 +376,7 @@ unsafe fn tropo_mapping_factors_common(
     if !out_error.is_null() {
         *out_error = zero_tropo_mapping_error(elevation_rad);
     }
-    let receiver = c_try!(geodetic_to_wgs84(fn_name, "receiver", receiver));
+    let receiver = c_try!(tropo_receiver(fn_name, "receiver", receiver));
     let epoch = c_try!(instant_from_jd_c(
         fn_name,
         epoch.scale,
@@ -332,7 +400,155 @@ unsafe fn tropo_mapping_factors_common(
             if !out_error.is_null() {
                 *out_error = classify_tropo_mapping_error(elevation_rad);
             }
-            extra_invalid_arg(fn_name, err)
+            tropo_core_error(fn_name, err)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn latest_tropo_error() -> serde_json::Value {
+        let mut info = std::mem::MaybeUninit::<SidereonEngineErrorInfo>::uninit();
+        assert_eq!(
+            unsafe { sidereon_last_engine_error_info(info.as_mut_ptr()) },
+            SidereonStatus::Ok
+        );
+        let info = unsafe { info.assume_init() };
+        assert_eq!(info.family, SidereonEngineErrorFamily::Atmosphere);
+
+        let mut written = 0;
+        let mut required = 0;
+        assert_eq!(
+            unsafe {
+                sidereon_last_engine_error_payload(
+                    std::ptr::null_mut(),
+                    0,
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(written, 0);
+        assert_eq!(required, info.payload_len);
+        let mut bytes = vec![0; required];
+        assert_eq!(
+            unsafe {
+                sidereon_last_engine_error_payload(
+                    bytes.as_mut_ptr(),
+                    bytes.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(written, required);
+        serde_json::from_slice(&bytes).expect("valid retained engine error")
+    }
+
+    fn assert_core_invalid_input_detail(operation: &str, message: &str) {
+        let envelope = latest_tropo_error();
+        assert_eq!(envelope["family"], "atmosphere");
+        assert_eq!(envelope["operation"], operation);
+        assert_eq!(envelope["error"]["kind"], "invalid_input");
+        assert_eq!(envelope["schema_version"], 1);
+        assert_eq!(envelope["error"].as_object().unwrap().len(), 2);
+        assert_eq!(envelope["error"]["fields"]["message"], message);
+    }
+
+    fn assert_input_detail(operation: &str, kind: &str, field: &str, reason: &str) {
+        let envelope = latest_tropo_error();
+        assert_eq!(envelope["family"], "atmosphere");
+        assert_eq!(envelope["operation"], operation);
+        assert_eq!(envelope["error"]["kind"], kind);
+        assert_eq!(envelope["error"]["field"], field);
+        assert_eq!(envelope["error"]["reason"], reason);
+        assert_eq!(envelope["schema_version"], 1);
+        assert_eq!(envelope["error"].as_object().unwrap().len(), 4);
+        assert!(!envelope["error"]["message"].as_str().unwrap().is_empty());
+    }
+
+    #[test]
+    fn public_troposphere_producers_retain_complete_core_refusals() {
+        let receiver = SidereonGeodetic {
+            lat_rad: 0.5,
+            lon_rad: 0.1,
+            height_m: 100.0,
+        };
+        let invalid_met = SidereonMet {
+            pressure_hpa: -1.0,
+            temperature_k: 288.15,
+            relative_humidity: 0.5,
+        };
+        let mut zenith = SidereonZenithDelay {
+            dry_m: 0.0,
+            wet_m: 0.0,
+        };
+        assert_eq!(
+            unsafe { sidereon_tropo_zenith_delay(receiver, &invalid_met, &mut zenith) },
+            SidereonStatus::InvalidArgument
+        );
+        assert_core_invalid_input_detail(
+            "sidereon_tropo_zenith_delay",
+            "pressure_hpa not positive",
+        );
+
+        let invalid_receiver = SidereonGeodetic {
+            lat_rad: 2.0,
+            lon_rad: 0.1,
+            height_m: 100.0,
+        };
+        assert_eq!(
+            unsafe { sidereon_tropo_zenith_delay(invalid_receiver, &invalid_met, &mut zenith) },
+            SidereonStatus::InvalidArgument
+        );
+        assert_input_detail(
+            "sidereon_tropo_zenith_delay",
+            "frame_value_invalid_input",
+            "lat_rad",
+            "must be in [-pi/2, pi/2]",
+        );
+
+        let mut mapping = SidereonMappingFactors { dry: 0.0, wet: 0.0 };
+        assert_eq!(
+            unsafe {
+                sidereon_tropo_mapping_factors(
+                    1.0_f64.to_radians(),
+                    receiver,
+                    4,
+                    2_451_545.0,
+                    0.0,
+                    &mut mapping,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+        assert_core_invalid_input_detail(
+            "sidereon_tropo_mapping_factors",
+            "elevation_rad below mapping validity",
+        );
+
+        assert_eq!(
+            unsafe {
+                sidereon_tropo_mapping_factors(
+                    45.0_f64.to_radians(),
+                    receiver,
+                    4,
+                    f64::INFINITY,
+                    0.0,
+                    &mut mapping,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+        assert_input_detail(
+            "sidereon_tropo_mapping_factors",
+            "time_model_invalid_input",
+            "jd_whole",
+            "must be finite",
+        );
     }
 }

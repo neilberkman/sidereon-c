@@ -17,13 +17,18 @@
  * sidereon_parse_rinex_nav_lenient and sidereon_parse_rinex_nav_records return
  * handles released by sidereon_nav_parse_free and
  * sidereon_rinex_nav_records_free respectively. The
- * sidereon_parse_rinex_glonass_records handle retains representable state
- * vectors and separately inspectable skipped extended-slot tokens, and is
+ * sidereon_parse_rinex_glonass_records handle retains the state vectors it
+ * reads and separately inspectable tokens that name no satellite, and is
  * released by sidereon_rinex_glonass_records_free; and
  * sidereon_rinex_clock_parse, sidereon_rinex_clock_parse_lossy,
+ * sidereon_rinex_clock_parse_result, sidereon_rinex_clock_from_points,
  * sidereon_rinex_clock_series, and sidereon_rinex_clock_series_for return
  * handles released by sidereon_rinex_clock_free or
- * sidereon_rinex_clock_series_free as appropriate. The SBAS log parsers return
+ * sidereon_rinex_clock_series_free as appropriate;
+ * sidereon_rinex_clock_header_records and sidereon_rinex_clock_records return
+ * snapshots released by sidereon_clock_header_records_free and
+ * sidereon_clock_records_free; and every SidereonRinexClockResult is released
+ * by sidereon_rinex_clock_result_free. The SBAS log parsers return
  * SidereonSbasLogBlocks released by sidereon_sbas_log_blocks_free, while the
  * RINEX RTK builders return SidereonRtkRinexArc or
  * SidereonRtkRinexDualFrequencyArc released by
@@ -34,7 +39,9 @@
  * Passing NULL to a _free function is a no-op.
  * Last-error storage is thread-local. Opaque handles are read-only shareable
  * after creation, but any concurrent _free invalidates the handle and any
- * borrowed pointers.
+ * borrowed pointers. The RINEX clock edit routes and the BLQ list builders
+ * change their handle in place; no other call may use that handle while one
+ * runs.
  *
  * Status and outputs:
  * SIDEREON_STATUS_OK is the only success value. On failure, the call records a
@@ -49,6 +56,10 @@
  * If the supplied buffer is too small, the function returns
  * SIDEREON_STATUS_INVALID_ARGUMENT, writes zero elements, and reports the
  * required count.
+ * All simultaneously writable output ranges in a call must be disjoint,
+ * including count outputs, data buffers, and multiple output arrays. For a
+ * variable-length output, only entries actually written form the output
+ * range; unused buffer capacity need not be disjoint from another output.
  */
 
 
@@ -63,10 +74,10 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-#define SIDEREON_VERSION_MAJOR 2
-#define SIDEREON_VERSION_MINOR 1
-#define SIDEREON_VERSION_PATCH 1
-#define SIDEREON_VERSION_STRING "2.1.1"
+#define SIDEREON_VERSION_MAJOR 3
+#define SIDEREON_VERSION_MINOR 0
+#define SIDEREON_VERSION_PATCH 0
+#define SIDEREON_VERSION_STRING "3.0.0"
 
 #define ANALYSIS_CENTER_C_BYTES 32
 
@@ -109,6 +120,30 @@
  * `ApArray` length).
  */
 #define SIDEREON_ATMOSPHERE_AP_ARRAY_LEN 7
+
+/**
+ * Most values a RINEX clock sample carries after its bias: bias sigma, rate,
+ * rate sigma, acceleration and acceleration sigma.
+ */
+#define SIDEREON_CLOCK_MAX_ADDITIONAL_VALUES 5
+
+/**
+ * Most values a RINEX clock record can carry beyond its declared count. A
+ * surplus value sits at a distinct position 1..=5 of the value sequence.
+ */
+#define SIDEREON_CLOCK_MAX_SURPLUS_VALUES 5
+
+/**
+ * Most values a RINEX clock record declares: the bias and up to five further
+ * values in the Table A16 order.
+ */
+#define SIDEREON_CLOCK_MAX_VALUES 6
+
+/**
+ * Bytes of a DTED horizontal datum text and its terminator. The DSI datum
+ * field is five bytes; decoded lossily it is at most fifteen bytes of UTF-8.
+ */
+#define SIDEREON_DTED_DATUM_TEXT_C_BYTES 65
 
 /**
  * ABI version for SidereonExactCacheSingleFlightOptions.
@@ -179,9 +214,20 @@
 #define SIDEREON_SLIP_REASON_MELBOURNE_WUBBENA 8
 
 /**
- * Fixed buffer length for terrain store typed error text, including the NUL.
+ * Bytes of the SP3 time-system label field of SidereonSp3WriteError: the
+ * three-character label and its terminator.
  */
-#define SIDEREON_TERRAIN_ERROR_TEXT_C_BYTES 512
+#define SIDEREON_SP3_TIME_SYSTEM_C_BYTES 4
+
+/**
+ * Bytes of a terrain field name or short field text and its terminator.
+ */
+#define SIDEREON_TERRAIN_ERROR_FIELD_C_BYTES 32
+
+/**
+ * Byte size of an `unknown_variant` field, terminator included.
+ */
+#define SIDEREON_UNKNOWN_VARIANT_C_BYTES 65
 
 #define SP3_ARTIFACT_FILENAME_C_BYTES 160
 
@@ -231,6 +277,12 @@ typedef enum SidereonStatus {
      * A bounded wait expired before the requested operation could proceed.
      */
     SIDEREON_STATUS_TIMEOUT = 7,
+    /**
+     * The call reads UT1 at an instant outside the UT1 table and its UT1
+     * policy refuses the long-term delta-T value there
+     * (Ut1OutsideCoverage in the engine error).
+     */
+    SIDEREON_STATUS_UT1_OUTSIDE_COVERAGE = 8,
 } SidereonStatus;
 
 typedef enum SidereonAlmanacEclipseKind {
@@ -276,6 +328,120 @@ typedef enum SidereonSeasonKind {
     SIDEREON_SEASON_KIND_SEPTEMBER_EQUINOX = 2,
     SIDEREON_SEASON_KIND_DECEMBER_SOLSTICE = 3,
 } SidereonSeasonKind;
+
+/**
+ * Which failure an ANTEX read, lookup or write reported. Every kind but None
+ * names an `AntexError` variant of the engine.
+ */
+typedef enum SidereonAntexErrorKind {
+    /**
+     * No failure is recorded.
+     */
+    SIDEREON_ANTEX_ERROR_KIND_NONE = 0,
+    /**
+     * A date-time component is outside the GPS calendar and clock ranges,
+     * including a second of 60, which GPS time does not have.
+     */
+    SIDEREON_ANTEX_ERROR_KIND_INVALID_DATE_TIME = 1,
+    /**
+     * A record field holds text that is not a valid value for it. Carries the
+     * antenna id (absent for a header record), record, field and value.
+     */
+    SIDEREON_ANTEX_ERROR_KIND_INVALID_FIELD = 2,
+    /**
+     * A record the format allows once per block, section or header appears
+     * again with different content. Carries the antenna id (absent for a
+     * header record) and record.
+     */
+    SIDEREON_ANTEX_ERROR_KIND_REPEATED_RECORD = 3,
+    /**
+     * A PCV row cannot be placed on a grid of distinct positions. Carries the
+     * antenna id, frequency and reason.
+     */
+    SIDEREON_ANTEX_ERROR_KIND_DEGENERATE_GRID = 4,
+    /**
+     * A caller input was refused by shared validation. Carries field and
+     * reason.
+     */
+    SIDEREON_ANTEX_ERROR_KIND_INVALID_INPUT = 5,
+    /**
+     * The requested frequency label is not among the antenna's sections.
+     * Carries the antenna id and frequency.
+     */
+    SIDEREON_ANTEX_ERROR_KIND_UNKNOWN_FREQUENCY = 6,
+    /**
+     * Several frequency sections carry the label and their contents differ, so
+     * no single calibration answers. Carries the antenna id, frequency and
+     * sections.
+     */
+    SIDEREON_ANTEX_ERROR_KIND_AMBIGUOUS_FREQUENCY = 7,
+    /**
+     * A frequency section ended without a `NORTH / EAST / UP` record. Carries
+     * the antenna id and frequency.
+     */
+    SIDEREON_ANTEX_ERROR_KIND_MISSING_PCO = 8,
+    /**
+     * The selected PCV interpolation input holds no samples. Carries the
+     * antenna id and frequency.
+     */
+    SIDEREON_ANTEX_ERROR_KIND_EMPTY_PCV_GRID = 9,
+    /**
+     * The product or a record cannot be written as ANTEX text exactly.
+     * Carries field and reason.
+     */
+    SIDEREON_ANTEX_ERROR_KIND_UNWRITABLE = 10,
+} SidereonAntexErrorKind;
+
+/**
+ * Outcome of a bias lookup. Mirrors the variants of
+ * sidereon_core::bias::BiasLookup.
+ */
+typedef enum SidereonBiasLookupStatus {
+    /**
+     * The value is available.
+     */
+    SIDEREON_BIAS_LOOKUP_STATUS_AVAILABLE = 0,
+    /**
+     * No record covers the query.
+     */
+    SIDEREON_BIAS_LOOKUP_STATUS_ABSENT = 1,
+    /**
+     * The query epoch is not on the product's time scale, or the product
+     * declares no usable time scale.
+     */
+    SIDEREON_BIAS_LOOKUP_STATUS_UNSUPPORTED_SCALE = 2,
+    /**
+     * Several records apply at the query epoch and give different values.
+     */
+    SIDEREON_BIAS_LOOKUP_STATUS_AMBIGUOUS = 3,
+    /**
+     * A phase bias stated in nanoseconds was requested in cycles without a
+     * carrier frequency.
+     */
+    SIDEREON_BIAS_LOOKUP_STATUS_CARRIER_FREQUENCY_REQUIRED = 4,
+    /**
+     * A carrier frequency given or needed is not finite and positive.
+     */
+    SIDEREON_BIAS_LOOKUP_STATUS_INVALID_CARRIER_FREQUENCY = 5,
+    /**
+     * No carrier frequency is known for an observable.
+     */
+    SIDEREON_BIAS_LOOKUP_STATUS_CARRIER_FREQUENCY_UNKNOWN = 6,
+    /**
+     * A sloped record has neither a start nor an end, so no epoch is defined
+     * for its value.
+     */
+    SIDEREON_BIAS_LOOKUP_STATUS_UNDEFINED_SLOPE_REFERENCE = 7,
+    /**
+     * The query epoch cannot be converted to a split Julian date.
+     */
+    SIDEREON_BIAS_LOOKUP_STATUS_INVALID_EPOCH = 8,
+    /**
+     * An outcome a later engine adds that this binding has no code for yet;
+     * unknown_variant names it.
+     */
+    SIDEREON_BIAS_LOOKUP_STATUS_UNKNOWN = 999,
+} SidereonBiasLookupStatus;
 
 typedef enum SidereonBiasMode {
     SIDEREON_BIAS_MODE_ABSOLUTE = 0,
@@ -329,6 +495,70 @@ typedef enum SidereonGnssSystem {
      */
     SIDEREON_GNSS_SYSTEM_SBAS = 6,
 } SidereonGnssSystem;
+
+/**
+ * Whether a bias record is a code, a phase or a mixed code/phase bias.
+ * Mirrors sidereon_core::bias::BiasObservableFamily.
+ */
+typedef enum SidereonBiasObservableFamily {
+    /**
+     * Every observable is a code observable.
+     */
+    SIDEREON_BIAS_OBSERVABLE_FAMILY_CODE = 0,
+    /**
+     * Every observable is a phase observable.
+     */
+    SIDEREON_BIAS_OBSERVABLE_FAMILY_PHASE = 1,
+    /**
+     * A DSB or ISB pairing a code with a phase observable. Code and phase
+     * lookups do not use it.
+     */
+    SIDEREON_BIAS_OBSERVABLE_FAMILY_MIXED = 2,
+} SidereonBiasObservableFamily;
+
+/**
+ * Unit a bias row states its values in. Mirrors
+ * sidereon_core::bias::BiasUnit.
+ */
+typedef enum SidereonBiasUnit {
+    /**
+     * Nanoseconds; the record value is held in seconds.
+     */
+    SIDEREON_BIAS_UNIT_NANOSECONDS = 0,
+    /**
+     * Cycles.
+     */
+    SIDEREON_BIAS_UNIT_CYCLES = 1,
+} SidereonBiasUnit;
+
+/**
+ * Which family of BLQ failure an operation reported.
+ */
+typedef enum SidereonBlqErrorKind {
+    /**
+     * No failure is recorded.
+     */
+    SIDEREON_BLQ_ERROR_KIND_NONE = 0,
+    /**
+     * The parser refused a line or the whole input; parse_kind names why.
+     */
+    SIDEREON_BLQ_ERROR_KIND_PARSE = 1,
+    /**
+     * The writer refused a block it could not write so that it reads back
+     * unchanged; write_kind names why.
+     */
+    SIDEREON_BLQ_ERROR_KIND_WRITE = 2,
+    /**
+     * Another engine failure. Its text is in the message.
+     */
+    SIDEREON_BLQ_ERROR_KIND_OTHER = 999,
+} SidereonBlqErrorKind;
+
+typedef enum SidereonClockRelativityKind {
+    SIDEREON_CLOCK_RELATIVITY_KIND_NOT_APPLICABLE = 0,
+    SIDEREON_CLOCK_RELATIVITY_KIND_TERM = 1,
+    SIDEREON_CLOCK_RELATIVITY_KIND_UNAVAILABLE = 2,
+} SidereonClockRelativityKind;
 
 /**
  * Per-satellite status for an emission-epoch state and media batch row.
@@ -504,6 +734,200 @@ typedef enum SidereonCarrierBand {
 } SidereonCarrierBand;
 
 /**
+ * Which terrain lookup failure a lookup reported.
+ */
+typedef enum SidereonTerrainLookupErrorKind {
+    /**
+     * No lookup failure is recorded.
+     */
+    SIDEREON_TERRAIN_LOOKUP_ERROR_KIND_NONE = 0,
+    /**
+     * A coordinate is not finite or is outside the lookup domain.
+     */
+    SIDEREON_TERRAIN_LOOKUP_ERROR_KIND_INVALID_INPUT = 1,
+    /**
+     * No tile of the terrain store covers the query. Carries the tile.
+     */
+    SIDEREON_TERRAIN_LOOKUP_ERROR_KIND_MISSING_TILE = 2,
+    /**
+     * The lookup gives nonzero weight to a posting holding the DTED null
+     * value (all bits set, MIL-PRF-89020B 3.11.3.1), an unknown elevation, and
+     * no neighbouring tile knows the height at the same place. Carries the
+     * tile and the posting.
+     */
+    SIDEREON_TERRAIN_LOOKUP_ERROR_KIND_UNKNOWN_ELEVATION = 3,
+    /**
+     * The tile states a horizontal datum other than WGS84, so it cannot
+     * answer a WGS84 query without a datum transformation, which the terrain
+     * readers do not perform. Carries the tile and the datum.
+     */
+    SIDEREON_TERRAIN_LOOKUP_ERROR_KIND_NON_WGS84_TILE = 4,
+    /**
+     * A tile could not be read. The engine's text is in the message and in
+     * the MESSAGE text.
+     */
+    SIDEREON_TERRAIN_LOOKUP_ERROR_KIND_PARSE = 5,
+    /**
+     * A tile file could not be read as a DTED tile, or a lookup in it failed
+     * other than on a null posting. Carries the tile and, in tile_error, the
+     * typed tile failure; its path and message are the PATH and MESSAGE texts.
+     */
+    SIDEREON_TERRAIN_LOOKUP_ERROR_KIND_TILE = 6,
+    /**
+     * A tile file states an origin other than the one-degree cell its name
+     * gives. Carries the tile the name gives, the origin the file states
+     * (origin_latitude_deg, origin_longitude_deg) and the file as the PATH
+     * text.
+     */
+    SIDEREON_TERRAIN_LOOKUP_ERROR_KIND_TILE_ORIGIN = 7,
+    /**
+     * Another engine failure. Its text is in the message and in the MESSAGE
+     * text.
+     */
+    SIDEREON_TERRAIN_LOOKUP_ERROR_KIND_OTHER = 999,
+} SidereonTerrainLookupErrorKind;
+
+/**
+ * Horizontal datum a DTED tile's DSI record states (DSI character 145).
+ */
+typedef enum SidereonDtedHorizontalDatum {
+    /**
+     * `WGS84`, the datum MIL-PRF-89020B 3.2.1 requires.
+     */
+    SIDEREON_DTED_HORIZONTAL_DATUM_WGS84 = 0,
+    /**
+     * `WGS72`, stated by cells compiled on the earlier World Geodetic System.
+     */
+    SIDEREON_DTED_HORIZONTAL_DATUM_WGS72 = 1,
+    /**
+     * The field is blank or zero-filled; read as WGS84.
+     */
+    SIDEREON_DTED_HORIZONTAL_DATUM_UNSTATED = 2,
+    /**
+     * Any other field content; the text carries it as read.
+     */
+    SIDEREON_DTED_HORIZONTAL_DATUM_OTHER = 3,
+    /**
+     * A datum a later engine names that this binding has no code for yet;
+     * the text carries the engine's value (variant and content) whole.
+     */
+    SIDEREON_DTED_HORIZONTAL_DATUM_UNKNOWN = 999,
+} SidereonDtedHorizontalDatum;
+
+/**
+ * Which failure a DTED tile read or query reported. Every kind but None and
+ * Unknown names a `DtedTileError` variant of the engine.
+ */
+typedef enum SidereonDtedTileErrorKind {
+    /**
+     * No failure is recorded.
+     */
+    SIDEREON_DTED_TILE_ERROR_KIND_NONE = 0,
+    /**
+     * The tile could not be read from disk. Carries path and message.
+     */
+    SIDEREON_DTED_TILE_ERROR_KIND_IO = 1,
+    /**
+     * The tile does not contain the fixed DTED header area. Carries path.
+     */
+    SIDEREON_DTED_TILE_ERROR_KIND_TOO_SHORT = 2,
+    /**
+     * The tile does not start with the UHL1 marker. Carries path.
+     */
+    SIDEREON_DTED_TILE_ERROR_KIND_MISSING_UHL1 = 3,
+    /**
+     * A fixed-width field was not valid UTF-8. Carries message.
+     */
+    SIDEREON_DTED_TILE_ERROR_KIND_INVALID_ENCODING = 4,
+    /**
+     * A numeric field could not be parsed. Carries message.
+     */
+    SIDEREON_DTED_TILE_ERROR_KIND_INVALID_FIELD = 5,
+    /**
+     * The tile dimensions are too small to define a grid cell. Carries path,
+     * lon_count and lat_count.
+     */
+    SIDEREON_DTED_TILE_ERROR_KIND_INVALID_DIMENSIONS = 6,
+    /**
+     * The tile ends before its declared data blocks end. Carries path,
+     * actual_bytes and expected_bytes.
+     */
+    SIDEREON_DTED_TILE_ERROR_KIND_TRUNCATED = 7,
+    /**
+     * A query is outside the tile's one-degree extent. Carries longitude_deg,
+     * latitude_deg, origin_longitude_deg and origin_latitude_deg.
+     */
+    SIDEREON_DTED_TILE_ERROR_KIND_OUTSIDE = 8,
+    /**
+     * A rounded query did not map to a declared posting. Carries
+     * longitude_index and latitude_index.
+     */
+    SIDEREON_DTED_TILE_ERROR_KIND_POSTING_INDEX_OUT_OF_BOUNDS = 9,
+    /**
+     * A data block is missing its sentinel byte. Carries longitude_index.
+     */
+    SIDEREON_DTED_TILE_ERROR_KIND_MISSING_DATA_SENTINEL = 10,
+    /**
+     * A data block checksum does not match its contents. Carries
+     * longitude_index, checksum and sum.
+     */
+    SIDEREON_DTED_TILE_ERROR_KIND_CHECKSUM = 11,
+    /**
+     * A coordinate field is empty.
+     */
+    SIDEREON_DTED_TILE_ERROR_KIND_EMPTY_COORDINATE = 12,
+    /**
+     * A coordinate field has an unsupported hemisphere suffix. Carries
+     * hemisphere.
+     */
+    SIDEREON_DTED_TILE_ERROR_KIND_INVALID_HEMISPHERE = 13,
+    /**
+     * A rounded coordinate is negative. Carries negative_index.
+     */
+    SIDEREON_DTED_TILE_ERROR_KIND_NEGATIVE_POSTING_INDEX = 14,
+    /**
+     * A UHL origin field states degrees outside its axis, or minutes or
+     * seconds outside 0..60. Carries field and text.
+     */
+    SIDEREON_DTED_TILE_ERROR_KIND_COORDINATE_OUT_OF_RANGE = 15,
+    /**
+     * A UHL origin field carries a hemisphere letter of the other axis.
+     * Carries field, hemisphere and expected_hemispheres.
+     */
+    SIDEREON_DTED_TILE_ERROR_KIND_WRONG_HEMISPHERE = 16,
+    /**
+     * A UHL origin is not a whole degree. Carries field and text.
+     */
+    SIDEREON_DTED_TILE_ERROR_KIND_ORIGIN_NOT_WHOLE_DEGREE = 17,
+    /**
+     * A UHL data interval and posting count do not span one degree. Carries
+     * field, interval_tenths_arcsec and count.
+     */
+    SIDEREON_DTED_TILE_ERROR_KIND_INTERVAL_COUNT_MISMATCH = 18,
+    /**
+     * A data record's longitude count does not match its position in the
+     * file. Carries longitude_index and declared.
+     */
+    SIDEREON_DTED_TILE_ERROR_KIND_PROFILE_LONGITUDE_COUNT_MISMATCH = 19,
+    /**
+     * A data record is a partial profile, which is refused rather than read at
+     * the wrong latitudes. Carries longitude_index and declared, the record's
+     * first latitude count.
+     */
+    SIDEREON_DTED_TILE_ERROR_KIND_UNSUPPORTED_PARTIAL_PROFILE = 20,
+    /**
+     * The posting holds the DTED null value (all bits set, MIL-PRF-89020B
+     * 3.11.3.1), an unknown elevation rather than a height. Carries
+     * longitude_index and latitude_index.
+     */
+    SIDEREON_DTED_TILE_ERROR_KIND_NULL_POSTING = 21,
+    /**
+     * A failure this binding does not yet name. Its text is in the message.
+     */
+    SIDEREON_DTED_TILE_ERROR_KIND_UNKNOWN = 999,
+} SidereonDtedTileErrorKind;
+
+/**
  * Eclipse status, mirroring sidereon_core::astro::events::eclipse::EclipseStatus.
  */
 typedef enum SidereonEclipseStatus {
@@ -560,6 +984,12 @@ typedef enum SidereonExactCacheOpenResult {
      */
     SIDEREON_EXACT_CACHE_OPEN_RESULT_OWNER = 1,
 } SidereonExactCacheOpenResult;
+
+typedef enum SidereonExactOrdering {
+    SIDEREON_EXACT_ORDERING_LESS = -1,
+    SIDEREON_EXACT_ORDERING_EQUAL = 0,
+    SIDEREON_EXACT_ORDERING_GREATER = 1,
+} SidereonExactOrdering;
 
 /**
  * Direction of a Moon elevation threshold crossing.
@@ -643,6 +1073,600 @@ typedef enum SidereonGeofenceErrorKind {
      */
     SIDEREON_GEOFENCE_ERROR_KIND_ERROR_METRICS = 5,
 } SidereonGeofenceErrorKind;
+
+typedef enum SidereonInertialErrorKind {
+    SIDEREON_INERTIAL_ERROR_KIND_NONE = 0,
+    SIDEREON_INERTIAL_ERROR_KIND_INVALID_INPUT = 1,
+    SIDEREON_INERTIAL_ERROR_KIND_NON_MONOTONIC_SAMPLE = 2,
+    SIDEREON_INERTIAL_ERROR_KIND_SINGULAR_CALIBRATION = 3,
+    SIDEREON_INERTIAL_ERROR_KIND_DEGENERATE_ATTITUDE = 4,
+    SIDEREON_INERTIAL_ERROR_KIND_INVALID_TAG = 5,
+} SidereonInertialErrorKind;
+
+/**
+ * What mapping function declaration an IONEX product carries.
+ */
+typedef enum SidereonIonexMappingDeclarationKind {
+    /**
+     * The product carries a declared MAPPING FUNCTION record.
+     */
+    SIDEREON_IONEX_MAPPING_DECLARATION_KIND_DECLARED = 0,
+    /**
+     * The product carries no MAPPING FUNCTION record.
+     */
+    SIDEREON_IONEX_MAPPING_DECLARATION_KIND_ABSENT = 1,
+} SidereonIonexMappingDeclarationKind;
+
+/**
+ * Standard mapping function code variants.
+ */
+typedef enum SidereonIonexMappingFunctionKind {
+    /**
+     * NONE: no mapping function was used.
+     */
+    SIDEREON_IONEX_MAPPING_FUNCTION_KIND_NO_MAPPING = 0,
+    /**
+     * COSZ: 1/cos(z).
+     */
+    SIDEREON_IONEX_MAPPING_FUNCTION_KIND_COS_Z = 1,
+    /**
+     * QFAC: Q-factor.
+     */
+    SIDEREON_IONEX_MAPPING_FUNCTION_KIND_Q_FACTOR = 2,
+    /**
+     * Another code, preserved verbatim; read the text with
+     * sidereon_ionex_header_get_mapping_function_code.
+     */
+    SIDEREON_IONEX_MAPPING_FUNCTION_KIND_OTHER = 3,
+} SidereonIonexMappingFunctionKind;
+
+/**
+ * IONEX coverage miss associated with a held slant-delay value.
+ */
+typedef enum SidereonIonexCoverageErrorKind {
+    /**
+     * No coverage error is associated with the value.
+     */
+    SIDEREON_IONEX_COVERAGE_ERROR_KIND_NONE = 0,
+    /**
+     * Query epoch precedes the first map epoch.
+     */
+    SIDEREON_IONEX_COVERAGE_ERROR_KIND_EPOCH_BEFORE_FIRST_MAP = 1,
+    /**
+     * Query epoch follows the last map epoch.
+     */
+    SIDEREON_IONEX_COVERAGE_ERROR_KIND_EPOCH_AFTER_LAST_MAP = 2,
+    /**
+     * Pierce-point latitude is outside the latitude nodes.
+     */
+    SIDEREON_IONEX_COVERAGE_ERROR_KIND_LATITUDE_OUT_OF_RANGE = 3,
+    /**
+     * Pierce-point longitude is outside the longitude nodes.
+     */
+    SIDEREON_IONEX_COVERAGE_ERROR_KIND_LONGITUDE_OUT_OF_RANGE = 4,
+} SidereonIonexCoverageErrorKind;
+
+/**
+ * Which mapping function a product declares where single-layer 1/cos(z') was assumed.
+ */
+typedef enum SidereonIonexAssumedMappingKind {
+    /**
+     * Product declares COSZ, matching the applied factor (nominal).
+     */
+    SIDEREON_IONEX_ASSUMED_MAPPING_KIND_NONE = 0,
+    /**
+     * Product declares NONE: no mapping function was used.
+     */
+    SIDEREON_IONEX_ASSUMED_MAPPING_KIND_NO_MAPPING = 1,
+    /**
+     * Product declares QFAC.
+     */
+    SIDEREON_IONEX_ASSUMED_MAPPING_KIND_Q_FACTOR = 2,
+    /**
+     * Product declares another custom code. A row of an owned result list
+     * carries its own copy of the text, readable with
+     * sidereon_ionex_slant_result_get_mapping_code; a scalar route leaves it
+     * on the live product header, readable with
+     * sidereon_ionex_header_get_mapping_function_code.
+     */
+    SIDEREON_IONEX_ASSUMED_MAPPING_KIND_OTHER = 3,
+    /**
+     * Product carries no MAPPING FUNCTION record.
+     */
+    SIDEREON_IONEX_ASSUMED_MAPPING_KIND_ABSENT = 4,
+} SidereonIonexAssumedMappingKind;
+
+/**
+ * Which engine failure a slant-delay evaluation reported.
+ */
+typedef enum SidereonIonexSlantErrorKind {
+    /**
+     * No failure is recorded; the evaluation holds a value.
+     */
+    SIDEREON_IONEX_SLANT_ERROR_KIND_NONE = 0,
+    /**
+     * The receiver position, geometry or carrier frequency was rejected. The
+     * full engine text is available through the message accessor.
+     */
+    SIDEREON_IONEX_SLANT_ERROR_KIND_INVALID_INPUT = 1,
+    /**
+     * The query lies outside the product's coverage under a strict policy.
+     */
+    SIDEREON_IONEX_SLANT_ERROR_KIND_OUT_OF_COVERAGE = 2,
+    /**
+     * The interpolation weights nodes the product gives as non-available.
+     */
+    SIDEREON_IONEX_SLANT_ERROR_KIND_NODES_NOT_AVAILABLE = 3,
+    /**
+     * The product gives no slant delay under the requested policy.
+     */
+    SIDEREON_IONEX_SLANT_ERROR_KIND_SLANT_UNAVAILABLE = 4,
+    /**
+     * A failure this binding does not yet name. The engine's own text remains
+     * available through the message accessor.
+     */
+    SIDEREON_IONEX_SLANT_ERROR_KIND_UNKNOWN = 999,
+} SidereonIonexSlantErrorKind;
+
+/**
+ * Why an IONEX product gives no slant delay under the requested policy.
+ */
+typedef enum SidereonIonexSlantRefusalKind {
+    /**
+     * No refusal is recorded.
+     */
+    SIDEREON_IONEX_SLANT_REFUSAL_KIND_NONE = 0,
+    /**
+     * The product's height maps give nodes different single-layer heights.
+     */
+    SIDEREON_IONEX_SLANT_REFUSAL_KIND_VARYING_HEIGHTS = 1,
+    /**
+     * A height map gives a node's height as non-available.
+     */
+    SIDEREON_IONEX_SLANT_REFUSAL_KIND_HEIGHT_NOT_AVAILABLE = 2,
+    /**
+     * Under the Declared mapping policy, the product's MAPPING FUNCTION
+     * defines no factor the slant delay applies.
+     */
+    SIDEREON_IONEX_SLANT_REFUSAL_KIND_MAPPING_FUNCTION = 3,
+    /**
+     * A refusal this binding does not yet name. The engine's own text remains
+     * available through the message accessor for the route that produced it.
+     */
+    SIDEREON_IONEX_SLANT_REFUSAL_KIND_UNKNOWN = 999,
+} SidereonIonexSlantRefusalKind;
+
+/**
+ * Typed cause when an exact IONEX query epoch cannot be carried onto UTC.
+ */
+typedef enum SidereonIonexEpochErrorKind {
+    SIDEREON_IONEX_EPOCH_ERROR_KIND_NONE = 0,
+    SIDEREON_IONEX_EPOCH_ERROR_KIND_NOT_WHOLE_SECOND = 1,
+    SIDEREON_IONEX_EPOCH_ERROR_KIND_FRACTIONAL_UTC_SECOND = 2,
+    SIDEREON_IONEX_EPOCH_ERROR_KIND_NO_EXACT_UTC_OFFSET = 3,
+    SIDEREON_IONEX_EPOCH_ERROR_KIND_INSERTED_LEAP_SECOND = 4,
+    SIDEREON_IONEX_EPOCH_ERROR_KIND_BEFORE_INTEGER_LEAP_SECONDS = 5,
+    SIDEREON_IONEX_EPOCH_ERROR_KIND_OUT_OF_RANGE = 6,
+    SIDEREON_IONEX_EPOCH_ERROR_KIND_YEAR_OUT_OF_FIELD = 7,
+    SIDEREON_IONEX_EPOCH_ERROR_KIND_UNKNOWN = 999,
+} SidereonIonexEpochErrorKind;
+
+/**
+ * Kind of IONEX warning reported by parse_with_warnings.
+ */
+typedef enum SidereonIonexWarningKind {
+    /**
+     * A mandatory record was omitted from the header.
+     */
+    SIDEREON_IONEX_WARNING_KIND_MISSING_RECORD = 0,
+    /**
+     * IONEX VERSION / TYPE record was not the first record.
+     */
+    SIDEREON_IONEX_WARNING_KIND_VERSION_RECORD_NOT_FIRST = 1,
+    /**
+     * EPOCH OF FIRST MAP or EPOCH OF LAST MAP disagrees with actual map epochs.
+     */
+    SIDEREON_IONEX_WARNING_KIND_EPOCH_MISMATCH = 2,
+    /**
+     * # OF MAPS IN FILE disagrees with map counts.
+     */
+    SIDEREON_IONEX_WARNING_KIND_MAP_COUNT_MISMATCH = 3,
+    /**
+     * A data field contained 'nan' instead of valid numbers or 9999.
+     */
+    SIDEREON_IONEX_WARNING_KIND_NOT_A_NUMBER_VALUE = 4,
+    /**
+     * Nonzero INTERVAL disagrees with consecutive map spacing.
+     */
+    SIDEREON_IONEX_WARNING_KIND_INTERVAL_MISMATCH = 5,
+    /**
+     * An exponent from an earlier map was carried forward across map boundaries.
+     */
+    SIDEREON_IONEX_WARNING_KIND_EXPONENT_CARRIED_INTO_MAP = 6,
+    /**
+     * Future unmapped warning kind.
+     */
+    SIDEREON_IONEX_WARNING_KIND_UNKNOWN = 999,
+} SidereonIonexWarningKind;
+
+typedef enum SidereonBiasErrorKind {
+    SIDEREON_BIAS_ERROR_KIND_NONE = 0,
+    SIDEREON_BIAS_ERROR_KIND_INVALID_INPUT = 1,
+    SIDEREON_BIAS_ERROR_KIND_INVALID_EPOCH = 2,
+    SIDEREON_BIAS_ERROR_KIND_UNKNOWN_OBSERVABLE = 3,
+    SIDEREON_BIAS_ERROR_KIND_UNSUPPORTED_VERSION = 4,
+    SIDEREON_BIAS_ERROR_KIND_MISSING_DCB_METADATA = 5,
+    SIDEREON_BIAS_ERROR_KIND_MISSING_CLOCK_REFERENCE = 6,
+    SIDEREON_BIAS_ERROR_KIND_MISSING_WRITER_METADATA = 7,
+    SIDEREON_BIAS_ERROR_KIND_UTF8 = 8,
+    SIDEREON_BIAS_ERROR_KIND_DEPARTURE = 9,
+    SIDEREON_BIAS_ERROR_KIND_INVALID_UTF8_LINE = 10,
+    SIDEREON_BIAS_ERROR_KIND_UNSUPPORTED_TIME_SYSTEM = 11,
+    SIDEREON_BIAS_ERROR_KIND_DCB_RECORD_MISMATCH = 12,
+    SIDEREON_BIAS_ERROR_KIND_UNKNOWN = 999,
+} SidereonBiasErrorKind;
+
+typedef enum SidereonDegradeReason {
+    SIDEREON_DEGRADE_REASON_NONE = 0,
+    SIDEREON_DEGRADE_REASON_BEFORE_COVERAGE = 1,
+    SIDEREON_DEGRADE_REASON_AFTER_COVERAGE = 2,
+} SidereonDegradeReason;
+
+/**
+ * Stable family identifier for the versioned engine-error detail record.
+ */
+typedef enum SidereonEngineErrorFamily {
+    /**
+     * No engine error is retained on this thread.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_NONE = 0,
+    /**
+     * Sequential, static, or dual-frequency RTK arc failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_RTK = 1,
+    /**
+     * Static reference-station solve failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_STATIC_REFERENCE = 2,
+    /**
+     * Trust-region least-squares solve failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_TRLS = 3,
+    /**
+     * Integer least-squares search failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_ILS = 4,
+    /**
+     * Orbit ephemeris SPK file parsing or evaluation failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_SPK = 5,
+    /**
+     * Conjunction data message (CDM) parsing or evaluation failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_CDM = 6,
+    /**
+     * Tracking data message (TDM) parsing or evaluation failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_TDM = 7,
+    /**
+     * GNSS/INS fusion filter failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_FUSION = 8,
+    /**
+     * Fusion state binary serialization or deserialization failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_FUSION_STATE_CODEC = 9,
+    /**
+     * Clock Allan-family stability estimator failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_ALLAN = 10,
+    /**
+     * Clock power-law noise identification or fit failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_POWER_LAW_NOISE = 11,
+    /**
+     * Terrestrial reference-frame catalog and propagation failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_FRAME_CATALOG = 12,
+    /**
+     * Sidereal filtering and repeating multipath error.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_SIDEREAL = 13,
+    /**
+     * Neutral-atmosphere density model evaluation failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_ATMOSPHERE = 14,
+    /**
+     * Source localization solve failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_SOURCE_LOCALIZATION = 15,
+    /**
+     * Geodetic time series analysis failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_GEODETIC_TIME_SERIES = 16,
+    /**
+     * Statistical normality testing failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_NORMALITY = 17,
+    /**
+     * Track filtering or covariance update failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_TRACK = 18,
+    /**
+     * Precise ephemeris samples building and validation failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_PRECISE_SAMPLES = 19,
+    /**
+     * Precise ephemeris interpolant construction or evaluation failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_PRECISE_INTERPOLANT = 20,
+    /**
+     * Space weather data parsing or evaluation failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_SPACE_WEATHER = 21,
+    /**
+     * Advanced RAIM integrity calculation failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_ARAIM = 22,
+    /**
+     * Reduced orbit propagation or state failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_REDUCED_ORBIT = 23,
+    /**
+     * Reduced orbit source failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_REDUCED_ORBIT_SOURCE = 24,
+    /**
+     * Piecewise orbit evaluation failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_PIECEWISE_ORBIT = 25,
+    /**
+     * Orbit determination fit failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_ORBIT_FIT = 26,
+    /**
+     * Orbital elements conversion failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_ELEMENTS = 27,
+    /**
+     * Equinoctial elements conversion failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_EQUINOCTIAL = 28,
+    /**
+     * RTN frame transformation failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_RTN_FRAME = 29,
+    /**
+     * Orbit anomaly conversion failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_ANOMALY = 30,
+    /**
+     * Numerical orbit propagation or state transition failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_PROPAGATION = 31,
+    /**
+     * Satellite orbit decay lifetime prediction failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_DECAY = 32,
+    /**
+     * DGNSS position orchestration failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_DGNSS = 33,
+    /**
+     * Synthetic-observable scenario simulation failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_SCENARIO = 34,
+    /**
+     * Data product catalog operations and queries.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_CATALOG = 35,
+    /**
+     * Exact product cache operations, storage, and publishing.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_EXACT_CACHE = 36,
+    /**
+     * Time of closest approach calculation failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_TCA = 37,
+    /**
+     * Astronomical almanac event evaluation failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_ALMANAC = 38,
+    /**
+     * Topocentric and celestial body observation failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_OBSERVE = 39,
+    /**
+     * Celestial body observation failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_BODY_OBSERVATION = 40,
+    /**
+     * Ground station look angle prediction failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_LOOK_ANGLE = 41,
+    /**
+     * Satellite pass prediction failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_PASS = 42,
+    /**
+     * Astronomical event finder failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_EVENT_FINDER = 43,
+    /**
+     * Reference frame transformation failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_FRAME_TRANSFORM = 44,
+    /**
+     * Close-approach conjunction evaluation failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_CONJUNCTION = 45,
+    /**
+     * Unified ergonomic facade product parsing or solve failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_FACADE = 46,
+    /**
+     * Single-point positioning core solve failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_SPP = 47,
+    /**
+     * Single-point positioning policy or solution validation failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_SPP_POLICY = 48,
+    /**
+     * Low-precision Sun and Moon position computation failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_SUN_MOON = 49,
+    /**
+     * RINEX observation to SPP input assembly failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_RINEX_SPP = 50,
+    /**
+     * Receiver solution validation failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_SOLUTION_VALIDATION = 51,
+    /**
+     * Radio-frequency link budget input validation failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_RF = 52,
+    /**
+     * Ionosphere-free GNSS observable combination failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_IONOSPHERE_FREE = 53,
+    /**
+     * Satellite-ground Doppler calculation failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_DOPPLER = 54,
+    /**
+     * CCSDS Orbit Ephemeris Message codec failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_OEM = 55,
+    /**
+     * CCSDS Orbit Parameter Message codec failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_OPM = 56,
+    /**
+     * CCSDS Orbit Mean-Elements Message codec failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_OMM = 57,
+    /**
+     * Dilution-of-precision and error-ellipse failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_DOP = 58,
+    /**
+     * Geodesic fence construction and evaluation failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_GEOFENCE = 59,
+    /**
+     * Position-error metrics and percentile calculations.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_ERROR_METRICS = 63,
+    /**
+     * GPS C/A signal generation, correlation, or acquisition failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_SIGNAL = 60,
+    /**
+     * Carrier-phase combination or cycle-slip failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_CARRIER_PHASE = 61,
+    /**
+     * Signal spectral or discriminator analysis failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_SIGNAL_ANALYSIS = 62,
+    /**
+     * GNSS observable prediction and state evaluation failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_OBSERVABLES = 64,
+    /**
+     * NMEA sentence writing failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_NMEA = 65,
+    /**
+     * SGP4 TLE fitting failure, including a complete best-effort fit when available.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_TLE_FIT = 66,
+    /**
+     * Initial-orbit-determination geometry or convergence failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_IOD = 67,
+    /**
+     * Product staleness selection failure with complete SelectionError fields.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_SELECTION = 68,
+    /**
+     * PPP auto-initialization failure, including its nested SPP/float/fixed cause.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_PPP_AUTO_INIT = 69,
+    /**
+     * Static-positioning solve failure with complete typed causes.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_STATIC_POSITIONING = 70,
+    /**
+     * Inter-system time-scale offset failure with complete variant and scale.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_TIME_OFFSET = 71,
+    /**
+     * Time-model construction failure with exact input field and reason.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_TIME_MODEL = 72,
+    /**
+     * A family introduced by a later library version.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_UNKNOWN = 999,
+} SidereonEngineErrorFamily;
+
+/**
+ * Why an FDE solve ended with a fault still detected
+ * (sidereon_core::quality::FdeUnresolvedReason).
+ */
+typedef enum SidereonFdeUnresolvedReason {
+    /**
+     * No unresolved FDE solve is recorded for this thread.
+     */
+    SIDEREON_FDE_UNRESOLVED_REASON_NONE = 0,
+    /**
+     * The exclusion budget (max_exclusions) was spent.
+     */
+    SIDEREON_FDE_UNRESOLVED_REASON_EXCLUSION_BUDGET_EXHAUSTED = 1,
+    /**
+     * No leave-one-out re-solve was admissible: every candidate failed to
+     * solve, used fewer than five satellites, or left a residual RMS above
+     * max_exclusion_rms_m.
+     */
+    SIDEREON_FDE_UNRESOLVED_REASON_NO_ADMISSIBLE_EXCLUSION = 2,
+    /**
+     * A reason a later engine names that this binding has no code for yet.
+     */
+    SIDEREON_FDE_UNRESOLVED_REASON_UNKNOWN = 999,
+} SidereonFdeUnresolvedReason;
+
+/**
+ * Stable kind of the most recent `sidereon_core::quality::QualityError` from a
+ * quality-producing C operation on this OS thread. Read immediately after one
+ * of those producers; unrelated calls intentionally retain this value.
+ */
+typedef enum SidereonQualityErrorKind {
+    /**
+     * No QualityError was recorded by the most recent quality producer.
+     */
+    SIDEREON_QUALITY_ERROR_KIND_NONE = 0,
+    SIDEREON_QUALITY_ERROR_KIND_INVALID_ELEVATION = 1,
+    SIDEREON_QUALITY_ERROR_KIND_MISSING_CN0 = 2,
+    SIDEREON_QUALITY_ERROR_KIND_INVALID_PARAMETER = 3,
+    SIDEREON_QUALITY_ERROR_KIND_INVALID_PROBABILITY = 4,
+    SIDEREON_QUALITY_ERROR_KIND_INVALID_SYSTEM_COUNT = 5,
+    SIDEREON_QUALITY_ERROR_KIND_INVALID_DOF = 6,
+    SIDEREON_QUALITY_ERROR_KIND_INVALID_WEIGHT = 7,
+    SIDEREON_QUALITY_ERROR_KIND_INVALID_RELIABILITY_PARAMETER = 8,
+    SIDEREON_QUALITY_ERROR_KIND_INVALID_RESIDUALS = 9,
+    SIDEREON_QUALITY_ERROR_KIND_INVALID_DESIGN = 10,
+    SIDEREON_QUALITY_ERROR_KIND_SINGULAR_GEOMETRY = 11,
+    SIDEREON_QUALITY_ERROR_KIND_MISSING_VARIANCES = 12,
+    SIDEREON_QUALITY_ERROR_KIND_INVALID_VARIANCE = 13,
+    /**
+     * A future core QualityError variant not listed above.
+     */
+    SIDEREON_QUALITY_ERROR_KIND_UNKNOWN = 999,
+} SidereonQualityErrorKind;
 
 /**
  * Provenance of the checksum carried by an opened artifact handle.
@@ -729,6 +1753,35 @@ typedef enum SidereonNavcenTiming {
     SIDEREON_NAVCEN_TIMING_UNPARSEABLE = 2,
 } SidereonNavcenTiming;
 
+typedef enum SidereonNmeaDiagnosticSource {
+    SIDEREON_NMEA_DIAGNOSTIC_SOURCE_PARSER = 0,
+    SIDEREON_NMEA_DIAGNOSTIC_SOURCE_EPOCH_ASSEMBLY = 1,
+} SidereonNmeaDiagnosticSource;
+
+typedef enum SidereonNmeaDiagnosticKind {
+    SIDEREON_NMEA_DIAGNOSTIC_KIND_SKIP = 0,
+    SIDEREON_NMEA_DIAGNOSTIC_KIND_WARNING = 1,
+} SidereonNmeaDiagnosticKind;
+
+typedef enum SidereonPppCorrectionsErrorKind {
+    SIDEREON_PPP_CORRECTIONS_ERROR_KIND_NONE = 0,
+    SIDEREON_PPP_CORRECTIONS_ERROR_KIND_INVALID_INPUT = 1,
+    SIDEREON_PPP_CORRECTIONS_ERROR_KIND_EPOCH = 2,
+    SIDEREON_PPP_CORRECTIONS_ERROR_KIND_TIDE = 3,
+    SIDEREON_PPP_CORRECTIONS_ERROR_KIND_POLE_TIDE = 4,
+    SIDEREON_PPP_CORRECTIONS_ERROR_KIND_OCEAN_LOADING = 5,
+    SIDEREON_PPP_CORRECTIONS_ERROR_KIND_WINDUP_FREQUENCY = 6,
+    SIDEREON_PPP_CORRECTIONS_ERROR_KIND_SATELLITE_ANTENNA_FREQUENCY = 7,
+    SIDEREON_PPP_CORRECTIONS_ERROR_KIND_BIAS = 8,
+    SIDEREON_PPP_CORRECTIONS_ERROR_KIND_CODE_BIAS_OBSERVABLE = 9,
+} SidereonPppCorrectionsErrorKind;
+
+typedef enum SidereonPppCorrectionsDegradeReason {
+    SIDEREON_PPP_CORRECTIONS_DEGRADE_REASON_NONE = 0,
+    SIDEREON_PPP_CORRECTIONS_DEGRADE_REASON_BEFORE_COVERAGE = 1,
+    SIDEREON_PPP_CORRECTIONS_DEGRADE_REASON_AFTER_COVERAGE = 2,
+} SidereonPppCorrectionsDegradeReason;
+
 /**
  * Terminal status of a PPP float or fixed least-squares solve.
  */
@@ -756,6 +1809,42 @@ typedef enum SidereonPppIntegerStatus {
      */
     SIDEREON_PPP_INTEGER_STATUS_NOT_FIXED = 1,
 } SidereonPppIntegerStatus;
+
+/**
+ * Why a PPP observation places no transmission epoch. Mirrors
+ * sidereon_core::precise_positioning::UnplacedObservationReason.
+ */
+typedef enum SidereonPppUnplacedObservationReason {
+    /**
+     * The code is zero or negative. RTKLIB reads a zero pseudorange as none
+     * and places no satellite for it (`satposs`); a negative code places the
+     * satellite at no meaningful epoch.
+     */
+    SIDEREON_PPP_UNPLACED_OBSERVATION_REASON_CODE_NOT_POSITIVE = 0,
+    /**
+     * A reason a later engine adds that this binding has no code for yet;
+     * unknown_variant names it.
+     */
+    SIDEREON_PPP_UNPLACED_OBSERVATION_REASON_UNKNOWN = 999,
+    /**
+     * Strict SSR size policy refused an orbit/clock correction; use the V2
+     * record to read its magnitudes.
+     */
+    SIDEREON_PPP_UNPLACED_OBSERVATION_REASON_SSR_CORRECTION_EXCEEDS_LIMIT = 1,
+} SidereonPppUnplacedObservationReason;
+
+typedef enum SidereonPreciseSamplesErrorKind {
+    SIDEREON_PRECISE_SAMPLES_ERROR_KIND_NONE = 0,
+    SIDEREON_PRECISE_SAMPLES_ERROR_KIND_EMPTY = 1,
+    SIDEREON_PRECISE_SAMPLES_ERROR_KIND_SINGLE_SAMPLE_SATELLITE = 2,
+    SIDEREON_PRECISE_SAMPLES_ERROR_KIND_NON_MONOTONIC_EPOCHS = 3,
+    SIDEREON_PRECISE_SAMPLES_ERROR_KIND_MIXED_TIME_SCALES = 4,
+    SIDEREON_PRECISE_SAMPLES_ERROR_KIND_EPOCH_NOT_REPRESENTABLE = 5,
+    SIDEREON_PRECISE_SAMPLES_ERROR_KIND_NON_FINITE_SAMPLE = 6,
+    SIDEREON_PRECISE_SAMPLES_ERROR_KIND_ACCURACY_SAMPLES_MISMATCH = 7,
+    SIDEREON_PRECISE_SAMPLES_ERROR_KIND_INVALID_ACCURACY_VALUE = 8,
+    SIDEREON_PRECISE_SAMPLES_ERROR_KIND_OTHER = 9,
+} SidereonPreciseSamplesErrorKind;
 
 /**
  * Precise-interpolant artifact open error category returned through out_error.
@@ -801,22 +1890,234 @@ typedef enum SidereonPreciseInterpolantArtifactErrorKind {
      * A caller-attested checksum differed from the checksum in the header.
      */
     SIDEREON_PRECISE_INTERPOLANT_ARTIFACT_ERROR_KIND_ATTESTED_CHECKSUM_MISMATCH = 9,
+    /**
+     * A satellite payload checksum did not match its index record.
+     */
+    SIDEREON_PRECISE_INTERPOLANT_ARTIFACT_ERROR_KIND_SATELLITE_CHECKSUM = 10,
+    /**
+     * The first eight bytes do not contain the precise-store magic.
+     */
+    SIDEREON_PRECISE_INTERPOLANT_ARTIFACT_ERROR_KIND_BAD_MAGIC = 11,
+    /**
+     * The byte span ends before the fixed artifact header is complete.
+     */
+    SIDEREON_PRECISE_INTERPOLANT_ARTIFACT_ERROR_KIND_HEADER_TRUNCATED = 12,
+    /**
+     * The byte span contains bytes after the declared artifact length.
+     */
+    SIDEREON_PRECISE_INTERPOLANT_ARTIFACT_ERROR_KIND_TRAILING_BYTES = 13,
+    /**
+     * An index region extends beyond the declared artifact length.
+     */
+    SIDEREON_PRECISE_INTERPOLANT_ARTIFACT_ERROR_KIND_RANGE_OUT_OF_BOUNDS = 14,
+    /**
+     * A refusal added by a later engine version; its detail remains in the
+     * thread-local error message.
+     */
+    SIDEREON_PRECISE_INTERPOLANT_ARTIFACT_ERROR_KIND_UNKNOWN = 999,
 } SidereonPreciseInterpolantArtifactErrorKind;
 
 /**
- * Which MSM variant an observation message is, mirroring
- * sidereon_core::rtcm::MsmKind.
+ * Which failure a RINEX clock read, edit, build or write reported. Every kind
+ * but None names a `RinexClockError` variant of the engine.
  */
-typedef enum SidereonRtcmMsmKind {
+typedef enum SidereonRinexClockErrorKind {
     /**
-     * MSM4: pseudorange + phase range, standard resolution.
+     * No failure is recorded.
      */
-    SIDEREON_RTCM_MSM_KIND_MSM4 = 0,
+    SIDEREON_RINEX_CLOCK_ERROR_KIND_NONE = 0,
     /**
-     * MSM7: pseudorange + phase range + phase-range-rate, extended resolution.
+     * An `AS` record is too short to carry its bias. Carries line, reason and
+     * record.
      */
-    SIDEREON_RTCM_MSM_KIND_MSM7 = 1,
-} SidereonRtcmMsmKind;
+    SIDEREON_RINEX_CLOCK_ERROR_KIND_MALFORMED_AS_RECORD = 1,
+    /**
+     * A declared continuation line is missing. Carries line and record_type.
+     */
+    SIDEREON_RINEX_CLOCK_ERROR_KIND_MISSING_CONTINUATION = 2,
+    /**
+     * A continuation line is malformed or truncated. Carries line, reason and
+     * record.
+     */
+    SIDEREON_RINEX_CLOCK_ERROR_KIND_MALFORMED_CONTINUATION = 3,
+    /**
+     * A record or header field could not be read or is out of range. Carries
+     * line, field and value.
+     */
+    SIDEREON_RINEX_CLOCK_ERROR_KIND_BAD_FIELD = 4,
+    /**
+     * A caller input or query parameter is invalid, or a value, name or epoch
+     * cannot be written exactly. Carries field and reason.
+     */
+    SIDEREON_RINEX_CLOCK_ERROR_KIND_INVALID_INPUT = 5,
+    /**
+     * The product names a time scale no RINEX clock time system states, such
+     * as GLONASS system time. Carries time_scale.
+     */
+    SIDEREON_RINEX_CLOCK_ERROR_KIND_UNSUPPORTED_TIME_SCALE = 6,
+} SidereonRinexClockErrorKind;
+
+/**
+ * Whether a header states one correction for a satellite's signal. Mirrors the
+ * engine's `Result<f64, CorrectionUnavailable>`.
+ */
+typedef enum SidereonRinexCorrectionStatus {
+    /**
+     * The header states one correction.
+     */
+    SIDEREON_RINEX_CORRECTION_STATUS_AVAILABLE = 0,
+    /**
+     * The header declares the correction unknown: the only `SYS / PHASE SHIFT`
+     * record covering the signal names just its constellation, which RINEX
+     * 3.05 section 5.2.12 gives where the applied corrections are unknown.
+     */
+    SIDEREON_RINEX_CORRECTION_STATUS_UNKNOWN = 1,
+    /**
+     * Records in one header block give the signal different corrections.
+     * RINEX gives a block's records no order to choose one by, so every
+     * correction is kept and none is picked.
+     */
+    SIDEREON_RINEX_CORRECTION_STATUS_AMBIGUOUS = 2,
+} SidereonRinexCorrectionStatus;
+
+/**
+ * Which refusal a RINEX observation write reported. Every kind but None names
+ * a `RinexObsWriteError` variant of the engine.
+ */
+typedef enum SidereonRinexObsWriteErrorKind {
+    /**
+     * No refusal is recorded.
+     */
+    SIDEREON_RINEX_OBS_WRITE_ERROR_KIND_NONE = 0,
+    /**
+     * A version 2 product whose constellations' code lists are not what one
+     * list of version 2 names reads as. Carries system, position and, when
+     * the lists differ at a code rather than in length, the code.
+     */
+    SIDEREON_RINEX_OBS_WRITE_ERROR_KIND_CODE_LISTS_NOT_VERSION_TWO = 1,
+    /**
+     * A downgrade asked for a version that is not a version 2. Carries
+     * version.
+     */
+    SIDEREON_RINEX_OBS_WRITE_ERROR_KIND_NOT_VERSION_TWO = 2,
+    /**
+     * A version 2 product carrying `SYS / SCALE FACTOR` records. Carries count.
+     */
+    SIDEREON_RINEX_OBS_WRITE_ERROR_KIND_SCALE_FACTORS_IN_VERSION_TWO = 3,
+    /**
+     * A satellite holds more observations or cycle slips than its
+     * constellation has codes. Carries epoch_index, satellite, codes and
+     * values.
+     */
+    SIDEREON_RINEX_OBS_WRITE_ERROR_KIND_VALUES_WITHOUT_CODES = 4,
+    /**
+     * A `PRN / # OF OBS` record holds more counts than its constellation has
+     * codes. Carries satellite, codes and, in values, the counts it holds.
+     */
+    SIDEREON_RINEX_OBS_WRITE_ERROR_KIND_COUNTS_WITHOUT_CODES = 5,
+    /**
+     * A version 2 product holding a code list the file would not state.
+     * Carries system.
+     */
+    SIDEREON_RINEX_OBS_WRITE_ERROR_KIND_CODE_LIST_NOT_STATED = 6,
+    /**
+     * An epoch flag the one-digit flag field cannot hold. Carries epoch_index
+     * and flag.
+     */
+    SIDEREON_RINEX_OBS_WRITE_ERROR_KIND_EPOCH_FLAG_TOO_WIDE = 7,
+    /**
+     * An observation or cycle-slip epoch with no epoch time. Carries
+     * epoch_index and flag.
+     */
+    SIDEREON_RINEX_OBS_WRITE_ERROR_KIND_EPOCH_TIME_MISSING = 8,
+    /**
+     * Epoch picoseconds in a product below version 4.02. Carries epoch_index
+     * and version.
+     */
+    SIDEREON_RINEX_OBS_WRITE_ERROR_KIND_EPOCH_PICOSECONDS_NOT_IN_VERSION = 9,
+    /**
+     * More observation types than the three-digit count declares. Carries
+     * count.
+     */
+    SIDEREON_RINEX_OBS_WRITE_ERROR_KIND_TOO_MANY_OBSERVATION_TYPES = 10,
+    /**
+     * A code list that is not the union of the lists the header and its
+     * events declare. Carries system.
+     */
+    SIDEREON_RINEX_OBS_WRITE_ERROR_KIND_CODE_LISTS_NOT_UNION = 11,
+    /**
+     * A value under a code the list in effect at its epoch does not declare.
+     * Carries epoch_index, satellite and, when the constellation has a list in
+     * effect, the code.
+     */
+    SIDEREON_RINEX_OBS_WRITE_ERROR_KIND_VALUE_OUTSIDE_DECLARED_LIST = 12,
+    /**
+     * A version 2 declared list its type names do not state. Carries system.
+     */
+    SIDEREON_RINEX_OBS_WRITE_ERROR_KIND_DECLARED_LIST_NOT_STATED = 13,
+    /**
+     * An event's header record does not read. Carries the reader's text as the
+     * detail.
+     */
+    SIDEREON_RINEX_OBS_WRITE_ERROR_KIND_EVENT_RECORDS_UNREADABLE = 14,
+    /**
+     * A code on a carrier the target version cannot represent. Carries system,
+     * the code and version.
+     */
+    SIDEREON_RINEX_OBS_WRITE_ERROR_KIND_OBSERVABLE_NOT_REPRESENTABLE = 15,
+    /**
+     * A `LEAP SECONDS` time system the target version does not support.
+     * Carries the identifier as the detail, and version.
+     */
+    SIDEREON_RINEX_OBS_WRITE_ERROR_KIND_LEAP_SECONDS_TIME_SYSTEM_NOT_IN_VERSION = 16,
+    /**
+     * An unknown or malformed `LEAP SECONDS` time system. Carries the
+     * identifier as the detail.
+     */
+    SIDEREON_RINEX_OBS_WRITE_ERROR_KIND_INVALID_LEAP_SECONDS_TIME_SYSTEM = 17,
+    /**
+     * The written text would read back as a different product. Carries the
+     * first field that would change, with its values, as the detail.
+     */
+    SIDEREON_RINEX_OBS_WRITE_ERROR_KIND_READ_BACK_MISMATCH = 18,
+} SidereonRinexObsWriteErrorKind;
+
+typedef enum SidereonRtcmSsrKind {
+    SIDEREON_RTCM_SSR_KIND_ORBIT = 0,
+    SIDEREON_RTCM_SSR_KIND_CLOCK = 1,
+    SIDEREON_RTCM_SSR_KIND_COMBINED_ORBIT_CLOCK = 2,
+    SIDEREON_RTCM_SSR_KIND_CODE_BIAS = 3,
+    SIDEREON_RTCM_SSR_KIND_PHASE_BIAS = 4,
+    SIDEREON_RTCM_SSR_KIND_URA = 5,
+    SIDEREON_RTCM_SSR_KIND_HIGH_RATE_CLOCK = 6,
+    SIDEREON_RTCM_SSR_KIND_VTEC = 7,
+} SidereonRtcmSsrKind;
+
+/**
+ * Category reported by the thread-local structured RTCM/SBAS error accessors.
+ */
+typedef enum SidereonRtcmErrorClass {
+    /**
+     * No typed error is recorded for this thread.
+     */
+    SIDEREON_RTCM_ERROR_CLASS_NONE = 0,
+    /**
+     * The last typed failure was RTCM encoding.
+     */
+    SIDEREON_RTCM_ERROR_CLASS_ENCODE = 1,
+    /**
+     * The last typed failure was RTCM conversion.
+     */
+    SIDEREON_RTCM_ERROR_CLASS_CONVERSION = 2,
+    /**
+     * The last operation recorded an unclassified error.
+     */
+    SIDEREON_RTCM_ERROR_CLASS_OTHER = 3,
+    /**
+     * The last typed failure was SBAS encoding.
+     */
+    SIDEREON_RTCM_ERROR_CLASS_SBAS_ENCODE = 4,
+} SidereonRtcmErrorClass;
 
 /**
  * Which RTCM message IR variant a decoded message is.
@@ -866,18 +2167,15 @@ typedef enum SidereonRtcmMessageKind {
      * A 1046 Galileo I/NAV broadcast ephemeris.
      */
     SIDEREON_RTCM_MESSAGE_KIND_GALILEO_INAV_EPHEMERIS = 10,
+    SIDEREON_RTCM_MESSAGE_KIND_LEGACY_OBSERVATIONS = 11,
+    SIDEREON_RTCM_MESSAGE_KIND_SYSTEM_PARAMETERS = 12,
+    SIDEREON_RTCM_MESSAGE_KIND_TEXT = 13,
+    SIDEREON_RTCM_MESSAGE_KIND_NETWORK = 14,
+    SIDEREON_RTCM_MESSAGE_KIND_TRANSFORMATION = 15,
+    SIDEREON_RTCM_MESSAGE_KIND_GLONASS_CODE_PHASE_BIASES = 16,
+    SIDEREON_RTCM_MESSAGE_KIND_NAVIC_EPHEMERIS = 17,
+    SIDEREON_RTCM_MESSAGE_KIND_SSR_VTEC = 18,
 } SidereonRtcmMessageKind;
-
-typedef enum SidereonRtcmSsrKind {
-    SIDEREON_RTCM_SSR_KIND_ORBIT = 0,
-    SIDEREON_RTCM_SSR_KIND_CLOCK = 1,
-    SIDEREON_RTCM_SSR_KIND_COMBINED_ORBIT_CLOCK = 2,
-    SIDEREON_RTCM_SSR_KIND_CODE_BIAS = 3,
-    SIDEREON_RTCM_SSR_KIND_PHASE_BIAS = 4,
-    SIDEREON_RTCM_SSR_KIND_URA = 5,
-    SIDEREON_RTCM_SSR_KIND_HIGH_RATE_CLOCK = 6,
-    SIDEREON_RTCM_SSR_KIND_VTEC = 7,
-} SidereonRtcmSsrKind;
 
 /**
  * Why a CRC-valid RTCM frame could not be decoded into the message IR.
@@ -891,7 +2189,27 @@ typedef enum SidereonRtcmFrameSkipReason {
      * The body is internally inconsistent for its recognized type.
      */
     SIDEREON_RTCM_FRAME_SKIP_REASON_MALFORMED = 1,
+    /**
+     * The frame or body departs from the RTCM 3 format and was refused under
+     * the strict policy. sidereon_rtcm_stream_diagnostics_skipped_frame_message
+     * names the departure.
+     */
+    SIDEREON_RTCM_FRAME_SKIP_REASON_DEPARTURE = 2,
 } SidereonRtcmFrameSkipReason;
+
+/**
+ * The receiver whose observation file a RINEX RTK arc report comes from.
+ */
+typedef enum SidereonRtkRinexReceiver {
+    /**
+     * The base receiver's file.
+     */
+    SIDEREON_RTK_RINEX_RECEIVER_BASE = 0,
+    /**
+     * The rover receiver's file.
+     */
+    SIDEREON_RTK_RINEX_RECEIVER_ROVER = 1,
+} SidereonRtkRinexReceiver;
 
 typedef enum SidereonSbasWireForm {
     SIDEREON_SBAS_WIRE_FORM_FRAMED250 = 0,
@@ -934,6 +2252,11 @@ typedef enum SidereonSbasPlError {
      * The supplied error model is missing, non-finite, or outside its domain.
      */
     SIDEREON_SBAS_PL_ERROR_INVALID_ERROR_MODEL = 3,
+    /**
+     * Forming the geometry read UT1 outside the UT1 table and the UT1 policy
+     * refused it.
+     */
+    SIDEREON_SBAS_PL_ERROR_UT1_OUTSIDE_COVERAGE = 4,
 } SidereonSbasPlError;
 
 /**
@@ -993,6 +2316,10 @@ typedef enum SidereonSelectionStatus {
      * An epoch computation overflowed the i64 J2000-second axis.
      */
     SIDEREON_SELECTION_STATUS_OVERFLOW = 11,
+    /**
+     * A typed IONEX epoch conversion failed.
+     */
+    SIDEREON_SELECTION_STATUS_IONEX_EPOCH = 12,
 } SidereonSelectionStatus;
 
 /**
@@ -1015,6 +2342,15 @@ typedef enum SidereonDegradationKind {
      */
     SIDEREON_DEGRADATION_KIND_DIURNAL_SHIFT = 2,
 } SidereonDegradationKind;
+
+typedef enum SidereonSgp4ErrorKind {
+    SIDEREON_SGP4_ERROR_KIND_NONE = 0,
+    SIDEREON_SGP4_ERROR_KIND_INVALID_INPUT = 1,
+    SIDEREON_SGP4_ERROR_KIND_NON_FINITE_OUTPUT = 2,
+    SIDEREON_SGP4_ERROR_KIND_INVALID_TLE = 3,
+    SIDEREON_SGP4_ERROR_KIND_ENGINE = 4,
+    SIDEREON_SGP4_ERROR_KIND_RESONANCE_STEP_BUDGET = 5,
+} SidereonSgp4ErrorKind;
 
 /**
  * Static-position solve error category returned through out_error fields.
@@ -1041,11 +2377,12 @@ typedef enum SidereonStaticPositionErrorKind {
      */
     SIDEREON_STATIC_POSITION_ERROR_KIND_DUPLICATE_OBSERVATION = 4,
     /**
-     * An ionosphere-corrected epoch used a satellite without a carrier model.
-     */
-    SIDEREON_STATIC_POSITION_ERROR_KIND_IONOSPHERE_UNSUPPORTED = 5,
-    /**
-     * Too few accepted measurements remained for the stacked state.
+     * Too few accepted measurements remained for the stacked state. An
+     * ionosphere-corrected epoch leaves out a satellite whose carrier does not
+     * resolve and reports it as a rejected satellite with
+     * SIDEREON_SPP_REJECTION_REASON_IONOSPHERE_CARRIER_UNRESOLVED, so such an
+     * epoch fails only when too few measurements remain. Value 5, which named
+     * the removed whole-solve ionosphere refusal, is not reused.
      */
     SIDEREON_STATIC_POSITION_ERROR_KIND_TOO_FEW_MEASUREMENTS = 6,
     /**
@@ -1056,6 +2393,16 @@ typedef enum SidereonStaticPositionErrorKind {
      * The stacked design was rank deficient.
      */
     SIDEREON_STATIC_POSITION_ERROR_KIND_SINGULAR = 8,
+    /**
+     * The ephemeris source read UT1 outside the UT1 table and its UT1 policy
+     * refused it.
+     */
+    SIDEREON_STATIC_POSITION_ERROR_KIND_UT1_OUTSIDE_COVERAGE = 9,
+    /**
+     * The per-epoch satellite selection did not settle within the solve's
+     * pass budget (RTKLIB's `MAXITR`); the error text states the passes run.
+     */
+    SIDEREON_STATIC_POSITION_ERROR_KIND_SELECTION_UNSETTLED = 10,
 } SidereonStaticPositionErrorKind;
 
 /**
@@ -1095,6 +2442,11 @@ typedef enum SidereonFallbackStatus {
      * (FallbackError::Broadcast).
      */
     SIDEREON_FALLBACK_STATUS_BROADCAST_SOLVE = 6,
+    /**
+     * The selected source read UT1 outside the UT1 table and its UT1 policy
+     * refused it, on either path.
+     */
+    SIDEREON_FALLBACK_STATUS_UT1_OUTSIDE_COVERAGE = 7,
 } SidereonFallbackStatus;
 
 /**
@@ -1131,6 +2483,248 @@ typedef enum SidereonFixSourceKind {
 } SidereonFixSourceKind;
 
 /**
+ * Category of the latest structured SP3 validation failure on this thread.
+ */
+typedef enum SidereonSp3ErrorKind {
+    /**
+     * No structured SP3 failure is recorded.
+     */
+    SIDEREON_SP3_ERROR_KIND_NONE = 0,
+    /**
+     * Exact SP3 content validation refused a product.
+     */
+    SIDEREON_SP3_ERROR_KIND_EXACT_VALIDATION = 1,
+    /**
+     * An SP3 epoch interval was invalid or unwritable.
+     */
+    SIDEREON_SP3_ERROR_KIND_EPOCH_INTERVAL = 2,
+    /**
+     * A merge tolerance was negative or non-finite.
+     */
+    SIDEREON_SP3_ERROR_KIND_MERGE_TOLERANCE = 3,
+    /**
+     * A continuity bound was negative or non-finite.
+     */
+    SIDEREON_SP3_ERROR_KIND_CONTINUITY_OPTIONS = 4,
+} SidereonSp3ErrorKind;
+
+/**
+ * Stable field discriminant in [`SidereonSp3ErrorInfo`].
+ */
+typedef enum SidereonSp3ErrorField {
+    /**
+     * No field applies.
+     */
+    SIDEREON_SP3_ERROR_FIELD_NONE = 0,
+    /**
+     * The declared line-1 start differs from the requested start.
+     */
+    SIDEREON_SP3_ERROR_FIELD_DECLARED_START = 1,
+    /**
+     * The explicit merge target interval.
+     */
+    SIDEREON_SP3_ERROR_FIELD_TARGET_EPOCH_INTERVAL = 2,
+    /**
+     * The cadence derived for the merged output.
+     */
+    SIDEREON_SP3_ERROR_FIELD_MERGED_EPOCH_INTERVAL = 3,
+    /**
+     * Position consensus tolerance.
+     */
+    SIDEREON_SP3_ERROR_FIELD_POSITION_TOLERANCE = 4,
+    /**
+     * Clock consensus tolerance.
+     */
+    SIDEREON_SP3_ERROR_FIELD_CLOCK_TOLERANCE = 5,
+    /**
+     * Outlier position tolerance.
+     */
+    SIDEREON_SP3_ERROR_FIELD_OUTLIER_POSITION_TOLERANCE = 6,
+    /**
+     * Outlier clock tolerance.
+     */
+    SIDEREON_SP3_ERROR_FIELD_OUTLIER_CLOCK_TOLERANCE = 7,
+    /**
+     * Explicit continuity speed bound.
+     */
+    SIDEREON_SP3_ERROR_FIELD_SPEED_BOUND = 8,
+    /**
+     * Continuity hold-out residual tolerance.
+     */
+    SIDEREON_SP3_ERROR_FIELD_RESIDUAL_TOLERANCE_M = 9,
+    /**
+     * SP3 bytes or logical records.
+     */
+    SIDEREON_SP3_ERROR_FIELD_SP3_CONTENT = 10,
+    /**
+     * Catalog identity fields.
+     */
+    SIDEREON_SP3_ERROR_FIELD_CATALOG_IDENTITY = 11,
+    /**
+     * Product family.
+     */
+    SIDEREON_SP3_ERROR_FIELD_PRODUCT_FAMILY = 12,
+    /**
+     * Product issue token.
+     */
+    SIDEREON_SP3_ERROR_FIELD_ISSUE_TOKEN = 13,
+    /**
+     * Requested product span token.
+     */
+    SIDEREON_SP3_ERROR_FIELD_SPAN_TOKEN = 14,
+    /**
+     * Requested sampling token.
+     */
+    SIDEREON_SP3_ERROR_FIELD_SAMPLE_TOKEN = 15,
+    /**
+     * Expected producing agency.
+     */
+    SIDEREON_SP3_ERROR_FIELD_EXPECTED_AGENCY = 16,
+    /**
+     * Parsed producing agency.
+     */
+    SIDEREON_SP3_ERROR_FIELD_PRODUCING_AGENCY = 17,
+    /**
+     * Terminal EOF record.
+     */
+    SIDEREON_SP3_ERROR_FIELD_TERMINAL_RECORD = 18,
+    /**
+     * Mandatory header record counts.
+     */
+    SIDEREON_SP3_ERROR_FIELD_HEADER_RECORD_COUNT = 19,
+    /**
+     * Declared satellite count.
+     */
+    SIDEREON_SP3_ERROR_FIELD_SATELLITE_COUNT = 20,
+    /**
+     * Satellite declarations in the header.
+     */
+    SIDEREON_SP3_ERROR_FIELD_SATELLITE_DECLARATIONS = 21,
+    /**
+     * Per-epoch satellite record sequence.
+     */
+    SIDEREON_SP3_ERROR_FIELD_SATELLITE_RECORD_SEQUENCE = 22,
+    /**
+     * Per-epoch P/V body ordering.
+     */
+    SIDEREON_SP3_ERROR_FIELD_BODY_RECORD_ORDER = 23,
+    /**
+     * Declared header cadence.
+     */
+    SIDEREON_SP3_ERROR_FIELD_HEADER_CADENCE = 24,
+    /**
+     * Declared epoch count.
+     */
+    SIDEREON_SP3_ERROR_FIELD_DECLARED_EPOCH_COUNT = 25,
+    /**
+     * GPS start metadata.
+     */
+    SIDEREON_SP3_ERROR_FIELD_GPS_START = 26,
+    /**
+     * SP3 line-2 start metadata.
+     */
+    SIDEREON_SP3_ERROR_FIELD_HEADER_START_METADATA = 27,
+    /**
+     * Parsed epoch grid.
+     */
+    SIDEREON_SP3_ERROR_FIELD_EPOCH_GRID = 28,
+    /**
+     * Requested span and parsed span coverage.
+     */
+    SIDEREON_SP3_ERROR_FIELD_REQUESTED_SPAN = 29,
+    /**
+     * Requested SP3 format revision.
+     */
+    SIDEREON_SP3_ERROR_FIELD_FORMAT_VERSION = 30,
+    /**
+     * A field this binding does not name.
+     */
+    SIDEREON_SP3_ERROR_FIELD_OTHER = 255,
+} SidereonSp3ErrorField;
+
+/**
+ * Stable validation reason discriminant in [`SidereonSp3ErrorInfo`].
+ */
+typedef enum SidereonSp3ErrorReason {
+    /**
+     * No reason applies.
+     */
+    SIDEREON_SP3_ERROR_REASON_NONE = 0,
+    /**
+     * Declared and requested start ticks differ.
+     */
+    SIDEREON_SP3_ERROR_REASON_MISMATCH = 1,
+    /**
+     * The supplied value was NaN or infinite.
+     */
+    SIDEREON_SP3_ERROR_REASON_NOT_FINITE = 2,
+    /**
+     * The supplied bound or tolerance was negative.
+     */
+    SIDEREON_SP3_ERROR_REASON_NEGATIVE = 3,
+    /**
+     * The supplied epoch interval was zero or negative.
+     */
+    SIDEREON_SP3_ERROR_REASON_NOT_POSITIVE = 4,
+    /**
+     * The supplied interval was not an integral number of 10 ns ticks.
+     */
+    SIDEREON_SP3_ERROR_REASON_NOT_WHOLE_TICKS = 5,
+    /**
+     * f64 spacing cannot identify one whole tick at this magnitude.
+     */
+    SIDEREON_SP3_ERROR_REASON_BEYOND_TICK_RESOLUTION = 6,
+    /**
+     * The interval was at or above the SP3 100000 s limit.
+     */
+    SIDEREON_SP3_ERROR_REASON_OUTSIDE_SPECIFICATION_RANGE = 7,
+    /**
+     * A token, identity or header value was invalid.
+     */
+    SIDEREON_SP3_ERROR_REASON_INVALID = 8,
+    /**
+     * Required input or record was missing.
+     */
+    SIDEREON_SP3_ERROR_REASON_MISSING = 9,
+    /**
+     * A valid value is unsupported by the exact SP3 contract.
+     */
+    SIDEREON_SP3_ERROR_REASON_UNSUPPORTED = 10,
+    /**
+     * SP3 content is malformed.
+     */
+    SIDEREON_SP3_ERROR_REASON_MALFORMED = 11,
+    /**
+     * A valid token was not written in canonical form.
+     */
+    SIDEREON_SP3_ERROR_REASON_NON_CANONICAL = 12,
+    /**
+     * A satellite declaration is duplicated.
+     */
+    SIDEREON_SP3_ERROR_REASON_DUPLICATE = 13,
+    /**
+     * Content follows the terminal EOF marker.
+     */
+    SIDEREON_SP3_ERROR_REASON_TRAILING_CONTENT = 14,
+    /**
+     * A required collection or grid is empty.
+     */
+    SIDEREON_SP3_ERROR_REASON_EMPTY = 15,
+    /**
+     * Requested span is not a multiple of its cadence.
+     */
+    SIDEREON_SP3_ERROR_REASON_NOT_MULTIPLE = 16,
+    /**
+     * The requested start predates the GPS week-numbering epoch.
+     */
+    SIDEREON_SP3_ERROR_REASON_BEFORE_GPS_EPOCH = 17,
+    /**
+     * A reason this binding does not name.
+     */
+    SIDEREON_SP3_ERROR_REASON_OTHER = 255,
+} SidereonSp3ErrorReason;
+
+/**
  * Which regular epoch-grid boundary representation an exact SP3 used.
  */
 typedef enum SidereonExactSp3Coverage {
@@ -1145,6 +2739,44 @@ typedef enum SidereonExactSp3Coverage {
 } SidereonExactSp3Coverage;
 
 /**
+ * Why a source's clock for a cell was not written
+ * (sidereon_core::ephemeris::ClockOmissionReason).
+ */
+typedef enum SidereonSp3ClockOmissionReason {
+    /**
+     * The source's datum offset to source 0 could not be estimated at this
+     * epoch; it is never extrapolated.
+     */
+    SIDEREON_SP3_CLOCK_OMISSION_REASON_DATUM_NOT_OBSERVABLE = 0,
+    /**
+     * Precedence writes a clock only from the preferred source, which had no
+     * clock on the reference datum. Carries the preferred source when the
+     * merge had one.
+     */
+    SIDEREON_SP3_CLOCK_OMISSION_REASON_PREFERRED_SOURCE_WITHOUT_CLOCK = 1,
+    /**
+     * Clocks disagreed and no agreeing subset met the consensus rule.
+     */
+    SIDEREON_SP3_CLOCK_OMISSION_REASON_NO_CONSENSUS = 2,
+} SidereonSp3ClockOmissionReason;
+
+/**
+ * Why an input epoch took no part in a merge
+ * (sidereon_core::ephemeris::DroppedEpochReason).
+ */
+typedef enum SidereonSp3DroppedEpochReason {
+    /**
+     * Not on the explicit target_epoch_interval_s grid.
+     */
+    SIDEREON_SP3_DROPPED_EPOCH_REASON_OFF_TARGET_GRID = 0,
+    /**
+     * Not a whole number of the 10-nanosecond ticks an SP3 epoch record
+     * resolves.
+     */
+    SIDEREON_SP3_DROPPED_EPOCH_REASON_NOT_ON_TICK_AXIS = 1,
+} SidereonSp3DroppedEpochReason;
+
+/**
  * Method used to reconcile one SP3 source coordinate label.
  */
 typedef enum SidereonSp3FrameReconciliationMethod {
@@ -1157,6 +2789,242 @@ typedef enum SidereonSp3FrameReconciliationMethod {
      */
     SIDEREON_SP3_FRAME_RECONCILIATION_METHOD_HELMERT = 1,
 } SidereonSp3FrameReconciliationMethod;
+
+/**
+ * How much per-epoch provenance an SP3 merge records
+ * (sidereon_core::ephemeris::ProvenanceMode, or none).
+ */
+typedef enum SidereonSp3ProvenanceMode {
+    /**
+     * Record no provenance (the engine default). The report then says so:
+     * sidereon_sp3_merge_report_provenance reports recorded false.
+     */
+    SIDEREON_SP3_PROVENANCE_MODE_OFF = 0,
+    /**
+     * Selection transitions and per-contributor coverage only.
+     */
+    SIDEREON_SP3_PROVENANCE_MODE_SUMMARY = 1,
+    /**
+     * Everything Summary records, plus one entry per accepted cell.
+     */
+    SIDEREON_SP3_PROVENANCE_MODE_FULL = 2,
+} SidereonSp3ProvenanceMode;
+
+/**
+ * How the merge arrived at the value it wrote for one channel of one cell
+ * (sidereon_core::ephemeris::CellSelection).
+ */
+typedef enum SidereonSp3CellSelectionKind {
+    /**
+     * One source carried the cell and was carried through. Carries source.
+     */
+    SIDEREON_SP3_CELL_SELECTION_KIND_SINGLE_SOURCE = 0,
+    /**
+     * Precedence picked one source out of an agreeing set. Carries source
+     * and the members.
+     */
+    SIDEREON_SP3_CELL_SELECTION_KIND_PRECEDENCE = 1,
+    /**
+     * The written value combines the members under rule; no single source
+     * supplied it. Carries rule and the members.
+     */
+    SIDEREON_SP3_CELL_SELECTION_KIND_COMBINED = 2,
+} SidereonSp3CellSelectionKind;
+
+/**
+ * How agreeing SP3 sources are combined during merge.
+ */
+typedef enum SidereonSp3MergeCombine {
+    /**
+     * Arithmetic mean of agreeing sources.
+     */
+    SIDEREON_SP3_MERGE_COMBINE_MEAN = 0,
+    /**
+     * Component-wise median of agreeing sources.
+     */
+    SIDEREON_SP3_MERGE_COMBINE_MEDIAN = 1,
+    /**
+     * Highest-precedence agreeing source, using input order.
+     */
+    SIDEREON_SP3_MERGE_COMBINE_PRECEDENCE = 2,
+} SidereonSp3MergeCombine;
+
+/**
+ * Why the source supplying a satellite's position changed
+ * (sidereon_core::ephemeris::TransitionReason).
+ */
+typedef enum SidereonSp3TransitionReason {
+    /**
+     * The previously selected source no longer carried the cell.
+     */
+    SIDEREON_SP3_TRANSITION_REASON_SOLE_AVAILABILITY = 0,
+    /**
+     * Precedence chose a different source that was already available.
+     */
+    SIDEREON_SP3_TRANSITION_REASON_PRECEDENCE = 1,
+    /**
+     * The previously selected source was rejected as an outlier.
+     */
+    SIDEREON_SP3_TRANSITION_REASON_OUTLIER_REJECTION = 2,
+    /**
+     * The cell moved between single-source and multi-source consensus, or
+     * between combined and single-source selection.
+     */
+    SIDEREON_SP3_TRANSITION_REASON_CONSENSUS_CHANGE = 3,
+} SidereonSp3TransitionReason;
+
+/**
+ * Which refusal an SP3 write reported. Every named kind other than None and
+ * Unknown corresponds to a `Sp3WriteError` variant of the engine; discriminant
+ * values 1 and 12 are reserved.
+ */
+typedef enum SidereonSp3WriteErrorKind {
+    /**
+     * No refusal is recorded.
+     */
+    SIDEREON_SP3_WRITE_ERROR_KIND_NONE = 0,
+    /**
+     * A header text field carries a line break, another control byte, or a
+     * non-ASCII byte. Carries the field and the text value.
+     */
+    SIDEREON_SP3_WRITE_ERROR_KIND_TEXT_NOT_COLUMN_SAFE = 2,
+    /**
+     * A header text field carries leading or trailing whitespace the reader
+     * trims. Carries the field and the text value.
+     */
+    SIDEREON_SP3_WRITE_ERROR_KIND_TEXT_NOT_COLUMN_STABLE = 3,
+    /**
+     * An optional descriptor holds a blank string, which its columns read back
+     * as absent. Carries the field and the text value.
+     */
+    SIDEREON_SP3_WRITE_ERROR_KIND_BLANK_DESCRIPTOR = 4,
+    /**
+     * A comment holds no text, which its record reads back as padding.
+     * Carries comment_index and the text value.
+     */
+    SIDEREON_SP3_WRITE_ERROR_KIND_EMPTY_COMMENT = 5,
+    /**
+     * A text field is wider than its columns. Carries the field, columns and
+     * the text value.
+     */
+    SIDEREON_SP3_WRITE_ERROR_KIND_TEXT_TOO_WIDE = 6,
+    /**
+     * An integer field is wider than its columns. Carries the field, columns
+     * and integer_value.
+     */
+    SIDEREON_SP3_WRITE_ERROR_KIND_INTEGER_TOO_WIDE = 7,
+    /**
+     * A header numeric field is not finite. Carries the field.
+     */
+    SIDEREON_SP3_WRITE_ERROR_KIND_NON_FINITE = 8,
+    /**
+     * A header number's F{columns}.{decimals} form is wider than its columns.
+     * Carries the field, columns, decimals and number.
+     */
+    SIDEREON_SP3_WRITE_ERROR_KIND_NUMBER_TOO_WIDE = 9,
+    /**
+     * A header number carries more precision than its F{columns}.{decimals}
+     * field states. Carries the field, columns, decimals and number.
+     */
+    SIDEREON_SP3_WRITE_ERROR_KIND_PRECISION_NOT_REPRESENTABLE = 10,
+    /**
+     * An epoch's calendar year falls outside four digits. Carries epoch_index
+     * and year.
+     */
+    SIDEREON_SP3_WRITE_ERROR_KIND_YEAR_NOT_REPRESENTABLE = 11,
+    /**
+     * An epoch record would state a different instant from the one the
+     * product holds. Carries epoch_index, field_seconds and, when the engine
+     * measured it, residual_s.
+     */
+    SIDEREON_SP3_WRITE_ERROR_KIND_EPOCH_NOT_RESTATABLE = 13,
+    /**
+     * An epoch is tagged with a different time scale than the header states.
+     * Carries epoch_index, epoch_time_scale and header_time_scale.
+     */
+    SIDEREON_SP3_WRITE_ERROR_KIND_EPOCH_TIME_SCALE_MISMATCH = 14,
+    /**
+     * The header's SP3 time system and core time scale disagree. Carries
+     * time_system and header_time_scale.
+     */
+    SIDEREON_SP3_WRITE_ERROR_KIND_HEADER_TIME_SCALE_MISMATCH = 15,
+    /**
+     * The header epoch count differs from the epochs the product holds.
+     * Carries declared_epochs and epochs.
+     */
+    SIDEREON_SP3_WRITE_ERROR_KIND_EPOCH_COUNT_MISMATCH = 16,
+    /**
+     * The accuracy codes are not index-aligned with the header satellite list.
+     * Carries satellites and codes.
+     */
+    SIDEREON_SP3_WRITE_ERROR_KIND_ACCURACY_CODE_COUNT_MISMATCH = 17,
+    /**
+     * The header satellite list names one satellite twice. Carries sat_id.
+     */
+    SIDEREON_SP3_WRITE_ERROR_KIND_DUPLICATE_SATELLITE = 18,
+    /**
+     * A per-epoch array is not parallel to the epoch list. Carries the field,
+     * epochs and entries.
+     */
+    SIDEREON_SP3_WRITE_ERROR_KIND_EPOCH_ARRAY_LENGTH_MISMATCH = 19,
+    /**
+     * A record belongs to a satellite the header does not declare. Carries
+     * sat_id and epoch_index.
+     */
+    SIDEREON_SP3_WRITE_ERROR_KIND_UNDECLARED_SATELLITE_RECORD = 20,
+    /**
+     * A satellite holds both a state and a clock-only record at one epoch.
+     * Carries sat_id and epoch_index.
+     */
+    SIDEREON_SP3_WRITE_ERROR_KIND_CONFLICTING_RECORDS = 21,
+    /**
+     * A position product holds velocity or clock-rate state. Carries the
+     * field, sat_id and epoch_index.
+     */
+    SIDEREON_SP3_WRITE_ERROR_KIND_VELOCITY_STATE_IN_POSITION_PRODUCT = 22,
+    /**
+     * A record field is not finite. Carries the field, sat_id and epoch_index.
+     */
+    SIDEREON_SP3_WRITE_ERROR_KIND_RECORD_VALUE_NON_FINITE = 23,
+    /**
+     * A record field's F{columns}.{decimals} form is wider than its columns.
+     * Carries the field, sat_id, epoch_index, columns, decimals and
+     * column_value.
+     */
+    SIDEREON_SP3_WRITE_ERROR_KIND_RECORD_VALUE_TOO_WIDE = 24,
+    /**
+     * A record field's column reads back as a different value from the one
+     * the product holds. Carries the field, sat_id, epoch_index, columns,
+     * decimals, stored and column_value.
+     */
+    SIDEREON_SP3_WRITE_ERROR_KIND_RECORD_VALUE_NOT_REPRESENTABLE = 25,
+    /**
+     * A record value would be written as one of the format's absence
+     * sentinels. Carries the field, sat_id, epoch_index and column_value.
+     */
+    SIDEREON_SP3_WRITE_ERROR_KIND_RECORD_READS_AS_ABSENT = 26,
+    /**
+     * A record holds a value in product units without its native-unit value,
+     * or the other way round. Carries the field, sat_id, epoch_index and
+     * whichever of stored and native the record holds.
+     */
+    SIDEREON_SP3_WRITE_ERROR_KIND_RECORD_FIELDS_DISAGREE = 27,
+    /**
+     * A header satellite has no 01..99 token that reads back as itself: a
+     * satellite number of 0 or of 100 and above, which only an identifier
+     * built without the constructor can hold. Carries sat_id, the satellite's
+     * system letter followed by its number as held.
+     */
+    SIDEREON_SP3_WRITE_ERROR_KIND_SATELLITE_NOT_REPRESENTABLE = 28,
+    SIDEREON_SP3_WRITE_ERROR_KIND_ACCURACY_NOT_REPRESENTABLE = 29,
+    SIDEREON_SP3_WRITE_ERROR_KIND_ACCURACY_RECORD_MISMATCH = 30,
+    SIDEREON_SP3_WRITE_ERROR_KIND_ACCURACY_BASIS_MISSING = 31,
+    /**
+     * A refusal this binding does not yet name. The engine's text is in the
+     * message.
+     */
+    SIDEREON_SP3_WRITE_ERROR_KIND_UNKNOWN = 999,
+} SidereonSp3WriteErrorKind;
 
 /**
  * SPP Doppler velocity solve error category.
@@ -1220,10 +3088,56 @@ typedef enum SidereonSppSolveStatus {
      * Maximum residual evaluations were reached.
      */
     SIDEREON_SPP_SOLVE_STATUS_MAX_EVALUATIONS = 3,
+    /**
+     * The positioning solve ended with a least-squares step below its
+     * tolerance at a satellite selection that held (RTKLIB `estpos`'s
+     * `norm(dx) < 1E-4`), or a robust solve's position and selection
+     * settled. The solve converged.
+     */
+    SIDEREON_SPP_SOLVE_STATUS_SELECTION_SETTLED = 4,
+    /**
+     * A robust-reweighted solve spent its outer solve budget before its
+     * position and selection settled. The solve did not converge.
+     */
+    SIDEREON_SPP_SOLVE_STATUS_OUTER_BUDGET_EXHAUSTED = 5,
+    /**
+     * A robust reweighting returned within outer_tol_m of a state it reached
+     * two or more solves earlier, at the same selection, by a step no smaller
+     * than the one that led there: it was cycling (typically the robust scale
+     * alternating between two medians) and stopped there. The solve did not
+     * converge.
+     */
+    SIDEREON_SPP_SOLVE_STATUS_OUTER_OSCILLATION = 6,
 } SidereonSppSolveStatus;
 
 /**
+ * Which side of the UT1 table an instant lies on when its UT1 came from the
+ * long-term delta-T curve rather than the table. Mirrors
+ * sidereon_core::astro::time::DegradeReason, with None for an instant inside
+ * the table.
+ */
+typedef enum SidereonUt1Degradation {
+    /**
+     * UT1 comes from the table.
+     */
+    SIDEREON_UT1_DEGRADATION_NONE = 0,
+    /**
+     * The instant precedes the first covered table entry.
+     */
+    SIDEREON_UT1_DEGRADATION_BEFORE_COVERAGE = 1,
+    /**
+     * The instant follows the last covered table entry.
+     */
+    SIDEREON_UT1_DEGRADATION_AFTER_COVERAGE = 2,
+} SidereonUt1Degradation;
+
+/**
  * Why an SPP observation was excluded from the final solve.
+ *
+ * Selection reports the first reason in the core policy order: strict SSR
+ * correction-size refusal, NoEphemeris, LowElevation, SbasIonoUncovered, then
+ * IonosphereCarrierUnresolved. A satellite both below the mask and without a
+ * carrier is reported as LowElevation. SbasWithdrawn is not reported by SPP.
  */
 typedef enum SidereonSppRejectionReason {
     /**
@@ -1242,7 +3156,29 @@ typedef enum SidereonSppRejectionReason {
      * The SBAS ionosphere grid does not cover this line of sight.
      */
     SIDEREON_SPP_REJECTION_REASON_SBAS_IONO_UNCOVERED = 3,
+    /**
+     * The ionosphere correction was requested and the satellite has no
+     * resolvable carrier frequency to scale the L1 delay to: a GLONASS
+     * satellite with no channel in glonass_channels, or a channel outside the
+     * -7..=6 FDMA allocation. GPS, QZSS, SBAS, Galileo, BeiDou and NavIC have
+     * fixed carriers and are never reported with this reason. The satellite is
+     * left out, as RTKLIB `rescode` leaves out a satellite whose `sat2freq` is
+     * zero, and the rest of the epoch is solved.
+     */
+    SIDEREON_SPP_REJECTION_REASON_IONOSPHERE_CARRIER_UNRESOLVED = 4,
+    /**
+     * Strict SSR size policy refused the orbit/clock correction. Read the exact
+     * magnitudes from the V2 rejected-satellite record.
+     */
+    SIDEREON_SPP_REJECTION_REASON_SSR_CORRECTION_EXCEEDS_LIMIT = 5,
 } SidereonSppRejectionReason;
+
+typedef enum SidereonSsrVtecQueryKind {
+    SIDEREON_SSR_VTEC_QUERY_KIND_NO_MODEL = 0,
+    SIDEREON_SSR_VTEC_QUERY_KIND_BEFORE_MODEL = 1,
+    SIDEREON_SSR_VTEC_QUERY_KIND_STALE = 2,
+    SIDEREON_SSR_VTEC_QUERY_KIND_EVALUATED = 3,
+} SidereonSsrVtecQueryKind;
 
 typedef enum SidereonSsrReferencePoint {
     SIDEREON_SSR_REFERENCE_POINT_ANTENNA_PHASE_CENTER = 0,
@@ -1278,6 +3214,289 @@ typedef enum SidereonStaticPositionInfluenceStatus {
      */
     SIDEREON_STATIC_POSITION_INFLUENCE_STATUS_SOLVE_FAILED = 5,
 } SidereonStaticPositionInfluenceStatus;
+
+typedef enum SidereonStationTideConstants {
+    SIDEREON_STATION_TIDE_CONSTANTS_CONVENTIONS = 0,
+    SIDEREON_STATION_TIDE_CONSTANTS_IERS_ROUTINE = 1,
+} SidereonStationTideConstants;
+
+typedef enum SidereonStationTideDegradeReason {
+    SIDEREON_STATION_TIDE_DEGRADE_REASON_NONE = 0,
+    SIDEREON_STATION_TIDE_DEGRADE_REASON_BEFORE_COVERAGE = 1,
+    SIDEREON_STATION_TIDE_DEGRADE_REASON_AFTER_COVERAGE = 2,
+} SidereonStationTideDegradeReason;
+
+typedef enum SidereonStationTideErrorKind {
+    SIDEREON_STATION_TIDE_ERROR_KIND_NONE = 0,
+    SIDEREON_STATION_TIDE_ERROR_KIND_INVALID_INPUT = 1,
+    SIDEREON_STATION_TIDE_ERROR_KIND_TIME_SCALE = 2,
+    SIDEREON_STATION_TIDE_ERROR_KIND_FRAME_TRANSFORM = 3,
+    SIDEREON_STATION_TIDE_ERROR_KIND_SUN_MOON = 4,
+    SIDEREON_STATION_TIDE_ERROR_KIND_MISSING_INPUT = 5,
+    SIDEREON_STATION_TIDE_ERROR_KIND_INVALID_TAG = 6,
+    SIDEREON_STATION_TIDE_ERROR_KIND_OTHER = 255,
+} SidereonStationTideErrorKind;
+
+typedef enum SidereonStationTideNestedErrorKind {
+    SIDEREON_STATION_TIDE_NESTED_ERROR_KIND_NONE = 0,
+    SIDEREON_STATION_TIDE_NESTED_ERROR_KIND_INVALID_INPUT = 1,
+    SIDEREON_STATION_TIDE_NESTED_ERROR_KIND_OUTSIDE_COVERAGE = 2,
+} SidereonStationTideNestedErrorKind;
+
+typedef enum SidereonStationTideSunMoonCause {
+    SIDEREON_STATION_TIDE_SUN_MOON_CAUSE_NONE = 0,
+    SIDEREON_STATION_TIDE_SUN_MOON_CAUSE_FRAME_TRANSFORM = 1,
+} SidereonStationTideSunMoonCause;
+
+typedef enum SidereonStationTideInputErrorKind {
+    SIDEREON_STATION_TIDE_INPUT_ERROR_KIND_NONE = 0,
+    SIDEREON_STATION_TIDE_INPUT_ERROR_KIND_MISSING = 1,
+    SIDEREON_STATION_TIDE_INPUT_ERROR_KIND_NON_FINITE = 2,
+    SIDEREON_STATION_TIDE_INPUT_ERROR_KIND_NOT_POSITIVE = 3,
+    SIDEREON_STATION_TIDE_INPUT_ERROR_KIND_NEGATIVE = 4,
+    SIDEREON_STATION_TIDE_INPUT_ERROR_KIND_OUT_OF_RANGE = 5,
+    SIDEREON_STATION_TIDE_INPUT_ERROR_KIND_FLOAT_PARSE = 6,
+    SIDEREON_STATION_TIDE_INPUT_ERROR_KIND_INT_PARSE = 7,
+    SIDEREON_STATION_TIDE_INPUT_ERROR_KIND_INVALID_CIVIL_DATE = 8,
+    SIDEREON_STATION_TIDE_INPUT_ERROR_KIND_INVALID_CIVIL_TIME = 9,
+} SidereonStationTideInputErrorKind;
+
+/**
+ * Which failure a standalone TEC-grid construction or query reported.
+ */
+typedef enum SidereonTecGridErrorKind {
+    /**
+     * No failure is recorded.
+     */
+    SIDEREON_TEC_GRID_ERROR_KIND_NONE = 0,
+    /**
+     * An axis has fewer than two nodes.
+     */
+    SIDEREON_TEC_GRID_ERROR_KIND_AXES_TOO_SHORT = 1,
+    /**
+     * An axis is not strictly increasing.
+     */
+    SIDEREON_TEC_GRID_ERROR_KIND_AXES_NOT_INCREASING = 2,
+    /**
+     * The product of the axis lengths overflowed.
+     */
+    SIDEREON_TEC_GRID_ERROR_KIND_DIMENSIONS_OVERFLOW = 3,
+    /**
+     * The value count does not match the axis lengths.
+     */
+    SIDEREON_TEC_GRID_ERROR_KIND_VALUE_COUNT_MISMATCH = 4,
+    /**
+     * A named input failed one of the engine's shared validation rules. The
+     * exact field label and reason are strings, so they are carried by an
+     * owned SidereonTecGridResult rather than by this fixed-width record:
+     * read them with sidereon_tec_grid_result_get_field and
+     * sidereon_tec_grid_result_get_reason.
+     */
+    SIDEREON_TEC_GRID_ERROR_KIND_INVALID_FIELD = 5,
+    /**
+     * The query weights grid nodes that hold no value.
+     */
+    SIDEREON_TEC_GRID_ERROR_KIND_NODES_NOT_AVAILABLE = 6,
+    /**
+     * The query lies outside an axis.
+     */
+    SIDEREON_TEC_GRID_ERROR_KIND_OUT_OF_BOUNDS = 7,
+    /**
+     * A value the caller marked present is not finite. This binding checks
+     * that before it builds a grid, so the engine never saw the value and
+     * named no field of its own; value_index names the rejected entry.
+     */
+    SIDEREON_TEC_GRID_ERROR_KIND_VALUE_NOT_FINITE = 8,
+    /**
+     * A failure this binding does not yet name. The engine's own text stays in
+     * the thread-local message.
+     */
+    SIDEREON_TEC_GRID_ERROR_KIND_UNKNOWN = 999,
+} SidereonTecGridErrorKind;
+
+/**
+ * Which axis a standalone TEC-grid bound failure names.
+ */
+typedef enum SidereonTecGridAxis {
+    /**
+     * No axis is named.
+     */
+    SIDEREON_TEC_GRID_AXIS_NONE = 0,
+    /**
+     * The epoch axis, in Unix nanoseconds.
+     */
+    SIDEREON_TEC_GRID_AXIS_EPOCH = 1,
+    /**
+     * The latitude axis, in degrees.
+     */
+    SIDEREON_TEC_GRID_AXIS_LATITUDE = 2,
+    /**
+     * The longitude axis, in degrees.
+     */
+    SIDEREON_TEC_GRID_AXIS_LONGITUDE = 3,
+    /**
+     * An axis this binding does not yet name.
+     */
+    SIDEREON_TEC_GRID_AXIS_UNKNOWN = 999,
+} SidereonTecGridAxis;
+
+/**
+ * Which failure building an IONEX product from samples reported.
+ *
+ * Every kind but None and Unknown names a `TecSamplesError` variant of the
+ * engine. EpochNotRepresentable, NonFiniteValue and the three count
+ * mismatches can also come from this binding's own marshalling, which reads
+ * the caller's buffers before the engine sees them; that detail then names
+ * the input and index it refused.
+ */
+typedef enum SidereonTecSamplesErrorKind {
+    /**
+     * No failure is recorded.
+     */
+    SIDEREON_TEC_SAMPLES_ERROR_KIND_NONE = 0,
+    /**
+     * No TEC samples were supplied.
+     */
+    SIDEREON_TEC_SAMPLES_ERROR_KIND_EMPTY = 1,
+    /**
+     * A latitude or longitude axis has fewer than two nodes; node_count
+     * names how many it has.
+     */
+    SIDEREON_TEC_SAMPLES_ERROR_KIND_TOO_FEW_NODES = 2,
+    /**
+     * Latitude nodes are not strictly monotonic in the direction dlat_deg gives.
+     */
+    SIDEREON_TEC_SAMPLES_ERROR_KIND_NON_MONOTONIC_LAT = 3,
+    /**
+     * Longitude nodes are not strictly monotonic in the direction dlon_deg gives.
+     */
+    SIDEREON_TEC_SAMPLES_ERROR_KIND_NON_MONOTONIC_LON = 4,
+    /**
+     * Map epochs are not strictly increasing.
+     */
+    SIDEREON_TEC_SAMPLES_ERROR_KIND_NON_MONOTONIC_EPOCHS = 5,
+    /**
+     * A map epoch names no exact whole J2000 second: a fraction of a second,
+     * a non-finite value, or a value outside the int64_t second range. It is
+     * refused rather than rounded to a neighbouring second.
+     */
+    SIDEREON_TEC_SAMPLES_ERROR_KIND_EPOCH_NOT_REPRESENTABLE = 6,
+    /**
+     * Grid dimensions do not match the epoch or node axes, or the TEC value
+     * count does not match them.
+     */
+    SIDEREON_TEC_SAMPLES_ERROR_KIND_SHAPE_MISMATCH = 7,
+    /**
+     * RMS map count or node coverage does not match the TEC maps.
+     */
+    SIDEREON_TEC_SAMPLES_ERROR_KIND_RMS_COUNT_MISMATCH = 8,
+    /**
+     * Height map count or node coverage does not match the TEC maps.
+     */
+    SIDEREON_TEC_SAMPLES_ERROR_KIND_HEIGHT_COUNT_MISMATCH = 9,
+    /**
+     * A supplied value is NaN or infinite.
+     */
+    SIDEREON_TEC_SAMPLES_ERROR_KIND_NON_FINITE_VALUE = 10,
+    /**
+     * A signed grid step is zero, so it names no direction for its axis.
+     */
+    SIDEREON_TEC_SAMPLES_ERROR_KIND_NON_POSITIVE_STEP = 11,
+    /**
+     * An axis coordinate or step falls outside [-360, 360] degrees;
+     * axis_value holds it.
+     */
+    SIDEREON_TEC_SAMPLES_ERROR_KIND_AXIS_OUT_OF_RANGE = 12,
+    /**
+     * A failure this binding does not yet name. The text stays with the
+     * owned result and in the thread-local message.
+     */
+    SIDEREON_TEC_SAMPLES_ERROR_KIND_UNKNOWN = 999,
+} SidereonTecSamplesErrorKind;
+
+/**
+ * Which caller input a sample-construction failure names by index.
+ */
+typedef enum SidereonTecSamplesInput {
+    /**
+     * No input is named.
+     */
+    SIDEREON_TEC_SAMPLES_INPUT_NONE = 0,
+    /**
+     * An entry of map_epochs_j2000_s or map_epochs_j2000_whole_s.
+     */
+    SIDEREON_TEC_SAMPLES_INPUT_MAP_EPOCH = 1,
+    /**
+     * An entry of the flat tec_maps_tecu buffer.
+     */
+    SIDEREON_TEC_SAMPLES_INPUT_TEC_VALUE = 2,
+    /**
+     * An entry of the flat rms_maps_tecu buffer.
+     */
+    SIDEREON_TEC_SAMPLES_INPUT_RMS_VALUE = 3,
+    /**
+     * An entry of the flat height_maps_km buffer.
+     */
+    SIDEREON_TEC_SAMPLES_INPUT_HEIGHT_VALUE = 4,
+    /**
+     * The epoch of the sample at index.
+     */
+    SIDEREON_TEC_SAMPLES_INPUT_SAMPLE_EPOCH = 5,
+    /**
+     * The vtec_tecu of the sample at index.
+     */
+    SIDEREON_TEC_SAMPLES_INPUT_SAMPLE_VTEC = 6,
+    /**
+     * The rms_tecu of the sample at index.
+     */
+    SIDEREON_TEC_SAMPLES_INPUT_SAMPLE_RMS = 7,
+    /**
+     * The height_offset_km of the sample at index.
+     */
+    SIDEREON_TEC_SAMPLES_INPUT_SAMPLE_HEIGHT = 8,
+} SidereonTecSamplesInput;
+
+/**
+ * What column 69 of a line held when it did not confirm the checksum.
+ */
+typedef enum SidereonTleChecksumWarningKind {
+    /**
+     * A digit that differs from the computed checksum; `found` is the digit.
+     */
+    SIDEREON_TLE_CHECKSUM_WARNING_KIND_MISMATCH = 0,
+    /**
+     * A character other than a digit; `found` is its byte.
+     */
+    SIDEREON_TLE_CHECKSUM_WARNING_KIND_NOT_DIGIT = 1,
+    /**
+     * The line ends before column 69, so it carries no checksum; `found` is 0.
+     */
+    SIDEREON_TLE_CHECKSUM_WARNING_KIND_MISSING = 2,
+} SidereonTleChecksumWarningKind;
+
+/**
+ * Why a stretch of a TLE file did not become a satellite. Mirrors
+ * sidereon_core::astro::sgp4::TleRecordIssue.
+ */
+typedef enum SidereonTleRecordIssue {
+    /**
+     * A line 1 and line 2 whose element set the TLE grammar, the checksum
+     * policy, or SGP4 initialization refused.
+     */
+    SIDEREON_TLE_RECORD_ISSUE_INVALID = 0,
+    /**
+     * A line 1 with no line 2 after it.
+     */
+    SIDEREON_TLE_RECORD_ISSUE_MISSING_LINE2 = 1,
+    /**
+     * A line 2 with no line 1 before it.
+     */
+    SIDEREON_TLE_RECORD_ISSUE_ORPHAN_LINE2 = 2,
+    /**
+     * A name line not followed by an element set.
+     */
+    SIDEREON_TLE_RECORD_ISSUE_ORPHAN_NAME = 3,
+} SidereonTleRecordIssue;
 
 /**
  * Standard GNSS product family.
@@ -1383,6 +3602,36 @@ typedef enum SidereonProjVgridshiftCoordinate {
 } SidereonProjVgridshiftCoordinate;
 
 /**
+ * Stable kind of the most recent geoid construction or parsing error.
+ */
+typedef enum SidereonGeoidErrorKind {
+    /**
+     * No geoid error is recorded for this thread.
+     */
+    SIDEREON_GEOID_ERROR_KIND_NONE = 0,
+    /**
+     * The supplied grid dimensions and sample count disagree.
+     */
+    SIDEREON_GEOID_ERROR_KIND_INVALID_DIMENSIONS = 1,
+    /**
+     * A grid origin or spacing is invalid.
+     */
+    SIDEREON_GEOID_ERROR_KIND_INVALID_SPACING = 2,
+    /**
+     * A row-major sample is not finite.
+     */
+    SIDEREON_GEOID_ERROR_KIND_NON_FINITE_VALUE = 3,
+    /**
+     * A text, DAC, GTX or raster input could not be parsed.
+     */
+    SIDEREON_GEOID_ERROR_KIND_PARSE = 4,
+    /**
+     * A geoid error added by a later engine version.
+     */
+    SIDEREON_GEOID_ERROR_KIND_UNKNOWN = 999,
+} SidereonGeoidErrorKind;
+
+/**
  * A time scale, tagging the system a time reading is expressed in. Pass as a
  * uint32_t to the inter-system offset helpers.
  */
@@ -1448,24 +3697,6 @@ typedef enum SidereonRtkStochasticModel {
 } SidereonRtkStochasticModel;
 
 /**
- * How agreeing SP3 sources are combined during merge.
- */
-typedef enum SidereonSp3MergeCombine {
-    /**
-     * Arithmetic mean of agreeing sources.
-     */
-    SIDEREON_SP3_MERGE_COMBINE_MEAN = 0,
-    /**
-     * Component-wise median of agreeing sources.
-     */
-    SIDEREON_SP3_MERGE_COMBINE_MEDIAN = 1,
-    /**
-     * Highest-precedence agreeing source, using input order.
-     */
-    SIDEREON_SP3_MERGE_COMBINE_PRECEDENCE = 2,
-} SidereonSp3MergeCombine;
-
-/**
  * Scope used by precedence-mode SP3 source selection.
  */
 typedef enum SidereonSp3MergePrecedenceScope {
@@ -1499,6 +3730,12 @@ typedef enum SidereonSp3MergeFlagKind {
      * Clock contributors rejected from an accepted consensus or guard.
      */
     SIDEREON_SP3_MERGE_FLAG_KIND_CLOCK_OUTLIER = 3,
+    /**
+     * Cells whose position some source carried but satellite-arc precedence
+     * did not write, because the arc owner carried none there. Each flag's
+     * sources are the sources whose positions were withheld.
+     */
+    SIDEREON_SP3_MERGE_FLAG_KIND_ARC_WITHHELD = 4,
 } SidereonSp3MergeFlagKind;
 
 /**
@@ -1530,6 +3767,434 @@ typedef enum SidereonTleOpsMode {
      */
     SIDEREON_TLE_OPS_MODE_IMPROVED = 1,
 } SidereonTleOpsMode;
+
+/**
+ * TLE checksum-reading policy. Pass these values as uint32_t policy
+ * arguments. Mirrors sidereon_core::astro::tle::TlePolicy.
+ */
+typedef enum SidereonTlePolicy {
+    /**
+     * Refuse a column-69 digit that disagrees with the checksum and a column
+     * 69 that is not a digit.
+     */
+    SIDEREON_TLE_POLICY_STRICT = 0,
+    /**
+     * Read both and report each as a checksum warning, as Vallado's
+     * `twoline2rv` reads.
+     */
+    SIDEREON_TLE_POLICY_LENIENT = 1,
+} SidereonTlePolicy;
+
+/**
+ * Which code an SPP solve's pseudoranges are. Mirrors
+ * sidereon_core::positioning::PseudorangeCode.
+ */
+typedef enum SidereonPseudorangeCode {
+    /**
+     * A single-frequency code (L1 C/A, E1, B1I): the broadcast group delay
+     * applies.
+     */
+    SIDEREON_PSEUDORANGE_CODE_SINGLE_FREQUENCY = 0,
+    /**
+     * The ionosphere-free combination: no broadcast group delay applies.
+     */
+    SIDEREON_PSEUDORANGE_CODE_IONOSPHERE_FREE = 1,
+} SidereonPseudorangeCode;
+
+typedef enum SidereonQzssClock {
+    SIDEREON_QZSS_CLOCK_GPS = 0,
+    SIDEREON_QZSS_CLOCK_SEPARATE = 1,
+} SidereonQzssClock;
+
+typedef enum SidereonTroposphereModel {
+    SIDEREON_TROPOSPHERE_MODEL_RTKLIB = 0,
+    SIDEREON_TROPOSPHERE_MODEL_SAASTAMOINEN_NIELL = 1,
+} SidereonTroposphereModel;
+
+/**
+ * How the Bias-SINEX and CODE DCB readers treat a file that departs from the
+ * format. Mirrors sidereon_core::bias::BiasReadPolicy.
+ */
+typedef enum SidereonBiasReadPolicy {
+    /**
+     * Refuse the file, naming the first departure.
+     */
+    SIDEREON_BIAS_READ_POLICY_STRICT = 0,
+    /**
+     * Read the file and report every departure as a notice.
+     */
+    SIDEREON_BIAS_READ_POLICY_LENIENT = 1,
+} SidereonBiasReadPolicy;
+
+/**
+ * Text categories copied by `sidereon_last_bias_error_text`.
+ */
+typedef enum SidereonBiasErrorText {
+    SIDEREON_BIAS_ERROR_TEXT_MESSAGE = 0,
+    SIDEREON_BIAS_ERROR_TEXT_FIELD = 1,
+    SIDEREON_BIAS_ERROR_TEXT_REASON = 2,
+    SIDEREON_BIAS_ERROR_TEXT_CODE = 3,
+    SIDEREON_BIAS_ERROR_TEXT_VERSION = 4,
+    SIDEREON_BIAS_ERROR_TEXT_DEPARTURE_NOTICE = 5,
+} SidereonBiasErrorText;
+
+/**
+ * How the RTCM reader treats a frame that departs from the format. Mirrors
+ * sidereon_core::rtcm::RtcmPolicy.
+ */
+typedef enum SidereonRtcmPolicy {
+    /**
+     * Refuse the first departure.
+     */
+    SIDEREON_RTCM_POLICY_STRICT = 0,
+    /**
+     * Read the frame and report each departure.
+     */
+    SIDEREON_RTCM_POLICY_LENIENT = 1,
+} SidereonRtcmPolicy;
+
+/**
+ * Navigation message a broadcast record carries, as the `message` and
+ * `issue_message` fields of the broadcast record structs state it. Mirrors
+ * sidereon_core::rinex::nav::NavMessage.
+ */
+typedef enum SidereonNavMessage {
+    SIDEREON_NAV_MESSAGE_GPS_LNAV = 0,
+    SIDEREON_NAV_MESSAGE_GPS_CNAV = 1,
+    SIDEREON_NAV_MESSAGE_GPS_CNAV2 = 2,
+    SIDEREON_NAV_MESSAGE_QZSS_CNAV = 3,
+    SIDEREON_NAV_MESSAGE_QZSS_CNAV2 = 4,
+    SIDEREON_NAV_MESSAGE_GALILEO_INAV = 5,
+    SIDEREON_NAV_MESSAGE_GALILEO_FNAV = 6,
+    SIDEREON_NAV_MESSAGE_BEIDOU_D1 = 7,
+    SIDEREON_NAV_MESSAGE_BEIDOU_D2 = 8,
+    SIDEREON_NAV_MESSAGE_QZSS_LNAV = 9,
+    /**
+     * A Galileo record whose data-source word names neither I/NAV nor F/NAV
+     * alone.
+     */
+    SIDEREON_NAV_MESSAGE_GALILEO_UNCLASSIFIED = 10,
+    /**
+     * NavIC (IRNSS) legacy navigation message.
+     */
+    SIDEREON_NAV_MESSAGE_NAVIC_LNAV = 11,
+} SidereonNavMessage;
+
+/**
+ * Fixed buffer length for terrain store typed error text, including the NUL.
+ * Which error the text of sidereon_last_terrain_error_text belongs to.
+ */
+typedef enum SidereonTerrainErrorFamily {
+    /**
+     * The last SidereonDtedTileError (sidereon_last_dted_tile_error).
+     */
+    SIDEREON_TERRAIN_ERROR_FAMILY_DTED_TILE = 0,
+    /**
+     * The last SidereonTerrainStoreError.
+     */
+    SIDEREON_TERRAIN_ERROR_FAMILY_TERRAIN_STORE = 1,
+    /**
+     * The last SidereonTerrainDatumError.
+     */
+    SIDEREON_TERRAIN_ERROR_FAMILY_TERRAIN_DATUM = 2,
+    /**
+     * The last single-point SidereonTerrainLookupError
+     * (sidereon_last_terrain_lookup_error).
+     */
+    SIDEREON_TERRAIN_ERROR_FAMILY_TERRAIN_LOOKUP = 3,
+    /**
+     * The last standalone or nested geoid parsing error.
+     */
+    SIDEREON_TERRAIN_ERROR_FAMILY_GEOID = 4,
+} SidereonTerrainErrorFamily;
+
+/**
+ * Which text of the last terrain error sidereon_last_terrain_error_text
+ * copies.
+ */
+typedef enum SidereonTerrainErrorText {
+    /**
+     * The path of the tile or file.
+     */
+    SIDEREON_TERRAIN_ERROR_TEXT_PATH = 0,
+    /**
+     * The I/O, field-reading or engine message.
+     */
+    SIDEREON_TERRAIN_ERROR_TEXT_MESSAGE = 1,
+    /**
+     * The store parse reason.
+     */
+    SIDEREON_TERRAIN_ERROR_TEXT_REASON = 2,
+    /**
+     * The remediation for a missing EGM96 grid.
+     */
+    SIDEREON_TERRAIN_ERROR_TEXT_REMEDIATION = 3,
+    /**
+     * The invalid geoid input field.
+     */
+    SIDEREON_TERRAIN_ERROR_TEXT_FIELD = 4,
+} SidereonTerrainErrorText;
+
+/**
+ * What a bias notice reports. Mirrors sidereon_core::bias::BiasNotice.
+ */
+typedef enum SidereonBiasNoticeKind {
+    /**
+     * A departure a lenient read accepted; `departure` names it.
+     */
+    SIDEREON_BIAS_NOTICE_KIND_DEPARTURE = 0,
+    /**
+     * A line that is not valid UTF-8 (`line`); its bytes are kept exactly.
+     */
+    SIDEREON_BIAS_NOTICE_KIND_INVALID_UTF8 = 1,
+    /**
+     * A declaration repeated with the same meaning (`line`, text KEYWORD).
+     */
+    SIDEREON_BIAS_NOTICE_KIND_REPEATED_DECLARATION = 2,
+    /**
+     * A declaration repeated with a different meaning (`line`, KEYWORD).
+     */
+    SIDEREON_BIAS_NOTICE_KIND_CONFLICTING_DECLARATION = 3,
+    /**
+     * Two records for one target and observable overlap (`first`, `second`,
+     * record indices).
+     */
+    SIDEREON_BIAS_NOTICE_KIND_OVERLAP = 4,
+    /**
+     * A CODE DCB title states no time system and no options were given.
+     */
+    SIDEREON_BIAS_NOTICE_KIND_DCB_TIME_SYSTEM_ASSUMED = 5,
+    /**
+     * A CODE DCB title names its time system by a constellation name
+     * (`line`, text LABEL).
+     */
+    SIDEREON_BIAS_NOTICE_KIND_DCB_TIME_SYSTEM_ALIAS = 6,
+    /**
+     * A notice a later engine adds; unknown_variant names it.
+     */
+    SIDEREON_BIAS_NOTICE_KIND_UNKNOWN = 999,
+} SidereonBiasNoticeKind;
+
+/**
+ * Which departure from Bias-SINEX 1.00 a DEPARTURE notice names. Mirrors
+ * sidereon_core::bias::BiasDeparture.
+ */
+typedef enum SidereonBiasDepartureKind {
+    /**
+     * Not a departure notice.
+     */
+    SIDEREON_BIAS_DEPARTURE_KIND_NONE = 0,
+    /**
+     * The header line is not the section 4.1 layout (text REASON).
+     */
+    SIDEREON_BIAS_DEPARTURE_KIND_HEADER_LAYOUT = 1,
+    /**
+     * A version other than 1.00 (text VERSION).
+     */
+    SIDEREON_BIAS_DEPARTURE_KIND_OTHER_VERSION = 2,
+    /**
+     * No `%=ENDBIA` footer.
+     */
+    SIDEREON_BIAS_DEPARTURE_KIND_MISSING_FOOTER = 3,
+    /**
+     * Content after the footer (`line`).
+     */
+    SIDEREON_BIAS_DEPARTURE_KIND_CONTENT_AFTER_FOOTER = 4,
+    /**
+     * A control line where none belongs (`line`).
+     */
+    SIDEREON_BIAS_DEPARTURE_KIND_UNEXPECTED_CONTROL_LINE = 5,
+    /**
+     * A block never closed (`line`, text NAME).
+     */
+    SIDEREON_BIAS_DEPARTURE_KIND_UNCLOSED_BLOCK = 6,
+    /**
+     * A block end with no start (`line`, NAME).
+     */
+    SIDEREON_BIAS_DEPARTURE_KIND_UNOPENED_BLOCK_END = 7,
+    /**
+     * A block closed by another name (`line`, OPEN, CLOSE).
+     */
+    SIDEREON_BIAS_DEPARTURE_KIND_MISMATCHED_BLOCK_END = 8,
+    /**
+     * A block opened inside another (`line`, OPEN, INNER).
+     */
+    SIDEREON_BIAS_DEPARTURE_KIND_NESTED_BLOCK = 9,
+    /**
+     * A mandatory block is missing (NAME).
+     */
+    SIDEREON_BIAS_DEPARTURE_KIND_MISSING_BLOCK = 10,
+    /**
+     * A block section 2.1 does not allow (`line`, NAME).
+     */
+    SIDEREON_BIAS_DEPARTURE_KIND_UNKNOWN_BLOCK = 11,
+    /**
+     * Text after a block start name (`line`).
+     */
+    SIDEREON_BIAS_DEPARTURE_KIND_BLOCK_START_SUFFIX = 12,
+    /**
+     * A data line outside any block (`line`).
+     */
+    SIDEREON_BIAS_DEPARTURE_KIND_DATA_OUTSIDE_BLOCK = 13,
+    /**
+     * A mandatory declaration is missing (KEYWORD).
+     */
+    SIDEREON_BIAS_DEPARTURE_KIND_MISSING_DECLARATION = 14,
+    /**
+     * A bias mode the format does not define (`line`, LABEL).
+     */
+    SIDEREON_BIAS_DEPARTURE_KIND_UNSUPPORTED_BIAS_MODE = 15,
+    /**
+     * A time system the format does not define (`line`, LABEL).
+     */
+    SIDEREON_BIAS_DEPARTURE_KIND_NON_STANDARD_TIME_SYSTEM = 16,
+    /**
+     * The header mode differs from BIAS_MODE (HEADER, `bias_mode`).
+     */
+    SIDEREON_BIAS_DEPARTURE_KIND_HEADER_MODE_MISMATCH = 17,
+    /**
+     * A DCB title time-system label naming no scale (`line`, LABEL).
+     */
+    SIDEREON_BIAS_DEPARTURE_KIND_UNKNOWN_DCB_TIME_SYSTEM = 18,
+    /**
+     * The header estimate count differs from the solution rows
+     * (`declared_count`, `solution_rows`).
+     */
+    SIDEREON_BIAS_DEPARTURE_KIND_ESTIMATE_COUNT_MISMATCH = 19,
+    /**
+     * A departure a later engine adds; unknown_variant names it.
+     */
+    SIDEREON_BIAS_DEPARTURE_KIND_UNKNOWN = 999,
+} SidereonBiasDepartureKind;
+
+/**
+ * Which text part of a bias notice sidereon_bias_set_notice_text copies.
+ */
+typedef enum SidereonBiasNoticeText {
+    /**
+     * The declaration keyword.
+     */
+    SIDEREON_BIAS_NOTICE_TEXT_KEYWORD = 0,
+    /**
+     * A label as written.
+     */
+    SIDEREON_BIAS_NOTICE_TEXT_LABEL = 1,
+    /**
+     * A block name.
+     */
+    SIDEREON_BIAS_NOTICE_TEXT_NAME = 2,
+    /**
+     * The block that was open.
+     */
+    SIDEREON_BIAS_NOTICE_TEXT_OPEN = 3,
+    /**
+     * The block end that was read.
+     */
+    SIDEREON_BIAS_NOTICE_TEXT_CLOSE = 4,
+    /**
+     * The block opened inside another.
+     */
+    SIDEREON_BIAS_NOTICE_TEXT_INNER = 5,
+    /**
+     * The version as written.
+     */
+    SIDEREON_BIAS_NOTICE_TEXT_VERSION = 6,
+    /**
+     * Why the header layout departs.
+     */
+    SIDEREON_BIAS_NOTICE_TEXT_REASON = 7,
+    /**
+     * The header mode as written.
+     */
+    SIDEREON_BIAS_NOTICE_TEXT_HEADER = 8,
+} SidereonBiasNoticeText;
+
+/**
+ * Which kind of transmission-time failure an SSR/HAS bias exclusion carries.
+ * Mirrors sidereon_core::precise_positioning::SsrTransmitTimeFailure.
+ */
+typedef enum SidereonPppTransmitTimeFailureKind {
+    /**
+     * No transmission-time failure.
+     */
+    SIDEREON_PPP_TRANSMIT_TIME_FAILURE_KIND_NONE = 0,
+    /**
+     * The solve's ephemeris source applies no SSR corrections.
+     */
+    SIDEREON_PPP_TRANSMIT_TIME_FAILURE_KIND_SOURCE_WITHOUT_SSR_CORRECTIONS = 1,
+    /**
+     * The transmission time could not be predicted from the solve's source.
+     */
+    SIDEREON_PPP_TRANSMIT_TIME_FAILURE_KIND_TRANSMIT_TIME_UNAVAILABLE = 2,
+    /**
+     * The source applies orbit and clock corrections of another solution, or
+     * none, at the transmission time (`applied`).
+     */
+    SIDEREON_PPP_TRANSMIT_TIME_FAILURE_KIND_ORBIT_CLOCK_SOLUTION = 3,
+    /**
+     * A recorded bias is not the record available at the transmission time
+     * (`signal`, `bias_status`).
+     */
+    SIDEREON_PPP_TRANSMIT_TIME_FAILURE_KIND_BIAS_RECORD = 4,
+    /**
+     * The ephemeris source failed with an error this check has no case for;
+     * sidereon_ppp_*_solution_ssr_bias_exclusion_error_text copies it.
+     */
+    SIDEREON_PPP_TRANSMIT_TIME_FAILURE_KIND_SOURCE = 5,
+    /**
+     * A failure a later engine adds; unknown_variant names it.
+     */
+    SIDEREON_PPP_TRANSMIT_TIME_FAILURE_KIND_UNKNOWN = 999,
+} SidereonPppTransmitTimeFailureKind;
+
+/**
+ * Status of an SSR bias query. Mirrors sidereon_core::ssr::SsrBiasStatus.
+ */
+typedef enum SidereonSsrBiasStatus {
+    SIDEREON_SSR_BIAS_STATUS_AVAILABLE = 0,
+    SIDEREON_SSR_BIAS_STATUS_MISSING = 1,
+    SIDEREON_SSR_BIAS_STATUS_UNAVAILABLE = 2,
+    SIDEREON_SSR_BIAS_STATUS_NOT_YET_VALID = 3,
+    SIDEREON_SSR_BIAS_STATUS_EXPIRED = 4,
+    SIDEREON_SSR_BIAS_STATUS_EXCLUDED = 5,
+    SIDEREON_SSR_BIAS_STATUS_INVALID_EPOCH = 6,
+    SIDEREON_SSR_BIAS_STATUS_PHASE_DISCONTINUITY_NEEDS_RESET = 7,
+    SIDEREON_SSR_BIAS_STATUS_UNKNOWN_SIGNAL = 8,
+    /**
+     * A status a later engine adds; the struct's unknown_variant names it.
+     */
+    SIDEREON_SSR_BIAS_STATUS_UNKNOWN = 999,
+} SidereonSsrBiasStatus;
+
+/**
+ * Status of an SSR ionosphere-free bias combination. Mirrors
+ * sidereon_core::precise_positioning::SsrIfCombinationStatus.
+ */
+typedef enum SidereonPppSsrIfCombinationStatus {
+    SIDEREON_PPP_SSR_IF_COMBINATION_STATUS_APPLIED = 0,
+    SIDEREON_PPP_SSR_IF_COMBINATION_STATUS_OPTED_OUT = 1,
+    SIDEREON_PPP_SSR_IF_COMBINATION_STATUS_SIGNAL_UNAVAILABLE = 2,
+    SIDEREON_PPP_SSR_IF_COMBINATION_STATUS_INVALID_FREQUENCIES = 3,
+    SIDEREON_PPP_SSR_IF_COMBINATION_STATUS_OBSERVATION_SIGNALS_UNKNOWN = 4,
+    SIDEREON_PPP_SSR_IF_COMBINATION_STATUS_CARRIER_UNRESOLVED = 5,
+    SIDEREON_PPP_SSR_IF_COMBINATION_STATUS_OBSERVATION_FREQUENCY_MISMATCH = 6,
+    SIDEREON_PPP_SSR_IF_COMBINATION_STATUS_INCOMPATIBLE_SOURCE_OR_SOLUTION = 7,
+    SIDEREON_PPP_SSR_IF_COMBINATION_STATUS_INCOMPATIBLE_IOD = 8,
+    SIDEREON_PPP_SSR_IF_COMBINATION_STATUS_ORBIT_CLOCK_SOLUTION_UNAVAILABLE = 9,
+    SIDEREON_PPP_SSR_IF_COMBINATION_STATUS_ORBIT_CLOCK_SOLUTION_MISMATCH = 10,
+    SIDEREON_PPP_SSR_IF_COMBINATION_STATUS_SATELLITE_EXCLUDED = 11,
+    SIDEREON_PPP_SSR_IF_COMBINATION_STATUS_TRANSMIT_TIME_UNAVAILABLE = 12,
+    SIDEREON_PPP_SSR_IF_COMBINATION_STATUS_PHASE_DISCONTINUITY_NEEDS_RESET = 13,
+    /**
+     * The satellite state read UT1 outside the UT1 table; the struct's
+     * `*_status_ut1` field names the side.
+     */
+    SIDEREON_PPP_SSR_IF_COMBINATION_STATUS_UT1_OUTSIDE_COVERAGE = 14,
+    /**
+     * A status a later engine adds; the struct's unknown_variant names it.
+     */
+    SIDEREON_PPP_SSR_IF_COMBINATION_STATUS_UNKNOWN = 999,
+} SidereonPppSsrIfCombinationStatus;
 
 /**
  * Numerical propagation force-model selector. Stored in
@@ -1572,6 +4237,12 @@ typedef enum SidereonPropagationIntegrator {
      */
     SIDEREON_PROPAGATION_INTEGRATOR_RK4 = 1,
 } SidereonPropagationIntegrator;
+
+typedef enum SidereonGravityTideSystem {
+    SIDEREON_GRAVITY_TIDE_SYSTEM_TIDE_FREE = 0,
+    SIDEREON_GRAVITY_TIDE_SYSTEM_ZERO_TIDE = 1,
+    SIDEREON_GRAVITY_TIDE_SYSTEM_MEAN_TIDE = 2,
+} SidereonGravityTideSystem;
 
 /**
  * Tropospheric mapping-function selection for a PPP solve. Pass as a uint32_t
@@ -1703,6 +4374,21 @@ typedef enum SidereonFusionImuSampleKind {
     SIDEREON_FUSION_IMU_SAMPLE_KIND_INCREMENT = 1,
 } SidereonFusionImuSampleKind;
 
+typedef enum SidereonInertialErrorText {
+    SIDEREON_INERTIAL_ERROR_TEXT_FIELD = 0,
+    SIDEREON_INERTIAL_ERROR_TEXT_REASON = 1,
+} SidereonInertialErrorText;
+
+typedef enum SidereonStationTideValidityMode {
+    SIDEREON_STATION_TIDE_VALIDITY_MODE_STRICT = 0,
+    SIDEREON_STATION_TIDE_VALIDITY_MODE_PERMISSIVE = 1,
+} SidereonStationTideValidityMode;
+
+typedef enum SidereonStationTideErrorText {
+    SIDEREON_STATION_TIDE_ERROR_TEXT_FIELD = 0,
+    SIDEREON_STATION_TIDE_ERROR_TEXT_REASON = 1,
+} SidereonStationTideErrorText;
+
 /**
  * GNSS fix status used to scale loose-fix covariance in field mode.
  */
@@ -1722,7 +4408,7 @@ typedef enum SidereonFusionGnssFixStatus {
 } SidereonFusionGnssFixStatus;
 
 /**
- * Policy applied when an IONEX slant-delay request is outside product coverage.
+ * Policy applied when an IONEX slant-delay query lands outside product coverage.
  */
 typedef enum SidereonIonexCoveragePolicy {
     /**
@@ -1736,44 +4422,32 @@ typedef enum SidereonIonexCoveragePolicy {
 } SidereonIonexCoveragePolicy;
 
 /**
- * Successful IONEX slant-delay coverage status.
+ * Policy applied when an IONEX interpolation weights grid nodes marked non-available.
  */
-typedef enum SidereonIonexSlantDelayStatus {
+typedef enum SidereonIonexMissingNodePolicy {
     /**
-     * The query was inside product coverage.
+     * Return an error when an interpolation cell weights non-available nodes.
      */
-    SIDEREON_IONEX_SLANT_DELAY_STATUS_VALID = 0,
+    SIDEREON_IONEX_MISSING_NODE_POLICY_STRICT = 0,
     /**
-     * The value was produced by the explicit hold policy.
+     * Interpolate from available weighted nodes and maps, marking the result degraded.
      */
-    SIDEREON_IONEX_SLANT_DELAY_STATUS_HELD = 1,
-} SidereonIonexSlantDelayStatus;
+    SIDEREON_IONEX_MISSING_NODE_POLICY_RENORMALIZE = 1,
+} SidereonIonexMissingNodePolicy;
 
 /**
- * IONEX coverage miss associated with a held slant-delay value.
+ * The factor an IONEX slant delay maps vertical TEC to the line of sight with.
  */
-typedef enum SidereonIonexCoverageErrorKind {
+typedef enum SidereonIonexMappingPolicy {
     /**
-     * No coverage error is associated with the value.
+     * The factor the product's MAPPING FUNCTION record defines (COSZ applies 1/cos(z')).
      */
-    SIDEREON_IONEX_COVERAGE_ERROR_KIND_NONE = 0,
+    SIDEREON_IONEX_MAPPING_POLICY_DECLARED = 0,
     /**
-     * Query epoch precedes the first map epoch.
+     * The single-layer 1/cos(z') at the shell height, reporting any non-COSZ declaration.
      */
-    SIDEREON_IONEX_COVERAGE_ERROR_KIND_EPOCH_BEFORE_FIRST_MAP = 1,
-    /**
-     * Query epoch follows the last map epoch.
-     */
-    SIDEREON_IONEX_COVERAGE_ERROR_KIND_EPOCH_AFTER_LAST_MAP = 2,
-    /**
-     * Pierce-point latitude is outside the latitude nodes.
-     */
-    SIDEREON_IONEX_COVERAGE_ERROR_KIND_LATITUDE_OUT_OF_RANGE = 3,
-    /**
-     * Pierce-point longitude is outside the longitude nodes.
-     */
-    SIDEREON_IONEX_COVERAGE_ERROR_KIND_LONGITUDE_OUT_OF_RANGE = 4,
-} SidereonIonexCoverageErrorKind;
+    SIDEREON_IONEX_MAPPING_POLICY_SINGLE_LAYER = 1,
+} SidereonIonexMappingPolicy;
 
 /**
  * Navigation modulation family for signal-analysis metrics.
@@ -1930,6 +4604,184 @@ typedef enum SidereonCdmStringField {
 } SidereonCdmStringField;
 
 /**
+ * RINEX observation kind inferred from the observation-code leading letter.
+ */
+typedef enum SidereonRinexObsKind {
+    /**
+     * Code pseudorange.
+     */
+    SIDEREON_RINEX_OBS_KIND_PSEUDORANGE = 0,
+    /**
+     * Carrier phase.
+     */
+    SIDEREON_RINEX_OBS_KIND_CARRIER_PHASE = 1,
+    /**
+     * Doppler.
+     */
+    SIDEREON_RINEX_OBS_KIND_DOPPLER = 2,
+    /**
+     * Signal strength.
+     */
+    SIDEREON_RINEX_OBS_KIND_SIGNAL_STRENGTH = 3,
+    /**
+     * Unknown or unsupported leading code letter.
+     */
+    SIDEREON_RINEX_OBS_KIND_UNKNOWN = 4,
+} SidereonRinexObsKind;
+
+/**
+ * Which text part of an ANTEX failure a text route copies.
+ */
+typedef enum SidereonAntexErrorText {
+    /**
+     * The complete failure text.
+     */
+    SIDEREON_ANTEX_ERROR_TEXT_MESSAGE = 0,
+    /**
+     * The antenna id the failure names.
+     */
+    SIDEREON_ANTEX_ERROR_TEXT_ANTENNA_ID = 1,
+    /**
+     * The record label the failure names.
+     */
+    SIDEREON_ANTEX_ERROR_TEXT_RECORD = 2,
+    /**
+     * The field name the failure names.
+     */
+    SIDEREON_ANTEX_ERROR_TEXT_FIELD = 3,
+    /**
+     * The field text an InvalidField failure carries.
+     */
+    SIDEREON_ANTEX_ERROR_TEXT_VALUE = 4,
+    /**
+     * The frequency label the failure names.
+     */
+    SIDEREON_ANTEX_ERROR_TEXT_FREQUENCY = 5,
+    /**
+     * The reason the failure gives.
+     */
+    SIDEREON_ANTEX_ERROR_TEXT_REASON = 6,
+} SidereonAntexErrorText;
+
+/**
+ * Phase center variation type from `PCV TYPE / REFANT` column 1.
+ */
+typedef enum SidereonAntexPcvType {
+    /**
+     * `A`: absolute values.
+     */
+    SIDEREON_ANTEX_PCV_TYPE_ABSOLUTE = 0,
+    /**
+     * `R`: values relative to a reference antenna.
+     */
+    SIDEREON_ANTEX_PCV_TYPE_RELATIVE = 1,
+} SidereonAntexPcvType;
+
+/**
+ * Which header text sidereon_antex_header_text copies.
+ */
+typedef enum SidereonAntexHeaderText {
+    /**
+     * Reference antenna type from `PCV TYPE / REFANT` columns 21-40, trimmed;
+     * empty when blank or when the record is absent.
+     */
+    SIDEREON_ANTEX_HEADER_TEXT_REFERENCE_ANTENNA_TYPE = 0,
+    /**
+     * Reference antenna serial number from columns 41-60, trimmed; empty when
+     * blank or when the record is absent.
+     */
+    SIDEREON_ANTEX_HEADER_TEXT_REFERENCE_ANTENNA_SERIAL = 1,
+    /**
+     * The antenna type relative values refer to (the stated type, or
+     * `AOAD/M_T` when a relative file leaves it blank); empty when
+     * has_reference_antenna is false.
+     */
+    SIDEREON_ANTEX_HEADER_TEXT_REFERENCE_ANTENNA = 2,
+} SidereonAntexHeaderText;
+
+/**
+ * ANTEX antenna block role.
+ */
+typedef enum SidereonAntennaKind {
+    /**
+     * A receiver antenna.
+     */
+    SIDEREON_ANTENNA_KIND_RECEIVER = 0,
+    /**
+     * A satellite antenna: the serial is one system letter and two digits.
+     */
+    SIDEREON_ANTENNA_KIND_SATELLITE = 1,
+} SidereonAntennaKind;
+
+/**
+ * Which antenna text sidereon_antenna_text copies.
+ */
+typedef enum SidereonAntennaText {
+    /**
+     * The trimmed `TYPE / SERIAL NO` body, the antenna id.
+     */
+    SIDEREON_ANTENNA_TEXT_ID = 0,
+    /**
+     * The trimmed antenna type field.
+     */
+    SIDEREON_ANTENNA_TEXT_ANTENNA_TYPE = 1,
+    /**
+     * The trimmed serial number field.
+     */
+    SIDEREON_ANTENNA_TEXT_SERIAL = 2,
+    /**
+     * The `SINEX CODE` text; empty when has_sinex_code is false.
+     */
+    SIDEREON_ANTENNA_TEXT_SINEX_CODE = 3,
+} SidereonAntennaText;
+
+/**
+ * Which comment list of an antenna block sidereon_antenna_comment reads.
+ */
+typedef enum SidereonAntennaCommentList {
+    /**
+     * Comments between `START OF ANTENNA` and `TYPE / SERIAL NO`.
+     */
+    SIDEREON_ANTENNA_COMMENT_LIST_LEADING = 0,
+    /**
+     * Comments after `TYPE / SERIAL NO`.
+     */
+    SIDEREON_ANTENNA_COMMENT_LIST_BLOCK = 1,
+} SidereonAntennaCommentList;
+
+/**
+ * Which calibration text sidereon_antenna_calibration_text copies.
+ */
+typedef enum SidereonAntexCalibrationText {
+    /**
+     * Method, columns 1-20, trailing blanks removed.
+     */
+    SIDEREON_ANTEX_CALIBRATION_TEXT_METHOD = 0,
+    /**
+     * Agency, columns 21-40, trailing blanks removed.
+     */
+    SIDEREON_ANTEX_CALIBRATION_TEXT_AGENCY = 1,
+    /**
+     * Date text, columns 51-60, trailing blanks removed.
+     */
+    SIDEREON_ANTEX_CALIBRATION_TEXT_DATE = 2,
+} SidereonAntexCalibrationText;
+
+/**
+ * PCV grid type of a sample.
+ */
+typedef enum SidereonAntexPcvGrid {
+    /**
+     * A `NOAZI` row.
+     */
+    SIDEREON_ANTEX_PCV_GRID_NO_AZIMUTH = 0,
+    /**
+     * A numeric-azimuth row.
+     */
+    SIDEREON_ANTEX_PCV_GRID_AZIMUTH = 1,
+} SidereonAntexPcvGrid;
+
+/**
  * Representation tag for a scale-tagged RINEX clock instant.
  */
 typedef enum SidereonRinexClockInstantRepresentation {
@@ -1942,6 +4794,452 @@ typedef enum SidereonRinexClockInstantRepresentation {
      */
     SIDEREON_RINEX_CLOCK_INSTANT_REPRESENTATION_NANOS = 1,
 } SidereonRinexClockInstantRepresentation;
+
+/**
+ * Column layout of a RINEX clock file.
+ */
+typedef enum SidereonClockLayout {
+    /**
+     * The 80-column layout of versions before 3.04.
+     */
+    SIDEREON_CLOCK_LAYOUT_V300 = 0,
+    /**
+     * The 85-column layout of version 3.04 and later.
+     */
+    SIDEREON_CLOCK_LAYOUT_V304 = 1,
+} SidereonClockLayout;
+
+/**
+ * A time system a RINEX clock `TIME SYSTEM ID` record names.
+ */
+typedef enum SidereonClockTimeSystem {
+    /**
+     * `GPS`: GPS system time.
+     */
+    SIDEREON_CLOCK_TIME_SYSTEM_GPS = 0,
+    /**
+     * `GLO`: GLONASS time as RINEX reports it, with the hours of UTC. Its
+     * epochs are read in UTC, so a 23:59:60 label on a leap-second day is an
+     * epoch.
+     */
+    SIDEREON_CLOCK_TIME_SYSTEM_GLO = 1,
+    /**
+     * `GAL`: Galileo system time.
+     */
+    SIDEREON_CLOCK_TIME_SYSTEM_GAL = 2,
+    /**
+     * `QZS`: QZSS system time.
+     */
+    SIDEREON_CLOCK_TIME_SYSTEM_QZS = 3,
+    /**
+     * `BDS`: BeiDou system time (the spelling `BDT` is also read).
+     */
+    SIDEREON_CLOCK_TIME_SYSTEM_BDS = 4,
+    /**
+     * `IRN`: IRNSS system time. No core time scale: epochs keep their civil
+     * fields and have no instant.
+     */
+    SIDEREON_CLOCK_TIME_SYSTEM_IRN = 5,
+    /**
+     * `UTC`: Coordinated Universal Time.
+     */
+    SIDEREON_CLOCK_TIME_SYSTEM_UTC = 6,
+    /**
+     * `TAI`: International Atomic Time.
+     */
+    SIDEREON_CLOCK_TIME_SYSTEM_TAI = 7,
+    /**
+     * A system this binding does not yet name.
+     */
+    SIDEREON_CLOCK_TIME_SYSTEM_UNKNOWN = 999,
+} SidereonClockTimeSystem;
+
+/**
+ * How a RINEX clock product's time system was established.
+ */
+typedef enum SidereonClockTimeSystemStatus {
+    /**
+     * A `TIME SYSTEM ID` record declares it.
+     */
+    SIDEREON_CLOCK_TIME_SYSTEM_STATUS_DECLARED = 0,
+    /**
+     * No `TIME SYSTEM ID` record is present; the RINEX clock 3.00 default
+     * applies (`GLO` for a pure GLONASS file, `GAL` for a pure Galileo file,
+     * otherwise `GPS`).
+     */
+    SIDEREON_CLOCK_TIME_SYSTEM_STATUS_DEFAULTED = 1,
+    /**
+     * A `TIME SYSTEM ID` label this reader does not know; the label is read
+     * with sidereon_rinex_clock_time_system_label.
+     */
+    SIDEREON_CLOCK_TIME_SYSTEM_STATUS_UNRECOGNIZED = 2,
+    /**
+     * Several `TIME SYSTEM ID` records naming different systems; the distinct
+     * labels are read with sidereon_rinex_clock_time_system_label.
+     */
+    SIDEREON_CLOCK_TIME_SYSTEM_STATUS_CONFLICTING = 3,
+    /**
+     * The product was built from points in a stated time scale.
+     */
+    SIDEREON_CLOCK_TIME_SYSTEM_STATUS_CONSTRUCTED = 4,
+    /**
+     * A status this binding does not yet name.
+     */
+    SIDEREON_CLOCK_TIME_SYSTEM_STATUS_UNKNOWN = 999,
+} SidereonClockTimeSystemStatus;
+
+/**
+ * A RINEX clock data record type (Table A16).
+ */
+typedef enum SidereonClockRecordType {
+    /**
+     * `AR`: analysis result for a receiver clock.
+     */
+    SIDEREON_CLOCK_RECORD_TYPE_AR = 0,
+    /**
+     * `AS`: analysis result for a satellite clock.
+     */
+    SIDEREON_CLOCK_RECORD_TYPE_AS = 1,
+    /**
+     * `CR`: calibration measurement for a receiver.
+     */
+    SIDEREON_CLOCK_RECORD_TYPE_CR = 2,
+    /**
+     * `DR`: discontinuity measurement for a receiver.
+     */
+    SIDEREON_CLOCK_RECORD_TYPE_DR = 3,
+    /**
+     * `MS`: monitor measurement for a broadcast satellite clock.
+     */
+    SIDEREON_CLOCK_RECORD_TYPE_MS = 4,
+} SidereonClockRecordType;
+
+/**
+ * How a RINEX clock data record line was read.
+ */
+typedef enum SidereonClockRecordReading {
+    /**
+     * Read at the columns of the 80-column layout.
+     */
+    SIDEREON_CLOCK_RECORD_READING_COLUMNS_V300 = 0,
+    /**
+     * Read at the columns of the 85-column layout.
+     */
+    SIDEREON_CLOCK_RECORD_READING_COLUMNS_V304 = 1,
+    /**
+     * Read as whitespace-separated values.
+     */
+    SIDEREON_CLOCK_RECORD_READING_WHITESPACE = 2,
+    /**
+     * Built or edited through the typed API; written in the product's layout.
+     */
+    SIDEREON_CLOCK_RECORD_READING_EDITED = 3,
+    /**
+     * A reading this binding does not yet name.
+     */
+    SIDEREON_CLOCK_RECORD_READING_UNKNOWN = 999,
+} SidereonClockRecordReading;
+
+/**
+ * How a RINEX clock header record's fields were read.
+ */
+typedef enum SidereonClockHeaderReading {
+    /**
+     * Read at the columns of the file's version.
+     */
+    SIDEREON_CLOCK_HEADER_READING_COLUMNS = 0,
+    /**
+     * Read at the columns of the other layout.
+     */
+    SIDEREON_CLOCK_HEADER_READING_OTHER_VERSION_COLUMNS = 1,
+    /**
+     * Read as whitespace-separated values.
+     */
+    SIDEREON_CLOCK_HEADER_READING_WHITESPACE = 2,
+    /**
+     * The label is known but the fields do not read in any supported way.
+     */
+    SIDEREON_CLOCK_HEADER_READING_UNINTERPRETED = 3,
+    /**
+     * The label is not a RINEX clock header label.
+     */
+    SIDEREON_CLOCK_HEADER_READING_UNKNOWN_LABEL = 4,
+    /**
+     * A reading this binding does not yet name.
+     */
+    SIDEREON_CLOCK_HEADER_READING_UNKNOWN = 999,
+} SidereonClockHeaderReading;
+
+/**
+ * The typed reading of a RINEX clock header record. The text parts of each
+ * kind, read with sidereon_clock_header_records_field_text, are listed per
+ * kind.
+ */
+typedef enum SidereonClockHeaderFieldKind {
+    /**
+     * The fields do not read; the record has no typed reading.
+     */
+    SIDEREON_CLOCK_HEADER_FIELD_KIND_NONE = 0,
+    /**
+     * `RINEX VERSION / TYPE`: version; text parts file type, satellite system,
+     * each as written.
+     */
+    SIDEREON_CLOCK_HEADER_FIELD_KIND_VERSION_TYPE = 1,
+    /**
+     * `PGM / RUN BY / DATE`: text parts program, run by, date.
+     */
+    SIDEREON_CLOCK_HEADER_FIELD_KIND_PROGRAM_RUN_BY_DATE = 2,
+    /**
+     * `COMMENT`: text part the comment.
+     */
+    SIDEREON_CLOCK_HEADER_FIELD_KIND_COMMENT = 3,
+    /**
+     * `SYS / # / OBS TYPES`, a first line (system_code and count present) or a
+     * continuation line (both absent): text parts the descriptors on the line.
+     */
+    SIDEREON_CLOCK_HEADER_FIELD_KIND_OBSERVATION_TYPES = 4,
+    /**
+     * `TIME SYSTEM ID`: text part the label, trimmed.
+     */
+    SIDEREON_CLOCK_HEADER_FIELD_KIND_TIME_SYSTEM = 5,
+    /**
+     * `LEAP SECONDS`: integer. RINEX clock 3.00 defines it as GPS - UTC; 3.04
+     * as TAI - UTC.
+     */
+    SIDEREON_CLOCK_HEADER_FIELD_KIND_LEAP_SECONDS = 6,
+    /**
+     * `LEAP SECONDS GNSS` (3.04): integer, GNSS time - UTC.
+     */
+    SIDEREON_CLOCK_HEADER_FIELD_KIND_LEAP_SECONDS_GNSS = 7,
+    /**
+     * `SYS / DCBS APPLIED`: text parts system, program, source.
+     */
+    SIDEREON_CLOCK_HEADER_FIELD_KIND_DCBS_APPLIED = 8,
+    /**
+     * `SYS / PCVS APPLIED`: text parts system, program, source.
+     */
+    SIDEREON_CLOCK_HEADER_FIELD_KIND_PCVS_APPLIED = 9,
+    /**
+     * `# / TYPES OF DATA`: count; text parts the data type codes on the line.
+     */
+    SIDEREON_CLOCK_HEADER_FIELD_KIND_TYPES_OF_DATA = 10,
+    /**
+     * `STATION NAME / NUM`: text parts name, identifier.
+     */
+    SIDEREON_CLOCK_HEADER_FIELD_KIND_STATION_NAME_NUM = 11,
+    /**
+     * `STATION CLK REF`: text part the reference.
+     */
+    SIDEREON_CLOCK_HEADER_FIELD_KIND_STATION_CLOCK_REF = 12,
+    /**
+     * `ANALYSIS CENTER`: text parts designator, name.
+     */
+    SIDEREON_CLOCK_HEADER_FIELD_KIND_ANALYSIS_CENTER = 13,
+    /**
+     * `# OF CLK REF`: count; start and stop when the record states them.
+     */
+    SIDEREON_CLOCK_HEADER_FIELD_KIND_CLOCK_REF_COUNT = 14,
+    /**
+     * `ANALYSIS CLK REF`: text parts name, identifier; constraint_s when
+     * stated.
+     */
+    SIDEREON_CLOCK_HEADER_FIELD_KIND_ANALYSIS_CLOCK_REF = 15,
+    /**
+     * `# OF SOLN STA / TRF`: count; text part the frame.
+     */
+    SIDEREON_CLOCK_HEADER_FIELD_KIND_SOLUTION_STATION_COUNT = 16,
+    /**
+     * `SOLN STA NAME / NUM`: text parts name, identifier; xyz_mm.
+     */
+    SIDEREON_CLOCK_HEADER_FIELD_KIND_SOLUTION_STATION = 17,
+    /**
+     * `# OF SOLN SATS`: count.
+     */
+    SIDEREON_CLOCK_HEADER_FIELD_KIND_SOLUTION_SATELLITE_COUNT = 18,
+    /**
+     * `PRN LIST`: text parts the satellites on the line.
+     */
+    SIDEREON_CLOCK_HEADER_FIELD_KIND_PRN_LIST = 19,
+    /**
+     * `END OF HEADER`.
+     */
+    SIDEREON_CLOCK_HEADER_FIELD_KIND_END_OF_HEADER = 20,
+    /**
+     * A reading this binding does not yet name. The line is read with
+     * sidereon_clock_header_records_text.
+     */
+    SIDEREON_CLOCK_HEADER_FIELD_KIND_UNKNOWN = 999,
+} SidereonClockHeaderFieldKind;
+
+/**
+ * Which text of a header record sidereon_clock_header_records_text copies.
+ */
+typedef enum SidereonClockHeaderText {
+    /**
+     * The complete line without its terminator, exactly as written.
+     */
+    SIDEREON_CLOCK_HEADER_TEXT_LINE = 0,
+    /**
+     * The header label, or for an unknown label the text in the label columns.
+     */
+    SIDEREON_CLOCK_HEADER_TEXT_LABEL = 1,
+    /**
+     * The text before the label.
+     */
+    SIDEREON_CLOCK_HEADER_TEXT_PAYLOAD = 2,
+} SidereonClockHeaderText;
+
+/**
+ * Which text part of a RINEX clock failure a text route copies.
+ */
+typedef enum SidereonRinexClockErrorText {
+    /**
+     * The complete failure text.
+     */
+    SIDEREON_RINEX_CLOCK_ERROR_TEXT_MESSAGE = 0,
+    /**
+     * The field name a BadField or InvalidInput failure names.
+     */
+    SIDEREON_RINEX_CLOCK_ERROR_TEXT_FIELD = 1,
+    /**
+     * The reason a MalformedAsRecord, MalformedContinuation or InvalidInput
+     * failure gives.
+     */
+    SIDEREON_RINEX_CLOCK_ERROR_TEXT_REASON = 2,
+    /**
+     * The record text a MalformedAsRecord or MalformedContinuation failure
+     * carries.
+     */
+    SIDEREON_RINEX_CLOCK_ERROR_TEXT_RECORD = 3,
+    /**
+     * The record type a MissingContinuation failure names.
+     */
+    SIDEREON_RINEX_CLOCK_ERROR_TEXT_RECORD_TYPE = 4,
+    /**
+     * The field value a BadField failure carries.
+     */
+    SIDEREON_RINEX_CLOCK_ERROR_TEXT_VALUE = 5,
+} SidereonRinexClockErrorText;
+
+/**
+ * A finding about how a RINEX clock product was read that does not stop it
+ * being read.
+ */
+typedef enum SidereonClockNoticeKind {
+    /**
+     * No `TIME SYSTEM ID` record; the default carried in time_system applies.
+     */
+    SIDEREON_CLOCK_NOTICE_KIND_TIME_SYSTEM_DEFAULTED = 1,
+    /**
+     * A version 3.04 or later file has no `TIME SYSTEM ID` record, which its
+     * version requires.
+     */
+    SIDEREON_CLOCK_NOTICE_KIND_TIME_SYSTEM_MISSING = 2,
+    /**
+     * The time system, carried in time_system, has no core time scale; record
+     * epochs keep their civil fields and have no instant.
+     */
+    SIDEREON_CLOCK_NOTICE_KIND_TIME_SYSTEM_WITHOUT_SCALE = 3,
+    /**
+     * A header record, at line, was read at the other layout's columns or as
+     * whitespace-separated values.
+     */
+    SIDEREON_CLOCK_NOTICE_KIND_HEADER_RECORD_NONCONFORMING = 4,
+    /**
+     * A header record, at line, has a known label whose fields do not read.
+     */
+    SIDEREON_CLOCK_NOTICE_KIND_HEADER_RECORD_UNINTERPRETED = 5,
+    /**
+     * A header line, at line, has no RINEX clock header label.
+     */
+    SIDEREON_CLOCK_NOTICE_KIND_HEADER_RECORD_UNKNOWN_LABEL = 6,
+    /**
+     * records records carry values beyond their declared count, the first at
+     * first_line.
+     */
+    SIDEREON_CLOCK_NOTICE_KIND_SURPLUS_VALUES = 7,
+    /**
+     * records records follow the columns of the layout the file does not
+     * declare, the first at first_line.
+     */
+    SIDEREON_CLOCK_NOTICE_KIND_OTHER_LAYOUT_RECORDS = 8,
+    /**
+     * records records were read as whitespace-separated values, the first at
+     * first_line.
+     */
+    SIDEREON_CLOCK_NOTICE_KIND_WHITESPACE_RECORDS = 9,
+    /**
+     * A finding this binding does not yet name.
+     */
+    SIDEREON_CLOCK_NOTICE_KIND_UNKNOWN = 999,
+} SidereonClockNoticeKind;
+
+/**
+ * Whether the RINEX clock writer may emit one kind of departure from what a
+ * product states, or refuses to write it.
+ */
+typedef enum SidereonClockWriteLeniency {
+    /**
+     * Refuse to write, naming what cannot be stated.
+     */
+    SIDEREON_CLOCK_WRITE_LENIENCY_STRICT = 0,
+    /**
+     * Write, and report the departure.
+     */
+    SIDEREON_CLOCK_WRITE_LENIENCY_ALLOW = 1,
+} SidereonClockWriteLeniency;
+
+/**
+ * Which departure the RINEX clock writer emitted under a policy.
+ */
+typedef enum SidereonClockWriteDepartureKind {
+    /**
+     * An epoch no microsecond text states exactly, written as the nearest
+     * microsecond text.
+     */
+    SIDEREON_CLOCK_WRITE_DEPARTURE_KIND_EPOCH_AT_NEAREST_MICROSECOND = 1,
+    /**
+     * A departure this binding does not yet name. Its text is in the name
+     * part.
+     */
+    SIDEREON_CLOCK_WRITE_DEPARTURE_KIND_UNKNOWN = 999,
+} SidereonClockWriteDepartureKind;
+
+/**
+ * Which text of a departure sidereon_rinex_clock_result_departure_text copies.
+ */
+typedef enum SidereonClockDepartureText {
+    /**
+     * The satellite or receiver name the record is written with.
+     */
+    SIDEREON_CLOCK_DEPARTURE_TEXT_NAME = 0,
+    /**
+     * The epoch fields as written: year, month, day, hour, minute and
+     * seconds, separated by single blanks.
+     */
+    SIDEREON_CLOCK_DEPARTURE_TEXT_WRITTEN = 1,
+} SidereonClockDepartureText;
+
+/**
+ * Which weights the RAIM statistic uses (sidereon_core::quality::RaimWeights).
+ */
+typedef enum SidereonRaimWeightsMode {
+    /**
+     * The variances the estimator weighted each residual by (the default):
+     * the statistic is sum (r / sigma)^2, as RTKLIB demo5 valsol forms it.
+     * Residuals without variances are refused.
+     */
+    SIDEREON_RAIM_WEIGHTS_MODE_SOLUTION = 0,
+    /**
+     * Unit weights, sigma = 1 m for every satellite.
+     */
+    SIDEREON_RAIM_WEIGHTS_MODE_UNIT = 1,
+    /**
+     * Per-satellite inverse-variance weights from the weights array; a
+     * satellite absent from it has unit weight.
+     */
+    SIDEREON_RAIM_WEIGHTS_MODE_BY_SATELLITE = 2,
+} SidereonRaimWeightsMode;
 
 /**
  * Geometric classification of a two-body orbit, mirroring
@@ -2060,7 +5358,249 @@ typedef enum SidereonTerrainStoreErrorKind {
      * A caller-attested full-store checksum did not match the opened bytes.
      */
     SIDEREON_TERRAIN_STORE_ERROR_KIND_ATTESTED_CHECKSUM_MISMATCH = 8,
+    /**
+     * A tile index record names a tile id outside the coordinate domain:
+     * latitude ids lie in -90..=89 and longitude ids in -180..=179. Carries
+     * lat_index and lon_index.
+     */
+    SIDEREON_TERRAIN_STORE_ERROR_KIND_TILE_ID_OUT_OF_RANGE = 9,
+    /**
+     * A tile index bound is not the edge of the one-degree cell its tile id
+     * names. Carries lat_index, lon_index and the index field name in field.
+     */
+    SIDEREON_TERRAIN_STORE_ERROR_KIND_TILE_BOUNDS_MISMATCH = 10,
+    /**
+     * A DTED input states a horizontal datum other than WGS84. The store
+     * records no datum and answers WGS84 queries, so the tile is refused
+     * rather than stored as if it were WGS84. Carries path and
+     * horizontal_datum.
+     */
+    SIDEREON_TERRAIN_STORE_ERROR_KIND_NON_WGS84_TILE = 11,
+    /**
+     * A DTED input could not be read as a tile. Carries path and, in
+     * tile_error, the typed tile failure; the same failure is also recorded
+     * for sidereon_last_dted_tile_error, whose texts
+     * (SIDEREON_TERRAIN_ERROR_FAMILY_DTED_TILE) carry its path and message.
+     */
+    SIDEREON_TERRAIN_STORE_ERROR_KIND_TILE = 12,
+    /**
+     * A terrain-store error added by a later engine version.
+     */
+    SIDEREON_TERRAIN_STORE_ERROR_KIND_UNKNOWN = 999,
 } SidereonTerrainStoreErrorKind;
+
+/**
+ * A BLQ tidal constituent, in the supported column order.
+ */
+typedef enum SidereonOceanTideConstituent {
+    /**
+     * `M2`.
+     */
+    SIDEREON_OCEAN_TIDE_CONSTITUENT_M2 = 0,
+    /**
+     * `S2`.
+     */
+    SIDEREON_OCEAN_TIDE_CONSTITUENT_S2 = 1,
+    /**
+     * `N2`.
+     */
+    SIDEREON_OCEAN_TIDE_CONSTITUENT_N2 = 2,
+    /**
+     * `K2`.
+     */
+    SIDEREON_OCEAN_TIDE_CONSTITUENT_K2 = 3,
+    /**
+     * `K1`.
+     */
+    SIDEREON_OCEAN_TIDE_CONSTITUENT_K1 = 4,
+    /**
+     * `O1`.
+     */
+    SIDEREON_OCEAN_TIDE_CONSTITUENT_O1 = 5,
+    /**
+     * `P1`.
+     */
+    SIDEREON_OCEAN_TIDE_CONSTITUENT_P1 = 6,
+    /**
+     * `Q1`.
+     */
+    SIDEREON_OCEAN_TIDE_CONSTITUENT_Q1 = 7,
+    /**
+     * `Mf`.
+     */
+    SIDEREON_OCEAN_TIDE_CONSTITUENT_MF = 8,
+    /**
+     * `Mm`.
+     */
+    SIDEREON_OCEAN_TIDE_CONSTITUENT_MM = 9,
+    /**
+     * `Ssa`.
+     */
+    SIDEREON_OCEAN_TIDE_CONSTITUENT_SSA = 10,
+} SidereonOceanTideConstituent;
+
+/**
+ * Where a retained comment or column-order header line sits in its block.
+ */
+typedef enum SidereonBlqCommentPlacement {
+    /**
+     * Before the station line. The parser gives a block every line after the
+     * previous block's last coefficient row, so file header comments belong to
+     * the first block.
+     */
+    SIDEREON_BLQ_COMMENT_PLACEMENT_BEFORE_STATION = 0,
+    /**
+     * Before the zero-based coefficient row in row, 0..=5; row 0 is between
+     * the station line and the first row. A column-order header here sets the
+     * order of this row and every later one.
+     */
+    SIDEREON_BLQ_COMMENT_PLACEMENT_BEFORE_ROW = 1,
+    /**
+     * After the sixth coefficient row. The parser uses it only for lines after
+     * the last block of the input, and the writer accepts it only on the last
+     * block it writes.
+     */
+    SIDEREON_BLQ_COMMENT_PLACEMENT_AFTER_ROWS = 2,
+} SidereonBlqCommentPlacement;
+
+/**
+ * Why the BLQ parser refused an input. Every kind but None names a
+ * `BlqParseErrorKind` variant of the engine.
+ */
+typedef enum SidereonBlqParseErrorKind {
+    /**
+     * No parse failure.
+     */
+    SIDEREON_BLQ_PARSE_ERROR_KIND_NONE = 0,
+    /**
+     * The input holds nothing but whitespace.
+     */
+    SIDEREON_BLQ_PARSE_ERROR_KIND_EMPTY = 1,
+    /**
+     * A coefficient row appears before a station line.
+     */
+    SIDEREON_BLQ_PARSE_ERROR_KIND_MISSING_STATION = 2,
+    /**
+     * A station ended before its six coefficient rows. Carries the station as
+     * text, expected and found.
+     */
+    SIDEREON_BLQ_PARSE_ERROR_KIND_MISSING_COEFFICIENT_ROWS = 3,
+    /**
+     * A station accumulated more than six rows. Carries the station as text.
+     */
+    SIDEREON_BLQ_PARSE_ERROR_KIND_TOO_MANY_COEFFICIENT_ROWS = 4,
+    /**
+     * A row or header does not hold eleven columns. Carries expected and
+     * found.
+     */
+    SIDEREON_BLQ_PARSE_ERROR_KIND_WRONG_COLUMN_COUNT = 5,
+    /**
+     * A coefficient token is not a number. Carries the token as text.
+     */
+    SIDEREON_BLQ_PARSE_ERROR_KIND_INVALID_NUMBER = 6,
+    /**
+     * A coefficient token is not finite. Carries the token as text.
+     */
+    SIDEREON_BLQ_PARSE_ERROR_KIND_NON_FINITE_NUMBER = 7,
+    /**
+     * A header label is not one of the eleven supported constituents, such as
+     * `SA` for `Ssa`. Carries the label as text.
+     */
+    SIDEREON_BLQ_PARSE_ERROR_KIND_UNSUPPORTED_CONSTITUENT = 8,
+    /**
+     * A header names a constituent twice. Carries the label as text.
+     */
+    SIDEREON_BLQ_PARSE_ERROR_KIND_DUPLICATE_CONSTITUENT = 9,
+    /**
+     * The single-block parser found more than one block. Carries found.
+     */
+    SIDEREON_BLQ_PARSE_ERROR_KIND_MULTIPLE_BLOCKS = 10,
+} SidereonBlqParseErrorKind;
+
+/**
+ * Why the BLQ writer refused a block. Every kind but None names a
+ * `BlqWriteErrorKind` variant of the engine.
+ */
+typedef enum SidereonBlqWriteErrorKind {
+    /**
+     * No write failure.
+     */
+    SIDEREON_BLQ_WRITE_ERROR_KIND_NONE = 0,
+    /**
+     * The station identifier is empty.
+     */
+    SIDEREON_BLQ_WRITE_ERROR_KIND_EMPTY_STATION = 1,
+    /**
+     * The station identifier contains a line break.
+     */
+    SIDEREON_BLQ_WRITE_ERROR_KIND_STATION_LINE_BREAK = 2,
+    /**
+     * The station identifier has leading or trailing whitespace, which the
+     * parser trims.
+     */
+    SIDEREON_BLQ_WRITE_ERROR_KIND_STATION_SURROUNDING_WHITESPACE = 3,
+    /**
+     * The station identifier starts with a comment marker (`$`, `#`, `!`).
+     */
+    SIDEREON_BLQ_WRITE_ERROR_KIND_STATION_READS_AS_COMMENT = 4,
+    /**
+     * The station identifier would read as a column-order header.
+     */
+    SIDEREON_BLQ_WRITE_ERROR_KIND_STATION_READS_AS_HEADER = 5,
+    /**
+     * The station identifier would read as a coefficient row.
+     */
+    SIDEREON_BLQ_WRITE_ERROR_KIND_STATION_READS_AS_COEFFICIENT_ROW = 6,
+    /**
+     * A coefficient is NaN or infinite. Carries row and constituent.
+     */
+    SIDEREON_BLQ_WRITE_ERROR_KIND_NON_FINITE_COEFFICIENT = 7,
+    /**
+     * A retained line contains a line break or ends with a carriage return.
+     * Carries comment_index.
+     */
+    SIDEREON_BLQ_WRITE_ERROR_KIND_COMMENT_LINE_BREAK = 8,
+    /**
+     * A retained line is blank or has no comment marker and is not a
+     * column-order header. Carries comment_index.
+     */
+    SIDEREON_BLQ_WRITE_ERROR_KIND_NOT_A_COMMENT_LINE = 9,
+    /**
+     * A retained line names a coefficient row after the sixth. Carries
+     * comment_index.
+     */
+    SIDEREON_BLQ_WRITE_ERROR_KIND_COMMENT_PLACEMENT_OUT_OF_RANGE = 10,
+    /**
+     * A retained line is a column-order header the parser refuses. Carries
+     * comment_index and the parser's refusal in parse_kind with its payload.
+     */
+    SIDEREON_BLQ_WRITE_ERROR_KIND_INVALID_HEADER = 11,
+    /**
+     * A retained line follows the rows of a block that is not the last one
+     * written; the parser would read it as part of the next block. Carries
+     * comment_index.
+     */
+    SIDEREON_BLQ_WRITE_ERROR_KIND_AFTER_ROWS_BEFORE_ANOTHER_BLOCK = 12,
+    /**
+     * Retained lines are not grouped by placement in file order. Carries
+     * comment_index, the first line placed before its predecessor.
+     */
+    SIDEREON_BLQ_WRITE_ERROR_KIND_COMMENTS_OUT_OF_PLACEMENT_ORDER = 13,
+} SidereonBlqWriteErrorKind;
+
+/**
+ * Which text of a BLQ result sidereon_blq_result_error_text copies.
+ */
+typedef enum SidereonBlqErrorText {
+    /**
+     * The complete failure text, prefixed with the route that produced it.
+     */
+    SIDEREON_BLQ_ERROR_TEXT_MESSAGE = 0,
+    /**
+     * The station, token or constituent label the failure carries.
+     */
+    SIDEREON_BLQ_ERROR_TEXT_TEXT = 1,
+} SidereonBlqErrorText;
 
 /**
  * Terrain datum conversion or geoid loading error kind.
@@ -2071,7 +5611,9 @@ typedef enum SidereonTerrainDatumErrorKind {
      */
     SIDEREON_TERRAIN_DATUM_ERROR_KIND_NONE = 0,
     /**
-     * Terrain lookup failed before datum conversion.
+     * Terrain lookup failed before datum conversion. The engine's text is the
+     * MESSAGE text, and the file of a Tile or TileOrigin lookup failure the
+     * PATH text.
      */
     SIDEREON_TERRAIN_DATUM_ERROR_KIND_TERRAIN = 1,
     /**
@@ -2087,6 +5629,149 @@ typedef enum SidereonTerrainDatumErrorKind {
      */
     SIDEREON_TERRAIN_DATUM_ERROR_KIND_MISSING_EGM96_DAC = 4,
 } SidereonTerrainDatumErrorKind;
+
+/**
+ * Stable SBAS encode error discriminants reported in `SidereonRtcmErrorInfo.kind`.
+ */
+enum SidereonSbasEncodeErrorKind
+#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+  : uint32_t
+#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+ {
+    SIDEREON_SBAS_ENCODE_ERROR_KIND_UNKNOWN = 0,
+    /**
+     * `SbasEncodeError::FieldOutOfRange`.
+     */
+    SIDEREON_SBAS_ENCODE_ERROR_KIND_FIELD_OUT_OF_RANGE = 1,
+    /**
+     * `SbasEncodeError::UnrecognizedPreamble`.
+     */
+    SIDEREON_SBAS_ENCODE_ERROR_KIND_UNRECOGNIZED_PREAMBLE = 2,
+    /**
+     * `SbasEncodeError::MessageType`.
+     */
+    SIDEREON_SBAS_ENCODE_ERROR_KIND_MESSAGE_TYPE = 3,
+    /**
+     * `SbasEncodeError::RawPayload`.
+     */
+    SIDEREON_SBAS_ENCODE_ERROR_KIND_RAW_PAYLOAD = 4,
+    /**
+     * `SbasEncodeError::ReservedLayout`.
+     */
+    SIDEREON_SBAS_ENCODE_ERROR_KIND_RESERVED_LAYOUT = 5,
+    /**
+     * `SbasEncodeError::LongTermRecordCount`.
+     */
+    SIDEREON_SBAS_ENCODE_ERROR_KIND_LONG_TERM_RECORD_COUNT = 6,
+    /**
+     * `SbasEncodeError::LongTermFieldNotCarried`.
+     */
+    SIDEREON_SBAS_ENCODE_ERROR_KIND_LONG_TERM_FIELD_NOT_CARRIED = 7,
+    /**
+     * `SbasEncodeError::LongTermMissingTimeOfDay`.
+     */
+    SIDEREON_SBAS_ENCODE_ERROR_KIND_LONG_TERM_MISSING_TIME_OF_DAY = 8,
+    /**
+     * `SbasEncodeError::PadBits`.
+     */
+    SIDEREON_SBAS_ENCODE_ERROR_KIND_PAD_BITS = 9,
+};
+#ifndef __cplusplus
+#if __STDC_VERSION__ >= 202311L
+typedef enum SidereonSbasEncodeErrorKind SidereonSbasEncodeErrorKind;
+#else
+typedef uint32_t SidereonSbasEncodeErrorKind;
+#endif // __STDC_VERSION__ >= 202311L
+#endif // __cplusplus
+
+enum SidereonRtcmEncodeErrorKind
+#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+  : uint32_t
+#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+ {
+    SIDEREON_RTCM_ENCODE_ERROR_KIND_FIELD_OUT_OF_RANGE = 1,
+    SIDEREON_RTCM_ENCODE_ERROR_KIND_NEGATIVE_ZERO_WITH_VALUE = 2,
+    SIDEREON_RTCM_ENCODE_ERROR_KIND_NEGATIVE_ZERO_MASK = 3,
+    SIDEREON_RTCM_ENCODE_ERROR_KIND_MESSAGE_NUMBER = 4,
+    SIDEREON_RTCM_ENCODE_ERROR_KIND_FIELD_PRESENCE = 5,
+    SIDEREON_RTCM_ENCODE_ERROR_KIND_SATELLITE_FIELD_PRESENCE = 6,
+    SIDEREON_RTCM_ENCODE_ERROR_KIND_COUNT_MISMATCH = 7,
+    SIDEREON_RTCM_ENCODE_ERROR_KIND_VALUE_OUT_OF_RANGE = 8,
+    SIDEREON_RTCM_ENCODE_ERROR_KIND_NON_LATIN1_CHARACTER = 9,
+    SIDEREON_RTCM_ENCODE_ERROR_KIND_SATELLITE_ID_OUT_OF_RANGE = 10,
+    SIDEREON_RTCM_ENCODE_ERROR_KIND_SSR_SATELLITE_ID_OUT_OF_RANGE = 11,
+    SIDEREON_RTCM_ENCODE_ERROR_KIND_SSR_RECORDS_NOT_CARRIED = 12,
+    SIDEREON_RTCM_ENCODE_ERROR_KIND_SSR_COMBINED_RECORD_COUNTS = 13,
+    SIDEREON_RTCM_ENCODE_ERROR_KIND_SSR_COMBINED_SATELLITE_MISMATCH = 14,
+    SIDEREON_RTCM_ENCODE_ERROR_KIND_SSR_HIGH_RATE_CLOCK_TERMS = 15,
+    SIDEREON_RTCM_ENCODE_ERROR_KIND_SSR_SATELLITE_COUNT = 16,
+    SIDEREON_RTCM_ENCODE_ERROR_KIND_MSM_MASK = 17,
+    SIDEREON_RTCM_ENCODE_ERROR_KIND_MSM_OPTIONAL = 18,
+    SIDEREON_RTCM_ENCODE_ERROR_KIND_TRAILING_ZERO_BITS = 19,
+    SIDEREON_RTCM_ENCODE_ERROR_KIND_STRICT_DEPARTURE = 20,
+    SIDEREON_RTCM_ENCODE_ERROR_KIND_UNSUPPORTED_BODY_TOO_SHORT = 21,
+    SIDEREON_RTCM_ENCODE_ERROR_KIND_UNSUPPORTED_BODY_NUMBER = 22,
+    SIDEREON_RTCM_ENCODE_ERROR_KIND_UNSUPPORTED_DECODED_NUMBER = 23,
+    SIDEREON_RTCM_ENCODE_ERROR_KIND_FRAME_BODY_TOO_LONG = 24,
+    SIDEREON_RTCM_ENCODE_ERROR_KIND_FRAME_RESERVED_OUT_OF_RANGE = 25,
+    SIDEREON_RTCM_ENCODE_ERROR_KIND_OTHER = 255,
+};
+#ifndef __cplusplus
+#if __STDC_VERSION__ >= 202311L
+typedef enum SidereonRtcmEncodeErrorKind SidereonRtcmEncodeErrorKind;
+#else
+typedef uint32_t SidereonRtcmEncodeErrorKind;
+#endif // __STDC_VERSION__ >= 202311L
+#endif // __cplusplus
+
+enum SidereonRtcmConversionErrorKind
+#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+  : uint32_t
+#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+ {
+    SIDEREON_RTCM_CONVERSION_ERROR_KIND_SATELLITE_ID_OUT_OF_RANGE = 1,
+    SIDEREON_RTCM_CONVERSION_ERROR_KIND_INVALID_SATELLITE = 2,
+    SIDEREON_RTCM_CONVERSION_ERROR_KIND_SBAS_PRN_OUTSIDE_WINDOW = 3,
+    SIDEREON_RTCM_CONVERSION_ERROR_KIND_NO_LNAV_RECORD = 4,
+    SIDEREON_RTCM_CONVERSION_ERROR_KIND_WEEK_MISMATCH = 5,
+    SIDEREON_RTCM_CONVERSION_ERROR_KIND_NAVIC_WEEK_MISMATCH = 6,
+    SIDEREON_RTCM_CONVERSION_ERROR_KIND_TIME_NOT_REPRESENTABLE = 7,
+    SIDEREON_RTCM_CONVERSION_ERROR_KIND_GALILEO_WEEK_OVERFLOW = 8,
+    SIDEREON_RTCM_CONVERSION_ERROR_KIND_SISA_SPARE = 9,
+    SIDEREON_RTCM_CONVERSION_ERROR_KIND_SISA_NO_PREDICTION = 10,
+    SIDEREON_RTCM_CONVERSION_ERROR_KIND_URA_OUT_OF_RANGE = 11,
+    SIDEREON_RTCM_CONVERSION_ERROR_KIND_URA_NO_PREDICTION = 12,
+    SIDEREON_RTCM_CONVERSION_ERROR_KIND_FIT_INTERVAL = 13,
+    SIDEREON_RTCM_CONVERSION_ERROR_KIND_VTEC_EVALUATION = 14,
+    SIDEREON_RTCM_CONVERSION_ERROR_KIND_OTHER = 255,
+};
+#ifndef __cplusplus
+#if __STDC_VERSION__ >= 202311L
+typedef enum SidereonRtcmConversionErrorKind SidereonRtcmConversionErrorKind;
+#else
+typedef uint32_t SidereonRtcmConversionErrorKind;
+#endif // __STDC_VERSION__ >= 202311L
+#endif // __cplusplus
+
+/**
+ * Which MSM variant an observation message is, mirroring
+ * sidereon_core::rtcm::MsmKind.
+ */
+typedef enum SidereonRtcmMsmKind {
+    /**
+     * MSM4: pseudorange + phase range, standard resolution.
+     */
+    SIDEREON_RTCM_MSM_KIND_MSM4 = 0,
+    /**
+     * MSM7: pseudorange + phase range + phase-range-rate, extended resolution.
+     */
+    SIDEREON_RTCM_MSM_KIND_MSM7 = 1,
+    SIDEREON_RTCM_MSM_KIND_MSM1 = 2,
+    SIDEREON_RTCM_MSM_KIND_MSM2 = 3,
+    SIDEREON_RTCM_MSM_KIND_MSM3 = 4,
+    SIDEREON_RTCM_MSM_KIND_MSM5 = 5,
+    SIDEREON_RTCM_MSM_KIND_MSM6 = 6,
+} SidereonRtcmMsmKind;
 
 /**
  * Selects which antenna-descriptor string field a reader returns. Pass as a
@@ -2537,6 +6222,28 @@ typedef enum SidereonGeofenceCrossingKind {
 } SidereonGeofenceCrossingKind;
 
 /**
+ * Which text field of the last precise-interpolant artifact error to copy.
+ */
+typedef enum SidereonPreciseInterpolantArtifactErrorText {
+    /**
+     * File path associated with an I/O error.
+     */
+    SIDEREON_PRECISE_INTERPOLANT_ARTIFACT_ERROR_TEXT_PATH = 0,
+    /**
+     * I/O or future-variant diagnostic.
+     */
+    SIDEREON_PRECISE_INTERPOLANT_ARTIFACT_ERROR_TEXT_MESSAGE = 1,
+    /**
+     * Parse reason.
+     */
+    SIDEREON_PRECISE_INTERPOLANT_ARTIFACT_ERROR_TEXT_REASON = 2,
+    /**
+     * Region name for RangeOutOfBounds.
+     */
+    SIDEREON_PRECISE_INTERPOLANT_ARTIFACT_ERROR_TEXT_REGION = 3,
+} SidereonPreciseInterpolantArtifactErrorText;
+
+/**
  * Selected solve mode for a static reference-station coordinate.
  */
 typedef enum SidereonStaticReferenceStationMode {
@@ -2966,6 +6673,158 @@ typedef enum SidereonTdmUnit {
     SIDEREON_TDM_UNIT_UNKNOWN = 255,
 } SidereonTdmUnit;
 
+typedef enum SidereonBroadcastGroupDelayTerm {
+    SIDEREON_BROADCAST_GROUP_DELAY_TERM_GPS_TGD = 0,
+    SIDEREON_BROADCAST_GROUP_DELAY_TERM_GALILEO_BGD_E5A_E1 = 1,
+    SIDEREON_BROADCAST_GROUP_DELAY_TERM_GALILEO_BGD_E5B_E1 = 2,
+    SIDEREON_BROADCAST_GROUP_DELAY_TERM_BEIDOU_TGD1 = 3,
+    SIDEREON_BROADCAST_GROUP_DELAY_TERM_BEIDOU_TGD2 = 4,
+    SIDEREON_BROADCAST_GROUP_DELAY_TERM_CNAV_ISC_L1_CA = 5,
+    SIDEREON_BROADCAST_GROUP_DELAY_TERM_CNAV_ISC_L2C = 6,
+    SIDEREON_BROADCAST_GROUP_DELAY_TERM_CNAV_ISC_L5I5 = 7,
+    SIDEREON_BROADCAST_GROUP_DELAY_TERM_CNAV_ISC_L5Q5 = 8,
+    SIDEREON_BROADCAST_GROUP_DELAY_TERM_CNAV_ISC_L1_CD = 9,
+    SIDEREON_BROADCAST_GROUP_DELAY_TERM_CNAV_ISC_L1_CP = 10,
+} SidereonBroadcastGroupDelayTerm;
+
+typedef enum SidereonCnavSignal {
+    SIDEREON_CNAV_SIGNAL_L1_CA = 0,
+    SIDEREON_CNAV_SIGNAL_L2C = 1,
+    SIDEREON_CNAV_SIGNAL_L5I5 = 2,
+    SIDEREON_CNAV_SIGNAL_L5Q5 = 3,
+    SIDEREON_CNAV_SIGNAL_L1_CP = 4,
+    SIDEREON_CNAV_SIGNAL_L1_CD = 5,
+} SidereonCnavSignal;
+
+typedef enum SidereonCovarianceFrame {
+    SIDEREON_COVARIANCE_FRAME_INERTIAL = 0,
+    SIDEREON_COVARIANCE_FRAME_RTN = 1,
+} SidereonCovarianceFrame;
+
+typedef enum SidereonNavMessagePreference {
+    SIDEREON_NAV_MESSAGE_PREFERENCE_PREFER_LEGACY = 0,
+    SIDEREON_NAV_MESSAGE_PREFERENCE_PREFER_MODERN = 1,
+} SidereonNavMessagePreference;
+
+typedef enum SidereonNtripEventKind {
+    SIDEREON_NTRIP_EVENT_KIND_CONNECTED = 0,
+    SIDEREON_NTRIP_EVENT_KIND_PAYLOAD = 1,
+    SIDEREON_NTRIP_EVENT_KIND_SOURCETABLE = 2,
+    SIDEREON_NTRIP_EVENT_KIND_REJECTED = 3,
+    SIDEREON_NTRIP_EVENT_KIND_STREAM_CORRUPTED = 4,
+    SIDEREON_NTRIP_EVENT_KIND_STREAM_ENDED = 5,
+} SidereonNtripEventKind;
+
+typedef enum SidereonNtripRejectionKind {
+    SIDEREON_NTRIP_REJECTION_KIND_NONE = 0,
+    SIDEREON_NTRIP_REJECTION_KIND_UNAUTHORIZED = 1,
+    SIDEREON_NTRIP_REJECTION_KIND_MOUNTPOINT_NOT_FOUND = 2,
+    SIDEREON_NTRIP_REJECTION_KIND_DIGEST_REQUIRED = 3,
+    SIDEREON_NTRIP_REJECTION_KIND_CASTER_ERROR = 4,
+    SIDEREON_NTRIP_REJECTION_KIND_UNEXPECTED_CONTENT_TYPE = 5,
+    SIDEREON_NTRIP_REJECTION_KIND_HTTP_ERROR = 6,
+    SIDEREON_NTRIP_REJECTION_KIND_MALFORMED_HANDSHAKE = 7,
+} SidereonNtripRejectionKind;
+
+typedef enum SidereonNtripSourcetableAuth {
+    SIDEREON_NTRIP_SOURCETABLE_AUTH_NONE = 0,
+    SIDEREON_NTRIP_SOURCETABLE_AUTH_BASIC = 1,
+    SIDEREON_NTRIP_SOURCETABLE_AUTH_DIGEST = 2,
+    SIDEREON_NTRIP_SOURCETABLE_AUTH_OTHER = 3,
+} SidereonNtripSourcetableAuth;
+
+typedef enum SidereonNtripState {
+    SIDEREON_NTRIP_STATE_IDLE = 0,
+    SIDEREON_NTRIP_STATE_AWAITING_STATUS = 1,
+    SIDEREON_NTRIP_STATE_AWAITING_HEADERS = 2,
+    SIDEREON_NTRIP_STATE_STREAMING = 3,
+    SIDEREON_NTRIP_STATE_SOURCETABLE = 4,
+    SIDEREON_NTRIP_STATE_CLOSED = 5,
+} SidereonNtripState;
+
+typedef enum SidereonNtripVersion {
+    SIDEREON_NTRIP_VERSION_REV1 = 1,
+    SIDEREON_NTRIP_VERSION_REV2 = 2,
+} SidereonNtripVersion;
+
+typedef enum SidereonObservationQcIntervalSource {
+    SIDEREON_OBSERVATION_QC_INTERVAL_SOURCE_OVERRIDE = 0,
+    SIDEREON_OBSERVATION_QC_INTERVAL_SOURCE_HEADER = 1,
+    SIDEREON_OBSERVATION_QC_INTERVAL_SOURCE_INFERRED = 2,
+    SIDEREON_OBSERVATION_QC_INTERVAL_SOURCE_UNRESOLVED = 3,
+} SidereonObservationQcIntervalSource;
+
+typedef enum SidereonProcessNoiseKind {
+    SIDEREON_PROCESS_NOISE_KIND_NONE = 0,
+    SIDEREON_PROCESS_NOISE_KIND_RTN_ACCELERATION_PSD = 1,
+} SidereonProcessNoiseKind;
+
+typedef enum SidereonRinexQcSeverity {
+    SIDEREON_RINEX_QC_SEVERITY_FATAL = 0,
+    SIDEREON_RINEX_QC_SEVERITY_ERROR = 1,
+    SIDEREON_RINEX_QC_SEVERITY_WARNING = 2,
+    SIDEREON_RINEX_QC_SEVERITY_INFO = 3,
+} SidereonRinexQcSeverity;
+
+typedef enum SidereonSgp4FitEpochKind {
+    SIDEREON_SGP4_FIT_EPOCH_KIND_MIDPOINT = 0,
+    SIDEREON_SGP4_FIT_EPOCH_KIND_FIRST = 1,
+    SIDEREON_SGP4_FIT_EPOCH_KIND_LAST = 2,
+    SIDEREON_SGP4_FIT_EPOCH_KIND_SAMPLE = 3,
+    SIDEREON_SGP4_FIT_EPOCH_KIND_JD = 4,
+} SidereonSgp4FitEpochKind;
+
+typedef enum SidereonSgp4Loss {
+    SIDEREON_SGP4_LOSS_LINEAR = 0,
+    SIDEREON_SGP4_LOSS_SOFT_L1 = 1,
+    SIDEREON_SGP4_LOSS_HUBER = 2,
+    SIDEREON_SGP4_LOSS_CAUCHY = 3,
+    SIDEREON_SGP4_LOSS_ARCTAN = 4,
+} SidereonSgp4Loss;
+
+typedef enum SidereonSgp4XScaleKind {
+    SIDEREON_SGP4_X_SCALE_KIND_NONE = 0,
+    SIDEREON_SGP4_X_SCALE_KIND_UNIT = 1,
+    SIDEREON_SGP4_X_SCALE_KIND_VALUES = 2,
+    SIDEREON_SGP4_X_SCALE_KIND_JACOBIAN = 3,
+} SidereonSgp4XScaleKind;
+
+typedef enum SidereonSp3AccuracyValueKind {
+    SIDEREON_SP3_ACCURACY_VALUE_KIND_KNOWN = 0,
+    SIDEREON_SP3_ACCURACY_VALUE_KIND_UNKNOWN = 1,
+    SIDEREON_SP3_ACCURACY_VALUE_KIND_TOO_LARGE = 2,
+    SIDEREON_SP3_ACCURACY_VALUE_KIND_INVALID_BASE = 3,
+    SIDEREON_SP3_ACCURACY_VALUE_KIND_OVERFLOW = 4,
+    SIDEREON_SP3_ACCURACY_VALUE_KIND_OTHER = 5,
+} SidereonSp3AccuracyValueKind;
+
+typedef enum SidereonSpaceWeatherObservationClass {
+    SIDEREON_SPACE_WEATHER_OBSERVATION_CLASS_OBSERVED = 0,
+    SIDEREON_SPACE_WEATHER_OBSERVATION_CLASS_INTERPOLATED = 1,
+    SIDEREON_SPACE_WEATHER_OBSERVATION_CLASS_DAILY_PREDICTED = 2,
+    SIDEREON_SPACE_WEATHER_OBSERVATION_CLASS_MONTHLY_PREDICTED = 3,
+    /**
+     * An observed-section row whose flux qualifier states the day had no
+     * flux observation (Q 3).
+     */
+    SIDEREON_SPACE_WEATHER_OBSERVATION_CLASS_NOT_OBSERVED = 4,
+} SidereonSpaceWeatherObservationClass;
+
+/**
+ * What an SSR-corrected state does with a correction above the declared size
+ * limit (`sidereon_core::ssr::SsrCorrectionSizePolicy`).
+ */
+typedef enum SidereonSsrCorrectionSizePolicy {
+    /**
+     * Refuse the corrected state and report the measured size.
+     */
+    SIDEREON_SSR_CORRECTION_SIZE_POLICY_STRICT = 0,
+    /**
+     * Apply the correction and report the measured size.
+     */
+    SIDEREON_SSR_CORRECTION_SIZE_POLICY_LENIENT = 1,
+} SidereonSsrCorrectionSizePolicy;
+
 /**
  * Combined Allan-family estimator curves. Opaque to C. Create with
  * sidereon_clock_compute_allan_deviations and release with
@@ -2975,16 +6834,32 @@ typedef struct SidereonAllanDeviationCurves SidereonAllanDeviationCurves;
 
 /**
  * A single ANTEX antenna calibration block (receiver or satellite), owned
- * independently of the parent product. Obtain one with sidereon_antex_antenna
- * and release it with sidereon_antenna_free.
+ * independently of the parent product. Obtain one with sidereon_antex_antenna,
+ * sidereon_antex_block, sidereon_antex_antenna_at or
+ * sidereon_antex_satellite_antenna and release it with sidereon_antenna_free.
  */
 typedef struct SidereonAntenna SidereonAntenna;
 
 /**
  * A parsed ANTEX antenna-calibration product. Create with sidereon_antex_parse
- * and release with sidereon_antex_free.
+ * or sidereon_antex_parse_result and release with sidereon_antex_free.
+ *
+ * The product retains every record ANTEX 1.4 defines and keeps absent records
+ * absent: the header (`ANTEX VERSION / SYST`, `PCV TYPE / REFANT`, comments
+ * and whether `END OF HEADER` is present), comments between and after the
+ * antenna blocks, and every antenna block in file order.
  */
 typedef struct SidereonAntex SidereonAntex;
+
+/**
+ * An owned record of one ANTEX parse or encode: the encoded text on success,
+ * or the typed failure with its owned text parts. It owns every string it
+ * reports, so they stay readable after the product is freed and after later
+ * failing calls have overwritten the thread-local message. Create with
+ * sidereon_antex_parse_result or sidereon_antex_encode_result and release with
+ * sidereon_antex_result_free.
+ */
+typedef struct SidereonAntexResult SidereonAntexResult;
 
 /**
  * ARAIM protection-level result. Opaque to C. Create with sidereon_araim and
@@ -2993,6 +6868,18 @@ typedef struct SidereonAntex SidereonAntex;
 typedef struct SidereonAraimResult SidereonAraimResult;
 
 typedef struct SidereonBiasSet SidereonBiasSet;
+
+/**
+ * An owned, ordered list of BLQ station blocks. Create with sidereon_blq_parse
+ * or sidereon_blq_blocks_new and release with sidereon_blq_blocks_free.
+ */
+typedef struct SidereonBlqBlocks SidereonBlqBlocks;
+
+/**
+ * An owned record of one BLQ parse or write: the written text on success, or
+ * the typed failure with its owned text. Release with sidereon_blq_result_free.
+ */
+typedef struct SidereonBlqResult SidereonBlqResult;
 
 /**
  * A broadcast-vs-precise comparison report. Opaque to C. Create with
@@ -3015,6 +6902,22 @@ typedef struct SidereonBroadcastEphemeris SidereonBroadcastEphemeris;
  * sidereon_cdm_free.
  */
 typedef struct SidereonCdm SidereonCdm;
+
+/**
+ * An owned snapshot of a RINEX clock product's header records. Create with
+ * sidereon_rinex_clock_header_records and release with
+ * sidereon_clock_header_records_free. The snapshot does not change when the
+ * product is edited afterwards.
+ */
+typedef struct SidereonClockHeaderRecords SidereonClockHeaderRecords;
+
+/**
+ * An owned snapshot of a RINEX clock product's data records, in file order,
+ * including duplicate records for one name and epoch. Create with
+ * sidereon_rinex_clock_records and release with sidereon_clock_records_free.
+ * The snapshot does not change when the product is edited afterwards.
+ */
+typedef struct SidereonClockRecords SidereonClockRecords;
 
 /**
  * An owned per-satellite RINEX clock series. Samples remain valid until this
@@ -3112,6 +7015,10 @@ typedef struct SidereonExactCacheEntry SidereonExactCacheEntry;
  */
 typedef struct SidereonExactCacheOwner SidereonExactCacheOwner;
 
+typedef struct SidereonExactEpoch SidereonExactEpoch;
+
+typedef struct SidereonExactEpochQuery SidereonExactEpochQuery;
+
 /**
  * Validated, source-independent requirements for one exact SP3 product.
  *
@@ -3123,9 +7030,9 @@ typedef struct SidereonExactSp3Request SidereonExactSp3Request;
 
 /**
  * The result of an FDE solve: the surviving receiver solution, the satellites
- * excluded in exclusion order, and the exclusion count. Opaque to C. Create
- * with sidereon_fde_solve_spp or sidereon_fde_solve_broadcast and release with
- * sidereon_fde_solution_free.
+ * excluded in exclusion order, the exclusion count and the accepted
+ * solution's detection test. Opaque to C. Create with sidereon_fde_solve_spp
+ * or sidereon_fde_solve_broadcast and release with sidereon_fde_solution_free.
  */
 typedef struct SidereonFdeSolution SidereonFdeSolution;
 
@@ -3180,11 +7087,40 @@ typedef struct SidereonGeoidGrid SidereonGeoidGrid;
  */
 typedef struct SidereonGroundTrack SidereonGroundTrack;
 
+typedef struct SidereonImuSimulator SidereonImuSimulator;
+
+typedef struct SidereonInertialMechanizer SidereonInertialMechanizer;
+
 /**
  * A parsed IONEX vertical-TEC product. Create with sidereon_ionex_parse and
  * release with sidereon_ionex_free.
  */
 typedef struct SidereonIonex SidereonIonex;
+
+/**
+ * An owned IONEX header handle holding descriptive records and metadata.
+ */
+typedef struct SidereonIonexHeader SidereonIonexHeader;
+
+/**
+ * Owned rows for exact-time IONEX batch results. Each row retains its typed
+ * outcome, core error text, and any custom mapping code after source handles
+ * are freed.
+ */
+typedef struct SidereonIonexInstantSlantResultList SidereonIonexInstantSlantResultList;
+
+/**
+ * An owned, ordered list of IONEX slant-delay results, one per input row.
+ *
+ * The list owns every string it reports, so a row stays readable after the
+ * product and header handles it came from are freed.
+ */
+typedef struct SidereonIonexSlantResultList SidereonIonexSlantResultList;
+
+/**
+ * An owned list of findings reported while reading an IONEX product without refusing the file.
+ */
+typedef struct SidereonIonexWarningList SidereonIonexWarningList;
 
 /**
  * The result of an ionosphere-free paired-pseudorange combination. Opaque to C.
@@ -3224,7 +7160,17 @@ typedef struct SidereonNavcenAssessments SidereonNavcenAssessments;
 
 typedef struct SidereonNmeaAccumulator SidereonNmeaAccumulator;
 
+/**
+ * Owned diagnostics copied from an NMEA log, accumulator, or epoch.
+ */
+typedef struct SidereonNmeaDiagnosticList SidereonNmeaDiagnosticList;
+
 typedef struct SidereonNmeaLog SidereonNmeaLog;
+
+/**
+ * Independently owned, ordered NMEA sentence or epoch field records.
+ */
+typedef struct SidereonNmeaRecordList SidereonNmeaRecordList;
 
 typedef struct SidereonNtripBytes SidereonNtripBytes;
 
@@ -3233,6 +7179,13 @@ typedef struct SidereonNtripEvents SidereonNtripEvents;
 typedef struct SidereonNtripMachine SidereonNtripMachine;
 
 typedef struct SidereonNtripSourcetable SidereonNtripSourcetable;
+
+/**
+ * Caller-owned snapshot of every typed error produced by the most recent
+ * observable batch on this OS thread. Release with
+ * `sidereon_observable_row_errors_free`.
+ */
+typedef struct SidereonObservableRowErrors SidereonObservableRowErrors;
 
 typedef struct SidereonObservationQcReport SidereonObservationQcReport;
 
@@ -3358,14 +7311,31 @@ typedef struct SidereonReducedOrbitPiecewise SidereonReducedOrbitPiecewise;
 typedef struct SidereonReliabilityReport SidereonReliabilityReport;
 
 /**
- * A parsed RINEX clock product. Opaque to C. Create with
- * sidereon_rinex_clock_parse; release with sidereon_rinex_clock_free.
+ * A RINEX clock product. Opaque to C. Create with sidereon_rinex_clock_parse,
+ * sidereon_rinex_clock_parse_lossy, sidereon_rinex_clock_parse_result or
+ * sidereon_rinex_clock_from_points; release with sidereon_rinex_clock_free.
+ *
+ * The edit routes (sidereon_rinex_clock_set_time_system,
+ * sidereon_rinex_clock_set_record_values, sidereon_rinex_clock_insert_record,
+ * sidereon_rinex_clock_remove_record, sidereon_rinex_clock_remove_records and
+ * sidereon_rinex_clock_set_records_values) change the handle in place; no
+ * other call may use the handle while one runs.
  */
 typedef struct SidereonRinexClock SidereonRinexClock;
 
 /**
- * Owned list of representable parsed GLONASS RINEX state-vector records and
- * separately inspectable skipped extended-slot diagnostics.
+ * An owned record of one RINEX clock operation: the outcome with its owned
+ * text parts, and whatever the operation produced (the written text and its
+ * departures, or a removed record). It owns every string it reports, so they
+ * stay readable after the product is freed and after later calls overwrite
+ * the thread-local message. Release with sidereon_rinex_clock_result_free.
+ */
+typedef struct SidereonRinexClockResult SidereonRinexClockResult;
+
+/**
+ * Owned list of parsed GLONASS RINEX state-vector records and separately
+ * inspectable skipped-token diagnostics. Every slot token `R01`..`R99` is read,
+ * the extended slots `R28` and up included.
  */
 typedef struct SidereonRinexGlonassRecords SidereonRinexGlonassRecords;
 
@@ -3383,11 +7353,24 @@ typedef struct SidereonRinexNavParse SidereonRinexNavParse;
 typedef struct SidereonRinexNavRecords SidereonRinexNavRecords;
 
 /**
- * A parsed RINEX 3 observation product. Create with sidereon_rinex_obs_parse and
+ * A parsed RINEX observation product. Create with sidereon_rinex_obs_parse and
  * release with sidereon_rinex_obs_free.
  */
 typedef struct SidereonRinexObs SidereonRinexObs;
 
+/**
+ * An owned record of one RINEX observation write: the text on success, or the
+ * typed refusal with its owned text parts. The result owns every string it
+ * reports. Create with sidereon_rinex_obs_to_rinex_text_result or
+ * sidereon_rinex_repair_text_result and release with
+ * sidereon_rinex_obs_write_result_free.
+ */
+typedef struct SidereonRinexObsWriteResult SidereonRinexObsWriteResult;
+
+/**
+ * A RINEX lint repair. Opaque to C. Create with sidereon_rinex_repair_obs or
+ * sidereon_rinex_repair_nav and release with sidereon_rinex_repair_free.
+ */
 typedef struct SidereonRinexRepair SidereonRinexRepair;
 
 /**
@@ -3519,8 +7502,8 @@ typedef struct SidereonSatelliteConstellation SidereonSatelliteConstellation;
  * Per-satellite sub-satellite (ground-track) arcs over a fleet. Opaque to C.
  * Create with sidereon_satellite_constellation_ground_tracks and release with
  * sidereon_satellite_constellation_ground_tracks_free. Element i is satellite
- * i's track, in fleet order; a satellite that fails yields an empty track so the
- * result stays index-aligned with the constellation.
+ * i's track, in fleet order. A failed track keeps the legacy empty row and is
+ * available as a typed payload through the indexed error accessor.
  */
 typedef struct SidereonSatelliteConstellationGroundTracks SidereonSatelliteConstellationGroundTracks;
 
@@ -3528,8 +7511,8 @@ typedef struct SidereonSatelliteConstellationGroundTracks SidereonSatelliteConst
  * Per-satellite topocentric look-angle arcs over a fleet. Opaque to C. Create
  * with sidereon_satellite_constellation_look_angle_arcs and release with
  * sidereon_satellite_constellation_look_angles_free. Element i is satellite i's
- * arc, in fleet order; a satellite that fails to propagate yields an empty arc
- * so the result stays index-aligned with the constellation.
+ * arc, in fleet order. A failed arc keeps the legacy empty row and is available
+ * as a typed payload through the indexed error accessor.
  */
 typedef struct SidereonSatelliteConstellationLookAngles SidereonSatelliteConstellationLookAngles;
 
@@ -3607,6 +7590,13 @@ typedef struct SidereonSourcedSolution SidereonSourcedSolution;
 typedef struct SidereonSp3 SidereonSp3;
 
 /**
+ * The per-satellite coverage of one SP3 product (sidereon_core Sp3Coverage).
+ * Opaque to C. Create with sidereon_sp3_satellite_coverage and release with
+ * sidereon_sp3_coverage_free.
+ */
+typedef struct SidereonSp3Coverage SidereonSp3Coverage;
+
+/**
  * Canonical, versioned identity of exact SP3 merge inputs and policy.
  *
  * The handle retains both the distributor-independent canonical contributor
@@ -3620,6 +7610,16 @@ typedef struct SidereonSp3MergeInputIdentity SidereonSp3MergeInputIdentity;
  * release with sidereon_sp3_merge_report_free.
  */
 typedef struct SidereonSp3MergeReport SidereonSp3MergeReport;
+
+/**
+ * An owned record of one SP3 write: the text on success, or the typed refusal
+ * with its owned text parts. The result owns every string it reports, so they
+ * stay readable after the product is freed and after later failing calls have
+ * overwritten the thread-local message. Create with
+ * sidereon_sp3_to_sp3_text_result and release with
+ * sidereon_sp3_write_result_free.
+ */
+typedef struct SidereonSp3WriteResult SidereonSp3WriteResult;
 
 typedef struct SidereonSpaceWeatherTable SidereonSpaceWeatherTable;
 
@@ -3656,6 +7656,13 @@ typedef struct SidereonSppSolution SidereonSppSolution;
 typedef struct SidereonSsrCorrectionStore SidereonSsrCorrectionStore;
 
 /**
+ * The decoded RTCM messages an SSR store refused to ingest, each with its
+ * message number and the refusal. Release with
+ * sidereon_ssr_ingest_refusals_free.
+ */
+typedef struct SidereonSsrIngestRefusals SidereonSsrIngestRefusals;
+
+/**
  * An opaque decoded RTCM SSR message body. The handle owns one
  * `sidereon_core::rtcm::SsrMessage` and is released with
  * sidereon_ssr_message_free.
@@ -3683,6 +7690,36 @@ typedef struct SidereonStaticReferenceStationSolution SidereonStaticReferenceSta
  * with sidereon_tdm_free.
  */
 typedef struct SidereonTdm SidereonTdm;
+
+/**
+ * A standalone regular-grid vertical-TEC source.
+ *
+ * The grid stores TECU values on strictly increasing epoch, latitude and
+ * longitude axes. Epoch coordinates are `f64` Unix nanoseconds; latitude and
+ * longitude are degrees; values are flat in epoch-latitude-longitude order
+ * with longitude varying fastest.
+ */
+typedef struct SidereonTecGrid SidereonTecGrid;
+
+/**
+ * An owned record of one standalone TEC-grid construction or evaluation.
+ *
+ * The result owns every string it reports, so the complete message, the exact
+ * InvalidField label and reason, and the indexed details all stay readable
+ * after the grid is freed and after any number of later failing calls have
+ * overwritten the thread-local message. Release it with
+ * sidereon_tec_grid_result_free.
+ */
+typedef struct SidereonTecGridResult SidereonTecGridResult;
+
+/**
+ * An owned record of one IONEX sample construction.
+ *
+ * It owns its text, so the message stays readable after any number of later
+ * failing calls have overwritten the thread-local message. Release it with
+ * sidereon_tec_samples_result_free.
+ */
+typedef struct SidereonTecSamplesResult SidereonTecSamplesResult;
 
 /**
  * A parsed TLE and initialized SGP4 satellite. Opaque to C. Create with
@@ -3884,6 +7921,306 @@ typedef struct SidereonAlphaBetaStep {
      */
     double innovation;
 } SidereonAlphaBetaStep;
+
+/**
+ * One `METH / BY / # / DATE` record. Its method, agency and date are read with
+ * sidereon_antenna_calibration_text.
+ */
+typedef struct SidereonAntexCalibration {
+    /**
+     * Whether antennas_calibrated carries the `I6` count.
+     */
+    bool has_antennas_calibrated;
+    /**
+     * Number of individual antennas calibrated.
+     */
+    uint32_t antennas_calibrated;
+} SidereonAntexCalibration;
+
+/**
+ * Fixed-width fields of one frequency section. Its label is read with
+ * sidereon_antenna_frequency_label and its samples with
+ * sidereon_antenna_frequency_pcv_samples.
+ */
+typedef struct SidereonAntexFrequencyInfo {
+    /**
+     * `NORTH / EAST / UP` phase-center offset, meters.
+     */
+    double pco_m[3];
+    /**
+     * Number of PCV samples.
+     */
+    size_t pcv_sample_count;
+    /**
+     * Whether the section has a `START OF FREQ RMS` section.
+     */
+    bool has_rms;
+    /**
+     * Whether rms_pco_m carries the RMS section's `NORTH / EAST / UP` record.
+     */
+    bool has_rms_pco_m;
+    /**
+     * RMS of the eccentricities, meters.
+     */
+    double rms_pco_m[3];
+    /**
+     * Number of RMS pattern samples.
+     */
+    size_t rms_pcv_sample_count;
+} SidereonAntexFrequencyInfo;
+
+/**
+ * One phase-center-variation grid value.
+ */
+typedef struct SidereonAntexPcvSample {
+    /**
+     * Row type, as SidereonAntexPcvGrid.
+     */
+    uint32_t grid;
+    /**
+     * Whether azimuth_deg carries the row's azimuth; false for `NOAZI`.
+     */
+    bool has_azimuth_deg;
+    /**
+     * Row azimuth as parsed, degrees; NaN for `NOAZI`.
+     */
+    double azimuth_deg;
+    /**
+     * Zenith (receiver) or nadir (satellite) angle, degrees.
+     */
+    double zenith_deg;
+    /**
+     * Value, meters.
+     */
+    double value_m;
+} SidereonAntexPcvSample;
+
+/**
+ * Exact GPS-time calendar instant of an ANTEX `VALID FROM` / `VALID UNTIL`
+ * bound. The fraction of the second is `fraction_digits / 10^fraction_scale`,
+ * kept exactly as the `F13.7` seconds field states it (a field with an
+ * exponent can state a fraction far below a nanosecond). An instant this
+ * binding returns is normalized: fraction_digits has no trailing zero digit,
+ * and a zero fraction has digits and scale 0.
+ */
+typedef struct SidereonAntexDateTime {
+    /**
+     * Calendar year.
+     */
+    int32_t year;
+    /**
+     * Month, 1..=12.
+     */
+    uint8_t month;
+    /**
+     * Day of month.
+     */
+    uint8_t day;
+    /**
+     * Hour, 0..=23.
+     */
+    uint8_t hour;
+    /**
+     * Minute, 0..=59.
+     */
+    uint8_t minute;
+    /**
+     * Whole second, 0..=59.
+     */
+    uint8_t second;
+    /**
+     * Significant digits of the fraction of the second.
+     */
+    uint64_t fraction_digits;
+    /**
+     * Power of ten dividing fraction_digits.
+     */
+    uint64_t fraction_scale;
+} SidereonAntexDateTime;
+
+/**
+ * Fixed-width fields of one ANTEX antenna block. Text is read with
+ * sidereon_antenna_text, sidereon_antenna_comment,
+ * sidereon_antenna_calibration_text and sidereon_antenna_frequency_label.
+ */
+typedef struct SidereonAntennaInfo {
+    /**
+     * Receiver or satellite, as SidereonAntennaKind.
+     */
+    uint32_t kind;
+    /**
+     * Whether dazi_deg carries the `DAZI` record.
+     */
+    bool has_dazi_deg;
+    /**
+     * Azimuth increment, degrees.
+     */
+    double dazi_deg;
+    /**
+     * Whether the zenith fields carry the `ZEN1 / ZEN2 / DZEN` record.
+     */
+    bool has_zenith_grid;
+    /**
+     * `ZEN1`, degrees.
+     */
+    double zenith_start_deg;
+    /**
+     * `ZEN2`, degrees.
+     */
+    double zenith_end_deg;
+    /**
+     * `DZEN`, degrees.
+     */
+    double zenith_step_deg;
+    /**
+     * Whether the block carries `# OF FREQUENCIES`.
+     */
+    bool has_frequency_count_record;
+    /**
+     * Whether the block carries `SINEX CODE`.
+     */
+    bool has_sinex_code;
+    /**
+     * Whether valid_from carries `VALID FROM`.
+     */
+    bool has_valid_from;
+    /**
+     * `VALID FROM`, exactly as stated.
+     */
+    struct SidereonAntexDateTime valid_from;
+    /**
+     * Whether valid_until carries `VALID UNTIL`.
+     */
+    bool has_valid_until;
+    /**
+     * `VALID UNTIL`, exactly as stated.
+     */
+    struct SidereonAntexDateTime valid_until;
+    /**
+     * Number of `METH / BY / # / DATE` records.
+     */
+    size_t calibration_count;
+    /**
+     * Number of comments before `TYPE / SERIAL NO`.
+     */
+    size_t leading_comment_count;
+    /**
+     * Number of comments after `TYPE / SERIAL NO`.
+     */
+    size_t comment_count;
+    /**
+     * Number of frequency sections, in file order; a repeated label keeps
+     * every section.
+     */
+    size_t frequency_count;
+} SidereonAntennaInfo;
+
+/**
+ * The retained ANTEX header records. Text is read with
+ * sidereon_antex_header_text and sidereon_antex_header_comment.
+ */
+typedef struct SidereonAntexHeader {
+    /**
+     * Whether the source carries `ANTEX VERSION / SYST`.
+     */
+    bool has_version;
+    /**
+     * Format version.
+     */
+    double version;
+    /**
+     * Whether the system column of `ANTEX VERSION / SYST` is not blank.
+     */
+    bool has_system;
+    /**
+     * Satellite system flag code point (`G`, `R`, `E`, `C`, `J`, `S` or `M`).
+     */
+    uint32_t system;
+    /**
+     * Whether the source carries `PCV TYPE / REFANT`.
+     */
+    bool has_pcv_type;
+    /**
+     * Whether the values are absolute or relative, as SidereonAntexPcvType.
+     */
+    uint32_t pcv_type;
+    /**
+     * Whether the values are relative to a reference antenna, the stated type
+     * or `AOAD/M_T` when a relative file leaves it blank.
+     */
+    bool has_reference_antenna;
+    /**
+     * Number of header `COMMENT` records.
+     */
+    size_t comment_count;
+    /**
+     * Whether the source carries `END OF HEADER`.
+     */
+    bool end_of_header;
+} SidereonAntexHeader;
+
+/**
+ * Typed detail of an ANTEX failure. Only the fields the kind names carry
+ * meaning; each has_ flag says whether the failure carries that text part,
+ * which is copied with the text route of its owner.
+ */
+typedef struct SidereonAntexError {
+    /**
+     * Which failure was reported.
+     */
+    enum SidereonAntexErrorKind kind;
+    /**
+     * Whether the failure names an antenna id.
+     */
+    bool has_antenna_id;
+    /**
+     * Whether the failure names a record label.
+     */
+    bool has_record;
+    /**
+     * Whether the failure names a field.
+     */
+    bool has_field;
+    /**
+     * Whether the failure carries field text.
+     */
+    bool has_value;
+    /**
+     * Whether the failure names a frequency label.
+     */
+    bool has_frequency;
+    /**
+     * Whether the failure gives a reason.
+     */
+    bool has_reason;
+    /**
+     * Whether sections carries an AmbiguousFrequency section count.
+     */
+    bool has_sections;
+    /**
+     * Number of frequency sections carrying the label.
+     */
+    size_t sections;
+} SidereonAntexError;
+
+/**
+ * The fixed-width outcome of one ANTEX parse or encode.
+ */
+typedef struct SidereonAntexOutcome {
+    /**
+     * Whether the operation succeeded.
+     */
+    bool is_ok;
+    /**
+     * SIDEREON_STATUS_OK on success, otherwise
+     * SIDEREON_STATUS_INVALID_ARGUMENT, which every failure maps to.
+     */
+    enum SidereonStatus status;
+    /**
+     * The typed failure; kind is None when is_ok is true.
+     */
+    struct SidereonAntexError error;
+} SidereonAntexOutcome;
 
 /**
  * An ECEF line-of-sight unit vector from the receiver toward a satellite.
@@ -4310,6 +8647,114 @@ typedef struct SidereonBiasEpoch {
     uint32_t second_of_day;
 } SidereonBiasEpoch;
 
+/**
+ * Result of one bias lookup. The fields that do not belong to `status` are
+ * zero. Record indices are into the set's records
+ * (sidereon_bias_set_record).
+ */
+typedef struct SidereonBiasLookup {
+    /**
+     * Outcome of the lookup.
+     */
+    enum SidereonBiasLookupStatus status;
+    /**
+     * The value when `status` is AVAILABLE, in the unit the query names.
+     */
+    double value;
+    /**
+     * Number of record indices the value comes from (AVAILABLE) or that
+     * conflict (AMBIGUOUS). The lookup copies up to records_len of them into
+     * out_records.
+     */
+    size_t record_count;
+    /**
+     * Number of records that also cover the query epoch but are overridden
+     * by a later start (AVAILABLE). The lookup copies up to overridden_len of
+     * them into out_overridden.
+     */
+    size_t overridden_count;
+    /**
+     * The record named by CARRIER_FREQUENCY_REQUIRED or
+     * UNDEFINED_SLOPE_REFERENCE.
+     */
+    size_t record;
+    /**
+     * Whether the product has a time scale (UNSUPPORTED_SCALE).
+     */
+    bool has_product_time_scale;
+    /**
+     * Product time scale as SidereonTimeScale (UNSUPPORTED_SCALE).
+     */
+    uint32_t product_time_scale;
+    /**
+     * Whether the query has a time scale (UNSUPPORTED_SCALE). The caller
+     * epoch is read on the product's scale, so it has none when the product
+     * has none.
+     */
+    bool has_query_time_scale;
+    /**
+     * Query time scale as SidereonTimeScale (UNSUPPORTED_SCALE).
+     */
+    uint32_t query_time_scale;
+    /**
+     * Observable code with no known carrier (CARRIER_FREQUENCY_UNKNOWN).
+     */
+    char observable[BIAS_OBS_C_BYTES];
+    /**
+     * The engine's name for the outcome when `status` is UNKNOWN; empty
+     * otherwise.
+     */
+    char unknown_variant[SIDEREON_UNKNOWN_VARIANT_C_BYTES];
+} SidereonBiasLookup;
+
+/**
+ * One bias notice, with every number the engine's notice carries. Its text
+ * parts are copied with sidereon_bias_set_notice_text.
+ */
+typedef struct SidereonBiasNotice {
+    /**
+     * A SidereonBiasNoticeKind value.
+     */
+    uint32_t kind;
+    /**
+     * For a DEPARTURE notice, a SidereonBiasDepartureKind value; NONE
+     * otherwise.
+     */
+    uint32_t departure;
+    /**
+     * Whether `line` is present.
+     */
+    bool has_line;
+    /**
+     * One-based source line.
+     */
+    size_t line;
+    /**
+     * For OVERLAP, the record with the earlier start.
+     */
+    size_t first;
+    /**
+     * For OVERLAP, the record with the later or equal start.
+     */
+    size_t second;
+    /**
+     * For ESTIMATE_COUNT_MISMATCH, the header count.
+     */
+    uint64_t declared_count;
+    /**
+     * For ESTIMATE_COUNT_MISMATCH, the solution rows.
+     */
+    size_t solution_rows;
+    /**
+     * For HEADER_MODE_MISMATCH, the BIAS_MODE declared.
+     */
+    enum SidereonBiasMode bias_mode;
+    /**
+     * The engine's name for a kind or departure that reads UNKNOWN.
+     */
+    char unknown_variant[SIDEREON_UNKNOWN_VARIANT_C_BYTES];
+} SidereonBiasNotice;
+
 typedef struct SidereonBiasRecord {
     enum SidereonBiasKind kind;
     enum SidereonBiasTargetKind target_kind;
@@ -4332,8 +8777,157 @@ typedef struct SidereonBiasRecord {
     double slope;
     bool has_slope_sigma;
     double slope_sigma;
+    /**
+     * True for a phase bias, one whose observable is an `L` code.
+     */
     bool is_phase;
+    /**
+     * Code, phase or mixed, from the observable codes (Bias-SINEX 1.00
+     * section 4.8).
+     */
+    enum SidereonBiasObservableFamily family;
+    /**
+     * Unit the source row states its values in. A nanosecond row holds its
+     * value in seconds, a cycle row in cycles.
+     */
+    enum SidereonBiasUnit unit;
+    /**
+     * Whether `line` is present.
+     */
+    bool has_line;
+    /**
+     * One-based source line of the row, when read from text.
+     */
+    size_t line;
 } SidereonBiasRecord;
+
+/**
+ * Ocean-loading BLQ coefficients, mirroring
+ * sidereon_core::ppp_corrections::OceanLoadingBlq. Both arrays are
+ * [3][SIDEREON_PPP_OCEAN_CONSTITUENTS]: row 0 radial, 1 west, 2 south.
+ */
+typedef struct SidereonOceanLoadingBlq {
+    /**
+     * Constituent amplitudes (m).
+     */
+    double amplitude_m[3][SIDEREON_PPP_OCEAN_CONSTITUENTS];
+    /**
+     * Constituent Greenwich phase lags (degrees, positive lag).
+     */
+    double phase_deg[3][SIDEREON_PPP_OCEAN_CONSTITUENTS];
+} SidereonOceanLoadingBlq;
+
+/**
+ * The placement of one retained BLQ line. Its text is copied with
+ * sidereon_blq_blocks_comment.
+ */
+typedef struct SidereonBlqComment {
+    /**
+     * Placement, as SidereonBlqCommentPlacement.
+     */
+    uint32_t placement;
+    /**
+     * Coefficient row the line precedes, when placement is BeforeRow; 0
+     * otherwise.
+     */
+    size_t row;
+} SidereonBlqComment;
+
+/**
+ * Typed detail of a BLQ failure. Only the fields the kinds name carry meaning,
+ * each behind a present flag; the text part (a station, token or constituent
+ * label) is copied with sidereon_blq_result_error_text.
+ */
+typedef struct SidereonBlqError {
+    /**
+     * The failure family.
+     */
+    enum SidereonBlqErrorKind kind;
+    /**
+     * Whether line carries the parser's line number.
+     */
+    bool has_line;
+    /**
+     * One-based offending line, or 0 for a whole-input failure.
+     */
+    size_t line;
+    /**
+     * Why the parser refused, as SidereonBlqParseErrorKind; also the nested
+     * refusal of a write InvalidHeader.
+     */
+    uint32_t parse_kind;
+    /**
+     * Whether expected carries a required count.
+     */
+    bool has_expected;
+    /**
+     * Required count (coefficient rows or columns).
+     */
+    size_t expected;
+    /**
+     * Whether found carries a found count.
+     */
+    bool has_found;
+    /**
+     * Found count (coefficient rows, columns or blocks).
+     */
+    size_t found;
+    /**
+     * Whether the failure carries a text part.
+     */
+    bool has_text;
+    /**
+     * Whether block carries the refused block's index.
+     */
+    bool has_block;
+    /**
+     * Zero-based index of the refused block in the written sequence.
+     */
+    size_t block;
+    /**
+     * Why the writer refused, as SidereonBlqWriteErrorKind.
+     */
+    uint32_t write_kind;
+    /**
+     * Whether row and constituent carry a non-finite coefficient's place.
+     */
+    bool has_coefficient;
+    /**
+     * Zero-based BLQ row: amplitudes radial, west, south, then phases.
+     */
+    size_t row;
+    /**
+     * Constituent of the coefficient, as SidereonOceanTideConstituent.
+     */
+    uint32_t constituent;
+    /**
+     * Whether comment_index carries a retained line's index.
+     */
+    bool has_comment_index;
+    /**
+     * Index of the retained line in the block's comments.
+     */
+    size_t comment_index;
+} SidereonBlqError;
+
+/**
+ * The fixed-width outcome of one BLQ operation.
+ */
+typedef struct SidereonBlqOutcome {
+    /**
+     * Whether the operation succeeded.
+     */
+    bool is_ok;
+    /**
+     * SIDEREON_STATUS_OK on success, otherwise
+     * SIDEREON_STATUS_INVALID_ARGUMENT, which every failure maps to.
+     */
+    enum SidereonStatus status;
+    /**
+     * The typed failure; kind is None when is_ok is true.
+     */
+    struct SidereonBlqError error;
+} SidereonBlqOutcome;
 
 /**
  * Scalar outcome of an integer least-squares search. The best integer vector
@@ -4522,6 +9116,24 @@ typedef struct SidereonMet {
 } SidereonMet;
 
 /**
+ * Composite policies applied to an IONEX slant-delay query.
+ */
+typedef struct SidereonIonexSlantPolicy {
+    /**
+     * One of SidereonIonexCoveragePolicy.
+     */
+    uint32_t coverage;
+    /**
+     * One of SidereonIonexMissingNodePolicy.
+     */
+    uint32_t missing_nodes;
+    /**
+     * One of SidereonIonexMappingPolicy.
+     */
+    uint32_t mapping;
+} SidereonIonexSlantPolicy;
+
+/**
  * Options for one-call emission-epoch state and media correction batches.
  * Initialize with sidereon_emission_media_options_init for engine defaults.
  */
@@ -4550,6 +9162,19 @@ typedef struct SidereonEmissionMediaOptions {
      * Optional IONEX handle for ionosphere correction. NULL disables IONEX.
      */
     const struct SidereonIonex *ionex;
+    /**
+     * Whether ionex_policy applies to the IONEX correction. False evaluates
+     * the IONEX product under the engine default policy, the one
+     * sidereon_ionex_slant_policy_default returns, so a zero-filled options
+     * struct keeps that default.
+     */
+    bool ionex_policy_enabled;
+    /**
+     * Coverage, missing-node and mapping policy for the IONEX correction,
+     * when ionex_policy_enabled is true. An unrecognized tag fails the call
+     * with SIDEREON_STATUS_INVALID_ARGUMENT.
+     */
+    struct SidereonIonexSlantPolicy ionex_policy;
 } SidereonEmissionMediaOptions;
 
 /**
@@ -4603,9 +9228,69 @@ typedef struct SidereonGlonassRecord {
      */
     double sv_health;
     /**
-     * FDMA frequency-channel number.
+     * FDMA frequency-channel number. A stated value above 128 is read as that
+     * value less 256, as RTKLIB `decode_geph` reads it.
      */
     int32_t freq_channel;
+    /**
+     * The record epoch as stated, seconds past J2000 in UTC.
+     */
+    double epoch_utc_j2000_s;
+    /**
+     * The frequency-channel field as stated, before a value above 128 is
+     * folded into freq_channel.
+     */
+    int32_t stated_freq_channel;
+    /**
+     * Whether `message_frame_time_s` is present.
+     */
+    bool has_message_frame_time_s;
+    /**
+     * Message frame time as stated: seconds of the UTC week in RINEX 3 and 4,
+     * seconds of the UTC day in RINEX 2.
+     */
+    double message_frame_time_s;
+    /**
+     * Whether `age_days` is present.
+     */
+    bool has_age_days;
+    /**
+     * Age of operational information E_n, days.
+     */
+    double age_days;
+    /**
+     * Whether `status_flags` is present.
+     */
+    bool has_status_flags;
+    /**
+     * Status flags (BROADCAST ORBIT-4 field 1) as stated.
+     */
+    double status_flags;
+    /**
+     * Whether `l1_l2_group_delay_field_s` is present.
+     */
+    bool has_l1_l2_group_delay_field_s;
+    /**
+     * L1/L2 group delay difference field, seconds, as stated, including the
+     * `.999999999999E+09` value for an unknown delay.
+     */
+    double l1_l2_group_delay_field_s;
+    /**
+     * Whether `urai` is present.
+     */
+    bool has_urai;
+    /**
+     * Raw accuracy index URAI as stated.
+     */
+    double urai;
+    /**
+     * Whether `health_flags` is present.
+     */
+    bool has_health_flags;
+    /**
+     * Health flags (BROADCAST ORBIT-4 field 4) as stated.
+     */
+    double health_flags;
 } SidereonGlonassRecord;
 
 /**
@@ -4664,6 +9349,31 @@ typedef struct SidereonIonoCorrections {
      * Galileo NeQuick-G coefficients.
      */
     struct SidereonGalileoNequickCoeffs galileo;
+    /**
+     * Whether `galileo_disturbance_flags` is present.
+     */
+    bool has_galileo_disturbance_flags;
+    /**
+     * Galileo ionospheric disturbance flags (the fourth `GAL` value) as stated.
+     */
+    double galileo_disturbance_flags;
+    /**
+     * QZSS Klobuchar coefficients (`QZSA`/`QZSB`).
+     */
+    struct SidereonKlobucharAlphaBeta qzss;
+    /**
+     * NavIC Klobuchar coefficients (`IRNA`/`IRNB`).
+     */
+    struct SidereonKlobucharAlphaBeta navic;
+    /**
+     * Whether `beidou_bdgim` is present.
+     */
+    bool has_beidou_bdgim;
+    /**
+     * BeiDou global ionospheric model coefficients alpha1..alpha9 from a
+     * RINEX 4 `CNVX` ionosphere frame.
+     */
+    double beidou_bdgim[9];
 } SidereonIonoCorrections;
 
 typedef struct SidereonCnavParameters {
@@ -4684,6 +9394,11 @@ typedef struct SidereonCnavParameters {
 typedef struct SidereonBroadcastRecordInfo {
     struct SidereonSatelliteToken sat_id;
     uint32_t message;
+    /**
+     * Whether the record carries an issue of data. GPS/QZSS CNAV-family
+     * records carry none, and then issue and issue_message are zero.
+     */
+    bool has_issue;
     uint32_t issue;
     uint32_t issue_message;
     uint32_t week;
@@ -4692,6 +9407,11 @@ typedef struct SidereonBroadcastRecordInfo {
     uint32_t toc_week;
     double toc_tow_s;
     double sv_health;
+    /**
+     * Whether sv_accuracy_m is present. CNAV URA_ED indices 15 and -16 carry
+     * no accuracy prediction.
+     */
+    bool has_sv_accuracy_m;
     double sv_accuracy_m;
     bool has_fit_interval_s;
     double fit_interval_s;
@@ -4958,6 +9678,74 @@ typedef struct SidereonBroadcastCnavParameters {
 } SidereonBroadcastCnavParameters;
 
 /**
+ * Fields of a legacy broadcast record that the orbit and clock models do not
+ * read, as the record states them. Each `has_*` flag is false for a blank
+ * field or one the source does not carry. Mirrors
+ * sidereon_core::rinex::nav::StatedNavFields.
+ */
+typedef struct SidereonStatedNavFields {
+    /**
+     * Whether `orbit5_field2` is present.
+     */
+    bool has_orbit5_field2;
+    /**
+     * BROADCAST ORBIT-5 field 2: GPS/QZSS codes on L2, the Galileo data-source
+     * word, spare for BeiDou and NavIC.
+     */
+    double orbit5_field2;
+    /**
+     * Whether `orbit5_field4` is present.
+     */
+    bool has_orbit5_field4;
+    /**
+     * BROADCAST ORBIT-5 field 4: GPS/QZSS L2 P data flag, spare elsewhere.
+     */
+    double orbit5_field4;
+    /**
+     * Whether `orbit6_field4` is present.
+     */
+    bool has_orbit6_field4;
+    /**
+     * BROADCAST ORBIT-6 field 4: GPS/QZSS IODC, NavIC spare.
+     */
+    double orbit6_field4;
+    /**
+     * Whether `transmission_time_sow` is present.
+     */
+    bool has_transmission_time_sow;
+    /**
+     * BROADCAST ORBIT-7 field 1: transmission time of message, seconds of
+     * week, as stated (including a `.9999E+09` not-known value).
+     */
+    double transmission_time_sow;
+    /**
+     * Whether `orbit7_field2` is present.
+     */
+    bool has_orbit7_field2;
+    /**
+     * BROADCAST ORBIT-7 field 2: GPS fit interval, QZSS fit flag, BeiDou
+     * AODC, spare for Galileo and NavIC, as stated.
+     */
+    double orbit7_field2;
+    /**
+     * Whether `orbit7_field3` is present.
+     */
+    bool has_orbit7_field3;
+    /**
+     * BROADCAST ORBIT-7 field 3 (spare).
+     */
+    double orbit7_field3;
+    /**
+     * Whether `orbit7_field4` is present.
+     */
+    bool has_orbit7_field4;
+    /**
+     * BROADCAST ORBIT-7 field 4 (spare).
+     */
+    double orbit7_field4;
+} SidereonStatedNavFields;
+
+/**
  * Complete broadcast navigation record. The scale is carried by `toe`,
  * `toc`, and (when present) the CNAV `top` value; optional fields use explicit
  * presence flags.
@@ -4971,6 +9759,11 @@ typedef struct SidereonBroadcastRecord {
      * Navigation message as SidereonNavMessage.
      */
     uint32_t message;
+    /**
+     * Whether the record carries an issue of data. GPS/QZSS CNAV-family
+     * records carry none; issue and issue_message are then zero and ignored.
+     */
+    bool has_issue;
     /**
      * Native issue-of-data value.
      */
@@ -5012,7 +9805,12 @@ typedef struct SidereonBroadcastRecord {
      */
     double sv_health;
     /**
-     * Signal-in-space accuracy, meters.
+     * Whether `sv_accuracy_m` is present. CNAV URA_ED indices 15 and -16
+     * carry no accuracy prediction.
+     */
+    bool has_sv_accuracy_m;
+    /**
+     * Signal-in-space accuracy, meters, when present.
      */
     double sv_accuracy_m;
     /**
@@ -5023,6 +9821,10 @@ typedef struct SidereonBroadcastRecord {
      * GPS curve-fit interval, seconds, when present.
      */
     double fit_interval_s;
+    /**
+     * Record fields the orbit and clock models do not read, as stated.
+     */
+    struct SidereonStatedNavFields stated;
 } SidereonBroadcastRecord;
 
 typedef struct SidereonEphemerisSampleRow {
@@ -5291,6 +10093,15 @@ typedef struct SidereonSatelliteState {
     struct SidereonClockOffset clock;
 } SidereonSatelliteState;
 
+typedef struct SidereonEphemerisSourceState {
+    bool has_state;
+    double position_ecef_m[3];
+    double clock_s;
+    bool has_group_delay;
+    double group_delay_s;
+    bool degraded;
+} SidereonEphemerisSourceState;
+
 /**
  * One RINEX dual-frequency code/carrier selection.
  */
@@ -5447,6 +10258,40 @@ typedef struct SidereonSourceInitialGuess {
 } SidereonSourceInitialGuess;
 
 /**
+ * Full precision, scale-tagged clock epoch. For `JulianDate`, the nanosecond
+ * pair is zero; for `Nanos`, the Julian fields are zero. The signed 128-bit
+ * value is transported losslessly as two's-complement high/low words. Where a
+ * record has no instant (its product's time system resolves to no time scale),
+ * the owning struct's presence flag is false and both Julian fields are NaN.
+ */
+typedef struct SidereonClockEpoch {
+    /**
+     * TimeScale code.
+     */
+    uint32_t scale;
+    /**
+     * SidereonRinexClockInstantRepresentation code.
+     */
+    uint32_t representation;
+    /**
+     * Whole Julian date for the JulianDate representation.
+     */
+    double jd_whole;
+    /**
+     * Residual Julian-day fraction for the JulianDate representation.
+     */
+    double jd_fraction;
+    /**
+     * Signed high 64 bits of the Nanos representation.
+     */
+    int64_t nanos_high;
+    /**
+     * Low 64 bits of the Nanos representation.
+     */
+    uint64_t nanos_low;
+} SidereonClockEpoch;
+
+/**
  * One point on an Allan-family estimator curve. `tau_s` is seconds, deviation
  * is in the estimator's natural units, and `n` is the number of terms used.
  */
@@ -5562,6 +10407,147 @@ typedef struct SidereonPowerLawNoiseOptions {
 } SidereonPowerLawNoiseOptions;
 
 /**
+ * Civil epoch fields of a RINEX clock record, in the product's time system.
+ * A UTC product accepts a second of 60.x on a day that ends with a positive
+ * leap second.
+ */
+typedef struct SidereonClockCivilEpoch {
+    /**
+     * Calendar year.
+     */
+    int32_t year;
+    /**
+     * Calendar month, 1..=12.
+     */
+    uint8_t month;
+    /**
+     * Day of month.
+     */
+    uint8_t day;
+    /**
+     * Hour of day.
+     */
+    uint8_t hour;
+    /**
+     * Minute of hour.
+     */
+    uint8_t minute;
+    /**
+     * Seconds of minute, including the fraction. A record's epoch keeps every
+     * digit its seconds field states; this is the nearest double to it, and
+     * sidereon_rinex_clock_source_line returns the field as written.
+     */
+    double second;
+} SidereonClockCivilEpoch;
+
+/**
+ * One RINEX clock header line with its typed reading. The line, label and
+ * payload text are read with sidereon_clock_header_records_text, and the
+ * typed field's text parts with sidereon_clock_header_records_field_text.
+ */
+typedef struct SidereonClockHeaderRecord {
+    /**
+     * Whether line carries the line number in the source.
+     */
+    bool has_line;
+    /**
+     * One-based line number; absent for a line written by an edit.
+     */
+    size_t line;
+    /**
+     * Zero-based column where the label starts.
+     */
+    size_t label_column;
+    /**
+     * How the fields were read, as SidereonClockHeaderReading.
+     */
+    uint32_t reading;
+    /**
+     * The typed reading, as SidereonClockHeaderFieldKind.
+     */
+    uint32_t field_kind;
+    /**
+     * Number of text parts the typed reading carries.
+     */
+    size_t text_part_count;
+    /**
+     * Whether version carries a VersionType version.
+     */
+    bool has_version;
+    /**
+     * Format version.
+     */
+    double version;
+    /**
+     * Whether system_code carries an ObservationTypes system code point.
+     */
+    bool has_system_code;
+    /**
+     * Satellite system code point.
+     */
+    uint32_t system_code;
+    /**
+     * Whether count carries a declared count.
+     */
+    bool has_count;
+    /**
+     * Declared count (ObservationTypes, TypesOfData, ClockRefCount,
+     * SolutionStationCount, SolutionSatelliteCount).
+     */
+    size_t count;
+    /**
+     * Whether integer carries a LeapSeconds or LeapSecondsGnss value.
+     */
+    bool has_integer;
+    /**
+     * Leap seconds.
+     */
+    int64_t integer;
+    /**
+     * Whether start carries a ClockRefCount start epoch.
+     */
+    bool has_start;
+    /**
+     * Start epoch.
+     */
+    struct SidereonClockCivilEpoch start;
+    /**
+     * Whether stop carries a ClockRefCount stop epoch.
+     */
+    bool has_stop;
+    /**
+     * Stop epoch.
+     */
+    struct SidereonClockCivilEpoch stop;
+    /**
+     * Whether constraint_s carries an AnalysisClockRef a priori constraint.
+     */
+    bool has_constraint_s;
+    /**
+     * A priori clock constraint, seconds.
+     */
+    double constraint_s;
+    /**
+     * Whether xyz_mm carries SolutionStation coordinates.
+     */
+    bool has_xyz_mm;
+    /**
+     * Geocentric X, Y, Z in millimetres.
+     */
+    int64_t xyz_mm[3];
+    /**
+     * The engine's name for `reading` when it reads UNKNOWN: a value a later
+     * engine adds that this binding has no code for yet. Empty otherwise.
+     */
+    char reading_unknown_variant[SIDEREON_UNKNOWN_VARIANT_C_BYTES];
+    /**
+     * The engine's name for `field_kind` when it reads UNKNOWN: a value a later
+     * engine adds that this binding has no code for yet. Empty otherwise.
+     */
+    char field_kind_unknown_variant[SIDEREON_UNKNOWN_VARIANT_C_BYTES];
+} SidereonClockHeaderRecord;
+
+/**
  * Per-octave power-law classification from ADEV and MDEV slopes.
  */
 typedef struct SidereonPowerLawOctave {
@@ -5648,6 +10634,119 @@ typedef struct SidereonPowerLawNoiseRegion {
      */
     double coefficient;
 } SidereonPowerLawNoiseRegion;
+
+/**
+ * A value present in a record beyond its declared count.
+ */
+typedef struct SidereonClockSurplusValue {
+    /**
+     * Zero-based position in the record's value sequence: 1 bias sigma,
+     * 2 rate, 3 rate sigma, 4 acceleration, 5 acceleration sigma.
+     */
+    size_t position;
+    /**
+     * The value.
+     */
+    double value;
+} SidereonClockSurplusValue;
+
+/**
+ * One RINEX clock data record with its typed reading. The record's name, as
+ * written and trimmed, is read with sidereon_clock_records_name.
+ */
+typedef struct SidereonClockRecord {
+    /**
+     * Record type, as SidereonClockRecordType.
+     */
+    uint32_t record_type;
+    /**
+     * Whether satellite carries the canonical identifier of an `AS` record.
+     */
+    bool has_satellite;
+    /**
+     * Canonical satellite identifier of an `AS` record.
+     */
+    struct SidereonSatelliteToken satellite;
+    /**
+     * Civil epoch in the product's time system.
+     */
+    struct SidereonClockCivilEpoch civil_epoch;
+    /**
+     * Whether epoch carries an instant; false when the product's time system
+     * resolves to no time scale.
+     */
+    bool has_epoch;
+    /**
+     * The epoch as an instant in the product's time scale.
+     */
+    struct SidereonClockEpoch epoch;
+    /**
+     * Number of declared values, bias first, 1..=6.
+     */
+    size_t value_count;
+    /**
+     * Declared values, bias first; entries at and past value_count are NaN.
+     */
+    double values[SIDEREON_CLOCK_MAX_VALUES];
+    /**
+     * Number of values present beyond the declared count.
+     */
+    size_t surplus_count;
+    /**
+     * Values present beyond the declared count, in file order; entries at and
+     * past surplus_count have position 0 and value NaN.
+     */
+    struct SidereonClockSurplusValue surplus[SIDEREON_CLOCK_MAX_SURPLUS_VALUES];
+    /**
+     * Whether line carries the record's first line number in the source.
+     */
+    bool has_line;
+    /**
+     * One-based line number of the record's first line; absent for a record
+     * built or edited through the typed API.
+     */
+    size_t line;
+    /**
+     * Number of physical lines the record spans in the source.
+     */
+    size_t line_count;
+    /**
+     * How the first line was read, as SidereonClockRecordReading.
+     */
+    uint32_t reading;
+    /**
+     * Whether continuation_reading carries how a continuation line was read.
+     */
+    bool has_continuation_reading;
+    /**
+     * How the continuation line was read, as SidereonClockRecordReading.
+     */
+    uint32_t continuation_reading;
+    /**
+     * The engine's name for `reading` when it reads UNKNOWN: a value a later
+     * engine adds that this binding has no code for yet. Empty otherwise.
+     */
+    char reading_unknown_variant[SIDEREON_UNKNOWN_VARIANT_C_BYTES];
+    /**
+     * The engine's name for `continuation_reading` when it reads UNKNOWN: a value a later
+     * engine adds that this binding has no code for yet. Empty otherwise.
+     */
+    char continuation_reading_unknown_variant[SIDEREON_UNKNOWN_VARIANT_C_BYTES];
+} SidereonClockRecord;
+
+/**
+ * The departures the RINEX clock writer may emit. Values are never
+ * approximated under any policy: a value no 19-column field states exactly is
+ * refused. Initialize with sidereon_clock_write_policy_init, which allows no
+ * departure.
+ */
+typedef struct SidereonClockWritePolicy {
+    /**
+     * Epochs that no microsecond text states exactly, written as the nearest
+     * microsecond text when Allow, as SidereonClockWriteLeniency.
+     */
+    uint32_t nearest_microsecond_epochs;
+} SidereonClockWritePolicy;
 
 typedef struct SidereonCodeDcbOptions {
     const char *obs1;
@@ -6396,6 +11495,12 @@ typedef struct SidereonSlipResult {
     bool skipped;
 } SidereonSlipResult;
 
+typedef struct SidereonArcEpochV2 {
+    struct SidereonArcEpoch legacy;
+    bool has_gap_epoch;
+    const struct SidereonExactEpoch *gap_epoch;
+} SidereonArcEpochV2;
+
 /**
  * One code-only pseudorange observation, mirroring
  * sidereon_core::dgnss::CodeObservation.
@@ -6488,6 +11593,15 @@ typedef struct SidereonSppInputs {
      * Also recover the geodetic (lat/lon/height) form of the position.
      */
     bool with_geodetic;
+    /**
+     * Which code the pseudoranges are. The broadcast single-frequency group
+     * delay (TGD, BGD) applies to single-frequency code only, as RTKLIB
+     * `prange` applies it to P1 and none under IFLC. A SidereonPseudorangeCode
+     * value; zero-initialized inputs read as
+     * SIDEREON_PSEUDORANGE_CODE_SINGLE_FREQUENCY, and any other value is
+     * refused with SIDEREON_STATUS_INVALID_ARGUMENT.
+     */
+    uint32_t pseudorange_code;
 } SidereonSppInputs;
 
 /**
@@ -6504,7 +11618,9 @@ typedef struct SidereonSppRobustConfig {
      */
     double scale_floor_m;
     /**
-     * Maximum outer robust solves, including the warm start.
+     * Maximum outer robust solves, including the warm start. The engine
+     * default (DEFAULT_ROBUST_MAX_OUTER, 100) is a safeguard: the reweighting
+     * ends when the position settles, when it cycles, or at this cap.
      */
     size_t max_outer;
     /**
@@ -6572,7 +11688,10 @@ typedef struct SidereonGlonassChannel {
      */
     uint8_t slot;
     /**
-     * FDMA frequency channel k, valid range [-7, +6] (engine-enforced).
+     * FDMA frequency channel k. The FDMA allocation is -7..=6; a channel
+     * outside it resolves no carrier, so an ionosphere-corrected SPP solve
+     * leaves that satellite out and reports it with
+     * SIDEREON_SPP_REJECTION_REASON_IONOSPHERE_CARRIER_UNRESOLVED.
      */
     int8_t channel;
 } SidereonGlonassChannel;
@@ -6616,9 +11735,12 @@ typedef struct SidereonSppInputsV2 {
      * slot. Required for any GLONASS observation solved with the ionosphere
      * correction: the per-satellite G1 carrier is resolved from this map to
      * scale the L1 Klobuchar delay. NULL with a zero count means no channels,
-     * which leaves every non-GLONASS solve bit-identical; a GLONASS observation
-     * with the ionosphere correction but no matching (or out-of-range) channel
-     * is rejected by the engine. Duplicate slots are rejected.
+     * which leaves every non-GLONASS solve bit-identical. A GLONASS observation
+     * solved with the ionosphere correction and no matching channel, or a
+     * channel outside the -7..=6 FDMA allocation, is left out of the solve and
+     * reported as a rejected satellite with
+     * SIDEREON_SPP_REJECTION_REASON_IONOSPHERE_CARRIER_UNRESOLVED; the rest of
+     * the epoch is solved. Duplicate slots are rejected.
      */
     const struct SidereonGlonassChannel *glonass_channels;
     /**
@@ -6689,6 +11811,13 @@ typedef struct SidereonTimeScales {
      * Full TDB Julian date.
      */
     double jd_tdb;
+    /**
+     * Whether UT1 lies outside the UT1 table and was taken from the long-term
+     * delta-T curve. The frame transforms that read UT1 refuse time scales
+     * marked this way. A SidereonUt1Degradation value; an unknown value is
+     * refused where the time scales are read.
+     */
+    uint32_t ut1_degraded;
 } SidereonTimeScales;
 
 /**
@@ -6748,6 +11877,227 @@ typedef struct SidereonLonLatDeg {
 } SidereonLonLatDeg;
 
 /**
+ * A DTED horizontal datum with the field text of an Other datum.
+ */
+typedef struct SidereonDtedHorizontalDatumValue {
+    /**
+     * Which datum the field states.
+     */
+    enum SidereonDtedHorizontalDatum kind;
+    /**
+     * For Other, the DSI field as read (lossily decoded if not UTF-8); for
+     * Unknown, the engine's value; null-terminated, empty for every other
+     * kind. The DSI field is 5 bytes; an engine value longer than 64 bytes
+     * is cut to 64.
+     */
+    char text[SIDEREON_DTED_DATUM_TEXT_C_BYTES];
+    /**
+     * Whether positions in a tile on this datum are WGS84 positions: true for
+     * Wgs84 and Unstated. Terrain lookups and the terrain-store converter
+     * refuse a tile for which this is false.
+     */
+    bool wgs84_compatible;
+} SidereonDtedHorizontalDatumValue;
+
+/**
+ * Typed detail of a failed DTED tile read or query. Only the fields the kind
+ * names carry meaning; each number group carries a present flag and each text
+ * is empty when the kind carries none.
+ */
+typedef struct SidereonDtedTileError {
+    /**
+     * Which failure was reported.
+     */
+    enum SidereonDtedTileErrorKind kind;
+    /**
+     * UHL field name, null-terminated, when the kind carries one.
+     */
+    char field[SIDEREON_TERRAIN_ERROR_FIELD_C_BYTES];
+    /**
+     * UHL field text as read, null-terminated, when the kind carries one.
+     */
+    char text[SIDEREON_TERRAIN_ERROR_FIELD_C_BYTES];
+    /**
+     * Whether lon_count and lat_count carry the tile dimensions.
+     */
+    bool has_counts;
+    /**
+     * Longitude count from the UHL header.
+     */
+    size_t lon_count;
+    /**
+     * Latitude count from the UHL header.
+     */
+    size_t lat_count;
+    /**
+     * Whether actual_bytes and expected_bytes carry the tile length.
+     */
+    bool has_lengths;
+    /**
+     * Bytes the tile holds.
+     */
+    size_t actual_bytes;
+    /**
+     * Bytes the declared data blocks need.
+     */
+    size_t expected_bytes;
+    /**
+     * Whether the query and origin coordinates are carried.
+     */
+    bool has_query;
+    /**
+     * Query longitude, degrees.
+     */
+    double longitude_deg;
+    /**
+     * Query latitude, degrees.
+     */
+    double latitude_deg;
+    /**
+     * Tile origin longitude, degrees.
+     */
+    double origin_longitude_deg;
+    /**
+     * Tile origin latitude, degrees.
+     */
+    double origin_latitude_deg;
+    /**
+     * Whether longitude_index carries a posting or data-block index.
+     */
+    bool has_longitude_index;
+    /**
+     * Zero-based longitude posting (profile) or data-block index.
+     */
+    size_t longitude_index;
+    /**
+     * Whether latitude_index carries a posting index.
+     */
+    bool has_latitude_index;
+    /**
+     * Zero-based latitude posting index.
+     */
+    size_t latitude_index;
+    /**
+     * Whether checksum and sum carry a data-block checksum comparison.
+     */
+    bool has_checksum;
+    /**
+     * Checksum the block states.
+     */
+    int32_t checksum;
+    /**
+     * Sum of the block's bytes.
+     */
+    int32_t sum;
+    /**
+     * Whether hemisphere carries a hemisphere letter.
+     */
+    bool has_hemisphere;
+    /**
+     * The hemisphere letter found.
+     */
+    uint32_t hemisphere;
+    /**
+     * Hemisphere letters the field allows, null-terminated, for
+     * WrongHemisphere.
+     */
+    char expected_hemispheres[SIDEREON_TERRAIN_ERROR_FIELD_C_BYTES];
+    /**
+     * Whether negative_index carries a rounded negative index.
+     */
+    bool has_negative_index;
+    /**
+     * The rounded negative posting index.
+     */
+    int64_t negative_index;
+    /**
+     * Whether interval_tenths_arcsec and count carry a UHL interval check.
+     */
+    bool has_interval;
+    /**
+     * Interval in tenths of an arc second.
+     */
+    uint32_t interval_tenths_arcsec;
+    /**
+     * Posting count on the same axis.
+     */
+    size_t count;
+    /**
+     * Whether declared carries a data record's declared count.
+     */
+    bool has_declared;
+    /**
+     * The longitude count a record declares (ProfileLongitudeCountMismatch)
+     * or its first latitude count (UnsupportedPartialProfile).
+     */
+    int32_t declared;
+} SidereonDtedTileError;
+
+/**
+ * Typed detail of a failed terrain lookup. Only the fields the kind names
+ * carry meaning, and each group carries a present flag.
+ */
+typedef struct SidereonTerrainLookupError {
+    /**
+     * Which failure the lookup reported.
+     */
+    enum SidereonTerrainLookupErrorKind kind;
+    /**
+     * Whether lat_index and lon_index name a tile.
+     */
+    bool has_tile;
+    /**
+     * Integer latitude tile id.
+     */
+    int32_t lat_index;
+    /**
+     * Integer longitude tile id.
+     */
+    int32_t lon_index;
+    /**
+     * Whether latitude_posting and longitude_posting name a posting.
+     */
+    bool has_posting;
+    /**
+     * Zero-based latitude posting index of the null posting in the tile.
+     */
+    size_t latitude_posting;
+    /**
+     * Zero-based longitude posting (profile) index of the null posting.
+     */
+    size_t longitude_posting;
+    /**
+     * Whether horizontal_datum carries the datum the tile states.
+     */
+    bool has_horizontal_datum;
+    /**
+     * The datum a NonWgs84Tile tile states.
+     */
+    struct SidereonDtedHorizontalDatumValue horizontal_datum;
+    /**
+     * Whether origin_latitude_deg and origin_longitude_deg carry the origin a
+     * TileOrigin tile file states.
+     */
+    bool has_origin;
+    /**
+     * Origin latitude the tile file states, whole degrees.
+     */
+    int32_t origin_latitude_deg;
+    /**
+     * Origin longitude the tile file states, whole degrees.
+     */
+    int32_t origin_longitude_deg;
+    /**
+     * Whether tile_error carries the typed failure of a Tile lookup.
+     */
+    bool has_tile_error;
+    /**
+     * The typed tile failure when kind is Tile; its kind is None otherwise.
+     */
+    struct SidereonDtedTileError tile_error;
+} SidereonTerrainLookupError;
+
+/**
  * One DTED terrain batch result. When has_height_m is true, height_m is an
  * orthometric height in meters.
  */
@@ -6764,6 +12114,11 @@ typedef struct SidereonDtedHeightResult {
      * Orthometric height, meters, when has_height_m is true.
      */
     double height_m;
+    /**
+     * The typed failure when status is not OK; its kind is None for a height.
+     * A null posting the lookup weights is UnknownElevation, not a height.
+     */
+    struct SidereonTerrainLookupError error;
 } SidereonDtedHeightResult;
 
 /**
@@ -7057,8 +12412,9 @@ typedef struct SidereonExactCacheSingleFlightOptions {
 
 /**
  * One RAIM per-satellite inverse-variance weight for an FDE solve. Supplied as
- * an array on SidereonFdeOptions when unit_weights is false. A satellite absent
- * from the array defaults to unit weight, matching the engine RAIM contract.
+ * an array on SidereonFdeOptions when weights_mode is BySatellite. A satellite
+ * absent from the array defaults to unit weight, matching the engine RAIM
+ * contract.
  */
 typedef struct SidereonFdeRaimWeight {
     /**
@@ -7083,18 +12439,26 @@ typedef struct SidereonFdeOptions {
      */
     double p_fa;
     /**
-     * Maximum number of exclusions to attempt. The Sidereon high-level API uses
-     * max(observation_count - 4, 0) as its default; choose a value for your
-     * geometry. Zero permits fault detection but no exclusion.
+     * Maximum number of exclusions. The default, 1, is RTKLIB demo5's single
+     * raim_fde exclusion; a larger budget repeats detection and a fresh
+     * leave-one-out search on the remaining set. Zero permits fault detection
+     * but no exclusion.
      */
-    size_t max_iterations;
+    size_t max_exclusions;
     /**
-     * When true, RAIM uses unit weights and the weights array is ignored.
+     * The largest unweighted post-fit residual RMS, metres, an exclusion may
+     * leave; the default is RTKLIB demo5's initial rms of 100 m.
      */
-    bool unit_weights;
+    double max_exclusion_rms_m;
+    /**
+     * Which weights the detection statistic uses, a SidereonRaimWeightsMode
+     * value. The default, Solution, standardizes each residual by the
+     * pseudorange variance the solve weighted it by.
+     */
+    uint32_t weights_mode;
     /**
      * Pointer to weight_count per-satellite weights, used only when
-     * unit_weights is false. May be NULL when weight_count is 0.
+     * weights_mode is BySatellite. May be NULL when weight_count is 0.
      */
     const struct SidereonFdeRaimWeight *weights;
     /**
@@ -7122,6 +12486,79 @@ typedef struct SidereonFdeOptions {
      */
     struct SidereonSppValidationOptions validation;
 } SidereonFdeOptions;
+
+/**
+ * A RAIM integrity result, mirroring sidereon_core::quality::RaimResult. The
+ * worst_sat token is null-terminated and valid only when has_worst_sat is true.
+ */
+typedef struct SidereonRaimResult {
+    /**
+     * Whether a fault was detected.
+     */
+    bool fault_detected;
+    /**
+     * Chi-square test statistic.
+     */
+    double test_statistic;
+    /**
+     * Whether a detection threshold was computed.
+     */
+    bool has_threshold;
+    /**
+     * Detection threshold (valid when has_threshold is true).
+     */
+    double threshold;
+    /**
+     * Whether reduced_chi_square is valid.
+     */
+    bool has_reduced_chi_square;
+    /**
+     * Chi-square statistic divided by dof, valid when has_reduced_chi_square
+     * is true.
+     */
+    double reduced_chi_square;
+    /**
+     * Root-mean-square residual, meters.
+     */
+    double rms_m;
+    /**
+     * Redundancy degrees of freedom.
+     */
+    int64_t dof;
+    /**
+     * Whether the geometry was testable.
+     */
+    bool testable;
+    /**
+     * Number of normalized residual rows available from
+     * sidereon_raim_normalized_residuals.
+     */
+    size_t normalized_residual_count;
+    /**
+     * Whether worst_sat carries a satellite token.
+     */
+    bool has_worst_sat;
+    /**
+     * Worst-residual satellite token, null-terminated (valid when
+     * has_worst_sat). Sized to hold any GNSS token (16 bytes) plus the
+     * terminator; kept in step with SATELLITE_TOKEN_C_BYTES by the assert below.
+     */
+    char worst_sat[17];
+} SidereonRaimResult;
+
+/**
+ * One per-satellite normalized RAIM residual.
+ */
+typedef struct SidereonRaimNormalizedResidual {
+    /**
+     * Satellite token.
+     */
+    struct SidereonSatelliteToken sat_id;
+    /**
+     * Residual multiplied by sqrt(weight), meters.
+     */
+    double normalized_residual;
+} SidereonRaimNormalizedResidual;
 
 /**
  * Options for the Moon rise/set finder. Pass NULL for the engine defaults
@@ -7697,9 +13134,9 @@ typedef struct SidereonRtkDualFrequencyArcEpoch {
  */
 typedef struct SidereonRtkArcReferenceEntry {
     /**
-     * Constellation, a SidereonGnssSystem value.
+     * Constellation, a SidereonGnssSystem value; an unknown value is refused.
      */
-    enum SidereonGnssSystem system;
+    uint32_t system;
     /**
      * Reference satellite id token for that constellation, e.g. "G04".
      */
@@ -7776,6 +13213,14 @@ typedef struct SidereonRtkWideLaneArcConfig {
      */
     struct SidereonRtkDualCycleSlipConfig cycle_slip;
 } SidereonRtkWideLaneArcConfig;
+
+typedef struct SidereonRtkDualFrequencyArcEpochV2 {
+    struct SidereonRtkDualFrequencyArcEpoch legacy;
+    bool has_gap_epoch;
+    const struct SidereonExactEpoch *gap_epoch;
+    bool has_prediction_epoch;
+    const struct SidereonExactEpoch *prediction_epoch;
+} SidereonRtkDualFrequencyArcEpochV2;
 
 /**
  * Helmert parameters in published table units.
@@ -9252,12 +14697,105 @@ typedef struct SidereonProjVgridshiftError {
     uint32_t coordinate;
 } SidereonProjVgridshiftError;
 
+typedef struct SidereonInertialSimulationOptions {
+    uint32_t output;
+    uint64_t seed;
+    double initial_accel_bias_mps2[3];
+    double initial_gyro_bias_rps[3];
+    double accel_scale_misalignment[9];
+    double gyro_scale_misalignment[9];
+    bool has_rate_random_walk;
+    double accel_random_walk_mps2_sqrt_s;
+    double gyro_random_walk_rps_sqrt_s;
+} SidereonInertialSimulationOptions;
+
+typedef struct SidereonInertialIncrement {
+    double t_j2000_s;
+    double delta_velocity_mps[3];
+    double delta_theta_rad[3];
+    double dt_s;
+} SidereonInertialIncrement;
+
+typedef struct SidereonInertialSimulatorState {
+    double accel_bias_mps2[3];
+    double gyro_bias_rps[3];
+    double accel_rate_random_walk_mps2[3];
+    double gyro_rate_random_walk_rps[3];
+} SidereonInertialSimulatorState;
+
+typedef struct SidereonInertialImuModel {
+    double accel_bias_mps2[3];
+    double gyro_bias_rps[3];
+    double accel_scale_misalignment[9];
+    double gyro_scale_misalignment[9];
+} SidereonInertialImuModel;
+
+typedef struct SidereonInertialConstants {
+    /**
+     * Default seed used by the core simulator options.
+     */
+    uint64_t default_imu_sim_seed;
+    /**
+     * WGS84 normal gravity at the equator in m/s².
+     */
+    double normal_gravity_equator_mps2;
+    /**
+     * WGS84 normal gravity at the pole in m/s².
+     */
+    double normal_gravity_pole_mps2;
+    /**
+     * WGS84 Somigliana gravity constant.
+     */
+    double somigliana_k;
+} SidereonInertialConstants;
+
+typedef struct SidereonInertialQuaternion {
+    /**
+     * Scalar-first unit-quaternion scalar component.
+     */
+    double w;
+    /**
+     * X component.
+     */
+    double x;
+    /**
+     * Y component.
+     */
+    double y;
+    /**
+     * Z component.
+     */
+    double z;
+} SidereonInertialQuaternion;
+
+typedef struct SidereonInertialError {
+    enum SidereonInertialErrorKind kind;
+    bool has_field;
+    bool has_reason;
+} SidereonInertialError;
+
+typedef struct SidereonInertialNavState {
+    double t_j2000_s;
+    double position_ecef_m[3];
+    double velocity_ecef_mps[3];
+    double attitude_body_to_ecef[9];
+    double accel_bias_mps2[3];
+    double gyro_bias_rps[3];
+} SidereonInertialNavState;
+
 /**
  * Whole-grid IONEX vertical-TEC samples for sidereon_ionex_from_tec_grid_samples.
- * Arrays are caller-owned. `tec_maps_tecu` is flattened in
- * `[map][lat][lon]` order with
- * `map_epoch_count * lat_node_count * lon_node_count` values. RMS maps use the
- * same order when `has_rms_maps` is true.
+ * Arrays are caller-owned. Value buffers use [map][lat][lon] order.
+ * Presence buffers are optional: if NULL, all corresponding values are treated as present.
+ * An all-missing present map (e.g. has_rms_maps=true with all presence false) remains
+ * distinct from no map (has_rms_maps=false).
+ *
+ * The map epochs come from `map_epochs_j2000_whole_s` when it is non-NULL and
+ * from `map_epochs_j2000_s` otherwise; the other buffer is not read. Each
+ * double must hold a whole second exactly, or the grid is refused as
+ * EpochNotRepresentable naming the epoch's index, never rounded to a
+ * neighbouring second. A double states every whole second only up to 2^53
+ * seconds in magnitude; the integer buffer states every one.
  */
 typedef struct SidereonTecGridSamples {
     /**
@@ -9265,15 +14803,23 @@ typedef struct SidereonTecGridSamples {
      */
     uint32_t time_scale;
     /**
-     * Map epochs, seconds since J2000 in `time_scale`.
+     * Map epochs, seconds since J2000 in time_scale; read only when
+     * map_epochs_j2000_whole_s is NULL.
      */
     const double *map_epochs_j2000_s;
+    /**
+     * Map epochs, whole seconds since J2000 in time_scale, or NULL to read
+     * map_epochs_j2000_s instead. Read over map_epoch_count entries.
+     */
+    const int64_t *map_epochs_j2000_whole_s;
     /**
      * Number of map epochs.
      */
     size_t map_epoch_count;
     /**
-     * Latitude nodes, degrees, descending.
+     * Latitude nodes, degrees, in either regular order: the engine takes an
+     * axis running north to south or south to north, as long as dlat_deg
+     * carries the sign that takes the first node to the last.
      */
     const double *lat_nodes_deg;
     /**
@@ -9281,7 +14827,8 @@ typedef struct SidereonTecGridSamples {
      */
     size_t lat_node_count;
     /**
-     * Longitude nodes, degrees, ascending.
+     * Longitude nodes, degrees, in either regular order, with dlon_deg
+     * carrying the matching sign.
      */
     const double *lon_nodes_deg;
     /**
@@ -9313,6 +14860,10 @@ typedef struct SidereonTecGridSamples {
      */
     const double *tec_maps_tecu;
     /**
+     * Explicit per-cell presence buffer for VTEC maps (or NULL if all present).
+     */
+    const bool *tec_maps_present;
+    /**
      * Number of flattened VTEC values.
      */
     size_t tec_map_value_count;
@@ -9325,14 +14876,49 @@ typedef struct SidereonTecGridSamples {
      */
     const double *rms_maps_tecu;
     /**
+     * Explicit per-cell presence buffer for RMS maps (or NULL if all present).
+     */
+    const bool *rms_maps_present;
+    /**
      * Number of flattened RMS values.
      */
     size_t rms_map_value_count;
+    /**
+     * Whether height maps are present.
+     */
+    bool has_height_maps;
+    /**
+     * Flattened height maps, km, when has_height_maps is true.
+     */
+    const double *height_maps_km;
+    /**
+     * Explicit per-cell presence buffer for height maps (or NULL if all present).
+     */
+    const bool *height_maps_present;
+    /**
+     * Number of flattened height values.
+     */
+    size_t height_map_value_count;
+    /**
+     * Optional header records handle (if NULL, defaults are used).
+     */
+    const struct SidereonIonexHeader *header;
 } SidereonTecGridSamples;
 
 /**
  * One IONEX vertical-TEC node sample. Angles are degrees, VTEC and RMS are
- * TECU, and the epoch is seconds since J2000 in `time_scale`.
+ * TECU, height offset is kilometers, and epoch is seconds since J2000 in time_scale.
+ * Presence flags are authoritative: when false, the numeric value is ignored.
+ *
+ * An IONEX map epoch is a whole second. On input the epoch is
+ * `epoch_j2000_whole_s` when `has_epoch_j2000_whole_s` is true, and
+ * `epoch_j2000_s` otherwise; that double must hold a whole second exactly or
+ * the sample is refused as EpochNotRepresentable naming its index, never
+ * rounded to a neighbouring second. A double states every whole second only
+ * up to 2^53 seconds in magnitude, so a caller whose epoch lies past that
+ * uses the integer field. On output both are filled from the product's
+ * exact whole-second axis, `has_epoch_j2000_whole_s` is true, and the double
+ * is that integer converted once.
  */
 typedef struct SidereonTecSample {
     /**
@@ -9340,9 +14926,19 @@ typedef struct SidereonTecSample {
      */
     uint32_t time_scale;
     /**
-     * Node epoch, seconds since J2000 in `time_scale`.
+     * Node epoch, seconds since J2000 in time_scale; read only when
+     * has_epoch_j2000_whole_s is false.
      */
     double epoch_j2000_s;
+    /**
+     * Whether epoch_j2000_whole_s carries the epoch.
+     */
+    bool has_epoch_j2000_whole_s;
+    /**
+     * Node epoch, whole seconds since J2000 in time_scale, exact at every
+     * magnitude (valid when has_epoch_j2000_whole_s is true).
+     */
+    int64_t epoch_j2000_whole_s;
     /**
      * Latitude node, degrees.
      */
@@ -9352,7 +14948,11 @@ typedef struct SidereonTecSample {
      */
     double lon_deg;
     /**
-     * Vertical TEC, TECU.
+     * Whether vtec_tecu carries an available value.
+     */
+    bool has_vtec_tecu;
+    /**
+     * Vertical TEC, TECU (valid when has_vtec_tecu is true).
      */
     double vtec_tecu;
     /**
@@ -9360,13 +14960,104 @@ typedef struct SidereonTecSample {
      */
     bool has_rms_tecu;
     /**
-     * RMS value, TECU, when has_rms_tecu is true.
+     * RMS value, TECU (valid when has_rms_tecu is true).
      */
     double rms_tecu;
+    /**
+     * Whether height_offset_km carries a height offset value.
+     */
+    bool has_height_offset_km;
+    /**
+     * Height offset above HGT1, kilometers (valid when has_height_offset_km is true).
+     */
+    double height_offset_km;
 } SidereonTecSample;
 
 /**
- * IONEX slant-delay value plus explicit coverage status.
+ * Nodes of one map's interpolation cell that carry weight in a query and are non-available.
+ */
+typedef struct SidereonIonexMissingNodes {
+    /**
+     * Whether any node was missing.
+     */
+    bool has_missing;
+    /**
+     * The map's number, counting from 1.
+     */
+    size_t map_number;
+    /**
+     * Index in lat_nodes_deg of the cell's first node row.
+     */
+    size_t lat_index;
+    /**
+     * Index in lon_nodes_deg of the cell's first node column.
+     */
+    size_t lon_index;
+    /**
+     * Index in lon_nodes_deg of the cell's second node column.
+     */
+    size_t lon_index_next;
+    /**
+     * Missing flags in order: [lat][lon], [lat][lon_next], [lat+1][lon], [lat+1][lon_next].
+     */
+    bool missing[4];
+} SidereonIonexMissingNodes;
+
+/**
+ * The non-available nodes a slant-delay query weights on each weighted map.
+ */
+typedef struct SidereonIonexNodeGap {
+    /**
+     * Whether any gap condition was recorded.
+     */
+    bool has_gap;
+    /**
+     * Missing nodes on the earlier map.
+     */
+    struct SidereonIonexMissingNodes earlier;
+    /**
+     * Missing nodes on the later map.
+     */
+    struct SidereonIonexMissingNodes later;
+} SidereonIonexNodeGap;
+
+/**
+ * Detailed independent status conditions for a slant-delay evaluation.
+ */
+typedef struct SidereonIonexSlantDelayStatus {
+    /**
+     * True when neither held nor degraded (assumed mapping does not invalidate).
+     */
+    bool is_valid;
+    /**
+     * Whether the value was produced by the explicit hold policy.
+     */
+    bool has_held;
+    /**
+     * The coverage miss the hold policy held the value through, when has_held
+     * is true.
+     */
+    enum SidereonIonexCoverageErrorKind coverage_error;
+    /**
+     * Whether the value was degraded by missing nodes.
+     */
+    bool has_degraded;
+    /**
+     * Detailed node gap information when has_degraded is true.
+     */
+    struct SidereonIonexNodeGap gap;
+    /**
+     * Whether single-layer mapping was assumed for a product declaring something else.
+     */
+    bool has_assumed_mapping;
+    /**
+     * What the product declares, when has_assumed_mapping is true.
+     */
+    enum SidereonIonexAssumedMappingKind assumed_mapping;
+} SidereonIonexSlantDelayStatus;
+
+/**
+ * IONEX slant-delay value plus independent coverage, node-gap, and mapping status.
  */
 typedef struct SidereonIonexSlantDelayEvaluation {
     /**
@@ -9374,18 +15065,167 @@ typedef struct SidereonIonexSlantDelayEvaluation {
      */
     double delay_m;
     /**
-     * One of SidereonIonexSlantDelayStatus_*.
+     * Detailed independent status conditions.
      */
-    uint32_t status;
-    /**
-     * One of SidereonIonexCoverageErrorKind_*.
-     */
-    uint32_t coverage_error;
+    struct SidereonIonexSlantDelayStatus status;
 } SidereonIonexSlantDelayEvaluation;
 
 /**
- * Dimensions and scalar metadata extracted from an IONEX vertical-TEC sample
- * grid. Heights are kilometers and angular fields are degrees.
+ * Typed detail of one failed IONEX slant-delay evaluation.
+ *
+ * Only the fields the kind names carry meaning. The text of an `Other`
+ * mapping-function code is not in this structure: an owned result list keeps
+ * its own copy for a failed and a successful row alike, readable with
+ * sidereon_ionex_slant_result_get_mapping_code, while a scalar route leaves it
+ * on the live product header.
+ */
+typedef struct SidereonIonexSlantError {
+    /**
+     * Which engine failure the evaluation reported.
+     */
+    enum SidereonIonexSlantErrorKind kind;
+    /**
+     * The coverage miss, when kind is OutOfCoverage.
+     */
+    enum SidereonIonexCoverageErrorKind coverage_error;
+    /**
+     * Whether gap carries the non-available nodes the query weighted.
+     */
+    bool has_gap;
+    /**
+     * Indexed corner masks, when kind is NodesNotAvailable.
+     */
+    struct SidereonIonexNodeGap gap;
+    /**
+     * Why the product gives no slant delay, when kind is SlantUnavailable.
+     */
+    enum SidereonIonexSlantRefusalKind refusal;
+    /**
+     * Height map number, counting from 1, for a height-map refusal.
+     */
+    size_t refusal_map_number;
+    /**
+     * Latitude index of the height node, for a height-map refusal.
+     */
+    size_t refusal_lat_index;
+    /**
+     * Longitude index of the height node, for a height-map refusal.
+     */
+    size_t refusal_lon_index;
+    /**
+     * Whether the refusal names a MAPPING FUNCTION declaration.
+     */
+    bool has_mapping_declaration;
+    /**
+     * What the product declares, for a mapping refusal.
+     */
+    enum SidereonIonexMappingDeclarationKind mapping_declaration;
+    /**
+     * Whether the declaration names a mapping function code.
+     */
+    bool has_mapping_function;
+    /**
+     * The declared mapping code, for a mapping refusal that names one.
+     */
+    enum SidereonIonexMappingFunctionKind mapping_function;
+} SidereonIonexSlantError;
+
+/**
+ * Typed IONEX epoch conversion detail returned by exact-time query functions.
+ */
+typedef struct SidereonIonexEpochError {
+    enum SidereonIonexEpochErrorKind kind;
+    uint32_t scale;
+    bool has_utc_j2000_s;
+    int64_t utc_j2000_s;
+} SidereonIonexEpochError;
+
+/**
+ * Caller-owned row output for `sidereon_ionex_slant_delay_results_at_instants`.
+ * When `epoch_error` is nonempty, `error` remains the no-error value because
+ * epoch conversion is reported separately.
+ */
+typedef struct SidereonIonexInstantSlantRowResult {
+    bool is_ok;
+    enum SidereonStatus status;
+    struct SidereonIonexSlantDelayEvaluation evaluation;
+    struct SidereonIonexSlantError error;
+    struct SidereonIonexEpochError epoch_error;
+} SidereonIonexInstantSlantRowResult;
+
+/**
+ * One slant-delay query for batch evaluation.
+ */
+typedef struct SidereonIonexSlantRequest {
+    /**
+     * Receiver geodetic latitude, degrees.
+     */
+    double lat_deg;
+    /**
+     * Receiver geodetic longitude, degrees.
+     */
+    double lon_deg;
+    /**
+     * Satellite azimuth, degrees.
+     */
+    double azimuth_deg;
+    /**
+     * Satellite elevation above the local horizon, degrees.
+     */
+    double elevation_deg;
+    /**
+     * Query epoch, integer UTC seconds since J2000.
+     */
+    int64_t epoch_j2000_s;
+    /**
+     * Carrier frequency in hertz.
+     */
+    double frequency_hz;
+} SidereonIonexSlantRequest;
+
+/**
+ * One IONEX slant query with an exact scale-tagged epoch. The epoch uses the
+ * same lossless representation as RINEX clock queries; see
+ * `SidereonClockEpoch` and `sidereon_rinex_clock_epoch_from_nanos`.
+ */
+typedef struct SidereonIonexInstantSlantRequest {
+    double lat_deg;
+    double lon_deg;
+    double azimuth_deg;
+    double elevation_deg;
+    struct SidereonClockEpoch epoch;
+    double frequency_hz;
+} SidereonIonexInstantSlantRequest;
+
+/**
+ * One row of an owned IONEX slant-delay result list.
+ *
+ * `is_ok` selects which of the two payloads carries meaning: a successful row
+ * reads `evaluation`, a failed row reads `status` and `error`. A failed row's
+ * `evaluation` holds a NaN delay with `status.is_valid` false, so it can never
+ * be mistaken for a nominal zero.
+ */
+typedef struct SidereonIonexSlantRowResult {
+    /**
+     * Whether the row holds a delay.
+     */
+    bool is_ok;
+    /**
+     * SIDEREON_STATUS_OK on success, or the status the failure maps to.
+     */
+    enum SidereonStatus status;
+    /**
+     * Delay evaluation; meaningful when is_ok is true.
+     */
+    struct SidereonIonexSlantDelayEvaluation evaluation;
+    /**
+     * Typed failure detail; meaningful when is_ok is false.
+     */
+    struct SidereonIonexSlantError error;
+} SidereonIonexSlantRowResult;
+
+/**
+ * Dimensions and metadata extracted from an IONEX vertical-TEC sample grid.
  */
 typedef struct SidereonTecGridSamplesInfo {
     /**
@@ -9432,7 +15272,94 @@ typedef struct SidereonTecGridSamplesInfo {
      * Flattened RMS value count.
      */
     size_t rms_map_value_count;
+    /**
+     * Whether height maps are present.
+     */
+    bool has_height_maps;
+    /**
+     * Flattened height value count.
+     */
+    size_t height_map_value_count;
 } SidereonTecGridSamplesInfo;
+
+/**
+ * Structured details of an IONEX warning record.
+ */
+typedef struct SidereonIonexWarningInfo {
+    /**
+     * Which finding the reader reported.
+     */
+    enum SidereonIonexWarningKind kind;
+    /**
+     * One-based line of the record in the source text.
+     */
+    size_t line;
+    /**
+     * Associated map number (1-based), where applicable.
+     */
+    size_t map_number;
+    /**
+     * Line number of the map that originally set the carried exponent.
+     */
+    size_t set_by_line;
+    /**
+     * Declared count (e.g. # OF MAPS IN FILE).
+     */
+    uint64_t declared_count;
+    /**
+     * Actual TEC map count.
+     */
+    size_t tec_map_count;
+    /**
+     * Total maps present in file.
+     */
+    size_t all_map_count;
+    /**
+     * Declared interval in seconds.
+     */
+    uint32_t declared_interval_s;
+    /**
+     * Actual spacing in seconds.
+     */
+    int64_t actual_spacing_s;
+    /**
+     * Exponent in effect.
+     */
+    int32_t exponent;
+    /**
+     * Node latitude, degrees.
+     */
+    double lat_deg;
+    /**
+     * Node longitude, degrees.
+     */
+    double lon_deg;
+    /**
+     * Whether the four epoch fields below carry epochs.
+     */
+    bool has_epochs;
+    /**
+     * Declared epoch as seconds since J2000, when has_epochs is true: the
+     * whole second declared_epoch_j2000_whole_s holds, converted to a double
+     * once, so it is exact up to 2^53 seconds and the nearest double past it.
+     */
+    double declared_epoch_j2000_s;
+    /**
+     * Actual map epoch as seconds since J2000, when has_epochs is true,
+     * converted from maps_epoch_j2000_whole_s the same way.
+     */
+    double maps_epoch_j2000_s;
+    /**
+     * Declared epoch as whole seconds since J2000, exact at every magnitude,
+     * when has_epochs is true.
+     */
+    int64_t declared_epoch_j2000_whole_s;
+    /**
+     * Actual map epoch as whole seconds since J2000, exact at every
+     * magnitude, when has_epochs is true.
+     */
+    int64_t maps_epoch_j2000_whole_s;
+} SidereonIonexWarningInfo;
 
 /**
  * One combined ionosphere-free pseudorange.
@@ -9477,6 +15404,154 @@ typedef struct SidereonScalarKalmanGains {
 } SidereonScalarKalmanGains;
 
 /**
+ * Fixed numeric payload of the last bias operation error on this thread.
+ */
+typedef struct SidereonBiasErrorInfo {
+    /**
+     * Stable engine-variant discriminant.
+     */
+    enum SidereonBiasErrorKind kind;
+    /**
+     * Line number for line-bearing failures.
+     */
+    size_t line;
+    /**
+     * Record index for record-bearing failures.
+     */
+    size_t record;
+    /**
+     * Whether `time_scale` is present.
+     */
+    bool has_time_scale;
+    /**
+     * SidereonTimeScale value for an unsupported-time-system failure.
+     */
+    uint32_t time_scale;
+    /**
+     * Full notice payload for a departure error; otherwise fields are inert.
+     */
+    struct SidereonBiasNotice departure;
+} SidereonBiasErrorInfo;
+
+/**
+ * Summary for the retained versioned engine-error JSON payload.
+ */
+typedef struct SidereonEngineErrorInfo {
+    /**
+     * Error family for this operation.
+     */
+    enum SidereonEngineErrorFamily family;
+    /**
+     * UTF-8 JSON payload size, excluding a terminator.
+     */
+    size_t payload_len;
+} SidereonEngineErrorInfo;
+
+/**
+ * The state the most recent FDE solve on this thread stopped in with a fault
+ * still detected (SIDEREON_STATUS_SOLVE with an unresolved fault).
+ */
+typedef struct SidereonFdeUnresolvedInfo {
+    /**
+     * Why the loop stopped; None when no unresolved solve is recorded.
+     */
+    enum SidereonFdeUnresolvedReason reason;
+    /**
+     * Satellites excluded before it stopped, copied by
+     * sidereon_last_fde_unresolved_excluded_sats.
+     */
+    size_t excluded_count;
+    /**
+     * The detection test of the last solution, with fault_detected true.
+     */
+    struct SidereonRaimResult raim;
+} SidereonFdeUnresolvedInfo;
+
+/**
+ * Typed detail for the latest standalone or nested geoid construction error.
+ */
+typedef struct SidereonGeoidError {
+    /**
+     * Error selector as SidereonGeoidErrorKind.
+     */
+    uint32_t kind;
+    /**
+     * Expected sample count for InvalidDimensions.
+     */
+    size_t expected;
+    /**
+     * Supplied sample count for InvalidDimensions.
+     */
+    size_t found;
+    /**
+     * Row-major sample index for NonFiniteValue.
+     */
+    size_t index;
+} SidereonGeoidError;
+
+/**
+ * Lossless typed details for the latest precise-interpolant artifact failure.
+ */
+typedef struct SidereonPreciseInterpolantArtifactError {
+    /**
+     * Error selector as SidereonPreciseInterpolantArtifactErrorKind.
+     */
+    uint32_t kind;
+    /**
+     * Unsupported artifact version when applicable.
+     */
+    uint16_t version;
+    /**
+     * Unsupported time-scale or satellite-system tag when applicable.
+     */
+    uint8_t tag;
+    /**
+     * Bytes found by BadMagic.
+     */
+    uint8_t found_magic[8];
+    /**
+     * Available bytes for truncated/trailing/range errors.
+     */
+    uint64_t available;
+    /**
+     * Header-declared length for truncated/trailing errors.
+     */
+    uint64_t declared;
+    /**
+     * Offset and length for RangeOutOfBounds.
+     */
+    uint64_t offset;
+    /**
+     * Offset and length for RangeOutOfBounds.
+     */
+    uint64_t len;
+    /**
+     * Expected checksum for Checksum and SatelliteChecksum.
+     */
+    uint64_t expected_checksum64;
+    /**
+     * Computed checksum for Checksum and SatelliteChecksum.
+     */
+    uint64_t found_checksum64;
+    /**
+     * Claimed checksum for AttestedChecksumMismatch.
+     */
+    uint64_t claimed_checksum64;
+    /**
+     * Header-declared checksum for AttestedChecksumMismatch.
+     */
+    uint64_t declared_checksum64;
+    /**
+     * Whether satellite identifies the affected satellite.
+     */
+    bool has_satellite;
+    /**
+     * Satellite for DuplicateSatellite, SatelliteChecksum or a bounded region.
+     */
+    struct SidereonSatelliteToken satellite;
+} SidereonPreciseInterpolantArtifactError;
+
+/**
  * Last typed terrain datum error for this thread.
  */
 typedef struct SidereonTerrainDatumError {
@@ -9485,17 +15560,14 @@ typedef struct SidereonTerrainDatumError {
      */
     uint32_t kind;
     /**
-     * Path text for I/O or MissingEgm96Dac errors, NUL-terminated when present.
+     * The typed terrain lookup failure when kind is Terrain; its kind is None
+     * for every other kind.
      */
-    char path[SIDEREON_TERRAIN_ERROR_TEXT_C_BYTES];
+    struct SidereonTerrainLookupError terrain;
     /**
-     * Error text for Terrain, Geoid, or I/O errors, NUL-terminated when present.
+     * The typed geoid failure when kind is Geoid; its kind is None otherwise.
      */
-    char message[SIDEREON_TERRAIN_ERROR_TEXT_C_BYTES];
-    /**
-     * Remediation text for MissingEgm96Dac, NUL-terminated when present.
-     */
-    char remediation[SIDEREON_TERRAIN_ERROR_TEXT_C_BYTES];
+    struct SidereonGeoidError geoid;
 } SidereonTerrainDatumError;
 
 /**
@@ -9506,18 +15578,6 @@ typedef struct SidereonTerrainStoreError {
      * Error selector as SidereonTerrainStoreErrorKind.
      */
     uint32_t kind;
-    /**
-     * Path text for I/O errors, NUL-terminated when present.
-     */
-    char path[SIDEREON_TERRAIN_ERROR_TEXT_C_BYTES];
-    /**
-     * Message text for I/O errors, NUL-terminated when present.
-     */
-    char message[SIDEREON_TERRAIN_ERROR_TEXT_C_BYTES];
-    /**
-     * Parse reason text, NUL-terminated when present.
-     */
-    char reason[SIDEREON_TERRAIN_ERROR_TEXT_C_BYTES];
     /**
      * Unsupported version tag when kind is UnsupportedVersion.
      */
@@ -9535,6 +15595,14 @@ typedef struct SidereonTerrainStoreError {
      */
     int32_t lon_index;
     /**
+     * Supplied tile id for TileIdMismatch.
+     */
+    struct SidereonTerrainTileId expected_tile_id;
+    /**
+     * Parsed tile id for TileIdMismatch.
+     */
+    struct SidereonTerrainTileId found_tile_id;
+    /**
      * Expected checksum for checksum and attested-checksum errors.
      */
     uint64_t expected_checksum64;
@@ -9542,6 +15610,26 @@ typedef struct SidereonTerrainStoreError {
      * Computed checksum for checksum and attested-checksum errors.
      */
     uint64_t found_checksum64;
+    /**
+     * Index field name for TileBoundsMismatch, NUL-terminated when present.
+     */
+    char field[SIDEREON_TERRAIN_ERROR_FIELD_C_BYTES];
+    /**
+     * Whether horizontal_datum carries the datum a NonWgs84Tile input states.
+     */
+    bool has_horizontal_datum;
+    /**
+     * The datum a NonWgs84Tile input states.
+     */
+    struct SidereonDtedHorizontalDatumValue horizontal_datum;
+    /**
+     * Whether tile_error carries the failure a Tile input reported.
+     */
+    bool has_tile_error;
+    /**
+     * The typed tile failure when kind is Tile; its kind is None otherwise.
+     */
+    struct SidereonDtedTileError tile_error;
 } SidereonTerrainStoreError;
 
 /**
@@ -9960,6 +16048,11 @@ typedef struct SidereonTerrainHeightResult {
      * Orthometric height H, metres, when has_orthometric_height_m is true.
      */
     struct SidereonOrthometricHeightM orthometric_height_m;
+    /**
+     * The typed failure when status is not OK; its kind is None for a height.
+     * A null posting the lookup weights is UnknownElevation, not a height.
+     */
+    struct SidereonTerrainLookupError error;
 } SidereonTerrainHeightResult;
 
 /**
@@ -10287,10 +16380,7 @@ typedef struct SidereonNavcenAssessment {
 } SidereonNavcenAssessment;
 
 /**
- * Receiver/satellite ray geometry and epoch for a full NeQuick-G evaluation,
- * mirroring sidereon_core::atmosphere::ionosphere::NequickGRayEval. Geodetic
- * longitudes and latitudes are in degrees, heights in metres above the
- * reference sphere; `month` is 1..=12 and `utc_hours` is in [0, 24].
+ * Receiver/satellite ray geometry and epoch for a full NeQuick-G evaluation.
  */
 typedef struct SidereonNequickGRay {
     /**
@@ -10419,6 +16509,17 @@ typedef struct SidereonNmeaSummary {
     size_t warning_count;
 } SidereonNmeaSummary;
 
+/**
+ * Metadata for one owned NMEA diagnostic JSON payload.
+ */
+typedef struct SidereonNmeaDiagnosticInfo {
+    enum SidereonNmeaDiagnosticSource source;
+    enum SidereonNmeaDiagnosticKind kind;
+    bool has_epoch_index;
+    size_t epoch_index;
+    size_t payload_len;
+} SidereonNmeaDiagnosticInfo;
+
 typedef struct SidereonNmeaGgaOptions {
     char talker[NMEA_TALKER_C_BYTES];
     double utc_seconds_of_day;
@@ -10494,6 +16595,24 @@ typedef struct SidereonNtripSourcetableSummary {
     size_t record_count;
     size_t stream_count;
 } SidereonNtripSourcetableSummary;
+
+/**
+ * Owned summary for one retained observable batch-row failure.
+ */
+typedef struct SidereonObservableRowErrorInfo {
+    /**
+     * Zero-based input row for this error.
+     */
+    size_t row_index;
+    /**
+     * Legacy C result status associated with this row.
+     */
+    enum SidereonStatus status;
+    /**
+     * UTF-8 JSON payload size, excluding a terminator.
+     */
+    size_t payload_len;
+} SidereonObservableRowErrorInfo;
 
 typedef struct SidereonObservationQcClockJump {
     size_t epoch_index;
@@ -10638,22 +16757,6 @@ typedef struct SidereonBodyObservation {
 } SidereonBodyObservation;
 
 /**
- * Ocean-loading BLQ coefficients, mirroring
- * sidereon_core::ppp_corrections::OceanLoadingBlq. Both arrays are
- * [3][SIDEREON_PPP_OCEAN_CONSTITUENTS]: row 0 radial, 1 west, 2 south.
- */
-typedef struct SidereonOceanLoadingBlq {
-    /**
-     * Constituent amplitudes (m).
-     */
-    double amplitude_m[3][SIDEREON_PPP_OCEAN_CONSTITUENTS];
-    /**
-     * Constituent Greenwich phase lags (degrees, positive lag).
-     */
-    double phase_deg[3][SIDEREON_PPP_OCEAN_CONSTITUENTS];
-} SidereonOceanLoadingBlq;
-
-/**
  * One OMM entry that the lenient build could not resolve to a record for the
  * requested system, read back as a value struct. The object name (when present)
  * is copied separately with sidereon_omm_catalog_skipped_object_name because it
@@ -10661,7 +16764,12 @@ typedef struct SidereonOceanLoadingBlq {
  */
 typedef struct SidereonSkippedOmm {
     /**
-     * The OMM NORAD_CAT_ID of the skipped entry.
+     * True when the entry stated a NORAD_CAT_ID. CCSDS 502.0-B-3 requires it
+     * only for SGP/SGP4 element sets, so an OMM may omit it.
+     */
+    bool norad_id_present;
+    /**
+     * The OMM NORAD_CAT_ID of the skipped entry, zero when absent.
      */
     uint32_t norad_id;
     /**
@@ -11389,6 +17497,23 @@ typedef struct SidereonPppFixedMetadata {
      * Number of integer candidates evaluated by the search.
      */
     size_t integer_candidates;
+    /**
+     * Number of solved epochs of the fixed re-solve
+     * (sidereon_ppp_fixed_solution_solved_epochs).
+     */
+    size_t solved_epoch_count;
+    /**
+     * Number of observations the fixed re-solve left out because an SSR/HAS
+     * bias they require was not resolved
+     * (sidereon_ppp_fixed_solution_ssr_bias_exclusions).
+     */
+    size_t ssr_bias_exclusion_count;
+    /**
+     * Number of observations the fixed re-solve left out because no
+     * transmission epoch can be placed from them
+     * (sidereon_ppp_fixed_solution_unplaced_observations).
+     */
+    size_t unplaced_observation_count;
 } SidereonPppFixedMetadata;
 
 /**
@@ -11416,6 +17541,280 @@ typedef struct SidereonPppPositionCovariances {
      */
     double temporal_scale_factor;
 } SidereonPppPositionCovariances;
+
+/**
+ * An SSR orbit/clock/bias solution identity.
+ */
+typedef struct SidereonSsrSolutionId {
+    /**
+     * 0 for RTCM SSR, 1 for Galileo HAS, 2 for IGS SSR.
+     */
+    uint32_t source;
+    /**
+     * Provider id.
+     */
+    uint16_t provider_id;
+    /**
+     * Solution id.
+     */
+    uint8_t solution_id;
+} SidereonSsrSolutionId;
+
+/**
+ * An SSR bias signal key: a physical signal, or a raw index its source's
+ * table assigns no physical signal.
+ */
+typedef struct SidereonSsrSignalKey {
+    /**
+     * True for a physical signal (`system` and `code`), false for a raw index
+     * (`system`, `source` and `index`).
+     */
+    bool is_physical;
+    /**
+     * The GNSS, a SidereonGnssSystem value.
+     */
+    uint32_t system;
+    /**
+     * The RINEX 3 band and attribute of a physical signal, null-terminated.
+     */
+    char code[3];
+    /**
+     * Source of a raw index: 0 for RTCM SSR, 1 for Galileo HAS, 2 for IGS SSR.
+     */
+    uint32_t source;
+    /**
+     * The raw index.
+     */
+    uint8_t index;
+} SidereonSsrSignalKey;
+
+/**
+ * Transmission-time failure of an SSR/HAS bias exclusion.
+ */
+typedef struct SidereonPppTransmitTimeFailure {
+    /**
+     * Which failure, a SidereonPppTransmitTimeFailureKind value.
+     */
+    uint32_t kind;
+    /**
+     * Whether `transmit_time_j2000_s` is present.
+     */
+    bool has_transmit_time;
+    /**
+     * Transmission time, seconds since J2000.
+     */
+    double transmit_time_j2000_s;
+    /**
+     * Whether `applied` is present (ORBIT_CLOCK_SOLUTION).
+     */
+    bool has_applied;
+    /**
+     * Solution the source applies at the transmission time.
+     */
+    struct SidereonSsrSolutionId applied;
+    /**
+     * Whether `signal` and `bias_status` are present (BIAS_RECORD).
+     */
+    bool has_signal;
+    /**
+     * Signal of the record.
+     */
+    struct SidereonSsrSignalKey signal;
+    /**
+     * Status of the query for that signal, a SidereonSsrBiasStatus value.
+     */
+    uint32_t bias_status;
+    /**
+     * The engine's name for the first value here that reads UNKNOWN.
+     */
+    char unknown_variant[SIDEREON_UNKNOWN_VARIANT_C_BYTES];
+} SidereonPppTransmitTimeFailure;
+
+/**
+ * One signal's bias query in an SSR application report.
+ */
+typedef struct SidereonPppSsrSignalReport {
+    /**
+     * Whether the report is present.
+     */
+    bool present;
+    /**
+     * The requested physical signal (`is_physical` is true).
+     */
+    struct SidereonSsrSignalKey signal;
+    /**
+     * Query status, a SidereonSsrBiasStatus value.
+     */
+    uint32_t status;
+    /**
+     * Whether `source_signal` is present.
+     */
+    bool has_source_signal;
+    /**
+     * The raw index of the record found.
+     */
+    struct SidereonSsrSignalKey source_signal;
+    /**
+     * Whether `bias_m` is present.
+     */
+    bool has_bias_m;
+    /**
+     * Bias, metres.
+     */
+    double bias_m;
+    /**
+     * Whether `bias_cycles` is present (phase only).
+     */
+    bool has_bias_cycles;
+    /**
+     * Bias, cycles (phase only).
+     */
+    double bias_cycles;
+    /**
+     * Whether `solution` is present.
+     */
+    bool has_solution;
+    /**
+     * Solution of the record found.
+     */
+    struct SidereonSsrSolutionId solution;
+    /**
+     * Whether `iod_ssr` is present.
+     */
+    bool has_iod_ssr;
+    /**
+     * IOD SSR of the record found.
+     */
+    uint8_t iod_ssr;
+    /**
+     * The engine's name for `status` when it reads UNKNOWN.
+     */
+    char unknown_variant[SIDEREON_UNKNOWN_VARIANT_C_BYTES];
+} SidereonPppSsrSignalReport;
+
+/**
+ * The SSR/HAS bias lookup's row for one observation.
+ */
+typedef struct SidereonPppSsrApplication {
+    /**
+     * Whether the row is present.
+     */
+    bool present;
+    /**
+     * Whether `transmit_time_j2000_s` is present.
+     */
+    bool has_transmit_time;
+    /**
+     * Transmission time the biases were evaluated at, seconds since J2000.
+     */
+    double transmit_time_j2000_s;
+    /**
+     * Whether `applied_orbit_clock_solution` is present.
+     */
+    bool has_applied_orbit_clock_solution;
+    /**
+     * Solution of the orbit and clock corrections the source applies.
+     */
+    struct SidereonSsrSolutionId applied_orbit_clock_solution;
+    /**
+     * Whether the observation states its signals (the four codes below).
+     */
+    bool has_observation_signals;
+    /**
+     * Tracking codes of the first and second code and carrier phase.
+     */
+    char code1_signal[3];
+    char code2_signal[3];
+    char phase1_signal[3];
+    char phase2_signal[3];
+    /**
+     * Code combination status, a SidereonPppSsrIfCombinationStatus value.
+     */
+    uint32_t code_status;
+    /**
+     * For a UT1_OUTSIDE_COVERAGE code status, the side, a
+     * SidereonUt1Degradation value.
+     */
+    uint32_t code_status_ut1;
+    /**
+     * Whether `applied_code_if_m` is present.
+     */
+    bool has_applied_code_if_m;
+    /**
+     * Applied code ionosphere-free bias, metres.
+     */
+    double applied_code_if_m;
+    /**
+     * First and second code signal queries.
+     */
+    struct SidereonPppSsrSignalReport code1;
+    struct SidereonPppSsrSignalReport code2;
+    /**
+     * Phase combination status, a SidereonPppSsrIfCombinationStatus value.
+     */
+    uint32_t phase_status;
+    /**
+     * For a UT1_OUTSIDE_COVERAGE phase status, the side.
+     */
+    uint32_t phase_status_ut1;
+    /**
+     * Whether `applied_phase_if_m` is present.
+     */
+    bool has_applied_phase_if_m;
+    /**
+     * Applied phase ionosphere-free bias, metres.
+     */
+    double applied_phase_if_m;
+    /**
+     * First and second phase signal queries.
+     */
+    struct SidereonPppSsrSignalReport phase1;
+    struct SidereonPppSsrSignalReport phase2;
+    /**
+     * The engine's name for the first status here that reads UNKNOWN.
+     */
+    char unknown_variant[SIDEREON_UNKNOWN_VARIANT_C_BYTES];
+} SidereonPppSsrApplication;
+
+/**
+ * An observation left out of a PPP solve because an SSR/HAS bias it requires
+ * was not resolved.
+ */
+typedef struct SidereonPppSsrBiasExclusion {
+    /**
+     * Zero-based index of the observation's epoch in the solve's input
+     * epochs.
+     */
+    size_t epoch_index;
+    /**
+     * Satellite id of the observation.
+     */
+    struct SidereonPppId satellite_id;
+    /**
+     * Ambiguity id of the observation.
+     */
+    struct SidereonPppId ambiguity_id;
+    /**
+     * A required SSR code bias is absent.
+     */
+    bool code_bias_missing;
+    /**
+     * A required SSR phase bias is absent.
+     */
+    bool phase_bias_missing;
+    /**
+     * Why the recorded biases do not hold at the observation's transmission
+     * time, when the lookup has them but the solve's source does not apply
+     * them there; kind NONE otherwise.
+     */
+    struct SidereonPppTransmitTimeFailure transmit_time_failure;
+    /**
+     * The row the SSR/HAS bias lookup reported for this observation, whose
+     * code and phase statuses state why the bias was not resolved; `present`
+     * is false when the lookup has no row for it.
+     */
+    struct SidereonPppSsrApplication application;
+} SidereonPppSsrBiasExclusion;
 
 /**
  * Residual temporal-correlation summary used by PPP covariance inflation.
@@ -11488,6 +17887,73 @@ typedef struct SidereonPppTropoGradientEstimate {
      */
     double formal_covariance_m2[4];
 } SidereonPppTropoGradientEstimate;
+
+/**
+ * An observation left out of a PPP solve before it solves because no
+ * transmission epoch can be placed from it.
+ */
+typedef struct SidereonPppUnplacedObservation {
+    /**
+     * Zero-based index of the observation's epoch in the solve's input
+     * epochs.
+     */
+    size_t epoch_index;
+    /**
+     * Satellite id of the observation.
+     */
+    struct SidereonPppId satellite_id;
+    /**
+     * Ambiguity id of the observation.
+     */
+    struct SidereonPppId ambiguity_id;
+    /**
+     * Why no transmission epoch can be placed from it.
+     */
+    enum SidereonPppUnplacedObservationReason reason;
+    /**
+     * The engine's name for the reason when `reason` is UNKNOWN; empty
+     * otherwise.
+     */
+    char unknown_variant[SIDEREON_UNKNOWN_VARIANT_C_BYTES];
+} SidereonPppUnplacedObservation;
+
+/**
+ * Unplaced observation with optional strict-SSR refusal magnitudes.
+ */
+typedef struct SidereonPppUnplacedObservationV2 {
+    /**
+     * Zero-based input epoch index.
+     */
+    size_t epoch_index;
+    /**
+     * Satellite identifier.
+     */
+    struct SidereonPppId satellite_id;
+    /**
+     * Ambiguity-state identifier.
+     */
+    struct SidereonPppId ambiguity_id;
+    /**
+     * Typed reason no transmission epoch could be placed.
+     */
+    enum SidereonPppUnplacedObservationReason reason;
+    /**
+     * Unknown reason name when `reason` is `Unknown`; zero-filled otherwise.
+     */
+    char unknown_variant[SIDEREON_UNKNOWN_VARIANT_C_BYTES];
+    /**
+     * Whether the reason carries SSR correction magnitudes.
+     */
+    bool has_size;
+    /**
+     * Refused orbit correction magnitude in metres; zero when absent.
+     */
+    double orbit_m;
+    /**
+     * Refused clock correction in metres, preserving its sign; zero when absent.
+     */
+    double clock_m;
+} SidereonPppUnplacedObservationV2;
 
 /**
  * PPP iteration and convergence controls.
@@ -11577,7 +18043,51 @@ typedef struct SidereonPppFloatMetadata {
      * Number of used satellite or ambiguity ids.
      */
     size_t used_sat_count;
+    /**
+     * Number of solved epochs (sidereon_ppp_float_solution_solved_epochs).
+     * An input epoch left with no observations is not solved.
+     */
+    size_t solved_epoch_count;
+    /**
+     * Number of observations left out because an SSR/HAS bias they require
+     * was not resolved (sidereon_ppp_float_solution_ssr_bias_exclusions).
+     */
+    size_t ssr_bias_exclusion_count;
+    /**
+     * Number of observations left out before the solve because no
+     * transmission epoch can be placed from them
+     * (sidereon_ppp_float_solution_unplaced_observations).
+     */
+    size_t unplaced_observation_count;
+    /**
+     * Whether the solve ran the residual screen.
+     */
+    bool residual_screen;
+    /**
+     * Number of observations the residual screen removed
+     * (sidereon_ppp_float_solution_residual_screen_removals).
+     */
+    size_t residual_screen_removal_count;
+    /**
+     * The iteration and convergence options the solve ran with.
+     */
+    struct SidereonPppFloatOptions solve_options;
 } SidereonPppFloatMetadata;
+
+/**
+ * One observation of a PPP solve named by its input epoch and ambiguity id.
+ */
+typedef struct SidereonPppEpochObservation {
+    /**
+     * Zero-based index of the observation's epoch in the solve's input
+     * epochs.
+     */
+    size_t epoch_index;
+    /**
+     * Ambiguity id of the observation.
+     */
+    struct SidereonPppId ambiguity_id;
+} SidereonPppEpochObservation;
 
 /**
  * PPP measurement weights. Values are inverse sigmas matching the engine.
@@ -11808,51 +18318,40 @@ typedef struct SidereonPppTroposphereOptions {
     struct SidereonPppVmfSiteSample vmf_samples[SIDEREON_PPP_VMF_SITE_MAX_SAMPLES];
 } SidereonPppTroposphereOptions;
 
-/**
- * One batch range-prediction request: the satellite token, the static receiver
- * ECEF position (meters), and the receive epoch (seconds since J2000).
- */
-typedef struct SidereonRangePredictionRequest {
-    /**
-     * Null-terminated satellite token (e.g. "G01").
-     */
-    const char *sat_id;
-    /**
-     * Receiver ECEF position, meters.
-     */
-    double receiver_ecef_m[3];
-    /**
-     * Receive epoch, seconds since J2000.
-     */
-    double t_rx_j2000_s;
-} SidereonRangePredictionRequest;
+typedef struct SidereonPreciseEphemerisSampleV2 {
+    struct SidereonSatelliteToken sat;
+    struct SidereonClockEpoch epoch;
+    double position_ecef_m[3];
+    bool has_clock_s;
+    double clock_s;
+    bool clock_event;
+} SidereonPreciseEphemerisSampleV2;
 
-/**
- * The geometry-only result of one range-prediction request: the transmit-time
- * geometry a range-only consumer needs, without Doppler or topocentric fields.
- */
-typedef struct SidereonRangePrediction {
-    /**
-     * Geometric range after optional Sagnac transport, meters.
-     */
-    double geometric_range_m;
-    /**
-     * Whether sat_clock_s is present.
-     */
-    bool has_sat_clock_s;
-    /**
-     * Satellite clock offset at transmit time, seconds, when present.
-     */
-    double sat_clock_s;
-    /**
-     * Transmit time, seconds since J2000.
-     */
-    double transmit_time_j2000_s;
-    /**
-     * Sagnac-transported satellite ECEF position, meters.
-     */
-    double sat_pos_ecef_m[3];
-} SidereonRangePrediction;
+typedef struct SidereonSp3AccuracyValue {
+    uint32_t kind;
+    double value;
+} SidereonSp3AccuracyValue;
+
+typedef struct SidereonPreciseEphemerisAccuracySample {
+    struct SidereonSatelliteToken sat;
+    uint32_t time_scale;
+    double epoch_j2000_s;
+    struct SidereonSp3AccuracyValue position_variance_m2[3];
+    struct SidereonSp3AccuracyValue clock_variance_m2;
+} SidereonPreciseEphemerisAccuracySample;
+
+typedef struct SidereonPreciseSamplesError {
+    enum SidereonPreciseSamplesErrorKind kind;
+    bool has_satellite;
+    struct SidereonSatelliteToken satellite;
+} SidereonPreciseSamplesError;
+
+typedef struct SidereonPreciseEphemerisAccuracySampleV2 {
+    struct SidereonSatelliteToken sat;
+    struct SidereonClockEpoch epoch;
+    struct SidereonSp3AccuracyValue position_variance_m2[3];
+    struct SidereonSp3AccuracyValue clock_variance_m2;
+} SidereonPreciseEphemerisAccuracySampleV2;
 
 /**
  * Exact parsed state of one satellite at one SP3 epoch.
@@ -11903,6 +18402,52 @@ typedef struct SidereonSp3State {
      */
     bool orbit_predicted;
 } SidereonSp3State;
+
+/**
+ * One batch range-prediction request: the satellite token, the static receiver
+ * ECEF position (meters), and the receive epoch (seconds since J2000).
+ */
+typedef struct SidereonRangePredictionRequest {
+    /**
+     * Null-terminated satellite token (e.g. "G01").
+     */
+    const char *sat_id;
+    /**
+     * Receiver ECEF position, meters.
+     */
+    double receiver_ecef_m[3];
+    /**
+     * Receive epoch, seconds since J2000.
+     */
+    double t_rx_j2000_s;
+} SidereonRangePredictionRequest;
+
+/**
+ * The geometry-only result of one range-prediction request: the transmit-time
+ * geometry a range-only consumer needs, without Doppler or topocentric fields.
+ */
+typedef struct SidereonRangePrediction {
+    /**
+     * Geometric range after optional Sagnac transport, meters.
+     */
+    double geometric_range_m;
+    /**
+     * Whether sat_clock_s is present.
+     */
+    bool has_sat_clock_s;
+    /**
+     * Satellite clock offset at transmit time, seconds, when present.
+     */
+    double sat_clock_s;
+    /**
+     * Transmit time, seconds since J2000.
+     */
+    double transmit_time_j2000_s;
+    /**
+     * Sagnac-transported satellite ECEF position, meters.
+     */
+    double sat_pos_ecef_m[3];
+} SidereonRangePrediction;
 
 /**
  * Fixed-size null-terminated RTK ambiguity id storage. Values returned by
@@ -12088,65 +18633,6 @@ typedef struct SidereonPseudorangeVarianceOptions {
 } SidereonPseudorangeVarianceOptions;
 
 /**
- * A RAIM integrity result, mirroring sidereon_core::quality::RaimResult. The
- * worst_sat token is null-terminated and valid only when has_worst_sat is true.
- */
-typedef struct SidereonRaimResult {
-    /**
-     * Whether a fault was detected.
-     */
-    bool fault_detected;
-    /**
-     * Chi-square test statistic.
-     */
-    double test_statistic;
-    /**
-     * Whether a detection threshold was computed.
-     */
-    bool has_threshold;
-    /**
-     * Detection threshold (valid when has_threshold is true).
-     */
-    double threshold;
-    /**
-     * Whether reduced_chi_square is valid.
-     */
-    bool has_reduced_chi_square;
-    /**
-     * Chi-square statistic divided by dof, valid when has_reduced_chi_square
-     * is true.
-     */
-    double reduced_chi_square;
-    /**
-     * Root-mean-square residual, meters.
-     */
-    double rms_m;
-    /**
-     * Redundancy degrees of freedom.
-     */
-    int64_t dof;
-    /**
-     * Whether the geometry was testable.
-     */
-    bool testable;
-    /**
-     * Number of normalized residual rows available from
-     * sidereon_raim_normalized_residuals.
-     */
-    size_t normalized_residual_count;
-    /**
-     * Whether worst_sat carries a satellite token.
-     */
-    bool has_worst_sat;
-    /**
-     * Worst-residual satellite token, null-terminated (valid when
-     * has_worst_sat). Sized to hold any GNSS token (16 bytes) plus the
-     * terminator; kept in step with SATELLITE_TOKEN_C_BYTES by the assert below.
-     */
-    char worst_sat[17];
-} SidereonRaimResult;
-
-/**
  * One linearized range measurement for sidereon_raim_fde_design, mirroring
  * sidereon_core::quality::RangeFdeRow. `design_row` points to `design_dim`
  * doubles (the design-matrix row); every row must carry the same `design_dim`,
@@ -12186,28 +18672,21 @@ typedef struct SidereonRangeFdeOptions {
      */
     double p_fa;
     /**
-     * Maximum number of measurements the exclusion loop may remove.
+     * Maximum number of measurements the exclusion loop may remove. The
+     * default, 1, is RTKLIB demo5's single raim_fde exclusion; a larger budget
+     * repeats the test and a fresh leave-one-out search on the remaining set.
      */
     size_t max_exclusions;
     /**
      * Minimum redundancy (degrees of freedom) an exclusion must leave behind.
      */
     size_t min_redundancy;
+    /**
+     * The largest unweighted post-fit residual RMS, metres, an exclusion may
+     * leave; the default is RTKLIB demo5's initial rms of 100 m.
+     */
+    double max_exclusion_rms_m;
 } SidereonRangeFdeOptions;
-
-/**
- * One per-satellite normalized RAIM residual.
- */
-typedef struct SidereonRaimNormalizedResidual {
-    /**
-     * Satellite token.
-     */
-    struct SidereonSatelliteToken sat_id;
-    /**
-     * Residual multiplied by sqrt(weight), meters.
-     */
-    double normalized_residual;
-} SidereonRaimNormalizedResidual;
 
 /**
  * Per-measurement FDE diagnostic, mirroring
@@ -12747,39 +19226,78 @@ typedef struct SidereonLinkBudget {
 } SidereonLinkBudget;
 
 /**
- * Full precision, scale-tagged clock epoch. For `JulianDate`, the nanosecond
- * pair is zero; for `Nanos`, the Julian fields are zero. The signed 128-bit
- * value is transported losslessly as two's-complement high/low words.
+ * Typed detail of a RINEX clock failure. Only the fields the kind names carry
+ * meaning. Text parts are read with the text route of the owner (a
+ * SidereonRinexClockResult or a diagnostic); each has_ flag says whether the
+ * failure carries that part, since a part can itself be empty.
  */
-typedef struct SidereonClockEpoch {
+typedef struct SidereonRinexClockError {
     /**
-     * TimeScale code.
+     * Which failure was reported.
      */
-    uint32_t scale;
+    enum SidereonRinexClockErrorKind kind;
     /**
-     * SidereonRinexClockInstantRepresentation code.
+     * Whether line carries a line number.
      */
-    uint32_t representation;
+    bool has_line;
     /**
-     * Whole Julian date for the JulianDate representation.
+     * One-based input line number.
      */
-    double jd_whole;
+    size_t line;
     /**
-     * Residual Julian-day fraction for the JulianDate representation.
+     * Whether time_scale carries the refused scale.
      */
-    double jd_fraction;
+    bool has_time_scale;
     /**
-     * Signed high 64 bits of the Nanos representation.
+     * The refused time scale, as SidereonTimeScale.
      */
-    int64_t nanos_high;
+    uint32_t time_scale;
     /**
-     * Low 64 bits of the Nanos representation.
+     * Whether the failure names a field.
      */
-    uint64_t nanos_low;
-} SidereonClockEpoch;
+    bool has_field;
+    /**
+     * Whether the failure gives a reason.
+     */
+    bool has_reason;
+    /**
+     * Whether the failure carries record text.
+     */
+    bool has_record;
+    /**
+     * Whether the failure names a record type.
+     */
+    bool has_record_type;
+    /**
+     * Whether the failure carries a field value.
+     */
+    bool has_value;
+} SidereonRinexClockError;
+
+/**
+ * A line a lossy read kept without reading it as a record, or a header
+ * time-system error, with the typed failure. Its text parts are read with
+ * sidereon_rinex_clock_diagnostic_text.
+ */
+typedef struct SidereonClockDiagnostic {
+    /**
+     * One-based line number.
+     */
+    size_t line;
+    /**
+     * The failure.
+     */
+    struct SidereonRinexClockError error;
+} SidereonClockDiagnostic;
 
 /**
  * One complete RINEX clock series sample.
+ *
+ * additional_values holds the declared values after the bias, in the Table A16
+ * order (bias sigma in seconds, clock rate, clock rate sigma, clock
+ * acceleration in 1/s, clock acceleration sigma in 1/s); entries at and past
+ * additional_value_count are NaN. Values a record carries beyond its declared
+ * count are not part of the sample; the record reports them as surplus values.
  */
 typedef struct SidereonClockPoint {
     /**
@@ -12790,15 +19308,265 @@ typedef struct SidereonClockPoint {
      * Satellite clock bias, seconds.
      */
     double bias_s;
+    /**
+     * Number of declared values after the bias, 0..=5.
+     */
+    size_t additional_value_count;
+    /**
+     * The declared values after the bias.
+     */
+    double additional_values[SIDEREON_CLOCK_MAX_ADDITIONAL_VALUES];
 } SidereonClockPoint;
 
 /**
- * One GLONASS RINEX record skipped because its extended satellite slot cannot
- * be represented by the core satellite identifier.
+ * One sample of a product built with sidereon_rinex_clock_from_points.
+ */
+typedef struct SidereonClockSatellitePoint {
+    /**
+     * Satellite name, null-terminated, exactly as the product holds it.
+     */
+    struct SidereonSatelliteToken satellite;
+    /**
+     * The sample, every declared value included.
+     */
+    struct SidereonClockPoint point;
+} SidereonClockSatellitePoint;
+
+/**
+ * Fixed-width summary of a RINEX clock product.
+ */
+typedef struct SidereonRinexClockInfo {
+    /**
+     * Whether version carries the declared format version.
+     */
+    bool has_version;
+    /**
+     * Declared format version; for a built product, the version it is written
+     * in.
+     */
+    double version;
+    /**
+     * Whether layout carries the column layout.
+     */
+    bool has_layout;
+    /**
+     * Column layout records are read and written in, as SidereonClockLayout.
+     */
+    uint32_t layout;
+    /**
+     * Whether satellite_system carries the `RINEX VERSION / TYPE` system code.
+     */
+    bool has_satellite_system;
+    /**
+     * Satellite system code point (`G`, `R`, `E`, `C`, `I`, `J`, `S` or `M`).
+     */
+    uint32_t satellite_system;
+    /**
+     * Whether time_system carries the product's time system.
+     */
+    bool has_time_system;
+    /**
+     * The declared, defaulted or built time system, as
+     * SidereonClockTimeSystem.
+     */
+    uint32_t time_system;
+    /**
+     * How the time system was established, as SidereonClockTimeSystemStatus.
+     */
+    uint32_t time_system_status;
+    /**
+     * Number of labels an Unrecognized or Conflicting status carries.
+     */
+    size_t time_system_label_count;
+    /**
+     * Whether time_scale carries the scale record epochs are read in. False
+     * when the time system is missing, unrecognized, conflicting or has no
+     * core scale (`IRN`).
+     */
+    bool has_time_scale;
+    /**
+     * The time scale, as SidereonTimeScale.
+     */
+    uint32_t time_scale;
+    /**
+     * Number of header lines; a built product has none.
+     */
+    size_t header_record_count;
+    /**
+     * Number of data records of every type.
+     */
+    size_t record_count;
+    /**
+     * Number of satellites with a clock series.
+     */
+    size_t series_count;
+    /**
+     * Number of samples across every satellite series.
+     */
+    size_t sample_count;
+    /**
+     * Number of records outside the satellite series.
+     */
+    size_t skipped_record_count;
+    /**
+     * Number of lines a lossy read kept without reading them, plus header
+     * time-system errors.
+     */
+    size_t diagnostic_count;
+    /**
+     * Number of non-fatal findings about how the product was read.
+     */
+    size_t notice_count;
+    /**
+     * The engine's name for `time_system` when it reads UNKNOWN: a value a later
+     * engine adds that this binding has no code for yet. Empty otherwise.
+     */
+    char time_system_unknown_variant[SIDEREON_UNKNOWN_VARIANT_C_BYTES];
+    /**
+     * The engine's name for `time_system_status` when it reads UNKNOWN: a value a later
+     * engine adds that this binding has no code for yet. Empty otherwise.
+     */
+    char time_system_status_unknown_variant[SIDEREON_UNKNOWN_VARIANT_C_BYTES];
+} SidereonRinexClockInfo;
+
+/**
+ * One notice about how a RINEX clock product was read.
+ */
+typedef struct SidereonClockNotice {
+    /**
+     * Which finding, as SidereonClockNoticeKind.
+     */
+    uint32_t kind;
+    /**
+     * Whether time_system carries a system.
+     */
+    bool has_time_system;
+    /**
+     * The system, as SidereonClockTimeSystem.
+     */
+    uint32_t time_system;
+    /**
+     * Whether line carries a header line number.
+     */
+    bool has_line;
+    /**
+     * One-based header line number.
+     */
+    size_t line;
+    /**
+     * Whether records and first_line carry a record count.
+     */
+    bool has_records;
+    /**
+     * Number of records.
+     */
+    size_t records;
+    /**
+     * One-based line number of the first.
+     */
+    size_t first_line;
+    /**
+     * The engine's name for `kind` when it reads UNKNOWN: a value a later
+     * engine adds that this binding has no code for yet. Empty otherwise.
+     */
+    char kind_unknown_variant[SIDEREON_UNKNOWN_VARIANT_C_BYTES];
+    /**
+     * The engine's name for `time_system` when it reads UNKNOWN: a value a later
+     * engine adds that this binding has no code for yet. Empty otherwise.
+     */
+    char time_system_unknown_variant[SIDEREON_UNKNOWN_VARIANT_C_BYTES];
+} SidereonClockNotice;
+
+/**
+ * One departure the RINEX clock writer emitted. The record's name and the
+ * epoch fields as written are read with
+ * sidereon_rinex_clock_result_departure_text.
+ */
+typedef struct SidereonClockWriteDeparture {
+    /**
+     * Which departure, as SidereonClockWriteDepartureKind.
+     */
+    uint32_t kind;
+    /**
+     * Index of the record, in record order.
+     */
+    size_t record;
+    /**
+     * Whether epoch carries the epoch the product holds.
+     */
+    bool has_epoch;
+    /**
+     * The epoch the product holds.
+     */
+    struct SidereonClockEpoch epoch;
+    /**
+     * The engine's name for the first value in this struct that reads
+     * UNKNOWN: a value a later engine adds that this binding has no code for
+     * yet. Empty when no value reads UNKNOWN.
+     */
+    char unknown_variant[SIDEREON_UNKNOWN_VARIANT_C_BYTES];
+} SidereonClockWriteDeparture;
+
+/**
+ * The fixed-width outcome of one RINEX clock operation.
+ */
+typedef struct SidereonRinexClockOutcome {
+    /**
+     * Whether the operation succeeded.
+     */
+    bool is_ok;
+    /**
+     * SIDEREON_STATUS_OK on success, otherwise
+     * SIDEREON_STATUS_INVALID_ARGUMENT, which every failure maps to.
+     */
+    enum SidereonStatus status;
+    /**
+     * The typed failure; kind is None when is_ok is true.
+     */
+    struct SidereonRinexClockError error;
+} SidereonRinexClockOutcome;
+
+/**
+ * Values for one record in a sidereon_rinex_clock_set_records_values batch.
+ */
+typedef struct SidereonClockRecordValues {
+    /**
+     * Index of the record, in record order.
+     */
+    size_t index;
+    /**
+     * Number of values in values, bias first, 1..=6.
+     */
+    size_t value_count;
+    /**
+     * The new declared values, bias first; entries past value_count are not
+     * read.
+     */
+    double values[SIDEREON_CLOCK_MAX_VALUES];
+} SidereonClockRecordValues;
+
+/**
+ * A data record read from the source that is not part of the satellite series.
+ */
+typedef struct SidereonClockSkip {
+    /**
+     * One-based line number where the record appears.
+     */
+    size_t line;
+    /**
+     * Record type, as SidereonClockRecordType.
+     */
+    uint32_t record_type;
+} SidereonClockSkip;
+
+/**
+ * One GLONASS RINEX record skipped because its satellite token names no
+ * satellite: a slot outside `01`..`99` such as `R00`, or a malformed slot
+ * field.
  */
 typedef struct SidereonSkippedGlonassRecord {
     /**
-     * Raw satellite token from the skipped input record, such as `R28`.
+     * Raw satellite token from the skipped input record, such as `R00`.
      */
     struct SidereonSatelliteToken satellite;
 } SidereonSkippedGlonassRecord;
@@ -12878,10 +19646,41 @@ typedef struct SidereonRinexObsCarrierPhase {
      */
     double value_m;
     /**
-     * Header phase-shift metadata, cycles.
+     * Whether the header in effect at the epoch states one `SYS / PHASE SHIFT`
+     * correction for this satellite's signal.
+     */
+    enum SidereonRinexCorrectionStatus phase_shift_status;
+    /**
+     * The phase-shift correction in cycles when phase_shift_status is
+     * Available, and NaN otherwise. No record, or a blank correction, is an
+     * available 0, as is every signal of a RINEX 4 file, whose records the
+     * format says to ignore. RINEX 3 phases are already aligned, so this is
+     * metadata and is not applied to value_cycles or value_m.
      */
     double phase_shift_cycles;
+    /**
+     * How many corrections the header block gives this signal when
+     * phase_shift_status is Ambiguous, and 0 otherwise. Copy them with
+     * sidereon_rinex_obs_carrier_phase_conflicts.
+     */
+    size_t phase_shift_conflict_count;
 } SidereonRinexObsCarrierPhase;
+
+/**
+ * One correction an ambiguous header block gives a signal, in the order the
+ * records give them.
+ */
+typedef struct SidereonRinexPhaseShiftCorrection {
+    /**
+     * Whether the record gives a correction. False for a record whose
+     * correction field is blank.
+     */
+    bool has_cycles;
+    /**
+     * The correction in cycles when has_cycles is true, and NaN otherwise.
+     */
+    double cycles;
+} SidereonRinexPhaseShiftCorrection;
 
 /**
  * One per-system RINEX observation code from the header.
@@ -12902,7 +19701,15 @@ typedef struct SidereonRinexObsCode {
  */
 typedef struct SidereonRinexObsEpoch {
     /**
-     * Civil epoch in the file's time scale.
+     * Whether epoch carries a time. False for an event record whose epoch
+     * fields are blank, which RINEX 2.11 and 3.05 allow for an event without a
+     * significant epoch; an observation or cycle-slip epoch always has one.
+     */
+    bool has_epoch;
+    /**
+     * Civil epoch in the file's time scale when has_epoch is true. When it is
+     * false the integer fields are 0, which names no calendar date, and second
+     * is NaN.
      */
     struct SidereonCalendarEpoch epoch;
     /**
@@ -13047,6 +19854,124 @@ typedef struct SidereonRinexObsValue {
     int32_t ssi;
 } SidereonRinexObsValue;
 
+/**
+ * Typed detail of a refused RINEX observation write.
+ *
+ * Only the fields the kind names carry meaning, and each carries a present
+ * flag. An absent number is NaN and an absent count or index is 0. The two
+ * text parts are read from the owned SidereonRinexObsWriteResult: the
+ * observation code with sidereon_rinex_obs_write_result_get_code, and the
+ * reader text, time-system identifier or changed field with
+ * sidereon_rinex_obs_write_result_get_detail.
+ */
+typedef struct SidereonRinexObsWriteError {
+    /**
+     * Which refusal the writer reported.
+     */
+    enum SidereonRinexObsWriteErrorKind kind;
+    /**
+     * Whether system names a constellation.
+     */
+    bool has_system;
+    /**
+     * The constellation the refusal concerns, as SidereonGnssSystem.
+     */
+    uint32_t system;
+    /**
+     * Whether satellite names a satellite.
+     */
+    bool has_satellite;
+    /**
+     * The satellite the refusal concerns.
+     */
+    struct SidereonSatelliteToken satellite;
+    /**
+     * Whether epoch_index names an epoch.
+     */
+    bool has_epoch_index;
+    /**
+     * Zero-based index of the epoch the refusal concerns.
+     */
+    size_t epoch_index;
+    /**
+     * Whether position carries a code-list position.
+     */
+    bool has_position;
+    /**
+     * Zero-based position in the constellation's code list, or its length
+     * when the lists differ in length.
+     */
+    size_t position;
+    /**
+     * Whether flag carries the epoch flag.
+     */
+    bool has_flag;
+    /**
+     * The epoch flag.
+     */
+    uint8_t flag;
+    /**
+     * Whether version carries a RINEX version.
+     */
+    bool has_version;
+    /**
+     * The product's version, or the version a downgrade or write targets.
+     */
+    double version;
+    /**
+     * Whether count carries a record or type count.
+     */
+    bool has_count;
+    /**
+     * Scale-factor records held, or observation types a version 2 list needs.
+     */
+    size_t count;
+    /**
+     * Whether codes carries a code count.
+     */
+    bool has_codes;
+    /**
+     * Codes the satellite's constellation has.
+     */
+    size_t codes;
+    /**
+     * Whether values carries a value count.
+     */
+    bool has_values;
+    /**
+     * Values the satellite holds, or counts its `PRN / # OF OBS` record holds.
+     */
+    size_t values;
+    /**
+     * Whether the refusal names an observation code.
+     */
+    bool has_code;
+    /**
+     * Whether the refusal carries a detail text.
+     */
+    bool has_detail;
+} SidereonRinexObsWriteError;
+
+/**
+ * The complete outcome of one RINEX observation write: the fixed-width part of
+ * an owned SidereonRinexObsWriteResult.
+ */
+typedef struct SidereonRinexObsWriteOutcome {
+    /**
+     * Whether the product was written.
+     */
+    bool is_ok;
+    /**
+     * SIDEREON_STATUS_OK when written, otherwise
+     * SIDEREON_STATUS_INVALID_ARGUMENT, which every refusal maps to.
+     */
+    enum SidereonStatus status;
+    /**
+     * The typed refusal; kind is None when is_ok is true.
+     */
+    struct SidereonRinexObsWriteError error;
+} SidereonRinexObsWriteOutcome;
+
 typedef struct SidereonRinexRepairAction {
     char id[RINEX_QC_CODE_C_BYTES];
     char message[RINEX_QC_FIELD_C_BYTES];
@@ -13163,6 +20088,24 @@ typedef struct SidereonRtcmBeidouEphemeris {
     bool sv_health;
 } SidereonRtcmBeidouEphemeris;
 
+typedef struct SidereonRtcmFkpGradients {
+    uint16_t message_number;
+    uint16_t reference_station_id;
+    uint32_t epoch_time;
+    uint8_t satellite_count;
+    size_t satellite_records;
+    size_t trailing_bit_count;
+} SidereonRtcmFkpGradients;
+
+typedef struct SidereonRtcmFkpGradient {
+    uint8_t satellite_id;
+    uint8_t iod;
+    int16_t geometric_north;
+    int16_t geometric_east;
+    int16_t ionospheric_north;
+    int16_t ionospheric_east;
+} SidereonRtcmFkpGradient;
+
 /**
  * A decoded 1045 Galileo F/NAV broadcast ephemeris, mirroring
  * sidereon_core::rtcm::GalileoFnavEphemeris. Every field is the raw
@@ -13237,6 +20180,21 @@ typedef struct SidereonRtcmGalileoInavEphemeris {
     bool e1b_data_validity;
     uint8_t reserved;
 } SidereonRtcmGalileoInavEphemeris;
+
+typedef struct SidereonRtcmGlonassCodePhaseBiases {
+    uint16_t reference_station_id;
+    bool aligned;
+    uint8_t reserved;
+    bool has_l1_ca;
+    int16_t l1_ca;
+    bool has_l1_p;
+    int16_t l1_p;
+    bool has_l2_ca;
+    int16_t l2_ca;
+    bool has_l2_p;
+    int16_t l2_p;
+    size_t trailing_bit_count;
+} SidereonRtcmGlonassCodePhaseBiases;
 
 /**
  * A decoded 1020 GLONASS broadcast ephemeris, mirroring
@@ -13388,6 +20346,13 @@ typedef struct SidereonRtcmGlonassEphemeris {
      * Reserved field, preserved for round-trip.
      */
     uint8_t reserved;
+    /**
+     * The sign-magnitude fields transmitted as negative zero, one bit per
+     * field as sidereon_core::rtcm::GlonassEphemeris::negative_zero defines
+     * them. Each such field reads as 0; the bit keeps the sign so the body
+     * re-encodes as transmitted. Zero for a message built by hand.
+     */
+    uint16_t negative_zero;
 } SidereonRtcmGlonassEphemeris;
 
 /**
@@ -13517,6 +20482,70 @@ typedef struct SidereonRtcmGpsEphemeris {
     bool fit_interval;
 } SidereonRtcmGpsEphemeris;
 
+typedef struct SidereonRtcmHelmertTransformation {
+    uint16_t message_number;
+    uint8_t source_name[31];
+    uint8_t source_name_len;
+    uint8_t target_name[31];
+    uint8_t target_name_len;
+    uint8_t system_id;
+    uint16_t utilized_messages;
+    uint8_t plate_number;
+    uint8_t computation_indicator;
+    uint8_t height_indicator;
+    int32_t validity_latitude;
+    int32_t validity_longitude;
+    uint16_t validity_extension_latitude;
+    uint16_t validity_extension_longitude;
+    int32_t dx;
+    int32_t dy;
+    int32_t dz;
+    int32_t r1;
+    int32_t r2;
+    int32_t r3;
+    int32_t ds;
+    bool has_rotation_point;
+    int64_t rotation_point_x;
+    int64_t rotation_point_y;
+    int64_t rotation_point_z;
+    uint32_t add_as;
+    uint32_t add_bs;
+    uint32_t add_at;
+    uint32_t add_bt;
+    uint8_t horizontal_quality;
+    uint8_t vertical_quality;
+    size_t trailing_bit_count;
+} SidereonRtcmHelmertTransformation;
+
+typedef struct SidereonRtcmLegacyL1 {
+    bool code_indicator;
+    uint32_t pseudorange;
+    int32_t phase_range_minus_pseudorange;
+    uint8_t lock_time_indicator;
+    bool has_pseudorange_modulus_ambiguity;
+    uint8_t pseudorange_modulus_ambiguity;
+    bool has_cnr;
+    uint8_t cnr;
+} SidereonRtcmLegacyL1;
+
+typedef struct SidereonRtcmLegacyL2 {
+    uint8_t code_indicator;
+    int16_t pseudorange_difference;
+    int32_t phase_range_minus_l1_pseudorange;
+    uint8_t lock_time_indicator;
+    bool has_cnr;
+    uint8_t cnr;
+} SidereonRtcmLegacyL2;
+
+typedef struct SidereonRtcmLegacySatellite {
+    uint8_t satellite_id;
+    bool has_frequency_channel;
+    uint8_t frequency_channel;
+    struct SidereonRtcmLegacyL1 l1;
+    bool has_l2;
+    struct SidereonRtcmLegacyL2 l2;
+} SidereonRtcmLegacySatellite;
+
 /**
  * MSM common header, mirroring sidereon_core::rtcm::MsmHeader.
  */
@@ -13570,13 +20599,15 @@ typedef struct SidereonRtcmMsmInfo {
      */
     uint16_t message_number;
     /**
-     * The constellation, a SidereonGnssSystem value.
+     * The constellation, a SidereonGnssSystem value; an unknown value is
+     * refused on input.
      */
-    enum SidereonGnssSystem system;
+    uint32_t system;
     /**
-     * The MSM variant.
+     * The MSM variant, a SidereonRtcmMsmKind value; an unknown value is
+     * refused on input.
      */
-    enum SidereonRtcmMsmKind kind;
+    uint32_t kind;
     /**
      * Common MSM header.
      */
@@ -13589,6 +20620,12 @@ typedef struct SidereonRtcmMsmInfo {
      * Number of active signal cells.
      */
     size_t signal_count;
+    /**
+     * The signal mask (DF395) as transmitted: bit `32 - id` is set for each
+     * signal id the message lists. A listed signal may have no cell. When
+     * building a message, zero builds the mask from the cells' signal ids.
+     */
+    uint32_t signal_mask;
 } SidereonRtcmMsmInfo;
 
 /**
@@ -13599,6 +20636,7 @@ typedef struct SidereonRtcmMsmSatellite {
      * Satellite id (1-based satellite-mask index).
      */
     uint8_t id;
+    bool has_rough_range_ms;
     /**
      * Rough range, whole milliseconds (255 marks invalid).
      */
@@ -13637,22 +20675,27 @@ typedef struct SidereonRtcmMsmSignal {
      * Signal id (1-based signal-mask index).
      */
     uint8_t signal_id;
+    bool has_fine_pseudorange;
     /**
      * Fine pseudorange (raw integer, scale per MSM variant).
      */
     int32_t fine_pseudorange;
+    bool has_fine_phase_range;
     /**
      * Fine phase range (raw integer, scale per MSM variant).
      */
     int32_t fine_phase_range;
+    bool has_lock_time_indicator;
     /**
      * Phase-range lock-time indicator.
      */
     uint16_t lock_time_indicator;
+    bool has_half_cycle_ambiguity;
     /**
      * Half-cycle ambiguity indicator.
      */
     bool half_cycle_ambiguity;
+    bool has_cnr;
     /**
      * Carrier-to-noise density ratio (raw integer, scale per MSM variant).
      */
@@ -13666,6 +20709,122 @@ typedef struct SidereonRtcmMsmSignal {
      */
     int16_t fine_phase_range_rate;
 } SidereonRtcmMsmSignal;
+
+typedef struct SidereonRtcmNavicEphemeris {
+    uint8_t satellite_id;
+    uint16_t week_number;
+    int32_t a_f0;
+    int32_t a_f1;
+    int16_t a_f2;
+    uint8_t ura;
+    uint16_t t_oc;
+    int16_t t_gd;
+    int32_t delta_n;
+    uint8_t iodec;
+    uint16_t reserved;
+    bool l5_flag;
+    bool s_flag;
+    int32_t c_uc;
+    int32_t c_us;
+    int32_t c_ic;
+    int32_t c_is;
+    int32_t c_rc;
+    int32_t c_rs;
+    int32_t idot;
+    int64_t m0;
+    uint16_t t_oe;
+    uint64_t eccentricity;
+    uint64_t sqrt_a;
+    int64_t omega0;
+    int64_t omega;
+    int32_t omega_dot;
+    int64_t i0;
+    uint8_t spare_df544;
+    uint8_t spare_df545;
+} SidereonRtcmNavicEphemeris;
+
+typedef struct SidereonRtcmNetworkAuxiliaryStation {
+    uint8_t network_id;
+    uint8_t subnetwork_id;
+    uint8_t auxiliary_station_count;
+    uint16_t master_station_id;
+    uint16_t auxiliary_station_id;
+    int32_t delta_latitude;
+    int32_t delta_longitude;
+    int32_t delta_height;
+    size_t trailing_bit_count;
+} SidereonRtcmNetworkAuxiliaryStation;
+
+typedef struct SidereonRtcmNetworkDifferences {
+    uint16_t message_number;
+    uint8_t network_id;
+    uint8_t subnetwork_id;
+    uint32_t epoch_time;
+    bool multiple_message;
+    uint16_t master_station_id;
+    uint16_t auxiliary_station_id;
+    uint8_t satellite_count;
+    size_t satellite_records;
+    size_t trailing_bit_count;
+} SidereonRtcmNetworkDifferences;
+
+typedef struct SidereonRtcmNetworkDifference {
+    uint8_t satellite_id;
+    uint8_t ambiguity_status;
+    uint8_t non_sync_count;
+    bool has_geometric;
+    int32_t geometric;
+    bool has_iod;
+    uint8_t iod;
+    bool has_ionospheric;
+    int32_t ionospheric;
+} SidereonRtcmNetworkDifference;
+
+typedef struct SidereonRtcmNetworkResiduals {
+    uint16_t message_number;
+    uint32_t epoch_time;
+    uint16_t reference_station_id;
+    uint8_t reference_station_count;
+    uint8_t satellite_count;
+    size_t satellite_records;
+    size_t trailing_bit_count;
+} SidereonRtcmNetworkResiduals;
+
+typedef struct SidereonRtcmNetworkResidual {
+    uint8_t satellite_id;
+    uint8_t s_oc;
+    uint16_t s_od;
+    uint8_t s_oh;
+    uint16_t s_lc;
+    uint16_t s_ld;
+} SidereonRtcmNetworkResidual;
+
+typedef struct SidereonRtcmPhysicalReferenceStation {
+    uint16_t non_physical_station_id;
+    uint16_t physical_station_id;
+    uint8_t itrf_realization_year;
+    int64_t ecef_x;
+    int64_t ecef_y;
+    int64_t ecef_z;
+    size_t trailing_bit_count;
+} SidereonRtcmPhysicalReferenceStation;
+
+typedef struct SidereonRtcmProjection {
+    uint16_t message_number;
+    uint8_t system_id;
+    uint8_t projection_type;
+    bool rectification;
+    int64_t latitude;
+    int64_t longitude;
+    int64_t standard_parallel_1;
+    int64_t standard_parallel_2;
+    uint64_t azimuth;
+    int32_t rectified_to_skew;
+    uint32_t add_scale;
+    uint64_t easting;
+    int64_t northing;
+    size_t trailing_bit_count;
+} SidereonRtcmProjection;
 
 /**
  * A decoded 1044 QZSS broadcast ephemeris, mirroring
@@ -13703,6 +20862,232 @@ typedef struct SidereonRtcmQzssEphemeris {
     uint16_t iodc;
     bool fit_interval;
 } SidereonRtcmQzssEphemeris;
+
+typedef struct SidereonRtcmGridResidual {
+    int16_t horizontal_1;
+    int16_t horizontal_2;
+    int16_t height;
+} SidereonRtcmGridResidual;
+
+typedef struct SidereonRtcmResidualGrid {
+    uint16_t message_number;
+    uint8_t system_id;
+    bool horizontal_shift;
+    bool vertical_shift;
+    int32_t origin_1;
+    int32_t origin_2;
+    uint16_t extension_1;
+    uint16_t extension_2;
+    int16_t mean_offset_1;
+    int16_t mean_offset_2;
+    int16_t mean_height_offset;
+    struct SidereonRtcmGridResidual residuals[16];
+    uint8_t horizontal_interpolation;
+    uint8_t vertical_interpolation;
+    uint8_t horizontal_quality;
+    uint8_t vertical_quality;
+    uint16_t mjd;
+    size_t trailing_bit_count;
+} SidereonRtcmResidualGrid;
+
+typedef struct SidereonRtcmSsrHeader {
+    uint32_t epoch_time_s;
+    uint8_t update_interval;
+    bool multiple_message;
+    uint8_t iod_ssr;
+    uint16_t provider_id;
+    uint8_t solution_id;
+    bool has_satellite_reference_datum;
+    bool satellite_reference_datum;
+    bool has_dispersive_bias_consistency;
+    bool dispersive_bias_consistency;
+    bool has_mw_consistency;
+    bool mw_consistency;
+    uint8_t satellite_count;
+} SidereonRtcmSsrHeader;
+
+/**
+ * Extended SSR metadata retaining the IGS version and the count of raw tail
+ * bits omitted by the original summary type.
+ */
+typedef struct SidereonRtcmSsrInfoV2 {
+    /**
+     * RTCM message number, including 4076 for IGS SSR.
+     */
+    uint16_t message_number;
+    /**
+     * Constellation carried by this SSR message.
+     */
+    enum SidereonGnssSystem system;
+    /**
+     * SSR record group.
+     */
+    enum SidereonRtcmSsrKind kind;
+    /**
+     * Common wire header.
+     */
+    struct SidereonRtcmSsrHeader header;
+    /**
+     * Whether `igs_ssr_version` is present (only for message 4076).
+     */
+    bool has_igs_ssr_version;
+    /**
+     * IGS SSR version when present; otherwise zero.
+     */
+    uint8_t igs_ssr_version;
+    /**
+     * Number of orbit records.
+     */
+    size_t orbit_count;
+    /**
+     * Number of clock records.
+     */
+    size_t clock_count;
+    /**
+     * Number of URA records.
+     */
+    size_t ura_count;
+    /**
+     * Number of code-bias satellite records.
+     */
+    size_t code_bias_count;
+    /**
+     * Number of phase-bias satellite records.
+     */
+    size_t phase_bias_count;
+    /**
+     * Number of raw trailing/padding bits after the final record.
+     */
+    size_t padding_bit_count;
+} SidereonRtcmSsrInfoV2;
+
+typedef struct SidereonRtcmSsrOrbitRecord {
+    uint8_t satellite_id;
+    uint32_t iode;
+    bool has_iod_crc;
+    uint32_t iod_crc;
+    int32_t delta_radial;
+    int32_t delta_along;
+    int32_t delta_cross;
+    int32_t dot_delta_radial;
+    int32_t dot_delta_along;
+    int32_t dot_delta_cross;
+} SidereonRtcmSsrOrbitRecord;
+
+typedef struct SidereonRtcmSsrClockRecord {
+    uint8_t satellite_id;
+    int32_t c0;
+    int32_t c1;
+    int32_t c2;
+} SidereonRtcmSsrClockRecord;
+
+typedef struct SidereonRtcmSsrUraRecord {
+    uint8_t satellite_id;
+    uint8_t ura_index;
+} SidereonRtcmSsrUraRecord;
+
+/**
+ * One satellite's raw RTCM SSR code-bias record. The nested signal rows are
+ * copied with sidereon_rtcm_message_ssr_code_bias_signals or
+ * sidereon_ssr_message_code_bias_signals.
+ */
+typedef struct SidereonRtcmSsrCodeBiasRecord {
+    /**
+     * Constellation-native satellite id.
+     */
+    uint8_t satellite_id;
+    /**
+     * Number of signal rows belonging to this satellite record.
+     */
+    size_t signal_count;
+} SidereonRtcmSsrCodeBiasRecord;
+
+/**
+ * One raw signal and bias pair in an RTCM SSR code-bias record.
+ */
+typedef struct SidereonRtcmSsrCodeBiasSignal {
+    /**
+     * Raw signal and tracking-mode id.
+     */
+    uint8_t signal_id;
+    /**
+     * Raw code bias integer.
+     */
+    int16_t bias;
+} SidereonRtcmSsrCodeBiasSignal;
+
+/**
+ * One satellite's raw RTCM SSR phase-bias record. The nested signal rows are
+ * copied with sidereon_rtcm_message_ssr_phase_bias_signals or
+ * sidereon_ssr_message_phase_bias_signals.
+ */
+typedef struct SidereonRtcmSsrPhaseBiasRecord {
+    /**
+     * Constellation-native satellite id.
+     */
+    uint8_t satellite_id;
+    /**
+     * Raw yaw angle.
+     */
+    uint16_t yaw_angle;
+    /**
+     * Raw yaw rate.
+     */
+    int8_t yaw_rate;
+    /**
+     * Number of signal rows belonging to this satellite record.
+     */
+    size_t signal_count;
+} SidereonRtcmSsrPhaseBiasRecord;
+
+/**
+ * One raw signal row in an RTCM SSR phase-bias record.
+ */
+typedef struct SidereonRtcmSsrPhaseBiasSignal {
+    /**
+     * Raw signal and tracking-mode id.
+     */
+    uint8_t signal_id;
+    /**
+     * Signal integer indicator.
+     */
+    uint8_t integer_indicator;
+    /**
+     * Wide-lane integer indicator.
+     */
+    uint8_t wide_lane_integer_indicator;
+    /**
+     * Discontinuity counter.
+     */
+    uint8_t discontinuity_counter;
+    /**
+     * Raw phase bias integer.
+     */
+    int32_t bias;
+} SidereonRtcmSsrPhaseBiasSignal;
+
+typedef struct SidereonRtcmSsrVtecInfo {
+    uint16_t message_number;
+    bool has_igs_ssr_version;
+    uint8_t igs_ssr_version;
+    uint32_t epoch_time_s;
+    uint8_t update_interval;
+    bool multiple_message;
+    uint8_t iod_ssr;
+    uint16_t provider_id;
+    uint8_t solution_id;
+    uint16_t quality_indicator;
+    size_t layer_count;
+    size_t trailing_bit_count;
+} SidereonRtcmSsrVtecInfo;
+
+typedef struct SidereonRtcmSsrVtecLayer {
+    uint8_t height;
+    uint8_t degree;
+    uint8_t order;
+    size_t cosine_count;
+    size_t sine_count;
+} SidereonRtcmSsrVtecLayer;
 
 /**
  * A decoded 1005 / 1006 station antenna reference point, mirroring
@@ -13787,6 +21172,12 @@ typedef struct SidereonRtcmStationCoordinates {
     double antenna_height_m;
 } SidereonRtcmStationCoordinates;
 
+typedef struct SidereonRtcmMessageAnnouncement {
+    uint16_t message_number;
+    bool synchronous;
+    uint16_t interval;
+} SidereonRtcmMessageAnnouncement;
+
 /**
  * Previous MSM lock-state input for sidereon_rtcm_derive_lli.
  */
@@ -13804,6 +21195,16 @@ typedef struct SidereonRtcmPreviousLock {
      */
     uint64_t elapsed_ms;
 } SidereonRtcmPreviousLock;
+
+/**
+ * Class and stable variant discriminant for a thread-local typed error.
+ * `kind` uses [`SidereonSbasEncodeErrorKind`] when `class` is `SbasEncode`.
+ */
+typedef struct SidereonRtcmErrorInfo {
+    enum SidereonRtcmErrorClass class_;
+    uint32_t kind;
+    size_t payload_len;
+} SidereonRtcmErrorInfo;
 
 /**
  * Derived RINEX LLI for one MSM signal cell.
@@ -13866,58 +21267,30 @@ typedef struct SidereonRtcmAntennaDescriptor {
     bool has_receiver_serial_number;
 } SidereonRtcmAntennaDescriptor;
 
-typedef struct SidereonRtcmSsrClockRecord {
-    uint8_t satellite_id;
-    int32_t c0;
-    int32_t c1;
-    int32_t c2;
-} SidereonRtcmSsrClockRecord;
+typedef struct SidereonRtcmDeparture {
+    uint32_t kind;
+    uint16_t message_number;
+    uint8_t reserved;
+    size_t layer_index;
+    uint8_t degree;
+    uint8_t order;
+    size_t declared;
+    size_t read;
+    size_t cells;
+    size_t bit_count;
+} SidereonRtcmDeparture;
 
-/**
- * One raw signal and bias pair in an RTCM SSR code-bias record.
- */
-typedef struct SidereonRtcmSsrCodeBiasSignal {
-    /**
-     * Raw signal and tracking-mode id.
-     */
-    uint8_t signal_id;
-    /**
-     * Raw code bias integer.
-     */
-    int16_t bias;
-} SidereonRtcmSsrCodeBiasSignal;
-
-/**
- * One satellite's raw RTCM SSR code-bias record. The nested signal rows are
- * copied with sidereon_rtcm_message_ssr_code_bias_signals or
- * sidereon_ssr_message_code_bias_signals.
- */
-typedef struct SidereonRtcmSsrCodeBiasRecord {
-    /**
-     * Constellation-native satellite id.
-     */
-    uint8_t satellite_id;
-    /**
-     * Number of signal rows belonging to this satellite record.
-     */
-    size_t signal_count;
-} SidereonRtcmSsrCodeBiasRecord;
-
-typedef struct SidereonRtcmSsrHeader {
-    uint32_t epoch_time_s;
-    uint8_t update_interval;
-    bool multiple_message;
-    uint8_t iod_ssr;
-    uint16_t provider_id;
-    uint8_t solution_id;
-    bool has_satellite_reference_datum;
-    bool satellite_reference_datum;
-    bool has_dispersive_bias_consistency;
-    bool dispersive_bias_consistency;
-    bool has_mw_consistency;
-    bool mw_consistency;
+typedef struct SidereonRtcmLegacyHeader {
+    uint16_t message_number;
+    uint16_t reference_station_id;
+    uint32_t epoch_time;
+    bool synchronous_gnss;
     uint8_t satellite_count;
-} SidereonRtcmSsrHeader;
+    bool divergence_free_smoothing;
+    uint8_t smoothing_interval;
+    size_t satellite_records;
+    size_t trailing_bit_count;
+} SidereonRtcmLegacyHeader;
 
 typedef struct SidereonRtcmSsrInfo {
     uint16_t message_number;
@@ -13931,71 +21304,24 @@ typedef struct SidereonRtcmSsrInfo {
     size_t phase_bias_count;
 } SidereonRtcmSsrInfo;
 
-typedef struct SidereonRtcmSsrOrbitRecord {
-    uint8_t satellite_id;
-    uint32_t iode;
-    int32_t delta_radial;
-    int32_t delta_along;
-    int32_t delta_cross;
-    int32_t dot_delta_radial;
-    int32_t dot_delta_along;
-    int32_t dot_delta_cross;
-} SidereonRtcmSsrOrbitRecord;
+typedef struct SidereonRtcmSystemParameters {
+    uint16_t reference_station_id;
+    uint16_t mjd;
+    uint32_t seconds_of_day;
+    uint8_t announcement_count;
+    uint8_t leap_seconds;
+    size_t announcements;
+    size_t trailing_bit_count;
+} SidereonRtcmSystemParameters;
 
-/**
- * One raw signal row in an RTCM SSR phase-bias record.
- */
-typedef struct SidereonRtcmSsrPhaseBiasSignal {
-    /**
-     * Raw signal and tracking-mode id.
-     */
-    uint8_t signal_id;
-    /**
-     * Signal integer indicator.
-     */
-    uint8_t integer_indicator;
-    /**
-     * Wide-lane integer indicator.
-     */
-    uint8_t wide_lane_integer_indicator;
-    /**
-     * Discontinuity counter.
-     */
-    uint8_t discontinuity_counter;
-    /**
-     * Raw phase bias integer.
-     */
-    int32_t bias;
-} SidereonRtcmSsrPhaseBiasSignal;
-
-/**
- * One satellite's raw RTCM SSR phase-bias record. The nested signal rows are
- * copied with sidereon_rtcm_message_ssr_phase_bias_signals or
- * sidereon_ssr_message_phase_bias_signals.
- */
-typedef struct SidereonRtcmSsrPhaseBiasRecord {
-    /**
-     * Constellation-native satellite id.
-     */
-    uint8_t satellite_id;
-    /**
-     * Raw yaw angle.
-     */
-    uint16_t yaw_angle;
-    /**
-     * Raw yaw rate.
-     */
-    int8_t yaw_rate;
-    /**
-     * Number of signal rows belonging to this satellite record.
-     */
-    size_t signal_count;
-} SidereonRtcmSsrPhaseBiasRecord;
-
-typedef struct SidereonRtcmSsrUraRecord {
-    uint8_t satellite_id;
-    uint8_t ura_index;
-} SidereonRtcmSsrUraRecord;
+typedef struct SidereonRtcmTextMessage {
+    uint16_t reference_station_id;
+    uint16_t mjd;
+    uint32_t seconds_of_day;
+    uint8_t character_count;
+    size_t code_unit_count;
+    size_t trailing_bit_count;
+} SidereonRtcmTextMessage;
 
 /**
  * One CRC-valid frame skipped by sidereon_rtcm_decode_stream.
@@ -14418,6 +21744,38 @@ typedef struct SidereonRtkResidualValidationOptions {
      */
     size_t max_exclusions;
 } SidereonRtkResidualValidationOptions;
+
+/**
+ * A satellite's measurement a RINEX RTK arc builder left out of one epoch
+ * because no configured signal pair whose values the epoch holds has every
+ * carrier frequency resolved: a GLONASS slot with no `GLONASS SLOT / FRQ #`
+ * channel, or a channel outside the -7..=6 FDMA allocation, such as the 7
+ * real IGS headers give R28, when no configured CDMA pair covers it. Only that
+ * satellite is left out of that epoch, as RTKLIB leaves out a measurement
+ * whose carrier frequency is zero; the rest of the epoch and the arc are built
+ * as usual. A satellite whose first held pair does not resolve but a later
+ * configured pair does is not reported: its measurement is formed from the
+ * later pair.
+ */
+typedef struct SidereonRtkRinexUnresolvedCarrier {
+    /**
+     * The receiver whose file holds the measurement.
+     */
+    enum SidereonRtkRinexReceiver receiver;
+    /**
+     * Index of the epoch in that receiver's file.
+     */
+    size_t epoch_index;
+    /**
+     * Satellite token.
+     */
+    struct SidereonSatelliteToken sat_id;
+    /**
+     * Null-terminated RINEX phase observable with no carrier frequency, exactly
+     * as the configured signal pair names it.
+     */
+    char observable_code[RINEX_OBS_CODE_C_BYTES];
+} SidereonRtkRinexUnresolvedCarrier;
 
 /**
  * One dual-frequency RINEX RTK arc epoch's time, array lengths, and optional
@@ -15162,6 +22520,24 @@ typedef struct SidereonSbasLogBlock {
      * Number of payload bytes available through the bytes accessor.
      */
     size_t byte_count;
+    /**
+     * Whether the log line stated a message type (the EMS message-type field,
+     * the fourth RTKLIB header field, or the NovAtel OEM4 message ID).
+     */
+    bool has_declared_message_type;
+    /**
+     * The message type the log line stated, when present. The type the bytes
+     * carry can differ from it.
+     */
+    uint8_t declared_message_type;
+    /**
+     * Whether the payload carries a message type.
+     */
+    bool has_message_type;
+    /**
+     * The message type the payload bytes carry, when present.
+     */
+    uint8_t message_type;
 } SidereonSbasLogBlock;
 
 /**
@@ -15286,6 +22662,11 @@ typedef struct SidereonSbasProtection {
     double d_en_m2;
 } SidereonSbasProtection;
 
+typedef struct SidereonSppModelOptions {
+    uint32_t qzss_clock;
+    uint32_t troposphere_model;
+} SidereonSppModelOptions;
+
 typedef struct SidereonSbasFastCorrection {
     double prc_m;
     double rrc_m_s;
@@ -15319,6 +22700,21 @@ typedef struct SidereonSbasLongTermCorrection {
     double delta_af1_s_s;
     double t0_j2000_s;
 } SidereonSbasLongTermCorrection;
+
+/**
+ * Corrections a source GEO addressed to one active PRN-mask bit that names no
+ * satellite the store holds.
+ */
+typedef struct SidereonSbasUnassignedMaskCorrections {
+    /**
+     * One-based DO-229 PRN mask number of the bit.
+     */
+    uint8_t mask_number;
+    /**
+     * Number of corrections addressed to it.
+     */
+    uint64_t count;
+} SidereonSbasUnassignedMaskCorrections;
 
 /**
  * Synthetic observable row.
@@ -15654,6 +23050,14 @@ typedef struct SidereonSgp4FitSample {
     bool has_velocity_teme_km_s;
     double velocity_teme_km_s[3];
 } SidereonSgp4FitSample;
+
+typedef struct SidereonSgp4ErrorInfo {
+    enum SidereonSgp4ErrorKind kind;
+    bool has_code;
+    int32_t code;
+    bool has_budget;
+    uint64_t budget;
+} SidereonSgp4ErrorInfo;
 
 /**
  * Fixed-size null-terminated TLE line storage. Values returned by Sidereon are
@@ -16512,6 +23916,36 @@ typedef struct SidereonPppObservation {
      * Second raw carrier frequency in Hz, or 0 when not supplied.
      */
     double freq2_hz;
+    /**
+     * Tracking code of the first pseudorange as a null-terminated RINEX 3
+     * band and attribute ("1C") or observation code ("C1C"), in the RINEX
+     * 3.04 convention. The four signal fields are all NULL, which leaves the
+     * observation's signals unstated, or all set. An SSR/HAS bias applies
+     * only to an observation formed from the bias's exact signal, so an
+     * observation with unstated signals receives none.
+     */
+    const char *code1_signal;
+    /**
+     * Tracking code of the second pseudorange, as code1_signal.
+     */
+    const char *code2_signal;
+    /**
+     * Tracking code of the first carrier phase, as code1_signal.
+     */
+    const char *phase1_signal;
+    /**
+     * Tracking code of the second carrier phase, as code1_signal.
+     */
+    const char *phase2_signal;
+    /**
+     * Whether `glonass_channel` is set.
+     */
+    bool has_glonass_channel;
+    /**
+     * GLONASS FDMA frequency channel of the satellite, which resolves its
+     * carriers where the frequencies are not given.
+     */
+    int8_t glonass_channel;
 } SidereonPppObservation;
 
 /**
@@ -16834,6 +24268,12 @@ typedef struct SidereonRtkArcConfig {
     struct SidereonRtkArcPreprocessing preprocessing;
 } SidereonRtkArcConfig;
 
+typedef struct SidereonRtkArcEpochV2 {
+    struct SidereonRtkArcEpoch legacy;
+    bool has_prediction_epoch;
+    const struct SidereonExactEpoch *prediction_epoch;
+} SidereonRtkArcEpochV2;
+
 /**
  * Complete typed input bundle for an RTK fixed solve. Initialize model and
  * option structs with their init functions before overriding fields.
@@ -16961,6 +24401,11 @@ typedef struct SidereonRtkFloatConfig {
     struct SidereonRtkFloatOptions options;
 } SidereonRtkFloatConfig;
 
+typedef struct SidereonSppBatchInputV2 {
+    struct SidereonSppInputsV2 inputs;
+    struct SidereonSppModelOptions models;
+} SidereonSppBatchInputV2;
+
 /**
  * One static-position epoch, expressed with the existing SPP V2 input bundle.
  */
@@ -17002,6 +24447,11 @@ typedef struct SidereonStaticPositionOptions {
      */
     struct SidereonSppRobustConfig robust;
 } SidereonStaticPositionOptions;
+
+typedef struct SidereonStaticPositionOptionsV2 {
+    struct SidereonStaticPositionOptions base;
+    struct SidereonSppModelOptions models;
+} SidereonStaticPositionOptionsV2;
 
 /**
  * Static reference-station RINEX solve config. Initialize with
@@ -17298,6 +24748,175 @@ typedef struct SidereonSp3ClockReferenceOffset {
 } SidereonSp3ClockReferenceOffset;
 
 /**
+ * Continuity checks (sidereon_core::ephemeris::ContinuityOptions). Fill with
+ * sidereon_sp3_continuity_options_for_orbit_class, then override fields.
+ * Invalid bounds return SIDEREON_STATUS_INVALID_ARGUMENT; the thread-local
+ * error message and sidereon_sp3_last_error_info/payload identify the field,
+ * supplied value and rejection reason.
+ */
+typedef struct SidereonSp3ContinuityOptions {
+    /**
+     * The speed gate, a SidereonSp3SpeedBoundKind value.
+     */
+    uint32_t speed_bound_kind;
+    /**
+     * The orbit class, a SidereonSp3OrbitClass value, read when
+     * speed_bound_kind is OrbitClass.
+     */
+    uint32_t orbit_class;
+    /**
+     * Explicit earth-fixed speed bound, meters per second, read when
+     * speed_bound_kind is ExplicitMaxSpeed; finite and non-negative.
+     */
+    double explicit_max_speed_m_s;
+    /**
+     * Whether the hold-out residual check runs. Exactly 0 or 1.
+     */
+    uint8_t residual_tolerance_enabled;
+    /**
+     * Hold-out residual tolerance, meters, read when
+     * residual_tolerance_enabled is 1; finite and non-negative.
+     */
+    double residual_tolerance_m;
+    /**
+     * Multiple of the nominal spacing above which a node gap is a coverage
+     * gap for the hold-out replay; as for the other gap_threshold_factor
+     * arguments, a value <= 0.0 selects the default 1.5 and NaN, infinity or
+     * a value in (0.0, 1.0] is refused.
+     */
+    double gap_threshold_factor;
+} SidereonSp3ContinuityOptions;
+
+/**
+ * A gap in a channel's coverage.
+ */
+typedef struct SidereonSp3CoverageGap {
+    /**
+     * Whether after_index is present; false for a gap before the first span.
+     */
+    bool has_after_index;
+    /**
+     * Index of the last covered epoch before the gap.
+     */
+    size_t after_index;
+    /**
+     * Whether before_index is present; false for a gap after the last span.
+     */
+    bool has_before_index;
+    /**
+     * Index of the first covered epoch after the gap.
+     */
+    size_t before_index;
+    /**
+     * Grid epochs the gap spans that the channel does not carry, whether or
+     * not the product has an epoch there.
+     */
+    size_t missing_epochs;
+} SidereonSp3CoverageGap;
+
+/**
+ * The epoch grid a product's epochs lie on.
+ */
+typedef struct SidereonSp3EpochGrid {
+    /**
+     * Whether the epochs lie on one grid, so interval_s is present.
+     */
+    bool has_interval;
+    /**
+     * The grid step, seconds; NaN when absent.
+     */
+    double interval_s;
+    /**
+     * Whether the grid step equals the header's declared interval.
+     */
+    bool agrees_with_header;
+    /**
+     * Epoch indices out of time order, copied by
+     * sidereon_sp3_coverage_grid_out_of_order.
+     */
+    size_t out_of_order_count;
+    /**
+     * Epoch indices no record states exactly, copied by
+     * sidereon_sp3_coverage_grid_unplaced.
+     */
+    size_t unplaced_count;
+} SidereonSp3EpochGrid;
+
+/**
+ * Coverage of one channel of one satellite.
+ */
+typedef struct SidereonSp3ChannelCoverage {
+    /**
+     * Product epochs that carry the channel.
+     */
+    size_t epochs;
+    /**
+     * Contiguous spans, copied by sidereon_sp3_coverage_spans.
+     */
+    size_t span_count;
+    /**
+     * Gaps, copied by sidereon_sp3_coverage_gaps.
+     */
+    size_t gap_count;
+    /**
+     * Whether the channel is present at every product epoch, in one span.
+     */
+    bool complete;
+} SidereonSp3ChannelCoverage;
+
+/**
+ * Coverage of one satellite.
+ */
+typedef struct SidereonSp3SatelliteCoverage {
+    /**
+     * Satellite token.
+     */
+    struct SidereonSatelliteToken sat_id;
+    /**
+     * Whether the header declares the satellite.
+     */
+    bool declared;
+    /**
+     * Position coverage.
+     */
+    struct SidereonSp3ChannelCoverage positions;
+    /**
+     * Clock coverage.
+     */
+    struct SidereonSp3ChannelCoverage clocks;
+} SidereonSp3SatelliteCoverage;
+
+/**
+ * One contiguous run of product epochs that carry a channel.
+ */
+typedef struct SidereonSp3CoverageSpan {
+    /**
+     * Index of the first epoch of the span.
+     */
+    size_t first_index;
+    /**
+     * Index of the last epoch of the span.
+     */
+    size_t last_index;
+    /**
+     * The first epoch, exact.
+     */
+    struct SidereonClockEpoch first_epoch;
+    /**
+     * first_epoch as seconds since J2000; NaN when unreadable.
+     */
+    double first_epoch_j2000_seconds;
+    /**
+     * The last epoch, exact.
+     */
+    struct SidereonClockEpoch last_epoch;
+    /**
+     * last_epoch as seconds since J2000; NaN when unreadable.
+     */
+    double last_epoch_j2000_seconds;
+} SidereonSp3CoverageSpan;
+
+/**
  * Prediction status aggregated over every satellite record at one SP3 epoch.
  */
 typedef struct SidereonSp3EpochPrediction {
@@ -17380,6 +24999,62 @@ typedef struct SidereonGeometryVisible {
      */
     double azimuth_deg;
 } SidereonGeometryVisible;
+
+/**
+ * Structured summary of the latest SP3 validation failure on this thread.
+ * Exact i128 tick values and string-safe offending values are in the JSON
+ * returned by `sidereon_sp3_last_error_payload`.
+ */
+typedef struct SidereonSp3ErrorInfo {
+    /**
+     * Stable error category.
+     */
+    enum SidereonSp3ErrorKind kind;
+    /**
+     * Stable field discriminator.
+     */
+    enum SidereonSp3ErrorField field;
+    /**
+     * Stable rejection reason.
+     */
+    enum SidereonSp3ErrorReason reason;
+    /**
+     * Whether value carries the rejected floating-point input.
+     */
+    bool has_value;
+    /**
+     * Rejected value; may be NaN or infinite when present.
+     */
+    double value;
+    /**
+     * Whether the payload carries requested_tick.
+     */
+    bool has_requested_tick;
+    /**
+     * Whether the payload carries a decimal declared_tick string.
+     */
+    bool has_declared_tick;
+    /**
+     * Whether the payload carries requested_j2000_s.
+     */
+    bool has_requested_j2000_s;
+    /**
+     * Whether the payload carries declared_j2000_s.
+     */
+    bool has_declared_j2000_s;
+    /**
+     * Exact f64 diagnostic value for requested_j2000_s.
+     */
+    double requested_j2000_s;
+    /**
+     * Exact f64 diagnostic value for declared_j2000_s.
+     */
+    double declared_j2000_s;
+    /**
+     * UTF-8 payload length in bytes, excluding a terminator.
+     */
+    size_t payload_len;
+} SidereonSp3ErrorInfo;
 
 /**
  * One caller-asserted set of SP3 coordinate labels.
@@ -17469,6 +25144,25 @@ typedef struct SidereonSp3MergeOptions {
      * Exactly 0 or 1.
      */
     uint8_t helmert_frame_reconciliation;
+    /**
+     * Per-epoch provenance to record, a SidereonSp3ProvenanceMode value. Off
+     * (the default) records none. Recording never changes the merged product.
+     */
+    uint32_t provenance_mode;
+    /**
+     * Whether to verify the merged product's continuity as a post-condition
+     * under verify_continuity. Exactly 0 or 1; 0 (the default) runs no check.
+     * Verification never changes the product or fails the merge; its findings
+     * are read with sidereon_sp3_merge_report_continuity_json and the window
+     * verdicts.
+     */
+    uint8_t verify_continuity_enabled;
+    /**
+     * Continuity checks for the post-condition, read when
+     * verify_continuity_enabled is 1. sidereon_sp3_merge_options_init fills
+     * the MEO GNSS settings (sidereon_sp3_continuity_options_for_orbit_class).
+     */
+    struct SidereonSp3ContinuityOptions verify_continuity;
 } SidereonSp3MergeOptions;
 
 /**
@@ -17520,14 +25214,82 @@ typedef struct SidereonSp3ArtifactIdentity {
 } SidereonSp3ArtifactIdentity;
 
 /**
+ * Agreement statistics for one accepted cell: how tightly the consensus
+ * members cluster about the value written. Absent statistics are NaN with a
+ * false present flag, never 0.
+ */
+typedef struct SidereonSp3AgreementMetric {
+    /**
+     * The epoch, exact.
+     */
+    struct SidereonClockEpoch epoch;
+    /**
+     * The epoch as seconds since J2000; NaN when the exact epoch has no such
+     * reading.
+     */
+    double epoch_j2000_seconds;
+    /**
+     * Satellite token.
+     */
+    struct SidereonSatelliteToken sat_id;
+    /**
+     * Sources in the accepted position consensus (0 when the cell carries no
+     * position).
+     */
+    size_t position_members;
+    /**
+     * Whether position_rms_m is present (the cell carries a position).
+     */
+    bool has_position_rms_m;
+    /**
+     * RMS 3D distance of the position members from the written position,
+     * meters; zero for a single-source cell.
+     */
+    double position_rms_m;
+    /**
+     * Whether position_max_m is present.
+     */
+    bool has_position_max_m;
+    /**
+     * Largest 3D distance of a position member from the written position,
+     * meters.
+     */
+    double position_max_m;
+    /**
+     * Sources in the accepted clock consensus (0 when the cell carries no
+     * clock).
+     */
+    size_t clock_members;
+    /**
+     * Whether clock_rms_s is present (the cell carries a clock).
+     */
+    bool has_clock_rms_s;
+    /**
+     * RMS deviation of the clock members from the written clock, seconds.
+     */
+    double clock_rms_s;
+    /**
+     * Whether clock_max_s is present.
+     */
+    bool has_clock_max_s;
+    /**
+     * Largest absolute clock deviation from the written clock, seconds.
+     */
+    double clock_max_s;
+} SidereonSp3AgreementMetric;
+
+/**
  * Whole-product rollup of the merge agreement metric: the pooled position/clock
  * dispersion of the consensus members about the combined values. Each scalar
  * mirrors a sidereon_core::ephemeris::MergeReport agreement method and carries a
  * present flag, but the present condition differs by field (see each below): the
  * pooled RMS fields are present only when some accepted cell had a multi-source
- * consensus on that channel, whereas the max fields are present whenever there
- * was any accepted cell (a single-source cell has zero dispersion, not an absent
- * max). Written by sidereon_sp3_merge_report_agreement_summary.
+ * consensus on that channel, whereas the max fields are present whenever some
+ * accepted cell carried that channel (a single-source cell has zero dispersion,
+ * not an absent max). An accepted cell that carries only a clock has no
+ * position, so a product whose accepted cells are all clock-only reports both
+ * position fields absent. An absent scalar is NaN, never 0. Written by
+ * sidereon_sp3_merge_report_agreement_summary.
  */
 typedef struct SidereonSp3AgreementSummary {
     /**
@@ -17537,17 +25299,17 @@ typedef struct SidereonSp3AgreementSummary {
     bool position_rms_present;
     /**
      * Member-count-weighted pooled RMS of the per-cell position dispersion over
-     * the whole product, meters. Valid only when position_rms_present is true.
+     * the whole product, meters. NaN when position_rms_present is false.
      */
     double position_rms_m;
     /**
-     * True when position_max_m carries a value (there was at least one accepted
-     * cell).
+     * True when position_max_m carries a value (at least one accepted cell
+     * carried a position).
      */
     bool position_max_present;
     /**
      * Largest single-cell position dispersion over the whole product, meters.
-     * Valid only when position_max_present is true.
+     * NaN when position_max_present is false.
      */
     double position_max_m;
     /**
@@ -17557,7 +25319,7 @@ typedef struct SidereonSp3AgreementSummary {
     bool clock_rms_present;
     /**
      * Member-count-weighted pooled RMS of the per-cell clock dispersion over the
-     * whole product, seconds. Valid only when clock_rms_present is true.
+     * whole product, seconds. NaN when clock_rms_present is false.
      */
     double clock_rms_s;
     /**
@@ -17566,11 +25328,91 @@ typedef struct SidereonSp3AgreementSummary {
      */
     bool clock_max_present;
     /**
-     * Largest single-cell clock dispersion over the whole product, seconds. Valid
-     * only when clock_max_present is true.
+     * Largest single-cell clock dispersion over the whole product, seconds. NaN
+     * when clock_max_present is false.
      */
     double clock_max_s;
+    /**
+     * True when single_source_fraction carries a value (some cell was
+     * accepted).
+     */
+    bool single_source_fraction_present;
+    /**
+     * Fraction of accepted cells carried from a single source, in 0..=1: the
+     * share of the product no second source cross-checked, which the
+     * dispersion fields do not cover. NaN when
+     * single_source_fraction_present is false.
+     */
+    double single_source_fraction;
 } SidereonSp3AgreementSummary;
+
+/**
+ * One source's clock for a cell that the merge did not write.
+ */
+typedef struct SidereonSp3ClockOmission {
+    /**
+     * The epoch, exact.
+     */
+    struct SidereonClockEpoch epoch;
+    /**
+     * The epoch as seconds since J2000; NaN when the exact epoch has no such
+     * reading.
+     */
+    double epoch_j2000_seconds;
+    /**
+     * Satellite token.
+     */
+    struct SidereonSatelliteToken sat_id;
+    /**
+     * Index into the merge's input list of the source whose clock was not
+     * written.
+     */
+    size_t source;
+    /**
+     * Why it was not written.
+     */
+    enum SidereonSp3ClockOmissionReason reason;
+    /**
+     * Whether preferred carries the preferred source of a
+     * PreferredSourceWithoutClock omission.
+     */
+    bool has_preferred;
+    /**
+     * The preferred source.
+     */
+    size_t preferred;
+    /**
+     * Whether the merged cell carries a clock from other sources.
+     */
+    bool cell_has_clock;
+} SidereonSp3ClockOmission;
+
+/**
+ * An input epoch that took no part in a merge.
+ */
+typedef struct SidereonSp3DroppedInputEpoch {
+    /**
+     * Index into the merge's input list.
+     */
+    size_t source;
+    /**
+     * Index into that source's epochs.
+     */
+    size_t epoch_index;
+    /**
+     * The epoch, exact.
+     */
+    struct SidereonClockEpoch epoch;
+    /**
+     * The epoch as seconds since J2000; NaN when the exact epoch has no such
+     * reading.
+     */
+    double epoch_j2000_seconds;
+    /**
+     * Why it took no part.
+     */
+    enum SidereonSp3DroppedEpochReason reason;
+} SidereonSp3DroppedInputEpoch;
 
 /**
  * Per-epoch aggregate of the merge agreement metric: how tightly the consensus
@@ -17578,29 +25420,49 @@ typedef struct SidereonSp3AgreementSummary {
  * pooled over the multi-source satellites at one output epoch. Mirrors
  * sidereon_core::ephemeris::EpochAgreement. Copied with
  * sidereon_sp3_merge_report_epoch_agreement; the entries are in output-epoch
- * order (count from sidereon_sp3_merge_report_epoch_agreement_count). The core
- * groups by integer (whole-second) epoch, so output epochs that fall in the same
- * integer second are pooled into one entry; for real SP3 products (epochs are
- * whole seconds apart) this is one entry per output epoch.
+ * order (count from sidereon_sp3_merge_report_epoch_agreement_count), one per
+ * output epoch: the engine groups the cells of one epoch by its exact instant.
+ *
+ * Every spread carries a present flag. An absent spread is NaN, never 0: a
+ * zero spread is a measured agreement of two or more sources, and an epoch
+ * whose cells were all single-source, or whose accepted cells carry only a
+ * clock and no orbit, has no position spread at all.
  */
 typedef struct SidereonSp3EpochAgreement {
     /**
-     * Output epoch as seconds since J2000 in the product time scale.
+     * Output epoch as seconds since J2000 in the product time scale; NaN when
+     * the exact epoch has no such reading.
      */
     double epoch_j2000_seconds;
     /**
+     * Output epoch, exact.
+     */
+    struct SidereonClockEpoch epoch;
+    /**
      * Satellites at this epoch with a multi-source position consensus. Zero when
-     * every cell at the epoch was single-source (the spread fields are then 0 and
-     * the clock present-flags false).
+     * no cell at the epoch had two or more position consensus members; the
+     * position present flags are then false.
      */
     size_t satellites;
     /**
+     * True when position_rms_m carries a value: some cell at this epoch had
+     * two or more position consensus members.
+     */
+    bool position_rms_present;
+    /**
      * Member-count-weighted pooled RMS of the per-cell position dispersion over
-     * the multi-source satellites at this epoch, meters.
+     * the multi-source satellites at this epoch, meters. NaN when
+     * position_rms_present is false.
      */
     double position_rms_m;
     /**
-     * Worst per-cell position dispersion at this epoch, meters.
+     * True when position_max_m carries a value, under the same condition as
+     * position_rms_present.
+     */
+    bool position_max_present;
+    /**
+     * Worst per-cell position dispersion over the multi-source satellites at
+     * this epoch, meters. NaN when position_max_present is false.
      */
     double position_max_m;
     /**
@@ -17609,8 +25471,8 @@ typedef struct SidereonSp3EpochAgreement {
      */
     bool clock_rms_present;
     /**
-     * Pooled RMS of the per-cell clock dispersion at this epoch, seconds. Valid
-     * only when clock_rms_present is true.
+     * Pooled RMS of the per-cell clock dispersion at this epoch, seconds. NaN
+     * when clock_rms_present is false.
      */
     double clock_rms_s;
     /**
@@ -17618,8 +25480,8 @@ typedef struct SidereonSp3EpochAgreement {
      */
     bool clock_max_present;
     /**
-     * Worst per-cell clock dispersion at this epoch, seconds. Valid only when
-     * clock_max_present is true.
+     * Worst per-cell clock dispersion at this epoch, seconds. NaN when
+     * clock_max_present is false.
      */
     double clock_max_s;
 } SidereonSp3EpochAgreement;
@@ -17630,9 +25492,14 @@ typedef struct SidereonSp3EpochAgreement {
  */
 typedef struct SidereonSp3MergeFlag {
     /**
-     * Flagged epoch as seconds since J2000 in the product time scale.
+     * Flagged epoch as seconds since J2000 in the product time scale; NaN
+     * when the exact epoch has no such reading.
      */
     double epoch_j2000_seconds;
+    /**
+     * Flagged epoch, exact.
+     */
+    struct SidereonClockEpoch epoch;
     /**
      * Satellite token.
      */
@@ -17766,6 +25633,205 @@ typedef struct SidereonSp3FrameReconciliation {
 } SidereonSp3FrameReconciliation;
 
 /**
+ * A union-grid epoch at which the merge accepted no cell, so the merged
+ * product does not carry it.
+ */
+typedef struct SidereonSp3MergeEpoch {
+    /**
+     * The epoch, exact.
+     */
+    struct SidereonClockEpoch epoch;
+    /**
+     * The epoch as seconds since J2000; NaN when the exact epoch has no such
+     * reading.
+     */
+    double epoch_j2000_seconds;
+} SidereonSp3MergeEpoch;
+
+/**
+ * Whether a merge recorded provenance, in which mode, and the length of each
+ * of its lists.
+ */
+typedef struct SidereonSp3MergeProvenanceInfo {
+    /**
+     * Whether provenance was requested and recorded. False is "not
+     * requested", never "one contributor supplied everything".
+     */
+    bool recorded;
+    /**
+     * The mode it was recorded in; Off when not recorded.
+     */
+    enum SidereonSp3ProvenanceMode mode;
+    /**
+     * Per-cell entries (zero under Summary).
+     */
+    size_t cell_count;
+    /**
+     * Selection transitions.
+     */
+    size_t transition_count;
+    /**
+     * Per-contributor coverage entries, one per input source.
+     */
+    size_t coverage_count;
+} SidereonSp3MergeProvenanceInfo;
+
+/**
+ * One cell channel's selection. The members (every source in the accepted
+ * consensus, ascending) are copied by
+ * sidereon_sp3_merge_report_provenance_cell_members.
+ */
+typedef struct SidereonSp3CellSelection {
+    /**
+     * How the value was arrived at.
+     */
+    enum SidereonSp3CellSelectionKind kind;
+    /**
+     * Whether source names the single source whose value was written
+     * (SingleSource and Precedence).
+     */
+    bool has_source;
+    /**
+     * Index into the merge's input list of the source written.
+     */
+    size_t source;
+    /**
+     * Whether rule carries the combining rule (Combined).
+     */
+    bool has_rule;
+    /**
+     * The rule that produced a Combined value.
+     */
+    enum SidereonSp3MergeCombine rule;
+    /**
+     * Number of consensus members.
+     */
+    size_t member_count;
+} SidereonSp3CellSelection;
+
+/**
+ * Provenance of one accepted cell, recorded as the merge decided it.
+ */
+typedef struct SidereonSp3CellProvenance {
+    /**
+     * The epoch, exact.
+     */
+    struct SidereonClockEpoch epoch;
+    /**
+     * The epoch as seconds since J2000; NaN when the exact epoch has no such
+     * reading.
+     */
+    double epoch_j2000_seconds;
+    /**
+     * Satellite token.
+     */
+    struct SidereonSatelliteToken sat_id;
+    /**
+     * Whether the cell carries a position, so position is meaningful.
+     */
+    bool has_position;
+    /**
+     * How the written position was arrived at.
+     */
+    struct SidereonSp3CellSelection position;
+    /**
+     * Whether the cell carries a clock, so clock is meaningful.
+     */
+    bool has_clock;
+    /**
+     * How the written clock was arrived at.
+     */
+    struct SidereonSp3CellSelection clock;
+} SidereonSp3CellProvenance;
+
+/**
+ * What one contributor supplied to the merged product.
+ */
+typedef struct SidereonSp3ContributorCoverage {
+    /**
+     * Index into the merge's input list.
+     */
+    size_t source;
+    /**
+     * Accepted cells where this source was in the position or clock consensus.
+     */
+    size_t cells_contributed;
+    /**
+     * Accepted cells whose written position came from this source alone.
+     */
+    size_t cells_selected;
+    /**
+     * Whether first_epoch is present.
+     */
+    bool has_first_epoch;
+    /**
+     * First accepted cell this source contributed to, exact.
+     */
+    struct SidereonClockEpoch first_epoch;
+    /**
+     * first_epoch as seconds since J2000; NaN when absent or unreadable.
+     */
+    double first_epoch_j2000_seconds;
+    /**
+     * Whether last_epoch is present.
+     */
+    bool has_last_epoch;
+    /**
+     * Last accepted cell this source contributed to, exact.
+     */
+    struct SidereonClockEpoch last_epoch;
+    /**
+     * last_epoch as seconds since J2000; NaN when absent or unreadable.
+     */
+    double last_epoch_j2000_seconds;
+    /**
+     * Accepted cells this source contributed nothing to.
+     */
+    size_t cells_absent;
+} SidereonSp3ContributorCoverage;
+
+/**
+ * One change in which source supplied a satellite's position.
+ */
+typedef struct SidereonSp3PrecedenceTransition {
+    /**
+     * Satellite token.
+     */
+    struct SidereonSatelliteToken sat_id;
+    /**
+     * The epoch at which the new source took over, exact.
+     */
+    struct SidereonClockEpoch epoch;
+    /**
+     * The epoch as seconds since J2000; NaN when the exact epoch has no such
+     * reading.
+     */
+    double epoch_j2000_seconds;
+    /**
+     * Whether from_source names the previous supplier; false at a
+     * satellite's first accepted cell.
+     */
+    bool has_from_source;
+    /**
+     * Source supplying the previous accepted cell.
+     */
+    size_t from_source;
+    /**
+     * Whether to_source names the new supplier; false when the new cell is
+     * combined and so has no single supplier.
+     */
+    bool has_to_source;
+    /**
+     * Source supplying this cell.
+     */
+    size_t to_source;
+    /**
+     * Why selection changed.
+     */
+    enum SidereonSp3TransitionReason reason;
+} SidereonSp3PrecedenceTransition;
+
+/**
  * Product-wide SP3 observed/predicted boundary metadata.
  */
 typedef struct SidereonSp3PredictionSummary {
@@ -17782,6 +25848,278 @@ typedef struct SidereonSp3PredictionSummary {
      */
     double observed_through_j2000_seconds;
 } SidereonSp3PredictionSummary;
+
+typedef struct SidereonSp3PositionClockAccuracy {
+    struct SidereonSp3AccuracyValue position_sigma_m[3];
+    struct SidereonSp3AccuracyValue clock_sigma_m;
+    struct SidereonSp3AccuracyValue position_variance_m2[3];
+    struct SidereonSp3AccuracyValue clock_variance_m2;
+} SidereonSp3PositionClockAccuracy;
+
+typedef struct SidereonSp3VelocityAccuracy {
+    struct SidereonSp3AccuracyValue velocity_sigma_m_s[3];
+    struct SidereonSp3AccuracyValue clock_rate_sigma_m_s;
+    struct SidereonSp3AccuracyValue velocity_variance_m2_s2[3];
+    struct SidereonSp3AccuracyValue clock_rate_variance_m2_s2;
+} SidereonSp3VelocityAccuracy;
+
+typedef struct SidereonSp3RecordAccuracy {
+    bool has_p;
+    struct SidereonSp3PositionClockAccuracy p;
+    bool has_v;
+    struct SidereonSp3VelocityAccuracy v;
+} SidereonSp3RecordAccuracy;
+
+typedef struct SidereonSp3AccuracyCodeGroup {
+    bool has_axis_exponents[3];
+    int16_t axis_exponents[3];
+    bool has_clock_exponent;
+    int16_t clock_exponent;
+    bool has_position_velocity_base;
+    double position_velocity_base;
+    bool has_clock_rate_base;
+    double clock_rate_base;
+} SidereonSp3AccuracyCodeGroup;
+
+typedef struct SidereonSp3RawRecordAccuracy {
+    bool has_p;
+    struct SidereonSp3AccuracyCodeGroup p;
+    bool has_v;
+    struct SidereonSp3AccuracyCodeGroup v;
+} SidereonSp3RawRecordAccuracy;
+
+/**
+ * Typed detail of a refused SP3 write.
+ *
+ * Only the fields the kind names carry meaning, and each carries a present
+ * flag. An absent number is NaN and an absent count or index is 0. The two
+ * text parts -- the field name and the text value the product holds -- are
+ * read from the owned SidereonSp3WriteResult with
+ * sidereon_sp3_write_result_get_field and
+ * sidereon_sp3_write_result_get_text_value; has_field and has_text_value say
+ * whether the refusal carries them, since a text value can itself be empty.
+ */
+typedef struct SidereonSp3WriteError {
+    /**
+     * Which refusal the writer reported.
+     */
+    enum SidereonSp3WriteErrorKind kind;
+    /**
+     * Whether the refusal names a header or record field.
+     */
+    bool has_field;
+    /**
+     * Whether the refusal carries the text the product holds.
+     */
+    bool has_text_value;
+    /**
+     * Whether sat_id names the satellite the refusal concerns.
+     */
+    bool has_sat_id;
+    /**
+     * The satellite the refusal concerns.
+     */
+    struct SidereonSatelliteToken sat_id;
+    /**
+     * Whether epoch_index names an epoch.
+     */
+    bool has_epoch_index;
+    /**
+     * Zero-based index of the epoch the refusal concerns.
+     */
+    size_t epoch_index;
+    /**
+     * Whether comment_index names a comment.
+     */
+    bool has_comment_index;
+    /**
+     * Zero-based index of the refused comment.
+     */
+    size_t comment_index;
+    /**
+     * Whether columns carries the width of the refused field.
+     */
+    bool has_columns;
+    /**
+     * Columns the refused field occupies.
+     */
+    size_t columns;
+    /**
+     * Whether decimals carries the decimal places of the refused field.
+     */
+    bool has_decimals;
+    /**
+     * Decimal places the refused field carries.
+     */
+    size_t decimals;
+    /**
+     * Whether integer_value carries the refused integer.
+     */
+    bool has_integer_value;
+    /**
+     * The integer an IntegerTooWide refusal names, as the product holds it.
+     */
+    uint64_t integer_value;
+    /**
+     * Whether number carries the refused header number.
+     */
+    bool has_number;
+    /**
+     * The header number a NumberTooWide or PrecisionNotRepresentable refusal
+     * names, as the product holds it.
+     */
+    double number;
+    /**
+     * Whether year carries the refused calendar year.
+     */
+    bool has_year;
+    /**
+     * The calendar year the epoch converts to.
+     */
+    int64_t year;
+    /**
+     * Whether field_seconds carries the seconds the epoch record would state.
+     */
+    bool has_field_seconds;
+    /**
+     * Seconds of minute the epoch record would state.
+     */
+    double field_seconds;
+    /**
+     * Whether residual_s carries a measured residual. False when the engine
+     * could read no candidate record back, which leaves no instant to measure
+     * against.
+     */
+    bool has_residual_s;
+    /**
+     * Stored epoch minus the instant the record would state, seconds.
+     */
+    double residual_s;
+    /**
+     * Whether epoch_time_scale carries the epoch's scale.
+     */
+    bool has_epoch_time_scale;
+    /**
+     * The scale the epoch is tagged with, as SidereonTimeScale.
+     */
+    uint32_t epoch_time_scale;
+    /**
+     * Whether header_time_scale carries the header's scale.
+     */
+    bool has_header_time_scale;
+    /**
+     * The core time scale the header states, as SidereonTimeScale.
+     */
+    uint32_t header_time_scale;
+    /**
+     * Whether time_system carries the header's SP3 time-system label.
+     */
+    bool has_time_system;
+    /**
+     * The SP3 time-system label the header states, such as "GPS",
+     * null-terminated.
+     */
+    char time_system[SIDEREON_SP3_TIME_SYSTEM_C_BYTES];
+    /**
+     * Whether declared_epochs carries the header epoch count.
+     */
+    bool has_declared_epochs;
+    /**
+     * The epoch count header line 1 states.
+     */
+    uint64_t declared_epochs;
+    /**
+     * Whether epochs carries the epoch count the product holds.
+     */
+    bool has_epochs;
+    /**
+     * Epochs the product holds.
+     */
+    size_t epochs;
+    /**
+     * Whether entries carries the length of the refused per-epoch array.
+     */
+    bool has_entries;
+    /**
+     * Entries the refused per-epoch array holds.
+     */
+    size_t entries;
+    /**
+     * Whether satellites carries the header satellite count.
+     */
+    bool has_satellites;
+    /**
+     * Satellites the header declares.
+     */
+    size_t satellites;
+    /**
+     * Whether codes carries the accuracy-code count.
+     */
+    bool has_codes;
+    /**
+     * Accuracy codes held against the header satellites.
+     */
+    size_t codes;
+    /**
+     * Whether stored carries the record value in the product's own units.
+     */
+    bool has_stored;
+    /**
+     * The record value as the product holds it, in meters, seconds, meters
+     * per second or seconds per second.
+     */
+    double stored;
+    /**
+     * Whether native carries the retained native-unit record value.
+     */
+    bool has_native;
+    /**
+     * The retained native-unit record value.
+     */
+    double native;
+    /**
+     * Whether column_value carries the number the column would state.
+     */
+    bool has_column_value;
+    /**
+     * The number the record column would carry, in the format's own units.
+     */
+    double column_value;
+    bool has_exponent;
+    int16_t exponent;
+} SidereonSp3WriteError;
+
+/**
+ * The complete outcome of one SP3 write: the fixed-width part of an owned
+ * SidereonSp3WriteResult.
+ */
+typedef struct SidereonSp3WriteOutcome {
+    /**
+     * Whether the product was written.
+     */
+    bool is_ok;
+    /**
+     * SIDEREON_STATUS_OK when written, otherwise
+     * SIDEREON_STATUS_INVALID_ARGUMENT, which every refusal maps to.
+     */
+    enum SidereonStatus status;
+    /**
+     * The typed refusal; kind is None when is_ok is true.
+     */
+    struct SidereonSp3WriteError error;
+} SidereonSp3WriteOutcome;
+
+typedef struct SidereonSpaceWeatherPolicy {
+    bool allow_interpolated;
+    /**
+     * Permit rows whose flux qualifier states that the day had no
+     * observation. Refused by default.
+     */
+    bool allow_not_observed;
+    bool allow_daily_predicted;
+    bool allow_monthly_predicted;
+    bool require_geomagnetic;
+} SidereonSpaceWeatherPolicy;
 
 typedef struct SidereonSpaceWeatherCoverage {
     double first_j2000_s;
@@ -17837,13 +26175,6 @@ typedef struct SidereonSpaceWeatherSample {
     bool ap_defaulted;
 } SidereonSpaceWeatherSample;
 
-typedef struct SidereonSpaceWeatherPolicy {
-    bool allow_interpolated;
-    bool allow_daily_predicted;
-    bool allow_monthly_predicted;
-    bool require_geomagnetic;
-} SidereonSpaceWeatherPolicy;
-
 typedef struct SidereonSpaceWeatherTableSummary {
     size_t day_count;
     size_t monthly_count;
@@ -17853,8 +26184,8 @@ typedef struct SidereonSpaceWeatherTableSummary {
 
 /**
  * State of an SPK target body relative to a center body at a queried epoch,
- * as produced by sidereon_spk_state. All vectors are in the kernel's own
- * reference frame (identified by `frame`).
+ * as produced by sidereon_spk_state or sidereon_spk_state_in_frame. Both
+ * vectors are in the NAIF frame `frame`.
  */
 typedef struct SidereonSpkState {
     /**
@@ -17870,19 +26201,17 @@ typedef struct SidereonSpkState {
      */
     double position_km[3];
     /**
-     * Whether velocity_km_s is present. Type-3 and type-21 segments provide
-     * velocity; a path that traverses any position-only type-2 segment does
-     * not, in which case this is false and velocity_km_s is all zero.
-     */
-    bool has_velocity_km_s;
-    /**
-     * Velocity of the target relative to the center, in kilometers per second,
-     * when has_velocity_km_s is true.
+     * Velocity of the target relative to the center, in kilometers per
+     * second. Every supported segment type yields it: type 2 as the
+     * derivative of its Chebyshev expansion over the record radius, as CSPICE
+     * `SPKE02` forms it.
      */
     double velocity_km_s[3];
     /**
-     * NAIF reference-frame identifier shared by all segments in the resolved
-     * path (0 for the trivial target == center query).
+     * NAIF reference-frame identifier the state is expressed in: the frame
+     * requested from sidereon_spk_state_in_frame, or for sidereon_spk_state
+     * the frame of the first segment evaluated (0 for the trivial
+     * target == center query).
      */
     int32_t frame;
 } SidereonSpkState;
@@ -17892,15 +26221,18 @@ typedef struct SidereonSpkState {
  */
 typedef struct SidereonSppMetadata {
     /**
-     * Number of accepted solver iterations.
+     * The trust-region iterations of every solve plus one per least-squares
+     * step.
      */
     size_t iterations;
     /**
-     * Whether a convergence criterion was reached.
+     * Whether the whole solve converged. A robust solve that spent its outer
+     * budget reports false with OUTER_BUDGET_EXHAUSTED, and one that cycled
+     * false with OUTER_OSCILLATION.
      */
     bool converged;
     /**
-     * Solver termination status.
+     * How the whole solve ended; a settled solve reports SELECTION_SETTLED.
      */
     enum SidereonSppSolveStatus status;
     /**
@@ -17943,6 +26275,12 @@ typedef struct SidereonSppMetadata {
      * Geometry observability and covariance-validation diagnostics.
      */
     struct SidereonGeometryQuality geometry_quality;
+    /**
+     * UT1 departure a permissive UT1 policy of the ephemeris source accepted
+     * while forming the solve; SIDEREON_UT1_DEGRADATION_NONE when UT1 came
+     * from the table or was not read.
+     */
+    enum SidereonUt1Degradation ut1_degraded;
 } SidereonSppMetadata;
 
 /**
@@ -17958,6 +26296,33 @@ typedef struct SidereonSppRejectedSat {
      */
     enum SidereonSppRejectionReason reason;
 } SidereonSppRejectedSat;
+
+/**
+ * Rejected satellite with the exact SSR size payload when the rejection was
+ * caused by the strict correction-size policy.
+ */
+typedef struct SidereonSppRejectedSatV2 {
+    /**
+     * Satellite token.
+     */
+    struct SidereonSatelliteToken sat_id;
+    /**
+     * First rejection reason.
+     */
+    enum SidereonSppRejectionReason reason;
+    /**
+     * Whether the reason carries SSR correction magnitudes.
+     */
+    bool has_size;
+    /**
+     * Refused orbit correction magnitude in metres; zero when absent.
+     */
+    double orbit_m;
+    /**
+     * Refused clock correction in metres, preserving its sign; zero when absent.
+     */
+    double clock_m;
+} SidereonSppRejectedSatV2;
 
 /**
  * Receiver clock for one GNSS system.
@@ -17989,10 +26354,46 @@ typedef struct SidereonSppSystemTdop {
     double tdop;
 } SidereonSppSystemTdop;
 
+typedef struct SidereonSsrCorrectionSize {
+    double orbit_m;
+    double clock_m;
+} SidereonSsrCorrectionSize;
+
+typedef struct SidereonSsrCorrectedStateResult {
+    bool has_state;
+    double position_ecef_m[3];
+    double clock_s;
+    bool has_group_delay;
+    double group_delay_s;
+    bool degraded;
+    bool has_size_event;
+    bool strict_refusal;
+    struct SidereonSsrCorrectionSize size;
+    bool has_oversized_report;
+    uint32_t source;
+    uint16_t provider_id;
+    uint8_t solution_id;
+    double orbit_ref_epoch_j2000_s;
+    double clock_ref_epoch_j2000_s;
+    double first_applied_epoch_j2000_s;
+} SidereonSsrCorrectedStateResult;
+
 typedef struct SidereonSsrClockCorrection {
     uint32_t source;
     uint16_t provider_id;
     uint8_t solution_id;
+    /**
+     * Whether the correction came from Galileo HAS and so carries the
+     * navigation-message index its mask states. False for an RTCM SSR
+     * correction.
+     */
+    bool has_nav_message;
+    /**
+     * The HAS navigation-message index NM as transmitted (0 is GPS LNAV or
+     * Galileo I/NAV; 1..=7 are reserved, and such a correction is stored but
+     * not applied). Zero when has_nav_message is false.
+     */
+    uint8_t has_nav_message_index;
     uint8_t iod_ssr;
     double c0_m;
     double c1_m_s;
@@ -18005,10 +26406,42 @@ typedef struct SidereonSsrClockCorrection {
     double high_rate_update_interval_s;
 } SidereonSsrClockCorrection;
 
+typedef struct SidereonSsrVtecQueryResult {
+    enum SidereonSsrVtecQueryKind kind;
+    double age_s;
+    double seconds_before_model;
+    double max_age_s;
+    size_t layer_count;
+    double stec_tecu;
+    double pseudorange_delay_m;
+    double phase_range_advance_m;
+} SidereonSsrVtecQueryResult;
+
+typedef struct SidereonSsrVtecLayerEvaluation {
+    double pierce_latitude_rad;
+    double pierce_longitude_rad;
+    double sun_fixed_longitude_rad;
+    double vtec_tecu;
+    double mapping_factor;
+    double stec_tecu;
+} SidereonSsrVtecLayerEvaluation;
+
 typedef struct SidereonSsrOrbitCorrection {
     uint32_t source;
     uint16_t provider_id;
     uint8_t solution_id;
+    /**
+     * Whether the correction came from Galileo HAS and so carries the
+     * navigation-message index its mask states. False for an RTCM SSR
+     * correction.
+     */
+    bool has_nav_message;
+    /**
+     * The HAS navigation-message index NM as transmitted (0 is GPS LNAV or
+     * Galileo I/NAV; 1..=7 are reserved, and such a correction is stored but
+     * not applied). Zero when has_nav_message is false.
+     */
+    uint8_t has_nav_message_index;
     uint32_t iode;
     uint8_t iod_ssr;
     bool crs_regional;
@@ -18088,15 +26521,18 @@ typedef struct SidereonStaticPositionEpochInfluence {
  */
 typedef struct SidereonStaticPositionMetadata {
     /**
-     * Number of accepted trust-region iterations in the final inner solve.
+     * The trust-region iterations of every solve plus one per least-squares
+     * step.
      */
     size_t iterations;
     /**
-     * Whether the final inner solve reached a convergence criterion.
+     * Whether the whole solve converged. A robust solve that spent its outer
+     * budget reports false with OUTER_BUDGET_EXHAUSTED, and one that cycled
+     * false with OUTER_OSCILLATION.
      */
     bool converged;
     /**
-     * Final inner solver termination status.
+     * How the whole solve ended; a settled solve reports SELECTION_SETTLED.
      */
     enum SidereonSppSolveStatus status;
     /**
@@ -18127,6 +26563,12 @@ typedef struct SidereonStaticPositionMetadata {
      * Geometry observability and covariance-validation diagnostics.
      */
     struct SidereonGeometryQuality geometry_quality;
+    /**
+     * UT1 departure a permissive UT1 policy of the ephemeris source accepted
+     * while forming the solve; SIDEREON_UT1_DEGRADATION_NONE when UT1 came
+     * from the table or was not read.
+     */
+    enum SidereonUt1Degradation ut1_degraded;
 } SidereonStaticPositionMetadata;
 
 /**
@@ -18393,6 +26835,58 @@ typedef struct SidereonStaticReferenceModeReport {
     bool has_error;
 } SidereonStaticReferenceModeReport;
 
+typedef struct SidereonStationTideEpoch {
+    int32_t year;
+    uint8_t month;
+    uint8_t day;
+    uint8_t hour;
+    uint8_t minute;
+    double second;
+    bool has_polar_motion;
+    double xp_arcsec;
+    double yp_arcsec;
+} SidereonStationTideEpoch;
+
+typedef struct SidereonStationTideOptions {
+    bool solid_earth_tide;
+    bool pole_tide;
+    bool has_ocean_loading;
+    struct SidereonOceanLoadingBlq ocean_loading;
+    uint32_t constants;
+    uint32_t validity_mode;
+} SidereonStationTideOptions;
+
+typedef struct SidereonStationTideDisplacement {
+    double ecef_m[3];
+    bool has_solid_earth_tide;
+    double solid_earth_tide_ecef_m[3];
+    bool has_pole_tide;
+    double pole_tide_ecef_m[3];
+    bool has_ocean_loading;
+    double ocean_loading_ecef_m[3];
+    enum SidereonStationTideDegradeReason degrade_reason;
+} SidereonStationTideDisplacement;
+
+typedef struct SidereonStationTideError {
+    enum SidereonStationTideErrorKind kind;
+    enum SidereonStationTideNestedErrorKind nested_kind;
+    /**
+     * Child variant when the root is `SunMoon`; distinguishes direct
+     * validation from a nested frame-transform failure.
+     */
+    enum SidereonStationTideSunMoonCause sun_moon_cause;
+    enum SidereonStationTideInputErrorKind input_kind;
+    enum SidereonStationTideDegradeReason degrade_reason;
+    bool has_field;
+    bool has_reason;
+} SidereonStationTideError;
+
+typedef struct SidereonStationTideBatchRow {
+    enum SidereonStatus status;
+    struct SidereonStationTideDisplacement displacement;
+    struct SidereonStationTideError error;
+} SidereonStationTideBatchRow;
+
 /**
  * A surface point as geocentric latitude/longitude (degrees), mirroring
  * sidereon_core::astro::observation::SurfacePoint.
@@ -18551,6 +27045,166 @@ typedef struct SidereonTdmSegmentSummary {
 } SidereonTdmSegmentSummary;
 
 /**
+ * Typed detail of a standalone TEC-grid failure.
+ *
+ * Only the fields the kind names carry meaning. The engine's full text is
+ * always in the thread-local message.
+ */
+typedef struct SidereonTecGridError {
+    /**
+     * Which failure the grid reported.
+     */
+    enum SidereonTecGridErrorKind kind;
+    /**
+     * Whether gap carries the non-available nodes the query weighted.
+     */
+    bool has_gap;
+    /**
+     * Indexed corner masks, when kind is NodesNotAvailable.
+     */
+    struct SidereonIonexNodeGap gap;
+    /**
+     * The axis the query left, when kind is OutOfBounds.
+     */
+    enum SidereonTecGridAxis axis;
+    /**
+     * Whether axis_value carries the query coordinate that left the axis.
+     */
+    bool has_axis_value;
+    /**
+     * The query coordinate the axis refused, in that axis's own unit, after
+     * any clamp the engine applied. On the latitude axis this is the effective
+     * coordinate, clamped to `[-87.5, 87.5]` degrees, so a query at 89 degrees
+     * that a narrower axis still refuses names 87.5, not 89. An infinite
+     * latitude is clamped the same way and names the bound it was outside,
+     * never an infinity.
+     */
+    double axis_value;
+    /**
+     * Values supplied, when kind is ValueCountMismatch.
+     */
+    size_t value_count;
+    /**
+     * Values the axes require, when kind is ValueCountMismatch.
+     */
+    size_t expected_value_count;
+    /**
+     * Whether value_index names an entry of the caller's value buffer.
+     */
+    bool has_value_index;
+    /**
+     * Index into the caller's flat value buffer, when kind is ValueNotFinite.
+     */
+    size_t value_index;
+} SidereonTecGridError;
+
+/**
+ * The complete outcome of one standalone TEC-grid construction or evaluation.
+ *
+ * This is the fixed-width part of an owned SidereonTecGridResult. The two
+ * parts of a failure that are text -- the engine's full message and the field
+ * label and reason of an InvalidField -- are read from the same result with
+ * sidereon_tec_grid_result_get_message, _get_field and _get_reason.
+ */
+typedef struct SidereonTecGridOutcome {
+    /**
+     * Whether the route succeeded. A false value means error names the failure.
+     */
+    bool is_ok;
+    /**
+     * SIDEREON_STATUS_OK on success, otherwise the status this failure maps
+     * to: a malformed grid or a rejected input is an argument failure, a query
+     * the grid cannot answer is a solve failure.
+     */
+    enum SidereonStatus status;
+    /**
+     * Whether vtec_tecu carries a value. False for a construction result,
+     * which builds a grid rather than evaluating one, and for any failure.
+     */
+    bool has_vtec;
+    /**
+     * Vertical TEC in TECU when has_vtec is true, otherwise NaN.
+     */
+    double vtec_tecu;
+    /**
+     * The non-available nodes a returned value was interpolated around, under
+     * the renormalizing policy. Empty on success with no gap, and empty on a
+     * failure: a strict refusal names its corners in error.gap instead,
+     * because no value was produced to degrade.
+     */
+    struct SidereonIonexNodeGap degraded;
+    /**
+     * The typed failure detail; kind is None when is_ok is true.
+     */
+    struct SidereonTecGridError error;
+} SidereonTecGridOutcome;
+
+/**
+ * Typed detail of a failed IONEX sample construction.
+ *
+ * Only the fields the kind names carry meaning.
+ */
+typedef struct SidereonTecSamplesError {
+    /**
+     * Which failure was reported.
+     */
+    enum SidereonTecSamplesErrorKind kind;
+    /**
+     * The caller input index refers to, when has_index is true.
+     */
+    enum SidereonTecSamplesInput input;
+    /**
+     * Whether index names an entry of a caller buffer.
+     */
+    bool has_index;
+    /**
+     * Index into the buffer input names.
+     */
+    size_t index;
+    /**
+     * Nodes the short axis has, when kind is TooFewNodes.
+     */
+    size_t node_count;
+    /**
+     * Values supplied, for a count mismatch this binding found.
+     */
+    size_t value_count;
+    /**
+     * Values the axes require, for a count mismatch this binding found.
+     */
+    size_t expected_value_count;
+    /**
+     * Whether axis_value carries the refused coordinate.
+     */
+    bool has_axis_value;
+    /**
+     * The refused axis coordinate or step in degrees, when kind is
+     * AxisOutOfRange.
+     */
+    double axis_value;
+} SidereonTecSamplesError;
+
+/**
+ * The complete outcome of one IONEX sample construction: the fixed-width part
+ * of an owned SidereonTecSamplesResult.
+ */
+typedef struct SidereonTecSamplesOutcome {
+    /**
+     * Whether a product was built.
+     */
+    bool is_ok;
+    /**
+     * SIDEREON_STATUS_OK on success, otherwise the status the failure maps
+     * to, which is SIDEREON_STATUS_INVALID_ARGUMENT for every kind.
+     */
+    enum SidereonStatus status;
+    /**
+     * The typed failure detail; kind is None when is_ok is true.
+     */
+    struct SidereonTecSamplesError error;
+} SidereonTecSamplesOutcome;
+
+/**
  * One TEME Cartesian state from SGP4.
  */
 typedef struct SidereonTemeState {
@@ -18565,7 +27219,7 @@ typedef struct SidereonTemeState {
 } SidereonTemeState;
 
 /**
- * Advisory checksum discrepancy from TLE parsing.
+ * A line whose column 69 did not confirm its checksum.
  */
 typedef struct SidereonTleChecksumWarning {
     /**
@@ -18573,14 +27227,35 @@ typedef struct SidereonTleChecksumWarning {
      */
     uint8_t line_number;
     /**
-     * Checksum digit found in column 69.
+     * What column 69 held.
      */
-    uint8_t expected;
+    enum SidereonTleChecksumWarningKind kind;
     /**
-     * Checksum recomputed from columns 1 through 68.
+     * The digit (MISMATCH) or byte (NOT_DIGIT) found in column 69; 0 for
+     * MISSING.
+     */
+    uint8_t found;
+    /**
+     * Checksum recomputed from columns 1 through 68 (or as many as the line
+     * has).
      */
     uint8_t computed;
 } SidereonTleChecksumWarning;
+
+/**
+ * One rejected stretch of a TLE file.
+ */
+typedef struct SidereonTleRejectedRecord {
+    /**
+     * One-based line number of the first rejected line: the name line when
+     * the record had one, otherwise its line 1 or line 2.
+     */
+    size_t line_number;
+    /**
+     * Why the lines were rejected.
+     */
+    enum SidereonTleRecordIssue issue;
+} SidereonTleRejectedRecord;
 
 /**
  * Parsed TLE element fields exposed as read-only metadata.
@@ -18643,15 +27318,27 @@ typedef struct SidereonTleMetadata {
      */
     double bstar;
     /**
-     * Ephemeris type from line 1.
+     * Whether line 1 states an ephemeris type (the field may be blank).
+     */
+    bool has_ephemeris_type;
+    /**
+     * Ephemeris type from line 1, zero when blank.
      */
     int32_t ephemeris_type;
     /**
-     * Element set number from line 1.
+     * Whether line 1 states an element set number.
+     */
+    bool has_elset_number;
+    /**
+     * Element set number from line 1, zero when blank.
      */
     int32_t elset_number;
     /**
-     * Revolution number at epoch.
+     * Whether line 2 states a revolution number.
+     */
+    bool has_rev_number;
+    /**
+     * Revolution number at epoch, zero when blank.
      */
     int32_t rev_number;
 } SidereonTleMetadata;
@@ -19011,6 +27698,49 @@ enum SidereonStatus sidereon_angular_separation_coords_deg(double a_lon_deg,
 enum SidereonStatus sidereon_angular_separation_deg(const double *a, const double *b, double *out);
 
 /**
+ * Copy the fixed-width fields of one `METH / BY / # / DATE` record.
+ *
+ * Safety: antenna is a live handle; out_calibration points to a
+ * SidereonAntexCalibration.
+ */
+enum SidereonStatus sidereon_antenna_calibration(const struct SidereonAntenna *antenna,
+                                                 size_t index,
+                                                 struct SidereonAntexCalibration *out_calibration);
+
+/**
+ * Copy one text of a `METH / BY / # / DATE` record, selected by a
+ * SidereonAntexCalibrationText value. Uses the variable-length output
+ * contract; the bytes are not null-terminated.
+ *
+ * Safety: antenna is a live handle; out points to len writable bytes or is
+ * NULL when len is 0; out_written and out_required point to size_t values.
+ */
+enum SidereonStatus sidereon_antenna_calibration_text(const struct SidereonAntenna *antenna,
+                                                      size_t index,
+                                                      uint32_t part,
+                                                      uint8_t *out,
+                                                      size_t len,
+                                                      size_t *out_written,
+                                                      size_t *out_required);
+
+/**
+ * Copy one comment of an antenna block, from the list a
+ * SidereonAntennaCommentList value selects, in file order, trailing blanks
+ * removed. Uses the variable-length output contract; the bytes are not
+ * null-terminated.
+ *
+ * Safety: antenna is a live handle; out points to len writable bytes or is
+ * NULL when len is 0; out_written and out_required point to size_t values.
+ */
+enum SidereonStatus sidereon_antenna_comment(const struct SidereonAntenna *antenna,
+                                             uint32_t list,
+                                             size_t index,
+                                             uint8_t *out,
+                                             size_t len,
+                                             size_t *out_written,
+                                             size_t *out_required);
+
+/**
  * Release an antenna handle from sidereon_antex_antenna. Passing NULL is a
  * no-op.
  *
@@ -19020,9 +27750,62 @@ enum SidereonStatus sidereon_angular_separation_deg(const double *a, const doubl
 void sidereon_antenna_free(struct SidereonAntenna *antenna);
 
 /**
+ * Copy the fixed-width fields of one frequency section, by index in file
+ * order.
+ *
+ * Safety: antenna is a live handle; out_info points to a
+ * SidereonAntexFrequencyInfo.
+ */
+enum SidereonStatus sidereon_antenna_frequency(const struct SidereonAntenna *antenna,
+                                               size_t index,
+                                               struct SidereonAntexFrequencyInfo *out_info);
+
+/**
+ * Copy the label of one frequency section, such as `G01`. Uses the
+ * variable-length output contract; the bytes are not null-terminated.
+ *
+ * Safety: antenna is a live handle; out points to len writable bytes or is
+ * NULL when len is 0; out_written and out_required point to size_t values.
+ */
+enum SidereonStatus sidereon_antenna_frequency_label(const struct SidereonAntenna *antenna,
+                                                     size_t index,
+                                                     uint8_t *out,
+                                                     size_t len,
+                                                     size_t *out_written,
+                                                     size_t *out_required);
+
+/**
+ * Copy the PCV samples of one frequency section, or of its RMS section when
+ * rms is true (none when the section has no RMS section), in row and token
+ * order. Uses the standard caller-buffer convention.
+ *
+ * Safety: antenna is a live handle; out points to len writable
+ * SidereonAntexPcvSample values or is NULL when len is 0; out_written and
+ * out_required point to size_t values.
+ */
+enum SidereonStatus sidereon_antenna_frequency_pcv_samples(const struct SidereonAntenna *antenna,
+                                                           size_t index,
+                                                           bool rms,
+                                                           struct SidereonAntexPcvSample *out,
+                                                           size_t len,
+                                                           size_t *out_written,
+                                                           size_t *out_required);
+
+/**
+ * Copy the fixed-width fields of an antenna block.
+ *
+ * Safety: antenna is a live handle; out_info points to a SidereonAntennaInfo.
+ */
+enum SidereonStatus sidereon_antenna_info(const struct SidereonAntenna *antenna,
+                                          struct SidereonAntennaInfo *out_info);
+
+/**
  * Write the frequency-dependent phase-center offset (north/east/up, meters) for
  * `frequency` into out_neu (three doubles). Reports SIDEREON_STATUS_INVALID_ARGUMENT
- * if the antenna has no such frequency.
+ * if the antenna has no section with that label, or has several with differing
+ * contents; sidereon_last_antex_error reports UnknownFrequency or
+ * AmbiguousFrequency with the section count. Sections that repeat a label with
+ * identical contents answer as one.
  *
  * Safety: antenna must be a live handle from sidereon_antex_antenna; frequency
  * must be a null-terminated C string; out_neu must point to three writable
@@ -19037,7 +27820,8 @@ enum SidereonStatus sidereon_antenna_pco(const struct SidereonAntenna *antenna,
  * to *out_value, with the engine's linear zenith/azimuth interpolation. When
  * has_azimuth is false the no-azimuth grid is used and azimuth_deg is ignored;
  * when true azimuth_deg selects the azimuth slice (the no-azimuth grid is still
- * used if the antenna has no azimuth-dependent samples).
+ * used if the antenna has no azimuth-dependent samples). A frequency lookup is
+ * refused as sidereon_antenna_pco describes.
  *
  * Safety: antenna must be a live handle from sidereon_antex_antenna; frequency
  * must be a null-terminated C string; out_value must point to a double.
@@ -19050,10 +27834,36 @@ enum SidereonStatus sidereon_antenna_pcv(const struct SidereonAntenna *antenna,
                                          double *out_value);
 
 /**
+ * Copy one antenna text, selected by a SidereonAntennaText value. Uses the
+ * variable-length output contract; the bytes are not null-terminated.
+ *
+ * Safety: antenna is a live handle; out points to len writable bytes or is
+ * NULL when len is 0; out_written and out_required point to size_t values.
+ */
+enum SidereonStatus sidereon_antenna_text(const struct SidereonAntenna *antenna,
+                                          uint32_t part,
+                                          uint8_t *out,
+                                          size_t len,
+                                          size_t *out_written,
+                                          size_t *out_required);
+
+/**
+ * Write whether an antenna block is valid at an epoch: at or after its
+ * `VALID FROM` and at or before its `VALID UNTIL`, each compared exactly, an
+ * absent bound leaving that side open.
+ *
+ * Safety: antenna is a live handle; epoch points to a SidereonAntexDateTime;
+ * out_valid points to a bool.
+ */
+enum SidereonStatus sidereon_antenna_valid_at(const struct SidereonAntenna *antenna,
+                                              const struct SidereonAntexDateTime *epoch,
+                                              bool *out_valid);
+
+/**
  * Look up an antenna by its exact `TYPE / SERIAL` id. On success writes a newly
- * owned antenna handle to *out_antenna, or NULL if no block has that id (a
- * successful query that found nothing, not an error). Release a non-NULL handle
- * with sidereon_antenna_free.
+ * owned handle for the latest block with that id to *out_antenna, or NULL if no
+ * block has that id (a successful query that found nothing, not an error).
+ * Release a non-NULL handle with sidereon_antenna_free.
  *
  * Safety: antex must be a live handle from sidereon_antex_parse; id must be a
  * null-terminated C string; out_antenna must point to storage for a
@@ -19064,7 +27874,22 @@ enum SidereonStatus sidereon_antex_antenna(const struct SidereonAntex *antex,
                                            struct SidereonAntenna **out_antenna);
 
 /**
- * Write the number of antenna blocks in the product to *out_count.
+ * Take a newly owned handle for the block of an antenna id valid at an epoch,
+ * or NULL with status OK when none is.
+ *
+ * Safety: antex is a live handle; id is a null-terminated UTF-8 string; epoch
+ * points to a SidereonAntexDateTime; out_antenna points to a
+ * SidereonAntenna*, set to NULL before any work.
+ */
+enum SidereonStatus sidereon_antex_antenna_at(const struct SidereonAntex *antex,
+                                              const char *id,
+                                              const struct SidereonAntexDateTime *epoch,
+                                              struct SidereonAntenna **out_antenna);
+
+/**
+ * Write the number of distinct antenna ids in the product to *out_count. An id
+ * with several validity blocks counts once; sidereon_antex_block_count counts
+ * every block.
  *
  * Safety: antex must be a live handle from sidereon_antex_parse; out_count must
  * point to a size_t.
@@ -19073,9 +27898,39 @@ enum SidereonStatus sidereon_antex_antenna_count(const struct SidereonAntex *ant
                                                  size_t *out_count);
 
 /**
+ * Take a newly owned handle for the antenna block at index, in file order.
+ *
+ * Safety: antex is a live handle; out_antenna points to a SidereonAntenna*,
+ * set to NULL before any work.
+ */
+enum SidereonStatus sidereon_antex_block(const struct SidereonAntex *antex,
+                                         size_t index,
+                                         struct SidereonAntenna **out_antenna);
+
+/**
+ * Write the number of antenna blocks in the product, every validity block of
+ * every id.
+ *
+ * Safety: antex is a live handle; out_count points to a size_t.
+ */
+enum SidereonStatus sidereon_antex_block_count(const struct SidereonAntex *antex,
+                                               size_t *out_count);
+
+/**
  * Serialize a parsed ANTEX product back to ANTEX text. The output is not
  * null-terminated. Delegates to sidereon_core::antex::Antex::encode. Uses the
  * variable-length output contract documented at the top of the header.
+ *
+ * Every record is written from a retained value, and no record the source did
+ * not carry is written, apart from the start and end records of blocks and
+ * sections. The encode is refused when the product holds something ANTEX text
+ * cannot state exactly, such as a field that overflows its columns, a value its
+ * column would round, validity seconds no `F13.7` form with a decimal point
+ * states, sample coordinates the grid cannot reconstruct, or public antenna
+ * fields that disagree with the retained validity intervals. A refusal returns
+ * SIDEREON_STATUS_INVALID_ARGUMENT, reports a required length of zero and
+ * writes nothing; sidereon_last_antex_error reports it typed, and
+ * sidereon_antex_encode_result returns it owned.
  *
  * Safety: antex must be a live handle from sidereon_antex_parse; out must point
  * to at least len writable bytes or be NULL when len is 0; out_written and
@@ -19088,18 +27943,99 @@ enum SidereonStatus sidereon_antex_encode(const struct SidereonAntex *antex,
                                           size_t *out_required);
 
 /**
- * Release an ANTEX product handle from sidereon_antex_parse. Passing NULL is a
- * no-op.
+ * Encode a parsed ANTEX product and take an owned record of the attempt.
  *
- * Safety: antex must be NULL or a live handle from sidereon_antex_parse that
+ * Returns SIDEREON_STATUS_OK whenever the call itself is well formed and hands
+ * back a newly owned SidereonAntexResult: the ANTEX text when the product was
+ * written, or the typed refusal. A null argument leaves `*out_result` NULL,
+ * returns SIDEREON_STATUS_NULL_POINTER and allocates nothing.
+ *
+ * Safety: `antex` must be a live SidereonAntex handle; `out_result` must point
+ * to writable storage for one `SidereonAntexResult *`, which is set to NULL
+ * before any work and receives a newly owned handle only on
+ * SIDEREON_STATUS_OK; release it with sidereon_antex_result_free.
+ */
+enum SidereonStatus sidereon_antex_encode_result(const struct SidereonAntex *antex,
+                                                 struct SidereonAntexResult **out_result);
+
+/**
+ * Release an ANTEX product handle. Passing NULL is a no-op.
+ *
+ * Safety: antex must be NULL or a live handle from an ANTEX parse route that
  * has not already been freed.
  */
 void sidereon_antex_free(struct SidereonAntex *antex);
 
 /**
+ * Copy the retained header records of an ANTEX product.
+ *
+ * Safety: antex is a live handle; out_header points to a SidereonAntexHeader.
+ */
+enum SidereonStatus sidereon_antex_header(const struct SidereonAntex *antex,
+                                          struct SidereonAntexHeader *out_header);
+
+/**
+ * Copy the text of one header `COMMENT` record, in file order, trailing blanks
+ * removed. Uses the variable-length output contract; the bytes are not
+ * null-terminated.
+ *
+ * Safety: antex is a live handle; out points to len writable bytes or is NULL
+ * when len is 0; out_written and out_required point to size_t values.
+ */
+enum SidereonStatus sidereon_antex_header_comment(const struct SidereonAntex *antex,
+                                                  size_t index,
+                                                  uint8_t *out,
+                                                  size_t len,
+                                                  size_t *out_written,
+                                                  size_t *out_required);
+
+/**
+ * Copy one header text, selected by a SidereonAntexHeaderText value. Uses the
+ * variable-length output contract; the bytes are not null-terminated.
+ *
+ * Safety: antex is a live handle; out points to len writable bytes or is NULL
+ * when len is 0; out_written and out_required point to size_t values.
+ */
+enum SidereonStatus sidereon_antex_header_text(const struct SidereonAntex *antex,
+                                               uint32_t part,
+                                               uint8_t *out,
+                                               size_t len,
+                                               size_t *out_written,
+                                               size_t *out_required);
+
+/**
+ * Copy one comment outside the antenna blocks, in file order: its text,
+ * trailing blanks removed, on the variable-length output contract, and in
+ * *out_blocks_before the number of antenna blocks that precede it.
+ *
+ * Safety: antex is a live handle; out_blocks_before points to a size_t; out
+ * points to len writable bytes or is NULL when len is 0; out_written and
+ * out_required point to size_t values.
+ */
+enum SidereonStatus sidereon_antex_outer_comment(const struct SidereonAntex *antex,
+                                                 size_t index,
+                                                 size_t *out_blocks_before,
+                                                 uint8_t *out,
+                                                 size_t len,
+                                                 size_t *out_written,
+                                                 size_t *out_required);
+
+/**
+ * Write the number of `COMMENT` records after `END OF HEADER` that lie outside
+ * every antenna block.
+ *
+ * Safety: antex is a live handle; out_count points to a size_t.
+ */
+enum SidereonStatus sidereon_antex_outer_comment_count(const struct SidereonAntex *antex,
+                                                       size_t *out_count);
+
+/**
  * Parse an ANTEX 1.4 antenna-calibration byte buffer. On success writes a newly
  * owned handle to *out_antex. Release it with sidereon_antex_free. PCO/PCV
- * values are exposed in meters, exactly as the engine produces them.
+ * values are exposed in meters, `mm * 1e-3` as RTKLIB `readantex` converts
+ * them. A failure returns SIDEREON_STATUS_INVALID_ARGUMENT; the typed failure
+ * is read with sidereon_last_antex_error, or returned owned by
+ * sidereon_antex_parse_result.
  *
  * Safety: data must point to len readable bytes; out_antex must point to
  * storage for a SidereonAntex*.
@@ -19107,6 +28043,105 @@ void sidereon_antex_free(struct SidereonAntex *antex);
 enum SidereonStatus sidereon_antex_parse(const uint8_t *data,
                                          size_t len,
                                          struct SidereonAntex **out_antex);
+
+/**
+ * Parse an ANTEX byte buffer and take an owned record of the attempt.
+ *
+ * Returns SIDEREON_STATUS_OK whenever the call itself is well formed and hands
+ * back a newly owned SidereonAntexResult; on a refusal of the text the typed
+ * failure is inside it and `*out_antex` stays NULL. A structural failure (a
+ * null pointer, data that is not UTF-8) leaves both outputs NULL and returns a
+ * status that is not OK.
+ *
+ * Safety: data must point to len readable bytes; out_antex points to a
+ * SidereonAntex*; out_result points to a SidereonAntexResult*. Both output
+ * slots must be disjoint and are set to NULL before any work.
+ */
+enum SidereonStatus sidereon_antex_parse_result(const uint8_t *data,
+                                                size_t len,
+                                                struct SidereonAntex **out_antex,
+                                                struct SidereonAntexResult **out_result);
+
+/**
+ * Copy one text part of an owned result's failure, selected by a
+ * SidereonAntexErrorText value; Message is prefixed with the route that
+ * produced it. A successful result, or a part the failure does not carry,
+ * copies nothing. Uses the variable-length output contract; the bytes are
+ * copied verbatim and not null-terminated.
+ *
+ * Safety: as sidereon_antex_result_get_text.
+ */
+enum SidereonStatus sidereon_antex_result_error_text(const struct SidereonAntexResult *result,
+                                                     uint32_t part,
+                                                     uint8_t *out,
+                                                     size_t len,
+                                                     size_t *out_written,
+                                                     size_t *out_required);
+
+/**
+ * Release an owned ANTEX result. Passing NULL is a no-op.
+ *
+ * Safety: `result` may be NULL; otherwise it must be a live
+ * SidereonAntexResult handle this binding produced, passed here exactly once.
+ */
+void sidereon_antex_result_free(struct SidereonAntexResult *result);
+
+/**
+ * Copy the fixed-width outcome of an owned ANTEX result. `*out_outcome` is
+ * written before the result pointer is validated.
+ *
+ * Safety: `result` must be a live SidereonAntexResult handle; `out_outcome`
+ * must point to one writable SidereonAntexOutcome.
+ */
+enum SidereonStatus sidereon_antex_result_get_outcome(const struct SidereonAntexResult *result,
+                                                      struct SidereonAntexOutcome *out_outcome);
+
+/**
+ * Copy the ANTEX text of an owned encode result. Uses the variable-length
+ * output contract; the bytes are not null-terminated.
+ *
+ * A refused result has no text: the call returns
+ * SIDEREON_STATUS_INVALID_ARGUMENT, reports a required length of zero, writes
+ * nothing, and sets the thread-local message to the result's own refusal text.
+ * A successful parse result holds no text and reports a required length of
+ * zero.
+ *
+ * Safety: `result` must be a live SidereonAntexResult handle; `out` may be
+ * NULL only when `len` is 0; `out_written` and `out_required` must each point
+ * to a writable size_t.
+ */
+enum SidereonStatus sidereon_antex_result_get_text(const struct SidereonAntexResult *result,
+                                                   uint8_t *out,
+                                                   size_t len,
+                                                   size_t *out_written,
+                                                   size_t *out_required);
+
+/**
+ * Take a newly owned handle for the satellite antenna block of a PRN (such as
+ * `G05`) valid at an epoch, or NULL with status OK when none is.
+ *
+ * Safety: antex is a live handle; prn is a null-terminated UTF-8 string; epoch
+ * points to a SidereonAntexDateTime; out_antenna points to a
+ * SidereonAntenna*, set to NULL before any work.
+ */
+enum SidereonStatus sidereon_antex_satellite_antenna(const struct SidereonAntex *antex,
+                                                     const char *prn,
+                                                     const struct SidereonAntexDateTime *epoch,
+                                                     struct SidereonAntenna **out_antenna);
+
+/**
+ * Write the number of records a forgiving read skipped or found inconsistent:
+ * a corrupt PCV value, an unrecognized grid-row head, a line outside any
+ * record the format defines, a `# OF FREQUENCIES` count that disagrees with
+ * the sections read, a frequency end record naming another frequency, a
+ * header record after `END OF HEADER`, and a block or section its own end
+ * record does not close. The blocks and sections are kept. A clean file
+ * reports zero.
+ *
+ * Safety: antex is a live handle; out_count points to a size_t.
+ */
+enum SidereonStatus sidereon_antex_skipped_records(const struct SidereonAntex *antex,
+                                                   size_t *out_count);
 
 /**
  * Run the ARAIM multi-hypothesis protection-level solve. HPL, VPL, EMT, and
@@ -19204,33 +28239,118 @@ enum SidereonStatus sidereon_beta_angle_from_state_deg(const double *r_km,
                                                        const double *sun_km,
                                                        double *out);
 
+/**
+ * Look up the code DSB `obs1` - `obs2` for satellite `sat_id` at `epoch`, in
+ * seconds. Epoch, outputs and buffers are as for
+ * sidereon_bias_set_code_osb_seconds.
+ *
+ * Safety: as for sidereon_bias_set_code_osb_seconds; obs1 and obs2 are
+ * null-terminated strings.
+ */
 enum SidereonStatus sidereon_bias_set_code_dsb_seconds(const struct SidereonBiasSet *set,
                                                        const char *sat_id,
                                                        const char *obs1,
                                                        const char *obs2,
                                                        struct SidereonBiasEpoch epoch,
-                                                       bool *out_present,
-                                                       double *out_seconds);
+                                                       struct SidereonBiasLookup *out_lookup,
+                                                       size_t *out_records,
+                                                       size_t records_len,
+                                                       size_t *out_overridden,
+                                                       size_t overridden_len);
 
+/**
+ * Look up the code OSB of `obs` for satellite `sat_id` at `epoch`, in
+ * seconds. The epoch is read on the product's time scale; a product without
+ * one gives SIDEREON_BIAS_LOOKUP_STATUS_UNSUPPORTED_SCALE. The outcome is
+ * written to *out_lookup; up to records_len record indices go to out_records
+ * and up to overridden_len overridden record indices to out_overridden. Each
+ * buffer may be NULL with a zero length; the counts in *out_lookup give the
+ * full lengths.
+ *
+ * Safety: set is a live handle; sat_id and obs are null-terminated strings;
+ * out_lookup points to a SidereonBiasLookup; out_records and out_overridden
+ * are NULL with a zero length or point to that many size_t.
+ */
 enum SidereonStatus sidereon_bias_set_code_osb_seconds(const struct SidereonBiasSet *set,
                                                        const char *sat_id,
                                                        const char *obs,
                                                        struct SidereonBiasEpoch epoch,
-                                                       bool *out_present,
-                                                       double *out_seconds);
+                                                       struct SidereonBiasLookup *out_lookup,
+                                                       size_t *out_records,
+                                                       size_t records_len,
+                                                       size_t *out_overridden,
+                                                       size_t overridden_len);
 
 void sidereon_bias_set_free(struct SidereonBiasSet *set);
 
+/**
+ * Read the product's bias mode and time scale. A product without a usable
+ * time scale (a lenient read of one without TIME_SYSTEM, or with a label
+ * naming no scale) sets *out_has_time_scale to false and *out_time_scale to
+ * zero.
+ */
 enum SidereonStatus sidereon_bias_set_mode(const struct SidereonBiasSet *set,
                                            enum SidereonBiasMode *out_mode,
+                                           bool *out_has_time_scale,
                                            uint32_t *out_time_scale);
 
+/**
+ * Copy notice `index` into *out_notice.
+ *
+ * Safety: set is a live handle; out_notice points to a SidereonBiasNotice.
+ */
+enum SidereonStatus sidereon_bias_set_notice(const struct SidereonBiasSet *set,
+                                             size_t index,
+                                             struct SidereonBiasNotice *out_notice);
+
+/**
+ * Write the number of notices the read recorded: departures accepted by a
+ * lenient read, lines that are not valid UTF-8, and repeated or conflicting
+ * declarations.
+ *
+ * Safety: set is a live handle; out_count points to a size_t.
+ */
+enum SidereonStatus sidereon_bias_set_notice_count(const struct SidereonBiasSet *set,
+                                                   size_t *out_count);
+
+/**
+ * Copy text part `part` (a SidereonBiasNoticeText value) of notice `index`,
+ * not null-terminated, under the variable-length output contract: call once
+ * with out=NULL and len 0 to learn *out_required, then again with a buffer of
+ * that size. A part the notice does not carry copies nothing.
+ *
+ * Safety: set is a live handle; out points to len writable bytes or is NULL
+ * when len is 0; out_written and out_required point to size_t values.
+ */
+enum SidereonStatus sidereon_bias_set_notice_text(const struct SidereonBiasSet *set,
+                                                  size_t index,
+                                                  uint32_t part,
+                                                  uint8_t *out,
+                                                  size_t len,
+                                                  size_t *out_written,
+                                                  size_t *out_required);
+
+/**
+ * Look up the phase OSB of `obs` for satellite `sat_id` at `epoch`, in
+ * cycles. A phase bias stated in nanoseconds is converted with the carrier
+ * frequency `carrier_hz`, used only when has_carrier_hz is true; without it
+ * such a bias gives
+ * SIDEREON_BIAS_LOOKUP_STATUS_CARRIER_FREQUENCY_REQUIRED. Epoch, outputs and
+ * buffers are as for sidereon_bias_set_code_osb_seconds.
+ *
+ * Safety: as for sidereon_bias_set_code_osb_seconds.
+ */
 enum SidereonStatus sidereon_bias_set_phase_osb_cycles(const struct SidereonBiasSet *set,
                                                        const char *sat_id,
                                                        const char *obs,
                                                        struct SidereonBiasEpoch epoch,
-                                                       bool *out_present,
-                                                       double *out_cycles);
+                                                       bool has_carrier_hz,
+                                                       double carrier_hz,
+                                                       struct SidereonBiasLookup *out_lookup,
+                                                       size_t *out_records,
+                                                       size_t records_len,
+                                                       size_t *out_overridden,
+                                                       size_t overridden_len);
 
 enum SidereonStatus sidereon_bias_set_record(const struct SidereonBiasSet *set,
                                              size_t index,
@@ -19249,6 +28369,17 @@ enum SidereonStatus sidereon_bias_sinex_load(const char *path, struct SidereonBi
 
 enum SidereonStatus sidereon_bias_sinex_load_lossy(const char *path, struct SidereonBiasSet **out);
 
+/**
+ * Read and parse a Bias-SINEX product (`.gz` is decompressed) under
+ * `policy`, as sidereon_bias_sinex_parse_with_policy.
+ *
+ * Safety: path is a null-terminated string; out points to a
+ * SidereonBiasSet pointer.
+ */
+enum SidereonStatus sidereon_bias_sinex_load_with_policy(const char *path,
+                                                         uint32_t policy,
+                                                         struct SidereonBiasSet **out);
+
 enum SidereonStatus sidereon_bias_sinex_parse(const uint8_t *bytes,
                                               size_t len,
                                               struct SidereonBiasSet **out);
@@ -19256,6 +28387,248 @@ enum SidereonStatus sidereon_bias_sinex_parse(const uint8_t *bytes,
 enum SidereonStatus sidereon_bias_sinex_parse_lossy(const uint8_t *bytes,
                                                     size_t len,
                                                     struct SidereonBiasSet **out);
+
+/**
+ * Parse Bias-SINEX bytes under `policy`, a SidereonBiasReadPolicy value.
+ * SIDEREON_BIAS_READ_POLICY_LENIENT reads a file that departs from
+ * Bias-SINEX 1.00 and records each departure as a notice
+ * (sidereon_bias_set_notice). sidereon_bias_sinex_parse reads strictly.
+ *
+ * Safety: bytes points to len bytes; out points to a SidereonBiasSet pointer.
+ */
+enum SidereonStatus sidereon_bias_sinex_parse_with_policy(const uint8_t *bytes,
+                                                          size_t len,
+                                                          uint32_t policy,
+                                                          struct SidereonBiasSet **out);
+
+/**
+ * Write a bias set as Bias-SINEX bytes, preserving non-UTF-8 source lines.
+ *
+ * Safety: set is a live handle; out points to len writable bytes or is NULL
+ * when len is 0; out_written and out_required point to size_t values.
+ */
+enum SidereonStatus sidereon_bias_sinex_to_bytes(const struct SidereonBiasSet *set,
+                                                 uint8_t *out,
+                                                 size_t len,
+                                                 size_t *out_written,
+                                                 size_t *out_required);
+
+/**
+ * Write a bias set as Bias-SINEX UTF-8 text. If the buffer is too small, the
+ * call copies its prefix and reports the required byte count. Typed writer
+ * refusals are available from `sidereon_last_bias_error`.
+ *
+ * Safety: set is a live handle; out points to len writable bytes or is NULL
+ * when len is 0; out_written and out_required point to size_t values.
+ */
+enum SidereonStatus sidereon_bias_sinex_to_text(const struct SidereonBiasSet *set,
+                                                uint8_t *out,
+                                                size_t len,
+                                                size_t *out_written,
+                                                size_t *out_required);
+
+/**
+ * Write one block on its own as a standard six-row BLQ block, in the column
+ * order its own retained header declares or the standard order, and take an
+ * owned record of the attempt. A block the parser would not read back
+ * unchanged is refused.
+ *
+ * Safety: blocks is a live handle; out_result points to a SidereonBlqResult*,
+ * set to NULL before any work.
+ */
+enum SidereonStatus sidereon_blq_block_to_text_result(const struct SidereonBlqBlocks *blocks,
+                                                      size_t index,
+                                                      struct SidereonBlqResult **out_result);
+
+/**
+ * Copy one block's coefficients, reordered to the supported constituent order:
+ * row 0 radial, 1 west, 2 south.
+ *
+ * Safety: blocks is a live handle; out_coefficients points to a
+ * SidereonOceanLoadingBlq.
+ */
+enum SidereonStatus sidereon_blq_blocks_coefficients(const struct SidereonBlqBlocks *blocks,
+                                                     size_t index,
+                                                     struct SidereonOceanLoadingBlq *out_coefficients);
+
+/**
+ * Copy one retained line of a block, in input order: its placement into
+ * *out_comment, and the line exactly as read, without its terminator, on the
+ * variable-length output contract (the bytes are not null-terminated).
+ *
+ * Safety: blocks is a live handle; out_comment points to a SidereonBlqComment;
+ * out points to len writable bytes or is NULL when len is 0; out_written and
+ * out_required point to size_t values.
+ */
+enum SidereonStatus sidereon_blq_blocks_comment(const struct SidereonBlqBlocks *blocks,
+                                                size_t index,
+                                                size_t comment_index,
+                                                struct SidereonBlqComment *out_comment,
+                                                uint8_t *out,
+                                                size_t len,
+                                                size_t *out_written,
+                                                size_t *out_required);
+
+/**
+ * Write the number of comment and column-order header lines one block keeps.
+ *
+ * Safety: blocks is a live handle; out_count points to a size_t.
+ */
+enum SidereonStatus sidereon_blq_blocks_comment_count(const struct SidereonBlqBlocks *blocks,
+                                                      size_t index,
+                                                      size_t *out_count);
+
+/**
+ * Write the number of blocks in a BLQ list.
+ *
+ * Safety: blocks is a live handle; out_count points to a size_t.
+ */
+enum SidereonStatus sidereon_blq_blocks_count(const struct SidereonBlqBlocks *blocks,
+                                              size_t *out_count);
+
+/**
+ * Release a BLQ block list. Passing NULL is a no-op.
+ *
+ * Safety: blocks must be NULL or a live handle from a BLQ list route.
+ */
+void sidereon_blq_blocks_free(struct SidereonBlqBlocks *blocks);
+
+/**
+ * Create an empty BLQ block list to build with sidereon_blq_blocks_push.
+ *
+ * Safety: out_blocks points to a SidereonBlqBlocks*.
+ */
+enum SidereonStatus sidereon_blq_blocks_new(struct SidereonBlqBlocks **out_blocks);
+
+/**
+ * Append a block with a station identifier, taken exactly as given, and
+ * coefficients in the supported constituent order. The writer, not this call,
+ * refuses a station or coefficient it cannot write back unchanged.
+ *
+ * Safety: blocks is a live handle no other call uses meanwhile; station is a
+ * null-terminated UTF-8 string; coefficients points to a
+ * SidereonOceanLoadingBlq.
+ */
+enum SidereonStatus sidereon_blq_blocks_push(struct SidereonBlqBlocks *blocks,
+                                             const char *station,
+                                             const struct SidereonOceanLoadingBlq *coefficients);
+
+/**
+ * Append a comment or column-order header line to a block at a placement, the
+ * line taken exactly as given. The writer, not this call, refuses a line it
+ * cannot write back as the same comment at the same place.
+ *
+ * Safety: blocks is a live handle no other call uses meanwhile; comment points
+ * to a SidereonBlqComment; line is a null-terminated UTF-8 string.
+ */
+enum SidereonStatus sidereon_blq_blocks_push_comment(struct SidereonBlqBlocks *blocks,
+                                                     size_t index,
+                                                     const struct SidereonBlqComment *comment,
+                                                     const char *line);
+
+/**
+ * Copy one block's station identifier, trimmed. Uses the variable-length
+ * output contract; the bytes are not null-terminated.
+ *
+ * Safety: blocks is a live handle; out points to len writable bytes or is
+ * NULL when len is 0; out_written and out_required point to size_t values.
+ */
+enum SidereonStatus sidereon_blq_blocks_station(const struct SidereonBlqBlocks *blocks,
+                                                size_t index,
+                                                uint8_t *out,
+                                                size_t len,
+                                                size_t *out_written,
+                                                size_t *out_required);
+
+/**
+ * Write every block as one BLQ file and take an owned record of the attempt.
+ * Each retained line is written at its placement, the station line from the
+ * third column (where the provider's files put it and RTKLIB `readblq` reads
+ * it), and each row in the column order its retained header declares, which
+ * stays in force for the blocks after it as it does when the parser reads the
+ * file; parsing the text gives back equal blocks. A block the parser would not
+ * read back unchanged is refused with its index and reason.
+ *
+ * Returns SIDEREON_STATUS_OK whenever the call itself is well formed and hands
+ * back a newly owned SidereonBlqResult.
+ *
+ * Safety: blocks is a live handle; out_result points to a SidereonBlqResult*,
+ * set to NULL before any work.
+ */
+enum SidereonStatus sidereon_blq_blocks_to_text_result(const struct SidereonBlqBlocks *blocks,
+                                                       struct SidereonBlqResult **out_result);
+
+/**
+ * Parse every standard station block of a BLQ file. Lines starting with `$`,
+ * `#` or `!` are comments; a column-order header (a `COLUMN ORDER`
+ * declaration, a line of constituent labels only, or a comment in which a
+ * word `ORDER` is followed to the end of the line by constituent labels) sets
+ * the column order of every later row, and its labels must be the eleven
+ * supported constituents, each once. Every comment and header line is kept on
+ * the block it belongs to.
+ *
+ * Returns SIDEREON_STATUS_OK with a newly owned list in *out_blocks, or
+ * SIDEREON_STATUS_INVALID_ARGUMENT with *out_blocks NULL. When out_result is
+ * not NULL it receives an owned SidereonBlqResult recording the outcome of a
+ * well-formed call.
+ *
+ * Safety: text points to len readable UTF-8 bytes; out_blocks points to a
+ * SidereonBlqBlocks*; out_result is NULL or points to a SidereonBlqResult*.
+ * Both output slots are set to NULL before any work.
+ */
+enum SidereonStatus sidereon_blq_parse(const uint8_t *text,
+                                       size_t len,
+                                       struct SidereonBlqBlocks **out_blocks,
+                                       struct SidereonBlqResult **out_result);
+
+/**
+ * Copy the failure message or the failure's text part, selected by a
+ * SidereonBlqErrorText value. A successful result copies nothing. Uses the
+ * variable-length output contract; the bytes are copied verbatim and not
+ * null-terminated.
+ *
+ * Safety: result is a live handle; out points to len writable bytes or is
+ * NULL when len is 0; out_written and out_required point to size_t values.
+ */
+enum SidereonStatus sidereon_blq_result_error_text(const struct SidereonBlqResult *result,
+                                                   uint32_t part,
+                                                   uint8_t *out,
+                                                   size_t len,
+                                                   size_t *out_written,
+                                                   size_t *out_required);
+
+/**
+ * Release an owned BLQ result. Passing NULL is a no-op.
+ *
+ * Safety: result may be NULL; otherwise it must be a live SidereonBlqResult
+ * handle this binding produced, passed here exactly once.
+ */
+void sidereon_blq_result_free(struct SidereonBlqResult *result);
+
+/**
+ * Copy the fixed-width outcome of an owned BLQ result. *out_outcome is written
+ * before the result pointer is validated.
+ *
+ * Safety: result is a live handle; out_outcome points to a SidereonBlqOutcome.
+ */
+enum SidereonStatus sidereon_blq_result_get_outcome(const struct SidereonBlqResult *result,
+                                                    struct SidereonBlqOutcome *out_outcome);
+
+/**
+ * Copy the text a write result holds. A refused result has no text: the call
+ * returns SIDEREON_STATUS_INVALID_ARGUMENT, reports a required length of zero,
+ * writes nothing, and sets the thread-local message to the result's own
+ * failure text. Uses the variable-length output contract; the bytes are not
+ * null-terminated.
+ *
+ * Safety: result is a live handle; out points to len writable bytes or is
+ * NULL when len is 0; out_written and out_required point to size_t values.
+ */
+enum SidereonStatus sidereon_blq_result_get_text(const struct SidereonBlqResult *result,
+                                                 uint8_t *out,
+                                                 size_t len,
+                                                 size_t *out_written,
+                                                 size_t *out_required);
 
 /**
  * Resolve integer ambiguities with a bounded lattice search: enumerate the
@@ -19281,6 +28654,13 @@ enum SidereonStatus sidereon_bounded_ils_search(const double *float_cycles,
                                                 double ratio_threshold,
                                                 int64_t *out_fixed,
                                                 struct SidereonIlsResult *out_result);
+
+enum SidereonStatus sidereon_broadcast_clock_relativity_at_epoch_query(const struct SidereonBroadcastEphemeris *broadcast,
+                                                                       const char *sat_id,
+                                                                       const struct SidereonExactEpochQuery *epoch,
+                                                                       const double *position_ecef_m,
+                                                                       enum SidereonClockRelativityKind *out_kind,
+                                                                       double *out_term_s);
 
 /**
  * Compare a broadcast ephemeris against a precise SP3 product over a set of
@@ -19559,6 +28939,12 @@ enum SidereonStatus sidereon_broadcast_ephemeris_select_by_issue(const struct Si
 enum SidereonStatus sidereon_broadcast_ephemeris_set_nav_message_preference(struct SidereonBroadcastEphemeris *broadcast,
                                                                             uint32_t preference);
 
+enum SidereonStatus sidereon_broadcast_ephemeris_variance_at_epoch_queries(const struct SidereonBroadcastEphemeris *broadcast,
+                                                                           const char *sat_id,
+                                                                           const struct SidereonExactEpochQuery *state_epoch,
+                                                                           const struct SidereonExactEpochQuery *selection_epoch,
+                                                                           double *out_variance_m2);
+
 /**
  * Evaluate a broadcast ephemeris at a J2000 second for one satellite, writing
  * the ECEF position (meters) and, when present, the satellite clock offset
@@ -19691,6 +29077,20 @@ enum SidereonStatus sidereon_broadcast_satellite_state(const struct SidereonKepl
                                                        double tgd_s,
                                                        bool is_geo,
                                                        struct SidereonSatelliteState *out);
+
+enum SidereonStatus sidereon_broadcast_state_at_epoch_queries(const struct SidereonBroadcastEphemeris *broadcast,
+                                                              const char *sat_id,
+                                                              const struct SidereonExactEpochQuery *state_epoch,
+                                                              const struct SidereonExactEpochQuery *selection_epoch,
+                                                              struct SidereonEphemerisSourceState *out);
+
+enum SidereonStatus sidereon_broadcast_transmit_epoch_clock_at_epoch_queries(const struct SidereonBroadcastEphemeris *broadcast,
+                                                                             const char *sat_id,
+                                                                             const struct SidereonExactEpochQuery *transmit_epoch,
+                                                                             const struct SidereonExactEpochQuery *selection_epoch,
+                                                                             bool *out_has_clock,
+                                                                             double *out_clock_s,
+                                                                             bool *out_degraded);
 
 /**
  * Build a dual-frequency RTK arc from parsed paired RINEX observations and an
@@ -19996,11 +29396,37 @@ enum SidereonStatus sidereon_chan_ho_initial_guess(const struct SidereonSourceSe
 enum SidereonStatus sidereon_chi2_inv(double p, size_t k, double *out);
 
 /**
- * GPS seconds for a civil instant (used to query RINEX clock series). Writes the
- * value to *out_gps_seconds and *out_available (false if the date is invalid).
+ * Convert a civil epoch in a time scale into the scale-tagged instant a RINEX
+ * clock record at that epoch holds. The second is read as the shortest
+ * decimal of the double given, every digit kept. A UTC second of 60.x is
+ * accepted on a day that ends with a positive leap second. *out_available is
+ * false, with *out_epoch's Julian fields NaN, when the fields name no epoch in
+ * that scale. Delegates to sidereon_core::rinex::clock::civil_to_clock_instant.
+ *
+ * Safety: out_epoch points to a SidereonClockEpoch; out_available points to a
+ * bool.
+ */
+enum SidereonStatus sidereon_civil_to_clock_epoch(uint32_t time_scale,
+                                                  int32_t year,
+                                                  uint8_t month,
+                                                  uint8_t day,
+                                                  uint8_t hour,
+                                                  uint8_t minute,
+                                                  double second,
+                                                  struct SidereonClockEpoch *out_epoch,
+                                                  bool *out_available);
+
+/**
+ * GPS seconds for a civil GPS-time instant (used to query RINEX clock series).
+ * Writes the value to *out_gps_seconds and *out_available (false if the date is
+ * invalid). The second is read as the shortest decimal of the double given,
+ * every digit kept, so 59.9999996 names that epoch rather than rounding into the
+ * next minute. GPS time has no leap-second label; for a civil epoch in another
+ * time scale, such as UTC with its 23:59:60, use sidereon_civil_to_clock_epoch.
  * Delegates to sidereon_core::rinex::clock::civil_to_gps_seconds.
  *
- * Safety: out_gps_seconds points to a double; out_available points to a bool.
+ * Safety: out_gps_seconds points to a double; out_available points to a bool;
+ * their output ranges must be disjoint.
  */
 enum SidereonStatus sidereon_civil_to_gps_seconds(int32_t year,
                                                   uint8_t month,
@@ -20025,6 +29451,19 @@ enum SidereonStatus sidereon_civil_to_j2000_seconds(int32_t year,
                                                     int32_t minute,
                                                     double second,
                                                     double *out);
+
+/**
+ * Clear the versioned engine-error detail retained on the current OS thread.
+ *
+ * Resets only the typed generic engine TLS slot (`LAST_ENGINE_ERROR`). All
+ * existing diagnostic text (`sidereon_last_error_message`) and other
+ * family-specific slots remain unchanged; ordinary readers and free functions
+ * continue retaining their slots until a producer or explicit reset runs.
+ *
+ * This explicit reset is needed for foreign language bindings (such as Go)
+ * to prevent stale generic detail on independent operation entry.
+ */
+void sidereon_clear_engine_error(void);
 
 /**
  * Copy one curve from a combined Allan-family result. Missing curves copy zero
@@ -20135,6 +29574,65 @@ enum SidereonStatus sidereon_clock_hadamard_deviation(const struct SidereonAllan
                                                       size_t *out_required);
 
 /**
+ * Write the number of records in a header-record snapshot.
+ *
+ * Safety: records is a live handle; out_count points to a size_t.
+ */
+enum SidereonStatus sidereon_clock_header_records_count(const struct SidereonClockHeaderRecords *records,
+                                                        size_t *out_count);
+
+/**
+ * Copy one text part of a header record's typed reading, by part index below
+ * the record's text_part_count, in the order SidereonClockHeaderFieldKind
+ * lists for its kind. Uses the variable-length output contract; the bytes are
+ * copied verbatim and not null-terminated.
+ *
+ * Safety: records is a live handle; out points to len writable bytes or is
+ * NULL when len is 0; out_written and out_required point to size_t values.
+ */
+enum SidereonStatus sidereon_clock_header_records_field_text(const struct SidereonClockHeaderRecords *records,
+                                                             size_t index,
+                                                             size_t part_index,
+                                                             uint8_t *out,
+                                                             size_t len,
+                                                             size_t *out_written,
+                                                             size_t *out_required);
+
+/**
+ * Release a header-record snapshot. Passing NULL is a no-op.
+ *
+ * Safety: records must be NULL or a live handle from
+ * sidereon_rinex_clock_header_records.
+ */
+void sidereon_clock_header_records_free(struct SidereonClockHeaderRecords *records);
+
+/**
+ * Copy the fixed-width reading of one header record.
+ *
+ * Safety: records is a live handle; out_record points to a
+ * SidereonClockHeaderRecord.
+ */
+enum SidereonStatus sidereon_clock_header_records_get(const struct SidereonClockHeaderRecords *records,
+                                                      size_t index,
+                                                      struct SidereonClockHeaderRecord *out_record);
+
+/**
+ * Copy the line, label or payload text of one header record, selected by a
+ * SidereonClockHeaderText value. Uses the variable-length output contract; the
+ * bytes are copied verbatim and not null-terminated.
+ *
+ * Safety: records is a live handle; out points to len writable bytes or is
+ * NULL when len is 0; out_written and out_required point to size_t values.
+ */
+enum SidereonStatus sidereon_clock_header_records_text(const struct SidereonClockHeaderRecords *records,
+                                                       size_t index,
+                                                       uint32_t part,
+                                                       uint8_t *out,
+                                                       size_t len,
+                                                       size_t *out_written,
+                                                       size_t *out_required);
+
+/**
  * Modified Allan deviation for explicit averaging factors. Each output point
  * has tau in seconds.
  *
@@ -20222,12 +29720,67 @@ enum SidereonStatus sidereon_clock_power_law_noise_options_init(double basic_tau
  * Return exact ADEV and MDEV log-log slopes for a power-law noise type.
  *
  * Safety: out_adev_slope, out_mdev_slope, and out_variance_tau_exponent must
- * point to writable scalars.
+ * point to writable scalars and their output ranges must be disjoint.
  */
 enum SidereonStatus sidereon_clock_power_law_noise_slopes(uint32_t noise_type,
                                                           double *out_adev_slope,
                                                           double *out_mdev_slope,
                                                           int32_t *out_variance_tau_exponent);
+
+/**
+ * Copy the fixed-width records of a snapshot using the standard caller-buffer
+ * convention.
+ *
+ * Safety: records is a live handle; out points to len writable
+ * SidereonClockRecord values or is NULL when len is 0; out_written and
+ * out_required point to size_t values.
+ */
+enum SidereonStatus sidereon_clock_records_copy(const struct SidereonClockRecords *records,
+                                                struct SidereonClockRecord *out,
+                                                size_t len,
+                                                size_t *out_written,
+                                                size_t *out_required);
+
+/**
+ * Write the number of records in a record snapshot.
+ *
+ * Safety: records is a live handle; out_count points to a size_t.
+ */
+enum SidereonStatus sidereon_clock_records_count(const struct SidereonClockRecords *records,
+                                                 size_t *out_count);
+
+/**
+ * Release a record snapshot. Passing NULL is a no-op.
+ *
+ * Safety: records must be NULL or a live handle from
+ * sidereon_rinex_clock_records.
+ */
+void sidereon_clock_records_free(struct SidereonClockRecords *records);
+
+/**
+ * Copy one fixed-width record of a snapshot.
+ *
+ * Safety: records is a live handle; out_record points to a
+ * SidereonClockRecord.
+ */
+enum SidereonStatus sidereon_clock_records_get(const struct SidereonClockRecords *records,
+                                               size_t index,
+                                               struct SidereonClockRecord *out_record);
+
+/**
+ * Copy the receiver or satellite name of one record, as written and trimmed.
+ * Uses the variable-length output contract; the bytes are not
+ * null-terminated.
+ *
+ * Safety: records is a live handle; out points to len writable bytes or is
+ * NULL when len is 0; out_written and out_required point to size_t values.
+ */
+enum SidereonStatus sidereon_clock_records_name(const struct SidereonClockRecords *records,
+                                                size_t index,
+                                                uint8_t *out,
+                                                size_t len,
+                                                size_t *out_written,
+                                                size_t *out_required);
 
 /**
  * Time deviation for explicit averaging factors. Tau and deviation are seconds.
@@ -20245,6 +29798,13 @@ enum SidereonStatus sidereon_clock_time_deviation(const struct SidereonAllanSamp
                                                   size_t len,
                                                   size_t *out_written,
                                                   size_t *out_required);
+
+/**
+ * Initialize a RINEX clock write policy that allows no departure.
+ *
+ * Safety: out_policy points to a SidereonClockWritePolicy.
+ */
+enum SidereonStatus sidereon_clock_write_policy_init(struct SidereonClockWritePolicy *out_policy);
 
 /**
  * Compute the closed-form source-localization initial guess.
@@ -20278,6 +29838,18 @@ enum SidereonStatus sidereon_code_dcb_load_lossy(const char *path,
                                                  const struct SidereonCodeDcbOptions *options,
                                                  struct SidereonBiasSet **out);
 
+/**
+ * Read and parse a CODE DCB product (`.gz` is decompressed) under `policy`,
+ * as sidereon_code_dcb_parse_with_policy.
+ *
+ * Safety: path is a null-terminated string; options is NULL or points to a
+ * SidereonCodeDcbOptions; out points to a SidereonBiasSet pointer.
+ */
+enum SidereonStatus sidereon_code_dcb_load_with_policy(const char *path,
+                                                       const struct SidereonCodeDcbOptions *options,
+                                                       uint32_t policy,
+                                                       struct SidereonBiasSet **out);
+
 enum SidereonStatus sidereon_code_dcb_parse(const uint8_t *bytes,
                                             size_t len,
                                             const struct SidereonCodeDcbOptions *options,
@@ -20287,6 +29859,46 @@ enum SidereonStatus sidereon_code_dcb_parse_lossy(const uint8_t *bytes,
                                                   size_t len,
                                                   const struct SidereonCodeDcbOptions *options,
                                                   struct SidereonBiasSet **out);
+
+/**
+ * Parse CODE DCB bytes under `policy`, a SidereonBiasReadPolicy value.
+ * SIDEREON_BIAS_READ_POLICY_LENIENT reads a generated title whose
+ * time-system label names no known scale, leaving the set without a time
+ * scale, and records the departure as a notice.
+ *
+ * Safety: bytes points to len bytes; options is NULL or points to a
+ * SidereonCodeDcbOptions; out points to a SidereonBiasSet pointer.
+ */
+enum SidereonStatus sidereon_code_dcb_parse_with_policy(const uint8_t *bytes,
+                                                        size_t len,
+                                                        const struct SidereonCodeDcbOptions *options,
+                                                        uint32_t policy,
+                                                        struct SidereonBiasSet **out);
+
+/**
+ * Write a bias set as CODE DCB bytes, preserving non-UTF-8 source lines.
+ *
+ * Safety: set is a live handle; out points to len writable bytes or is NULL
+ * when len is 0; out_written and out_required point to size_t values.
+ */
+enum SidereonStatus sidereon_code_dcb_to_bytes(const struct SidereonBiasSet *set,
+                                               uint8_t *out,
+                                               size_t len,
+                                               size_t *out_written,
+                                               size_t *out_required);
+
+/**
+ * Write a bias set as CODE DCB UTF-8 text. Typed writer refusals are available
+ * from `sidereon_last_bias_error`.
+ *
+ * Safety: set is a live handle; out points to len writable bytes or is NULL
+ * when len is 0; out_written and out_required point to size_t values.
+ */
+enum SidereonStatus sidereon_code_dcb_to_text(const struct SidereonBiasSet *set,
+                                              uint8_t *out,
+                                              size_t len,
+                                              size_t *out_written,
+                                              size_t *out_required);
 
 enum SidereonStatus sidereon_coe2eq(const struct SidereonClassicalElements *coe,
                                     uint32_t retrograde,
@@ -20602,7 +30214,7 @@ void sidereon_constellation_free(struct SidereonConstellation *catalog);
  * Resolve a Galileo GSAT number to its PRN. Delegates to
  * sidereon_core::constellation::galileo_prn_for_gsat.
  *
- * Safety: out_present and out_prn must point to writable storage.
+ * Safety: out_present and out_prn must point to disjoint writable storage.
  */
 enum SidereonStatus sidereon_constellation_galileo_prn_for_gsat(uint16_t gsat,
                                                                 bool *out_present,
@@ -20612,7 +30224,7 @@ enum SidereonStatus sidereon_constellation_galileo_prn_for_gsat(uint16_t gsat,
  * Resolve a GLONASS slot to its FDMA frequency channel. Delegates to
  * sidereon_core::constellation::glonass_fdma_channel.
  *
- * Safety: out_present and out_channel must point to writable storage.
+ * Safety: out_present and out_channel must point to disjoint writable storage.
  */
 enum SidereonStatus sidereon_constellation_glonass_fdma_channel(uint16_t slot,
                                                                 bool *out_present,
@@ -20622,7 +30234,7 @@ enum SidereonStatus sidereon_constellation_glonass_fdma_channel(uint16_t slot,
  * Resolve a GLONASS vehicle number to its slot. Delegates to
  * sidereon_core::constellation::glonass_slot_for_number.
  *
- * Safety: out_present and out_slot must point to writable storage.
+ * Safety: out_present and out_slot must point to disjoint writable storage.
  */
 enum SidereonStatus sidereon_constellation_glonass_slot_for_number(uint16_t number,
                                                                    bool *out_present,
@@ -20984,7 +30596,7 @@ enum SidereonStatus sidereon_coverage_grid_access_counts(const struct SidereonCo
  * Read the satellite and station counts for a coverage grid.
  *
  * Safety: grid must be a live handle; out_sat_count and out_station_count must
- * point to size_t storage.
+ * point to disjoint size_t storage.
  */
 enum SidereonStatus sidereon_coverage_grid_dimensions(const struct SidereonCoverageGrid *grid,
                                                       size_t *out_sat_count,
@@ -21008,6 +30620,23 @@ enum SidereonStatus sidereon_coverage_grid_look_angle(const struct SidereonCover
                                                       size_t sat_index,
                                                       size_t station_index,
                                                       struct SidereonCoverageLookAngle *out);
+
+/**
+ * Copy the complete typed error for one failed grid cell as JSON bytes.
+ * Successful cells and out-of-range indices are rejected. Query the required
+ * byte count with a NULL output and zero capacity, then retry with a caller
+ * buffer; the grid remains owned by the caller throughout.
+ *
+ * Safety: `grid` must be live; when `len` is nonzero, `out_payload` must point
+ * to `len` writable bytes; both count outputs must be writable.
+ */
+enum SidereonStatus sidereon_coverage_grid_look_angle_error_payload(const struct SidereonCoverageGrid *grid,
+                                                                    size_t sat_index,
+                                                                    size_t station_index,
+                                                                    uint8_t *out_payload,
+                                                                    size_t len,
+                                                                    size_t *out_written,
+                                                                    size_t *out_required);
 
 /**
  * Copy the per-station maximum successful elevation. Delegates to
@@ -21434,7 +31063,7 @@ enum SidereonStatus sidereon_decay_config_init(struct SidereonDecayConfig *out_c
  * valid systems have no constellation-wide default. Delegates to
  * `sidereon_core::frequencies::default_iono_free_pair`.
  *
- * Safety: out_pair and out_present point to writable storage.
+ * Safety: out_pair and out_present point to disjoint writable storage.
  */
 enum SidereonStatus sidereon_default_iono_free_pair(uint32_t system,
                                                     struct SidereonCarrierPair *out_pair,
@@ -21464,6 +31093,14 @@ enum SidereonStatus sidereon_detect_cycle_slips(const struct SidereonArcEpoch *a
                                                 size_t len,
                                                 size_t *out_written,
                                                 size_t *out_required);
+
+enum SidereonStatus sidereon_detect_cycle_slips_v2(const struct SidereonArcEpochV2 *arc,
+                                                   size_t count,
+                                                   const struct SidereonCycleSlipOptions *options,
+                                                   struct SidereonSlipResult *out,
+                                                   size_t len,
+                                                   size_t *out_written,
+                                                   size_t *out_required);
 
 /**
  * Read one corrected observation: its satellite token (null-terminated) into
@@ -21523,7 +31160,8 @@ enum SidereonStatus sidereon_dgnss_apply_corrections(const struct SidereonCodeOb
  * whether the table has an entry for it.
  *
  * Safety: corrections is a live handle; satellite_id is a null-terminated token;
- * out_value points to a double; out_present points to a bool.
+ * out_value points to a double; out_present points to a bool. The output
+ * ranges must not overlap.
  */
 enum SidereonStatus sidereon_dgnss_correction(const struct SidereonDgnssCorrections *corrections,
                                               const char *satellite_id,
@@ -21766,7 +31404,8 @@ void sidereon_dted_terrain_free(struct SidereonDtedTerrain *terrain);
  * Query many terrain points using the same mutable DTED tile cache. Points are
  * longitude-first `(lon_deg, lat_deg)` pairs. Each successful result carries an
  * orthometric height in meters. Per-point lookup failures are written into
- * `out[i].status` and do not fail the whole call.
+ * `out[i].status` and `out[i].error` (their texts through
+ * sidereon_last_terrain_batch_error_text) and do not fail the whole call.
  *
  * Safety: terrain must be a live handle; points points to count
  * SidereonLonLatDeg values; options must point to SidereonDtedLookupOptions;
@@ -21783,6 +31422,14 @@ enum SidereonStatus sidereon_dted_terrain_height_batch_m(struct SidereonDtedTerr
  * Query one terrain height. Inputs are longitude, latitude in degrees. The
  * returned height is orthometric meters.
  *
+ * A missing tile reads as sea level. A lookup that gives nonzero weight to a
+ * DTED null posting, an unknown elevation, is refused unless a neighbouring
+ * tile knows the height at the same place, and a tile whose DSI names a
+ * horizontal datum other than WGS84 is refused. A refusal returns
+ * SIDEREON_STATUS_INVALID_ARGUMENT with `*out_height_m` 0;
+ * sidereon_last_terrain_lookup_error reports it typed, with the tile and the
+ * posting or datum.
+ *
  * Safety: terrain must be a live handle; out_height_m must point to a double.
  */
 enum SidereonStatus sidereon_dted_terrain_height_m(struct SidereonDtedTerrain *terrain,
@@ -21792,7 +31439,8 @@ enum SidereonStatus sidereon_dted_terrain_height_m(struct SidereonDtedTerrain *t
 
 /**
  * Query one terrain height with interpolation options. Inputs are longitude,
- * latitude in degrees. The returned height is orthometric meters.
+ * latitude in degrees. The returned height is orthometric meters. Refusals
+ * follow sidereon_dted_terrain_height_m.
  *
  * Safety: terrain must be a live handle; options must point to a
  * SidereonDtedLookupOptions; out_height_m must point to a double.
@@ -21825,12 +31473,29 @@ void sidereon_dted_tile_free(struct SidereonDtedTile *tile);
  * latitude in degrees. The returned integer elevation is an orthometric height
  * in meters.
  *
+ * A posting holding the DTED null value (all bits set) is an unknown
+ * elevation, not a height: the call returns SIDEREON_STATUS_INVALID_ARGUMENT
+ * with `*out_elevation_m` 0, and sidereon_last_dted_tile_error reports
+ * NullPosting with the posting indices.
+ *
  * Safety: tile must be a live handle; out_elevation_m must point to an int16_t.
  */
 enum SidereonStatus sidereon_dted_tile_get_elevation(const struct SidereonDtedTile *tile,
                                                      double longitude_deg,
                                                      double latitude_deg,
                                                      int16_t *out_elevation_m);
+
+/**
+ * Copy the horizontal datum a loaded DTED tile's DSI record states. A blank
+ * field reads as Unstated, which counts as WGS84; a tile on any datum loads,
+ * and the terrain lookups and store converter refuse one that is not WGS84
+ * compatible.
+ *
+ * Safety: tile must be a live handle; out_datum must point to a
+ * SidereonDtedHorizontalDatumValue.
+ */
+enum SidereonStatus sidereon_dted_tile_horizontal_datum(const struct SidereonDtedTile *tile,
+                                                        struct SidereonDtedHorizontalDatumValue *out_datum);
 
 /**
  * Convert an explicit DTED tile list into canonical memory-mappable terrain
@@ -21851,6 +31516,15 @@ enum SidereonStatus sidereon_dted_tile_list_to_mmap_store(const struct SidereonD
 
 /**
  * Load one DTED tile. Tile heights are orthometric meters.
+ *
+ * The tile is checked against the metadata the reader places postings by: UHL
+ * origins must be whole degrees inside their axis with that axis's hemisphere
+ * letters, a stated UHL data interval must span one degree over the posting
+ * count, and each data record must declare the longitude count of its
+ * position and latitude count zero. A failure returns
+ * SIDEREON_STATUS_INVALID_ARGUMENT; sidereon_last_dted_tile_error reports it
+ * typed. A tile on any horizontal datum loads; read it with
+ * sidereon_dted_tile_horizontal_datum.
  *
  * Safety: path must be a non-empty UTF-8 C string; out_tile must point to a
  * SidereonDtedTile*.
@@ -22473,10 +32147,209 @@ enum SidereonStatus sidereon_exact_cache_read_unlocked(const char *stable_path,
  */
 enum SidereonStatus sidereon_exact_cache_single_flight_options_init(struct SidereonExactCacheSingleFlightOptions *out_options);
 
+enum SidereonStatus sidereon_exact_epoch_attoseconds_per_second(uint64_t *out_attoseconds);
+
 /**
- * Fill *out_options with the default FDE options: unit weights, the engine
- * default false-alarm probability, no exclusions, no system-count override, and
- * the engine default validation gates. Override fields before solving.
+ * Add a shortest-decimal second offset while retaining the exact epoch result.
+ *
+ * Safety: `epoch` must be live; `out_epoch` must point to one writable handle pointer.
+ */
+enum SidereonStatus sidereon_exact_epoch_checked_add_seconds(const struct SidereonExactEpoch *epoch,
+                                                             double seconds,
+                                                             struct SidereonExactEpoch **out_epoch);
+
+/**
+ * Subtract a shortest-decimal second offset while retaining the exact epoch result.
+ *
+ * Safety: `epoch` must be live; `out_epoch` must point to one writable handle pointer.
+ */
+enum SidereonStatus sidereon_exact_epoch_checked_sub_seconds(const struct SidereonExactEpoch *epoch,
+                                                             double seconds,
+                                                             struct SidereonExactEpoch **out_epoch);
+
+/**
+ * Compare exact epoch values without converting them to rounded seconds.
+ *
+ * Safety: both epoch handles must be live and out_ordering must be writable.
+ */
+enum SidereonStatus sidereon_exact_epoch_compare(const struct SidereonExactEpoch *epoch,
+                                                 const struct SidereonExactEpoch *other,
+                                                 enum SidereonExactOrdering *out_ordering);
+
+/**
+ * Write the exact epoch components and sub-attosecond decimal residue.
+ *
+ * Safety: `epoch` must be live; all output pointers must be writable.
+ */
+enum SidereonStatus sidereon_exact_epoch_components(const struct SidereonExactEpoch *epoch,
+                                                    int64_t *out_seconds,
+                                                    uint64_t *out_attoseconds,
+                                                    int64_t *out_residue_digits,
+                                                    uint16_t *out_residue_places);
+
+/**
+ * Compare exact epoch values for equality without converting them to seconds.
+ *
+ * Safety: both epoch handles must be live and out_equal must be writable.
+ */
+enum SidereonStatus sidereon_exact_epoch_equal(const struct SidereonExactEpoch *epoch,
+                                               const struct SidereonExactEpoch *other,
+                                               bool *out_equal);
+
+/**
+ * Release an exact epoch handle.
+ */
+void sidereon_exact_epoch_free(struct SidereonExactEpoch *epoch);
+
+/**
+ * Build an exact epoch from a civil date and the shortest-decimal second label.
+ *
+ * Safety: `out_epoch` must point to one writable handle pointer.
+ */
+enum SidereonStatus sidereon_exact_epoch_from_civil(int32_t year,
+                                                    int32_t month,
+                                                    int32_t day,
+                                                    int32_t hour,
+                                                    int32_t minute,
+                                                    double second,
+                                                    struct SidereonExactEpoch **out_epoch);
+
+/**
+ * Parse a shortest-decimal J2000 second value as an exact epoch.
+ *
+ * Safety: `out_epoch` must point to one writable handle pointer.
+ */
+enum SidereonStatus sidereon_exact_epoch_from_j2000_seconds(double seconds,
+                                                            struct SidereonExactEpoch **out_epoch);
+
+enum SidereonStatus sidereon_exact_epoch_j2000(struct SidereonExactEpoch **out_epoch);
+
+/**
+ * Write an epoch's J2000 seconds rounded once from its exact value.
+ *
+ * Safety: `epoch` must be live; `out_seconds` must be writable.
+ */
+enum SidereonStatus sidereon_exact_epoch_j2000_seconds(const struct SidereonExactEpoch *epoch,
+                                                       double *out_seconds);
+
+/**
+ * Create an exact epoch from whole J2000 seconds and attoseconds.
+ *
+ * Safety: `out_epoch` must point to one writable handle pointer.
+ */
+enum SidereonStatus sidereon_exact_epoch_new(int64_t seconds,
+                                             uint64_t attoseconds,
+                                             struct SidereonExactEpoch **out_epoch);
+
+/**
+ * Create a query at an exact civil epoch without adding a binary offset.
+ *
+ * Safety: `epoch` must be live; `out_query` must point to one writable handle pointer.
+ */
+enum SidereonStatus sidereon_exact_epoch_query(const struct SidereonExactEpoch *epoch,
+                                               struct SidereonExactEpochQuery **out_query);
+
+/**
+ * Add an exact binary `f64` offset to a query.
+ *
+ * Safety: `query` must be live; `out_query` must point to one writable handle pointer.
+ */
+enum SidereonStatus sidereon_exact_epoch_query_checked_add_binary_seconds(const struct SidereonExactEpochQuery *query,
+                                                                          double seconds,
+                                                                          struct SidereonExactEpochQuery **out_query);
+
+/**
+ * Subtract an exact binary `f64` offset from a query.
+ *
+ * Safety: `query` must be live; `out_query` must point to one writable handle pointer.
+ */
+enum SidereonStatus sidereon_exact_epoch_query_checked_sub_binary_seconds(const struct SidereonExactEpochQuery *query,
+                                                                          double seconds,
+                                                                          struct SidereonExactEpochQuery **out_query);
+
+/**
+ * Create an owned exact epoch from a query's exact origin and offset.
+ * Release the result with sidereon_exact_epoch_free.
+ *
+ * Safety: query must be a live handle and out_epoch must point to writable
+ * handle-pointer storage.
+ */
+enum SidereonStatus sidereon_exact_epoch_query_epoch(const struct SidereonExactEpochQuery *query,
+                                                     struct SidereonExactEpoch **out_epoch);
+
+/**
+ * Compare query values by their exact mathematical value, independent of
+ * their epoch origin and binary-offset representation.
+ *
+ * Safety: both query handles must be live and out_equal must be writable.
+ */
+enum SidereonStatus sidereon_exact_epoch_query_equal(const struct SidereonExactEpochQuery *query,
+                                                     const struct SidereonExactEpochQuery *other,
+                                                     bool *out_equal);
+
+/**
+ * Release an exact epoch query handle.
+ */
+void sidereon_exact_epoch_query_free(struct SidereonExactEpochQuery *query);
+
+/**
+ * Interpret a finite `f64` as its exact binary J2000-second value.
+ *
+ * Safety: `out_query` must point to one writable handle pointer.
+ */
+enum SidereonStatus sidereon_exact_epoch_query_from_binary_j2000_seconds(double seconds,
+                                                                         struct SidereonExactEpochQuery **out_query);
+
+/**
+ * Write query seconds since J2000 rounded once from its exact value.
+ *
+ * Safety: `query` must be live; `out_seconds` must be writable.
+ */
+enum SidereonStatus sidereon_exact_epoch_query_j2000_seconds(const struct SidereonExactEpochQuery *query,
+                                                             double *out_seconds);
+
+/**
+ * Write seconds from an exact epoch query to another exact epoch.
+ *
+ * Safety: both handles must be live; `out_seconds` must be writable.
+ */
+enum SidereonStatus sidereon_exact_epoch_query_seconds_since(const struct SidereonExactEpochQuery *query,
+                                                             const struct SidereonExactEpoch *earlier,
+                                                             double *out_seconds);
+
+/**
+ * Write seconds between exact queries, rounded once from their exact difference.
+ *
+ * Safety: both handles must be live; `out_seconds` must be writable.
+ */
+enum SidereonStatus sidereon_exact_epoch_query_seconds_since_query(const struct SidereonExactEpochQuery *query,
+                                                                   const struct SidereonExactEpochQuery *earlier,
+                                                                   double *out_seconds);
+
+/**
+ * Write seconds from `earlier` to `epoch`, rounded once from the exact difference.
+ *
+ * Safety: both handles must be live; `out_seconds` must be writable.
+ */
+enum SidereonStatus sidereon_exact_epoch_seconds_since(const struct SidereonExactEpoch *epoch,
+                                                       const struct SidereonExactEpoch *earlier,
+                                                       double *out_seconds);
+
+/**
+ * Write an exact epoch as the nearest whole/fraction Julian-date pair.
+ *
+ * Safety: `epoch` must be live; both outputs must be writable.
+ */
+enum SidereonStatus sidereon_exact_epoch_split_julian_date(const struct SidereonExactEpoch *epoch,
+                                                           double *out_jd_whole,
+                                                           double *out_fraction);
+
+/**
+ * Fill *out_options with the default FDE options: sidereon-core's
+ * FdeOptions::default() (the solve's own variances as RAIM weights, the
+ * engine false-alarm probability, RTKLIB demo5's single exclusion and 100 m
+ * exclusion RMS cap), no system-count override, and the engine default
+ * validation gates. Override fields before solving.
  *
  * Safety: out_options must point to writable storage for a SidereonFdeOptions.
  */
@@ -22512,6 +32385,29 @@ void sidereon_fde_solution_free(struct SidereonFdeSolution *sol);
  */
 enum SidereonStatus sidereon_fde_solution_iterations(const struct SidereonFdeSolution *sol,
                                                      size_t *out_iterations);
+
+/**
+ * Write the detection test of the accepted solution: testable is false when
+ * the accepted set has no redundancy left to test.
+ *
+ * Safety: sol must be a live handle; out must point to a SidereonRaimResult.
+ */
+enum SidereonStatus sidereon_fde_solution_raim(const struct SidereonFdeSolution *sol,
+                                               struct SidereonRaimResult *out);
+
+/**
+ * Copy the weighted residuals of the accepted solution's detection test,
+ * ordered by satellite token. Uses the variable-length output contract.
+ *
+ * Safety: sol must be a live handle; out must point to len writable
+ * SidereonRaimNormalizedResidual values or be NULL when len is 0; out_written
+ * and out_required must point to size_t values.
+ */
+enum SidereonStatus sidereon_fde_solution_raim_normalized_residuals(const struct SidereonFdeSolution *sol,
+                                                                    struct SidereonRaimNormalizedResidual *out,
+                                                                    size_t len,
+                                                                    size_t *out_written,
+                                                                    size_t *out_required);
 
 /**
  * Copy the surviving receiver solution out of an FDE solution into a newly owned
@@ -22552,7 +32448,7 @@ enum SidereonStatus sidereon_fde_solve_broadcast(const struct SidereonBroadcastE
  * SidereonSppInputs whose observations field points to observation_count valid
  * entries with bounded null-terminated sat_id values; options must point to a
  * valid SidereonFdeOptions (with weights pointing to weight_count entries when
- * unit_weights is false); out_solution must point to storage for a
+ * weights_mode is BySatellite); out_solution must point to storage for a
  * SidereonFdeSolution*.
  */
 enum SidereonStatus sidereon_fde_solve_spp(const struct SidereonSp3 *sp3,
@@ -22753,6 +32649,11 @@ enum SidereonStatus sidereon_fix_wide_lane_rtk_arc(const struct SidereonRtkDualF
                                                    size_t epoch_count,
                                                    const struct SidereonRtkWideLaneArcConfig *config,
                                                    struct SidereonRtkWideLaneArcSolution **out_solution);
+
+enum SidereonStatus sidereon_fix_wide_lane_rtk_arc_v2(const struct SidereonRtkDualFrequencyArcEpochV2 *epochs,
+                                                      size_t epoch_count,
+                                                      const struct SidereonRtkWideLaneArcConfig *config,
+                                                      struct SidereonRtkWideLaneArcSolution **out_solution);
 
 /**
  * J2 oblateness perturbing acceleration in km/s^2. Delegates to
@@ -23048,8 +32949,9 @@ enum SidereonStatus sidereon_frame_polar_motion_matrix(double xp_arcsec,
  * sidereon_core::astro::frames::transforms::teme_to_gcrs_compute.
  *
  * Safety: position_km and velocity_km_s point to 3 doubles each; ts points to a
- * SidereonTimeScales; out_position_km and out_velocity_km_s point to 3 doubles
- * each.
+ * SidereonTimeScales; out_position_km and out_velocity_km_s point to disjoint
+ * 3-double ranges. Either input vector may also be used as its corresponding
+ * output vector; inputs are copied before outputs are initialized.
  */
 enum SidereonStatus sidereon_frame_teme_to_gcrs(const double *position_km,
                                                 const double *velocity_km_s,
@@ -23250,7 +33152,8 @@ enum SidereonStatus sidereon_fusion_filter_update_loose_time_sync(struct Sidereo
  * update is applied, out_present is false and out_update is zeroed.
  *
  * Safety: filter must be a live handle; out_update must point to a
- * SidereonFusionUpdate; out_present must point to a bool.
+ * SidereonFusionUpdate; out_present must point to a bool, and the output
+ * ranges must be disjoint.
  */
 enum SidereonStatus sidereon_fusion_filter_update_non_holonomic(struct SidereonFusionFilter *filter,
                                                                 struct SidereonFusionUpdate *out_update,
@@ -23262,7 +33165,8 @@ enum SidereonStatus sidereon_fusion_filter_update_non_holonomic(struct SidereonF
  * zeroed.
  *
  * Safety: filter and history must be live handles; out_update must point to a
- * SidereonFusionUpdate; out_present must point to a bool.
+ * SidereonFusionUpdate; out_present must point to a bool, and the output
+ * ranges must be disjoint.
  */
 enum SidereonStatus sidereon_fusion_filter_update_non_holonomic_recorded(struct SidereonFusionFilter *filter,
                                                                          struct SidereonFusionRtsHistoryBuilder *history,
@@ -23274,7 +33178,8 @@ enum SidereonStatus sidereon_fusion_filter_update_non_holonomic_recorded(struct 
  * applied, out_present is false and out_update is zeroed.
  *
  * Safety: filter must be a live handle; out_update must point to a
- * SidereonFusionUpdate; out_present must point to a bool.
+ * SidereonFusionUpdate; out_present must point to a bool; the output ranges
+ * must be disjoint.
  */
 enum SidereonStatus sidereon_fusion_filter_update_stationary(struct SidereonFusionFilter *filter,
                                                              struct SidereonFusionUpdate *out_update,
@@ -23285,7 +33190,8 @@ enum SidereonStatus sidereon_fusion_filter_update_stationary(struct SidereonFusi
  * When no update is applied, out_present is false and out_update is zeroed.
  *
  * Safety: filter and history must be live handles; out_update must point to a
- * SidereonFusionUpdate; out_present must point to a bool.
+ * SidereonFusionUpdate; out_present must point to a bool, and the output
+ * ranges must be disjoint.
  */
 enum SidereonStatus sidereon_fusion_filter_update_stationary_recorded(struct SidereonFusionFilter *filter,
                                                                       struct SidereonFusionRtsHistoryBuilder *history,
@@ -23506,16 +33412,13 @@ enum SidereonStatus sidereon_fusion_velocity_match_outage(const struct SidereonF
                                                           struct SidereonFusionVelocityMatchedTrajectory *out_trajectory);
 
 /**
- * Galileo coefficient-driven single-frequency ionospheric group delay in the
- * model's native units (positive meters). Delegates to
- * sidereon_core::atmosphere::ionosphere::galileo_nequick_g_native.
+ * Galileo coefficient-driven single-frequency ionospheric group delay in native units (meters).
  *
- * `ai0`/`ai1`/`ai2` are the three broadcast NeQuick-G coefficients.
- * Latitude/longitude/elevation are in degrees; `t_gal_s` is the Galileo-system
- * second of day and `day_of_year` is the fractional day of year. The slant TEC
- * is mapped to meters on `frequency_hz`. Writes the delay to *out_delay_m.
- *
- * Safety: out_delay_m must point to a double.
+ * Safety: `out_delay_m` must point to one writable, aligned double that no
+ * other argument aliases. A NULL argument this contract does not allow is
+ * refused with SIDEREON_STATUS_NULL_POINTER rather than dereferenced; a
+ * non-null pointer that is not valid for the whole call cannot be checked and
+ * is undefined behavior.
  */
 enum SidereonStatus sidereon_galileo_nequick_g_native(double ai0,
                                                       double ai1,
@@ -24017,7 +33920,16 @@ enum SidereonStatus sidereon_geoid_undulations_rad(const struct SidereonGeoidPoi
 enum SidereonStatus sidereon_glonass_g1_frequency_hz(int8_t channel, double *out);
 
 /**
- * Write seconds of week for a calendar date and time.
+ * Write seconds of week for a calendar date and time, counted from Sunday
+ * 00:00 in the date's own system time.
+ *
+ * The fields must name a calendar date and clock time: `month` in 1..=12,
+ * `day` in 1 through the length of that month in the Gregorian calendar,
+ * `hour` in 0..=23, `minute` in 0..=59 and `second` in 0..=60, where 60 is a
+ * leap-second label. Any other field is refused with
+ * SIDEREON_STATUS_INVALID_ARGUMENT and a thread-local message naming the
+ * fields. `*out_sow_s` is set to NaN before the fields are read and keeps it on
+ * a refusal, so a refused date never reads as a seconds-of-week value.
  *
  * Safety: out_sow_s points to a double.
  */
@@ -24060,7 +33972,14 @@ enum SidereonStatus sidereon_gnss_week_epoch_julian_day_number(uint32_t system,
 /**
  * Write the GNSS week for a calendar date, when present.
  *
- * Safety: out_present points to a bool; out_week points to a uint32_t.
+ * `*out_present` is false, with `*out_week` 0, for a date before the system's
+ * week epoch, for a scale without GNSS weeks, and for fields that name no
+ * calendar date: a month outside 1..=12 or a day outside that month. The
+ * engine reports all three as one absence, so this call does not tell them
+ * apart.
+ *
+ * Safety: out_present points to a bool; out_week points to a uint32_t; their
+ * output ranges must be disjoint.
  */
 enum SidereonStatus sidereon_gnss_week_from_calendar(uint32_t system,
                                                      int64_t year,
@@ -24149,6 +34068,339 @@ enum SidereonStatus sidereon_ground_track_values(const struct SidereonGroundTrac
 enum SidereonStatus sidereon_hessian_trace(const double *jacobian, size_t m, size_t n, double *out);
 
 /**
+ * Release a synthetic IMU simulator; null is accepted.
+ *
+ * # Safety
+ * `simulator` must be null or a live, not-yet-freed handle.
+ */
+void sidereon_imu_simulator_free(struct SidereonImuSimulator *simulator);
+
+/**
+ * Create the deterministic synthetic IMU simulator from an IMU specification
+ * and caller options.
+ *
+ * `output` is 0 for rate samples and 1 for integrated increments.
+ *
+ * # Safety
+ * `spec`, `options`, and `out` must point to readable, readable, and writable
+ * values. Release the returned handle with `sidereon_imu_simulator_free`.
+ */
+enum SidereonStatus sidereon_imu_simulator_new(const struct SidereonFusionImuSpec *spec,
+                                               const struct SidereonInertialSimulationOptions *options,
+                                               struct SidereonImuSimulator **out);
+
+/**
+ * Generate one noisy sample from a truth increment and return updated noise
+ * states.
+ *
+ * # Safety
+ * `simulator`, `truth`, `out_sample`, and `out_state` must be live/writable
+ * pointers as appropriate.
+ */
+enum SidereonStatus sidereon_imu_simulator_sample_increment(struct SidereonImuSimulator *simulator,
+                                                            const struct SidereonInertialIncrement *truth,
+                                                            struct SidereonFusionImuSample *out_sample,
+                                                            struct SidereonInertialSimulatorState *out_state);
+
+/**
+ * Copy the current simulator bias and rate-random-walk state without drawing
+ * another sample.
+ *
+ * # Safety
+ * `simulator` must be a live handle and `out_state` must point to writable
+ * storage.
+ */
+enum SidereonStatus sidereon_imu_simulator_state(const struct SidereonImuSimulator *simulator,
+                                                 struct SidereonInertialSimulatorState *out_state);
+
+/**
+ * Extract yaw, pitch, and roll radians from a row-major body-to-ECEF matrix.
+ *
+ * # Safety
+ * `dcm` must point to nine readable doubles (row-major) and
+ * `out_yaw_pitch_roll_rad` to three writable doubles. A NULL pointer is refused with SIDEREON_STATUS_NULL_POINTER.
+ */
+enum SidereonStatus sidereon_inertial_attitude_yaw_pitch_roll(const double *dcm,
+                                                              double *out_yaw_pitch_roll_rad);
+
+/**
+ * Build a diagonal IMU calibration from axis scale errors in ppm.
+ *
+ * # Safety
+ * `accel_scale_ppm` and `gyro_scale_ppm` must each point to three readable
+ * doubles (x, y, z) and `out_model` to writable storage. A NULL pointer is refused with SIDEREON_STATUS_NULL_POINTER.
+ */
+enum SidereonStatus sidereon_inertial_calibration_from_scale_ppm(const double *accel_scale_ppm,
+                                                                 const double *gyro_scale_ppm,
+                                                                 struct SidereonInertialImuModel *out_model);
+
+/**
+ * Copy immutable inertial-model constants to caller storage.
+ *
+ * # Safety
+ * `out_constants` must point to writable storage.
+ */
+enum SidereonStatus sidereon_inertial_constants(struct SidereonInertialConstants *out_constants);
+
+/**
+ * Correct one raw IMU sample using caller-supplied bias and calibration.
+ *
+ * # Safety
+ * `sample`, `model`, and `out_increment` must point to readable, readable,
+ * and writable storage respectively.
+ */
+enum SidereonStatus sidereon_inertial_correct_sample(const struct SidereonFusionImuSample *sample,
+                                                     double previous_t_j2000_s,
+                                                     const struct SidereonInertialImuModel *model,
+                                                     struct SidereonInertialIncrement *out_increment);
+
+/**
+ * Convert a validated body-to-ECEF direction cosine matrix to a unit quaternion.
+ *
+ * # Safety
+ * `dcm` must point to nine readable doubles (row-major) and `out` to writable
+ * storage. A NULL pointer is refused with SIDEREON_STATUS_NULL_POINTER.
+ */
+enum SidereonStatus sidereon_inertial_dcm_to_quaternion(const double *dcm,
+                                                        struct SidereonInertialQuaternion *out);
+
+/**
+ * Compute the ECEF gravitational acceleration at an ECEF position.
+ *
+ * # Safety
+ * `position_ecef_m` must point to three readable doubles and
+ * `out_gravity_ecef_mps2` to three writable doubles. A NULL pointer is refused with SIDEREON_STATUS_NULL_POINTER.
+ */
+enum SidereonStatus sidereon_inertial_gravity_ecef(const double *position_ecef_m,
+                                                   double *out_gravity_ecef_mps2);
+
+/**
+ * Validate model biases and calibration matrices without propagating a sample.
+ *
+ * # Safety
+ * `model` must point to a readable IMU error-model record.
+ */
+enum SidereonStatus sidereon_inertial_imu_model_validate(const struct SidereonInertialImuModel *model);
+
+/**
+ * Evaluate accelerometer and gyroscope bias decay and variance increments.
+ * Output order is accel decay, gyro decay, accel variance, gyro variance.
+ *
+ * # Safety
+ * `spec` must reference a readable record and `out_values` must point to four
+ * writable doubles. A NULL pointer is refused with SIDEREON_STATUS_NULL_POINTER.
+ */
+enum SidereonStatus sidereon_inertial_imu_spec_bias_statistics(const struct SidereonFusionImuSpec *spec,
+                                                               double dt_s,
+                                                               double *out_values);
+
+/**
+ * Return one built-in IMU stochastic specification; grade tags are 0 MEMS,
+ * 1 tactical, and 2 navigation.
+ *
+ * # Safety
+ * `out_spec` must point to writable storage.
+ */
+enum SidereonStatus sidereon_inertial_imu_spec_preset(uint32_t grade,
+                                                      struct SidereonFusionImuSpec *out_spec);
+
+/**
+ * Validate a caller-built IMU stochastic specification.
+ *
+ * # Safety
+ * `spec` must point to a readable specification.
+ */
+enum SidereonStatus sidereon_inertial_imu_spec_validate(const struct SidereonFusionImuSpec *spec);
+
+/**
+ * Copy the last typed inertial failure for this thread, or `None` when no
+ * inertial operation has failed.
+ *
+ * # Safety
+ * `out_error` must point to writable storage.
+ */
+enum SidereonStatus sidereon_inertial_last_error(struct SidereonInertialError *out_error);
+
+/**
+ * Copy a text field of the last typed inertial failure; bytes are not
+ * NUL-terminated and use the standard count-query buffer convention.
+ *
+ * # Safety
+ * `out_written` and `out_required` must be writable. `out` must reference
+ * `len` writable bytes unless `len` is zero.
+ */
+enum SidereonStatus sidereon_inertial_last_error_text(uint32_t part,
+                                                      uint8_t *out,
+                                                      size_t len,
+                                                      size_t *out_written,
+                                                      size_t *out_required);
+
+/**
+ * Propagate a navigation state by one corrected increment without a handle.
+ *
+ * # Safety
+ * `state`, `increment`, and `config` must be readable; `out_state` writable.
+ */
+enum SidereonStatus sidereon_inertial_mechanize_ecef(const struct SidereonInertialNavState *state,
+                                                     const struct SidereonInertialIncrement *increment,
+                                                     const struct SidereonFusionMechanizationConfig *config,
+                                                     struct SidereonInertialNavState *out_state);
+
+/**
+ * Release a mechanizer handle; null is accepted.
+ *
+ * # Safety
+ * `mechanizer` must be null or a live, not-yet-freed handle.
+ */
+void sidereon_inertial_mechanizer_free(struct SidereonInertialMechanizer *mechanizer);
+
+/**
+ * Create an ECEF strapdown mechanizer with the default zero-bias IMU model.
+ *
+ * # Safety
+ * `initial` must reference a readable navigation state and `out` a writable
+ * handle pointer. The returned handle must be released with
+ * `sidereon_inertial_mechanizer_free`.
+ */
+enum SidereonStatus sidereon_inertial_mechanizer_new(const struct SidereonInertialNavState *initial,
+                                                     struct SidereonInertialMechanizer **out);
+
+/**
+ * Create a mechanizer using the caller-selected core coning-correction mode.
+ *
+ * # Safety
+ * `initial` and `config` must point to readable values; `out` must point to a
+ * writable handle pointer. Free a returned handle with
+ * `sidereon_inertial_mechanizer_free`.
+ */
+enum SidereonStatus sidereon_inertial_mechanizer_new_with_config(const struct SidereonInertialNavState *initial,
+                                                                 const struct SidereonFusionMechanizationConfig *config,
+                                                                 struct SidereonInertialMechanizer **out);
+
+/**
+ * Create a mechanizer with caller-supplied sensor bias and calibration.
+ *
+ * # Safety
+ * `initial`, `model`, and `out` must point to readable, readable, and writable
+ * values respectively. The returned handle must be freed with
+ * `sidereon_inertial_mechanizer_free`.
+ */
+enum SidereonStatus sidereon_inertial_mechanizer_new_with_model(const struct SidereonInertialNavState *initial,
+                                                                const struct SidereonInertialImuModel *model,
+                                                                struct SidereonInertialMechanizer **out);
+
+/**
+ * Propagate one rate or increment sample and copy out the updated state.
+ *
+ * # Safety
+ * `mechanizer` must be a live handle; `sample` and `out_state` must point to
+ * readable and writable values.
+ */
+enum SidereonStatus sidereon_inertial_mechanizer_propagate(struct SidereonInertialMechanizer *mechanizer,
+                                                           const struct SidereonFusionImuSample *sample,
+                                                           struct SidereonInertialNavState *out_state);
+
+/**
+ * Copy the current mechanizer state without advancing it.
+ *
+ * # Safety
+ * `mechanizer` must be a live handle; `out_state` must point to writable
+ * storage.
+ */
+enum SidereonStatus sidereon_inertial_mechanizer_state(const struct SidereonInertialMechanizer *mechanizer,
+                                                       struct SidereonInertialNavState *out_state);
+
+/**
+ * Compute normal gravity magnitude at geodetic latitude and ellipsoidal height.
+ *
+ * # Safety
+ * `out_gravity_mps2` must point to writable storage.
+ */
+enum SidereonStatus sidereon_inertial_normal_gravity(double latitude_rad,
+                                                     double height_m,
+                                                     double *out_gravity_mps2);
+
+/**
+ * Convert a unit quaternion to a row-major body-to-ECEF direction cosine matrix.
+ *
+ * # Safety
+ * `quaternion` must point to a readable record and `out` to nine writable
+ * doubles (row-major). A NULL pointer is refused with SIDEREON_STATUS_NULL_POINTER.
+ */
+enum SidereonStatus sidereon_inertial_quaternion_to_dcm(const struct SidereonInertialQuaternion *quaternion,
+                                                        double *out);
+
+/**
+ * Validate optional rate-random-walk densities in SI units.
+ *
+ * # Safety
+ * This call has no pointer arguments.
+ */
+enum SidereonStatus sidereon_inertial_rate_random_walk_validate(double accel_mps2_sqrt_s,
+                                                                double gyro_rps_sqrt_s);
+
+/**
+ * Re-orthonormalize a row-major 3-by-3 direction cosine matrix.
+ *
+ * # Safety
+ * `dcm` must point to nine readable doubles and `out` to nine writable doubles,
+ * both row-major. A NULL pointer is refused with SIDEREON_STATUS_NULL_POINTER.
+ */
+enum SidereonStatus sidereon_inertial_reorthonormalize_dcm(const double *dcm, double *out);
+
+/**
+ * Generate a Rodrigues body rotation from an angular increment.
+ *
+ * # Safety
+ * `delta_theta_rad` must point to three readable doubles and `out_dcm` to nine
+ * writable doubles (row-major). A NULL pointer is refused with SIDEREON_STATUS_NULL_POINTER.
+ */
+enum SidereonStatus sidereon_inertial_rodrigues_delta_dcm(const double *delta_theta_rad,
+                                                          double *out_dcm);
+
+/**
+ * Generate a sample and bias-history batch from corrected truth increments.
+ * All output arrays have `count` entries; their contents are untouched on error.
+ *
+ * # Safety
+ * Inputs must reference `count` readable records; output arrays must each
+ * reference `count` writable records unless `count` is zero. The two output
+ * ranges must not overlap.
+ */
+enum SidereonStatus sidereon_inertial_simulate_increments(const struct SidereonInertialIncrement *increments,
+                                                          size_t count,
+                                                          const struct SidereonFusionImuSpec *spec,
+                                                          const struct SidereonInertialSimulationOptions *options,
+                                                          struct SidereonFusionImuSample *out_samples,
+                                                          struct SidereonInertialSimulatorState *out_state_history);
+
+/**
+ * Generate a sample and bias-history batch from a navigation-state trajectory.
+ * The output arrays have `count - 1` entries and are untouched on error.
+ *
+ * # Safety
+ * `trajectory` must reference `count` readable states; output arrays must
+ * reference `count - 1` writable records when `count > 1`. The two output
+ * ranges must not overlap.
+ */
+enum SidereonStatus sidereon_inertial_simulate_trajectory(const struct SidereonInertialNavState *trajectory,
+                                                          size_t count,
+                                                          const struct SidereonFusionImuSpec *spec,
+                                                          const struct SidereonInertialSimulationOptions *options,
+                                                          struct SidereonFusionImuSample *out_samples,
+                                                          struct SidereonInertialSimulatorState *out_state_history);
+
+/**
+ * Reconstruct the corrected truth increment between two navigation states.
+ *
+ * # Safety
+ * `start`, `end`, and `out_increment` must point to readable/writable storage.
+ */
+enum SidereonStatus sidereon_inertial_true_increment_between(const struct SidereonInertialNavState *start,
+                                                             const struct SidereonInertialNavState *end,
+                                                             struct SidereonInertialIncrement *out_increment);
+
+/**
  * Build a UTC Instant from civil-calendar fields and report its split Julian
  * date and continuous J2000 seconds. No leap second is applied. Delegates to
  * sidereon_core::astro::time::Instant::from_utc_civil.
@@ -24174,7 +34426,8 @@ enum SidereonStatus sidereon_instant_from_utc_civil(int32_t year,
  *
  * Safety: decl/rtasc/jd/jdf point to 3 doubles each; rseci_km points to 9
  * doubles (row-major, row i = site i); out_position_km and out_velocity_km_s
- * point to 3 doubles each.
+ * point to disjoint 3-double ranges. Inputs are copied before outputs are
+ * initialized, so an input array may be used as an output array.
  */
 enum SidereonStatus sidereon_iod_gauss_angles(const double *decl_rad,
                                               const double *rtasc_rad,
@@ -24221,28 +34474,38 @@ enum SidereonStatus sidereon_iod_hgibbs(const double *r1_km,
 /**
  * Write the number of TEC map epochs in the product to *out_count.
  *
- * Safety: ionex must be a live handle from sidereon_ionex_parse; out_count must
- * point to a size_t.
+ * Safety: `ionex` must be a live SidereonIonex handle, not freed for the
+ * duration of the call; `out_count` must point to one writable, aligned size_t
+ * that no other argument aliases. A NULL argument this contract does not allow
+ * is refused with SIDEREON_STATUS_NULL_POINTER rather than dereferenced; a
+ * non-null pointer that is not valid for the whole call cannot be checked and
+ * is undefined behavior.
  */
 enum SidereonStatus sidereon_ionex_epoch_count(const struct SidereonIonex *ionex,
                                                size_t *out_count);
 
 /**
- * Write the IONEX EXPONENT header field to *out_exponent (the TEC scale is
- * 10^EXPONENT).
+ * Write the IONEX EXPONENT header field to *out_exponent.
  *
- * Safety: ionex must be a live handle from sidereon_ionex_parse; out_exponent
- * must point to an int32_t.
+ * Safety: `ionex` must be a live SidereonIonex handle, not freed for the
+ * duration of the call; `out_exponent` must point to one writable, aligned
+ * int32_t that no other argument aliases. A NULL argument this contract does
+ * not allow is refused with SIDEREON_STATUS_NULL_POINTER rather than
+ * dereferenced; a non-null pointer that is not valid for the whole call cannot
+ * be checked and is undefined behavior.
  */
 enum SidereonStatus sidereon_ionex_exponent(const struct SidereonIonex *ionex,
                                             int32_t *out_exponent);
 
 /**
- * Release an IONEX product handle from sidereon_ionex_parse. Passing NULL is a
- * no-op.
+ * Release an IONEX product handle. Passing NULL is a no-op.
  *
- * Safety: ionex must be NULL or a live handle from sidereon_ionex_parse that has
- * not already been freed.
+ * Safety: `ionex` may be NULL, which is a no-op; otherwise it must be a live
+ * SidereonIonex handle this binding produced, and it must be passed here
+ * exactly once. The handle and every pointer read out of it are invalid
+ * afterwards. This call returns nothing, so it reports no status: a pointer
+ * that is neither NULL nor such a handle cannot be checked and is undefined
+ * behavior.
  */
 void sidereon_ionex_free(struct SidereonIonex *ionex);
 
@@ -24250,19 +34513,101 @@ void sidereon_ionex_free(struct SidereonIonex *ionex);
  * Build an IONEX product from whole-grid TEC samples. On success writes a new
  * handle to *out_ionex; release it with sidereon_ionex_free.
  *
- * Safety: samples must point to a SidereonTecGridSamples whose arrays match its
- * counts; out_ionex must point to storage for a SidereonIonex*.
+ * The struct's pointer fields fall into three groups, and NULL means a
+ * different thing in each.
+ *
+ * The mandatory value buffers -- the map epochs, `lat_nodes_deg`,
+ * `lon_nodes_deg` and `tec_maps_tecu` -- are read over the count beside each,
+ * and each may be NULL only when that count is 0. The map epochs are read from
+ * `map_epochs_j2000_whole_s` when it is non-NULL and from
+ * `map_epochs_j2000_s` otherwise. `tec_map_value_count` must equal the product
+ * of the three node counts, so `tec_maps_tecu` may be NULL only for a grid
+ * with no cells at all.
+ *
+ * The presence buffers -- `tec_maps_present`, `rms_maps_present` and
+ * `height_maps_present` -- are optional at every count. A NULL one reads all
+ * of its map's values as present, exactly as the field comment says; a
+ * non-NULL one must be readable over the same count as the values it marks.
+ *
+ * The RMS and height stacks are gated by `has_rms_maps` and
+ * `has_height_maps`. When a flag is false its whole stack is ignored: neither
+ * `rms_maps_tecu`/`rms_maps_present`/`rms_map_value_count` nor their height
+ * counterparts are read at all, and they may hold anything. When a flag is
+ * true that stack's value count must equal the same product, its value buffer
+ * is mandatory on the rule above and its presence buffer stays optional.
+ *
+ * A refusal of the samples themselves -- an epoch that is not a whole second,
+ * a present value that is not finite, a count that disagrees with the axes,
+ * or any engine `TecSamplesError` -- returns SIDEREON_STATUS_INVALID_ARGUMENT
+ * with text naming the input and index in the thread-local message. Use
+ * sidereon_ionex_from_tec_grid_samples_result for the same refusal as a
+ * typed SidereonTecSamplesError with owned text.
+ *
+ * Safety: `samples` must point to one readable, aligned SidereonTecGridSamples
+ * whose pointer fields satisfy those three rules, with `header` either NULL,
+ * which builds the header declaring no mapping function, or a live
+ * SidereonIonexHeader handle, which is cloned rather than taken over;
+ * `out_ionex` must point to writable, aligned storage for one `SidereonIonex
+ * *`, which is set to NULL before any work and receives a newly owned handle
+ * only on SIDEREON_STATUS_OK; release it with sidereon_ionex_free. The output
+ * slot must be disjoint from the SidereonTecGridSamples struct, from every
+ * buffer its pointer fields name, and from the header handle's own storage:
+ * it is written while Rust references to all of them are live. Those input
+ * buffers are read-only and may overlap one another. A NULL argument this
+ * contract does not allow is refused with SIDEREON_STATUS_NULL_POINTER
+ * rather than dereferenced; a non-null pointer that is not valid for the whole
+ * call cannot be checked and is undefined behavior.
  */
 enum SidereonStatus sidereon_ionex_from_tec_grid_samples(const struct SidereonTecGridSamples *samples,
                                                          struct SidereonIonex **out_ionex);
 
 /**
- * Build an IONEX product from one sample per grid node. Angles are degrees,
- * VTEC/RMS are TECU, shell/base radii are kilometers, and epochs are seconds
- * since J2000 in each sample's time scale.
+ * Build an IONEX product from whole-grid TEC samples and take an owned record
+ * of the attempt.
  *
- * Safety: samples points to count SidereonTecSample entries, or NULL when count
- * is zero; out_ionex must point to storage for a SidereonIonex*.
+ * Same inputs as sidereon_ionex_from_tec_grid_samples. This route returns
+ * SIDEREON_STATUS_OK whenever the call itself was well formed and hands back a
+ * newly owned SidereonTecSamplesResult; a refusal of the samples is inside
+ * it, with `*out_ionex` left NULL. Read it with
+ * sidereon_tec_samples_result_get_outcome and
+ * sidereon_tec_samples_result_get_message. A structural failure of the call
+ * -- a null out-parameter, a null buffer with a nonzero count, a count no
+ * slice can span, or a time scale tag this binding does not name -- leaves
+ * both outputs NULL, returns a status that is not OK, allocates nothing, and
+ * sets the thread-local message.
+ *
+ * Safety: as sidereon_ionex_from_tec_grid_samples for `samples` and
+ * `out_ionex`; `out_result` must point to writable, aligned storage for one
+ * `SidereonTecSamplesResult *`, which is set to NULL before any work and
+ * receives a newly owned handle only on SIDEREON_STATUS_OK; release it with
+ * sidereon_tec_samples_result_free. Both output slots must be disjoint from
+ * every input and from each other. A NULL argument this contract does not
+ * allow is refused with SIDEREON_STATUS_NULL_POINTER rather than
+ * dereferenced; a non-null pointer that is not valid for the whole call
+ * cannot be checked and is undefined behavior.
+ */
+enum SidereonStatus sidereon_ionex_from_tec_grid_samples_result(const struct SidereonTecGridSamples *samples,
+                                                                struct SidereonIonex **out_ionex,
+                                                                struct SidereonTecSamplesResult **out_result);
+
+/**
+ * Build an IONEX product from one sample per grid node with default header.
+ *
+ * The default header declares no mapping function: it is the header
+ * `sidereon_ionex_header_new` builds. See
+ * `sidereon_ionex_from_tec_samples_with_header` for what that means for a
+ * slant query and for a product written back, and for the epoch contract.
+ *
+ * Safety: `samples` must point to `count` readable, aligned SidereonTecSample
+ * values, or may be NULL when `count` is 0; `out_ionex` must point to
+ * writable, aligned storage for one `SidereonIonex *`, which is set to NULL
+ * before any work and receives a newly owned handle only on
+ * SIDEREON_STATUS_OK; release it with sidereon_ionex_free. The output slot
+ * must be disjoint from the `count` samples: it is written while a Rust
+ * reference to them is live. A NULL argument this contract does not allow is
+ * refused with SIDEREON_STATUS_NULL_POINTER rather than dereferenced; a
+ * non-null pointer that is not valid for the whole call cannot be checked and
+ * is undefined behavior.
  */
 enum SidereonStatus sidereon_ionex_from_tec_samples(const struct SidereonTecSample *samples,
                                                     size_t count,
@@ -24272,12 +34617,767 @@ enum SidereonStatus sidereon_ionex_from_tec_samples(const struct SidereonTecSamp
                                                     struct SidereonIonex **out_ionex);
 
 /**
- * Copy the latitude node axis (degrees, descending north-to-south). Uses the
- * variable-length output contract documented at the top of the header.
+ * Build an IONEX product from one sample per grid node and take an owned
+ * record of the attempt.
  *
- * Safety: ionex must be a live handle from sidereon_ionex_parse; out (when
- * non-NULL) must point to len writable doubles; out_written and out_required
- * must point to size_t.
+ * Same inputs as sidereon_ionex_from_tec_samples_with_header, `header` NULL
+ * included. The outcome contract is sidereon_ionex_from_tec_grid_samples_result's:
+ * a refusal of the samples returns SIDEREON_STATUS_OK with `*out_ionex` NULL
+ * and the typed refusal in the result, and a structural failure of the call
+ * leaves both outputs NULL with a status that is not OK.
+ *
+ * Safety: as sidereon_ionex_from_tec_samples_with_header for every argument
+ * but `out_result`, which must point to writable, aligned storage for one
+ * `SidereonTecSamplesResult *`, which is set to NULL before any work and
+ * receives a newly owned handle only on SIDEREON_STATUS_OK; release it with
+ * sidereon_tec_samples_result_free. Both output slots must be disjoint from
+ * every input and from each other. A NULL argument this contract does not
+ * allow is refused with SIDEREON_STATUS_NULL_POINTER rather than
+ * dereferenced; a non-null pointer that is not valid for the whole call
+ * cannot be checked and is undefined behavior.
+ */
+enum SidereonStatus sidereon_ionex_from_tec_samples_result(const struct SidereonTecSample *samples,
+                                                           size_t count,
+                                                           double shell_height_km,
+                                                           double base_radius_km,
+                                                           int32_t exponent,
+                                                           const struct SidereonIonexHeader *header,
+                                                           struct SidereonIonex **out_ionex,
+                                                           struct SidereonTecSamplesResult **out_result);
+
+/**
+ * Build an IONEX product from one sample per grid node with an explicit header handle.
+ *
+ * A NULL `header` builds a header with every record at the value the spec
+ * gives for an unstated one and no `MAPPING FUNCTION` record. The product
+ * then reports `SIDEREON_IONEX_ASSUMED_MAPPING_KIND_ABSENT` on a successful slant
+ * row, is refused under `SIDEREON_IONEX_MAPPING_POLICY_DECLARED`, and writes
+ * back no `MAPPING FUNCTION` record. Pass a header from
+ * `sidereon_ionex_header_new` plus
+ * `sidereon_ionex_header_set_mapping_function` to declare one.
+ *
+ * Each sample's epoch follows the SidereonTecSample contract: the integer
+ * field when its flag is set, otherwise a double that must hold a whole
+ * second exactly. A refusal of the samples themselves returns
+ * SIDEREON_STATUS_INVALID_ARGUMENT with text naming the sample index in the
+ * thread-local message; sidereon_ionex_from_tec_samples_result returns the
+ * same refusal typed, with owned text.
+ *
+ * Safety: `samples` must point to `count` readable, aligned SidereonTecSample
+ * values, or may be NULL when `count` is 0; `header` may be NULL, which builds
+ * the header declaring no mapping function; otherwise it must be a live
+ * SidereonIonexHeader handle, which is cloned rather than taken over, so the
+ * caller still owns it and must still free it; `out_ionex` must point to
+ * writable, aligned storage for one `SidereonIonex *`, which is set to NULL
+ * before any work and receives a newly owned handle only on
+ * SIDEREON_STATUS_OK; release it with sidereon_ionex_free. The output slot
+ * must be disjoint from the `count` samples and from the header handle's own
+ * storage: it is written while Rust references to both are live. A NULL
+ * argument this contract does not allow is refused with
+ * SIDEREON_STATUS_NULL_POINTER rather than dereferenced; a non-null pointer
+ * that is not valid for the whole call cannot be checked and is undefined
+ * behavior.
+ */
+enum SidereonStatus sidereon_ionex_from_tec_samples_with_header(const struct SidereonTecSample *samples,
+                                                                size_t count,
+                                                                double shell_height_km,
+                                                                double base_radius_km,
+                                                                int32_t exponent,
+                                                                const struct SidereonIonexHeader *header,
+                                                                struct SidereonIonex **out_ionex);
+
+/**
+ * Extract a cloned copy of an IONEX product's header into a newly owned handle.
+ *
+ * Safety: `ionex` must be a live SidereonIonex handle, not freed for the
+ * duration of the call; `out_header` must point to writable, aligned storage
+ * for one `SidereonIonexHeader *`, which is set to NULL before any work and
+ * receives a newly owned handle only on SIDEREON_STATUS_OK; release it with
+ * sidereon_ionex_header_free. The output slot must be disjoint from the
+ * product's own storage: it is written while a Rust reference to the product
+ * is live. A NULL argument this contract does not allow is refused with
+ * SIDEREON_STATUS_NULL_POINTER rather than dereferenced; a non-null pointer
+ * that is not valid for the whole call cannot be checked and is undefined
+ * behavior.
+ */
+enum SidereonStatus sidereon_ionex_get_header(const struct SidereonIonex *ionex,
+                                              struct SidereonIonexHeader **out_header);
+
+/**
+ * Append a comment line to an IONEX header.
+ *
+ * Safety: `header` must be a live SidereonIonexHeader handle, exclusively
+ * borrowed for the call: nothing else may read or write it meanwhile; `text`
+ * must point to `len` readable bytes, or may be NULL when `len` is 0; the
+ * bytes are copied during the call, no NUL terminator is read or required, and
+ * a NUL among them is copied as data. A NULL argument this contract does not
+ * allow is refused with SIDEREON_STATUS_NULL_POINTER rather than dereferenced;
+ * a non-null pointer that is not valid for the whole call cannot be checked
+ * and is undefined behavior.
+ */
+enum SidereonStatus sidereon_ionex_header_add_comment(struct SidereonIonexHeader *header,
+                                                      const uint8_t *text,
+                                                      size_t len);
+
+/**
+ * Append a description line to an IONEX header.
+ *
+ * Safety: `header` must be a live SidereonIonexHeader handle, exclusively
+ * borrowed for the call: nothing else may read or write it meanwhile; `text`
+ * must point to `len` readable bytes, or may be NULL when `len` is 0; the
+ * bytes are copied during the call, no NUL terminator is read or required, and
+ * a NUL among them is copied as data. A NULL argument this contract does not
+ * allow is refused with SIDEREON_STATUS_NULL_POINTER rather than dereferenced;
+ * a non-null pointer that is not valid for the whole call cannot be checked
+ * and is undefined behavior.
+ */
+enum SidereonStatus sidereon_ionex_header_add_description(struct SidereonIonexHeader *header,
+                                                          const uint8_t *text,
+                                                          size_t len);
+
+/**
+ * Clear all comment lines from an IONEX header.
+ *
+ * Safety: `header` must be a live SidereonIonexHeader handle, exclusively
+ * borrowed for the call: nothing else may read or write it meanwhile. A NULL
+ * argument this contract does not allow is refused with
+ * SIDEREON_STATUS_NULL_POINTER rather than dereferenced; a non-null pointer
+ * that is not valid for the whole call cannot be checked and is undefined
+ * behavior.
+ */
+enum SidereonStatus sidereon_ionex_header_clear_comments(struct SidereonIonexHeader *header);
+
+/**
+ * Clear all description lines from an IONEX header.
+ *
+ * Safety: `header` must be a live SidereonIonexHeader handle, exclusively
+ * borrowed for the call: nothing else may read or write it meanwhile. A NULL
+ * argument this contract does not allow is refused with
+ * SIDEREON_STATUS_NULL_POINTER rather than dereferenced; a non-null pointer
+ * that is not valid for the whole call cannot be checked and is undefined
+ * behavior.
+ */
+enum SidereonStatus sidereon_ionex_header_clear_descriptions(struct SidereonIonexHeader *header);
+
+/**
+ * Clear the mapping function on an IONEX header (marking it absent).
+ *
+ * Safety: `header` must be a live SidereonIonexHeader handle, exclusively
+ * borrowed for the call: nothing else may read or write it meanwhile. A NULL
+ * argument this contract does not allow is refused with
+ * SIDEREON_STATUS_NULL_POINTER rather than dereferenced; a non-null pointer
+ * that is not valid for the whole call cannot be checked and is undefined
+ * behavior.
+ */
+enum SidereonStatus sidereon_ionex_header_clear_mapping_function(struct SidereonIonexHeader *header);
+
+/**
+ * Clone an IONEX header into a new owned handle.
+ *
+ * Safety: `header` must be a live SidereonIonexHeader handle, not freed for
+ * the duration of the call; `out_header` must point to writable, aligned
+ * storage for one `SidereonIonexHeader *`, which is set to NULL before any
+ * work and receives a newly owned handle only on SIDEREON_STATUS_OK; release
+ * it with sidereon_ionex_header_free. A NULL argument this contract does not
+ * allow is refused with SIDEREON_STATUS_NULL_POINTER rather than dereferenced;
+ * a non-null pointer that is not valid for the whole call cannot be checked
+ * and is undefined behavior.
+ */
+enum SidereonStatus sidereon_ionex_header_clone(const struct SidereonIonexHeader *header,
+                                                struct SidereonIonexHeader **out_header);
+
+/**
+ * Write the count of comment lines in an IONEX header to *out_count.
+ *
+ * Safety: `header` must be a live SidereonIonexHeader handle, not freed for
+ * the duration of the call; `out_count` must point to one writable, aligned
+ * size_t that no other argument aliases. A NULL argument this contract does
+ * not allow is refused with SIDEREON_STATUS_NULL_POINTER rather than
+ * dereferenced; a non-null pointer that is not valid for the whole call cannot
+ * be checked and is undefined behavior.
+ */
+enum SidereonStatus sidereon_ionex_header_comment_count(const struct SidereonIonexHeader *header,
+                                                        size_t *out_count);
+
+/**
+ * Write the count of description lines in an IONEX header to *out_count.
+ *
+ * Safety: `header` must be a live SidereonIonexHeader handle, not freed for
+ * the duration of the call; `out_count` must point to one writable, aligned
+ * size_t that no other argument aliases. A NULL argument this contract does
+ * not allow is refused with SIDEREON_STATUS_NULL_POINTER rather than
+ * dereferenced; a non-null pointer that is not valid for the whole call cannot
+ * be checked and is undefined behavior.
+ */
+enum SidereonStatus sidereon_ionex_header_description_count(const struct SidereonIonexHeader *header,
+                                                            size_t *out_count);
+
+/**
+ * Release an IONEX header handle. Passing NULL is a no-op.
+ *
+ * Safety: `header` may be NULL, which is a no-op; otherwise it must be a live
+ * SidereonIonexHeader handle this binding produced, and it must be passed here
+ * exactly once. The handle and every pointer read out of it are invalid
+ * afterwards. This call returns nothing, so it reports no status: a pointer
+ * that is neither NULL nor such a handle cannot be checked and is undefined
+ * behavior.
+ */
+void sidereon_ionex_header_free(struct SidereonIonexHeader *header);
+
+/**
+ * Copy comment line at index. Uses variable-length output contract.
+ *
+ * Safety: `header` must be a live SidereonIonexHeader handle, not freed for
+ * the duration of the call; `out` may be NULL only when `len` is 0, which
+ * queries the required count through `out_required`; otherwise it must point
+ * to `len` writable, aligned bytes that do not overlap the handle being read.
+ * `len` is the buffer size in bytes. `out_written` and `out_required` must
+ * each point to one writable, aligned size_t, must alias neither each other
+ * nor `out`, and are both set to 0 before anything else is read. The bytes are
+ * copied verbatim: no NUL terminator is appended, so a caller wanting a C
+ * string must allocate one more byte and write it. A NULL argument this
+ * contract does not allow is refused with SIDEREON_STATUS_NULL_POINTER rather
+ * than dereferenced; a non-null pointer that is not valid for the whole call
+ * cannot be checked and is undefined behavior.
+ */
+enum SidereonStatus sidereon_ionex_header_get_comment(const struct SidereonIonexHeader *header,
+                                                      size_t index,
+                                                      uint8_t *out,
+                                                      size_t len,
+                                                      size_t *out_written,
+                                                      size_t *out_required);
+
+/**
+ * Copy the creation date string from an IONEX header. Uses variable-length output.
+ *
+ * Safety: `header` must be a live SidereonIonexHeader handle, not freed for
+ * the duration of the call; `out` may be NULL only when `len` is 0, which
+ * queries the required count through `out_required`; otherwise it must point
+ * to `len` writable, aligned bytes that do not overlap the handle being read.
+ * `len` is the buffer size in bytes. `out_written` and `out_required` must
+ * each point to one writable, aligned size_t, must alias neither each other
+ * nor `out`, and are both set to 0 before anything else is read. The bytes are
+ * copied verbatim: no NUL terminator is appended, so a caller wanting a C
+ * string must allocate one more byte and write it. A NULL argument this
+ * contract does not allow is refused with SIDEREON_STATUS_NULL_POINTER rather
+ * than dereferenced; a non-null pointer that is not valid for the whole call
+ * cannot be checked and is undefined behavior.
+ */
+enum SidereonStatus sidereon_ionex_header_get_date(const struct SidereonIonexHeader *header,
+                                                   uint8_t *out,
+                                                   size_t len,
+                                                   size_t *out_written,
+                                                   size_t *out_required);
+
+/**
+ * Copy description line at index. Uses variable-length output contract.
+ *
+ * Safety: `header` must be a live SidereonIonexHeader handle, not freed for
+ * the duration of the call; `out` may be NULL only when `len` is 0, which
+ * queries the required count through `out_required`; otherwise it must point
+ * to `len` writable, aligned bytes that do not overlap the handle being read.
+ * `len` is the buffer size in bytes. `out_written` and `out_required` must
+ * each point to one writable, aligned size_t, must alias neither each other
+ * nor `out`, and are both set to 0 before anything else is read. The bytes are
+ * copied verbatim: no NUL terminator is appended, so a caller wanting a C
+ * string must allocate one more byte and write it. A NULL argument this
+ * contract does not allow is refused with SIDEREON_STATUS_NULL_POINTER rather
+ * than dereferenced; a non-null pointer that is not valid for the whole call
+ * cannot be checked and is undefined behavior.
+ */
+enum SidereonStatus sidereon_ionex_header_get_description(const struct SidereonIonexHeader *header,
+                                                          size_t index,
+                                                          uint8_t *out,
+                                                          size_t len,
+                                                          size_t *out_written,
+                                                          size_t *out_required);
+
+/**
+ * Read elevation cutoff in degrees from an IONEX header.
+ *
+ * Safety: `header` must be a live SidereonIonexHeader handle, not freed for
+ * the duration of the call; `out_cutoff_deg` must point to one writable,
+ * aligned double that no other argument aliases. A NULL argument this contract
+ * does not allow is refused with SIDEREON_STATUS_NULL_POINTER rather than
+ * dereferenced; a non-null pointer that is not valid for the whole call cannot
+ * be checked and is undefined behavior.
+ */
+enum SidereonStatus sidereon_ionex_header_get_elevation_cutoff_deg(const struct SidereonIonexHeader *header,
+                                                                   double *out_cutoff_deg);
+
+/**
+ * Read interval between maps in seconds from an IONEX header.
+ *
+ * Safety: `header` must be a live SidereonIonexHeader handle, not freed for
+ * the duration of the call; `out_interval_s` must point to one writable,
+ * aligned uint32_t that no other argument aliases. A NULL argument this
+ * contract does not allow is refused with SIDEREON_STATUS_NULL_POINTER rather
+ * than dereferenced; a non-null pointer that is not valid for the whole call
+ * cannot be checked and is undefined behavior.
+ */
+enum SidereonStatus sidereon_ionex_header_get_interval_s(const struct SidereonIonexHeader *header,
+                                                         uint32_t *out_interval_s);
+
+/**
+ * Read mapping declaration status and function variant from an IONEX header.
+ *
+ * Safety: `header` must be a live SidereonIonexHeader handle, not freed for
+ * the duration of the call; `out_decl_kind` must point to one writable,
+ * aligned SidereonIonexMappingDeclarationKind that no other argument aliases;
+ * `out_func_kind` must point to one writable, aligned
+ * SidereonIonexMappingFunctionKind that no other argument aliases. A NULL
+ * argument this contract does not allow is refused with
+ * SIDEREON_STATUS_NULL_POINTER rather than dereferenced; a non-null pointer
+ * that is not valid for the whole call cannot be checked and is undefined
+ * behavior.
+ */
+enum SidereonStatus sidereon_ionex_header_get_mapping_declaration(const struct SidereonIonexHeader *header,
+                                                                  enum SidereonIonexMappingDeclarationKind *out_decl_kind,
+                                                                  enum SidereonIonexMappingFunctionKind *out_func_kind);
+
+/**
+ * Copy the raw mapping function code text (e.g. "NONE", "COSZ", "QFAC", or custom text).
+ * Uses variable-length output contract. If absent, required length is 0.
+ *
+ * Safety: `header` must be a live SidereonIonexHeader handle, not freed for
+ * the duration of the call; `out` may be NULL only when `len` is 0, which
+ * queries the required count through `out_required`; otherwise it must point
+ * to `len` writable, aligned bytes that do not overlap the handle being read.
+ * `len` is the buffer size in bytes. `out_written` and `out_required` must
+ * each point to one writable, aligned size_t, must alias neither each other
+ * nor `out`, and are both set to 0 before anything else is read. The bytes are
+ * copied verbatim: no NUL terminator is appended, so a caller wanting a C
+ * string must allocate one more byte and write it. A NULL argument this
+ * contract does not allow is refused with SIDEREON_STATUS_NULL_POINTER rather
+ * than dereferenced; a non-null pointer that is not valid for the whole call
+ * cannot be checked and is undefined behavior.
+ */
+enum SidereonStatus sidereon_ionex_header_get_mapping_function_code(const struct SidereonIonexHeader *header,
+                                                                    uint8_t *out,
+                                                                    size_t len,
+                                                                    size_t *out_written,
+                                                                    size_t *out_required);
+
+/**
+ * Read optional maps_in_file count from an IONEX header.
+ *
+ * Safety: `header` must be a live SidereonIonexHeader handle, not freed for
+ * the duration of the call; `out_count` must point to one writable, aligned
+ * uint32_t that no other argument aliases; `out_has_count` must point to one
+ * writable, aligned bool that no other argument aliases. A NULL argument this
+ * contract does not allow is refused with SIDEREON_STATUS_NULL_POINTER rather
+ * than dereferenced; a non-null pointer that is not valid for the whole call
+ * cannot be checked and is undefined behavior.
+ */
+enum SidereonStatus sidereon_ionex_header_get_maps_in_file(const struct SidereonIonexHeader *header,
+                                                           uint32_t *out_count,
+                                                           bool *out_has_count);
+
+/**
+ * Copy observables used description from an IONEX header. Uses variable-length output.
+ *
+ * Safety: `header` must be a live SidereonIonexHeader handle, not freed for
+ * the duration of the call; `out` may be NULL only when `len` is 0, which
+ * queries the required count through `out_required`; otherwise it must point
+ * to `len` writable, aligned bytes that do not overlap the handle being read.
+ * `len` is the buffer size in bytes. `out_written` and `out_required` must
+ * each point to one writable, aligned size_t, must alias neither each other
+ * nor `out`, and are both set to 0 before anything else is read. The bytes are
+ * copied verbatim: no NUL terminator is appended, so a caller wanting a C
+ * string must allocate one more byte and write it. A NULL argument this
+ * contract does not allow is refused with SIDEREON_STATUS_NULL_POINTER rather
+ * than dereferenced; a non-null pointer that is not valid for the whole call
+ * cannot be checked and is undefined behavior.
+ */
+enum SidereonStatus sidereon_ionex_header_get_observables_used(const struct SidereonIonexHeader *header,
+                                                               uint8_t *out,
+                                                               size_t len,
+                                                               size_t *out_written,
+                                                               size_t *out_required);
+
+/**
+ * Copy the program name from an IONEX header. Uses variable-length output.
+ *
+ * Safety: `header` must be a live SidereonIonexHeader handle, not freed for
+ * the duration of the call; `out` may be NULL only when `len` is 0, which
+ * queries the required count through `out_required`; otherwise it must point
+ * to `len` writable, aligned bytes that do not overlap the handle being read.
+ * `len` is the buffer size in bytes. `out_written` and `out_required` must
+ * each point to one writable, aligned size_t, must alias neither each other
+ * nor `out`, and are both set to 0 before anything else is read. The bytes are
+ * copied verbatim: no NUL terminator is appended, so a caller wanting a C
+ * string must allocate one more byte and write it. A NULL argument this
+ * contract does not allow is refused with SIDEREON_STATUS_NULL_POINTER rather
+ * than dereferenced; a non-null pointer that is not valid for the whole call
+ * cannot be checked and is undefined behavior.
+ */
+enum SidereonStatus sidereon_ionex_header_get_program(const struct SidereonIonexHeader *header,
+                                                      uint8_t *out,
+                                                      size_t len,
+                                                      size_t *out_written,
+                                                      size_t *out_required);
+
+/**
+ * Copy the agency / run_by name from an IONEX header. Uses variable-length output.
+ *
+ * Safety: `header` must be a live SidereonIonexHeader handle, not freed for
+ * the duration of the call; `out` may be NULL only when `len` is 0, which
+ * queries the required count through `out_required`; otherwise it must point
+ * to `len` writable, aligned bytes that do not overlap the handle being read.
+ * `len` is the buffer size in bytes. `out_written` and `out_required` must
+ * each point to one writable, aligned size_t, must alias neither each other
+ * nor `out`, and are both set to 0 before anything else is read. The bytes are
+ * copied verbatim: no NUL terminator is appended, so a caller wanting a C
+ * string must allocate one more byte and write it. A NULL argument this
+ * contract does not allow is refused with SIDEREON_STATUS_NULL_POINTER rather
+ * than dereferenced; a non-null pointer that is not valid for the whole call
+ * cannot be checked and is undefined behavior.
+ */
+enum SidereonStatus sidereon_ionex_header_get_run_by(const struct SidereonIonexHeader *header,
+                                                     uint8_t *out,
+                                                     size_t len,
+                                                     size_t *out_written,
+                                                     size_t *out_required);
+
+/**
+ * Read optional satellite count from an IONEX header.
+ *
+ * Safety: `header` must be a live SidereonIonexHeader handle, not freed for
+ * the duration of the call; `out_count` must point to one writable, aligned
+ * uint32_t that no other argument aliases; `out_has_count` must point to one
+ * writable, aligned bool that no other argument aliases. A NULL argument this
+ * contract does not allow is refused with SIDEREON_STATUS_NULL_POINTER rather
+ * than dereferenced; a non-null pointer that is not valid for the whole call
+ * cannot be checked and is undefined behavior.
+ */
+enum SidereonStatus sidereon_ionex_header_get_satellite_count(const struct SidereonIonexHeader *header,
+                                                              uint32_t *out_count,
+                                                              bool *out_has_count);
+
+/**
+ * Copy the satellite system string from an IONEX header. Uses variable-length output.
+ *
+ * Safety: `header` must be a live SidereonIonexHeader handle, not freed for
+ * the duration of the call; `out` may be NULL only when `len` is 0, which
+ * queries the required count through `out_required`; otherwise it must point
+ * to `len` writable, aligned bytes that do not overlap the handle being read.
+ * `len` is the buffer size in bytes. `out_written` and `out_required` must
+ * each point to one writable, aligned size_t, must alias neither each other
+ * nor `out`, and are both set to 0 before anything else is read. The bytes are
+ * copied verbatim: no NUL terminator is appended, so a caller wanting a C
+ * string must allocate one more byte and write it. A NULL argument this
+ * contract does not allow is refused with SIDEREON_STATUS_NULL_POINTER rather
+ * than dereferenced; a non-null pointer that is not valid for the whole call
+ * cannot be checked and is undefined behavior.
+ */
+enum SidereonStatus sidereon_ionex_header_get_satellite_system(const struct SidereonIonexHeader *header,
+                                                               uint8_t *out,
+                                                               size_t len,
+                                                               size_t *out_written,
+                                                               size_t *out_required);
+
+/**
+ * Read optional station count from an IONEX header.
+ *
+ * Safety: `header` must be a live SidereonIonexHeader handle, not freed for
+ * the duration of the call; `out_count` must point to one writable, aligned
+ * uint32_t that no other argument aliases; `out_has_count` must point to one
+ * writable, aligned bool that no other argument aliases. A NULL argument this
+ * contract does not allow is refused with SIDEREON_STATUS_NULL_POINTER rather
+ * than dereferenced; a non-null pointer that is not valid for the whole call
+ * cannot be checked and is undefined behavior.
+ */
+enum SidereonStatus sidereon_ionex_header_get_station_count(const struct SidereonIonexHeader *header,
+                                                            uint32_t *out_count,
+                                                            bool *out_has_count);
+
+/**
+ * Read the format version from an IONEX header.
+ *
+ * Safety: `header` must be a live SidereonIonexHeader handle, not freed for
+ * the duration of the call; `out_version` must point to one writable, aligned
+ * double that no other argument aliases. A NULL argument this contract does
+ * not allow is refused with SIDEREON_STATUS_NULL_POINTER rather than
+ * dereferenced; a non-null pointer that is not valid for the whole call cannot
+ * be checked and is undefined behavior.
+ */
+enum SidereonStatus sidereon_ionex_header_get_version(const struct SidereonIonexHeader *header,
+                                                      double *out_version);
+
+/**
+ * Create a new IONEX header handle declaring no mapping function.
+ *
+ * Every record sits at the value the spec gives for an unstated one, and the
+ * handle carries no `MAPPING FUNCTION` record. A product built on it reports
+ * `has_assumed_mapping` true with kind
+ * `SIDEREON_IONEX_ASSUMED_MAPPING_KIND_ABSENT` on a successful slant row, is
+ * refused with `SIDEREON_IONEX_MAPPING_POLICY_DECLARED`, and writes back no
+ * `MAPPING FUNCTION` record. Call
+ * `sidereon_ionex_header_set_mapping_function` to declare one.
+ *
+ * Safety: `out_header` must point to writable, aligned storage for one
+ * `SidereonIonexHeader *`, which is set to NULL before any work and receives a
+ * newly owned handle only on SIDEREON_STATUS_OK; release it with
+ * sidereon_ionex_header_free. A NULL argument this contract does not allow is
+ * refused with SIDEREON_STATUS_NULL_POINTER rather than dereferenced; a
+ * non-null pointer that is not valid for the whole call cannot be checked and
+ * is undefined behavior.
+ */
+enum SidereonStatus sidereon_ionex_header_new(struct SidereonIonexHeader **out_header);
+
+/**
+ * Assign the creation date string on an IONEX header.
+ *
+ * Safety: `header` must be a live SidereonIonexHeader handle, exclusively
+ * borrowed for the call: nothing else may read or write it meanwhile; `text`
+ * must point to `len` readable bytes, or may be NULL when `len` is 0; the
+ * bytes are copied during the call, no NUL terminator is read or required, and
+ * a NUL among them is copied as data. A NULL argument this contract does not
+ * allow is refused with SIDEREON_STATUS_NULL_POINTER rather than dereferenced;
+ * a non-null pointer that is not valid for the whole call cannot be checked
+ * and is undefined behavior.
+ */
+enum SidereonStatus sidereon_ionex_header_set_date(struct SidereonIonexHeader *header,
+                                                   const uint8_t *text,
+                                                   size_t len);
+
+/**
+ * Assign elevation cutoff in degrees on an IONEX header.
+ *
+ * Safety: `header` must be a live SidereonIonexHeader handle, exclusively
+ * borrowed for the call: nothing else may read or write it meanwhile. A NULL
+ * argument this contract does not allow is refused with
+ * SIDEREON_STATUS_NULL_POINTER rather than dereferenced; a non-null pointer
+ * that is not valid for the whole call cannot be checked and is undefined
+ * behavior.
+ */
+enum SidereonStatus sidereon_ionex_header_set_elevation_cutoff_deg(struct SidereonIonexHeader *header,
+                                                                   double cutoff_deg);
+
+/**
+ * Assign interval between maps in seconds on an IONEX header.
+ *
+ * Safety: `header` must be a live SidereonIonexHeader handle, exclusively
+ * borrowed for the call: nothing else may read or write it meanwhile. A NULL
+ * argument this contract does not allow is refused with
+ * SIDEREON_STATUS_NULL_POINTER rather than dereferenced; a non-null pointer
+ * that is not valid for the whole call cannot be checked and is undefined
+ * behavior.
+ */
+enum SidereonStatus sidereon_ionex_header_set_interval_s(struct SidereonIonexHeader *header,
+                                                         uint32_t interval_s);
+
+/**
+ * Assign the mapping function on an IONEX header.
+ *
+ * Safety: `header` must be a live SidereonIonexHeader handle, exclusively
+ * borrowed for the call: nothing else may read or write it meanwhile;
+ * `custom_code` must point to `custom_code_len` readable bytes, or may be NULL
+ * when `custom_code_len` is 0; the bytes are copied during the call, no NUL
+ * terminator is read or required, and a NUL among them is copied as data. A
+ * NULL argument this contract does not allow is refused with
+ * SIDEREON_STATUS_NULL_POINTER rather than dereferenced; a non-null pointer
+ * that is not valid for the whole call cannot be checked and is undefined
+ * behavior.
+ */
+enum SidereonStatus sidereon_ionex_header_set_mapping_function(struct SidereonIonexHeader *header,
+                                                               uint32_t func_kind,
+                                                               const uint8_t *custom_code,
+                                                               size_t custom_code_len);
+
+/**
+ * Assign or clear optional maps_in_file count on an IONEX header.
+ *
+ * Safety: `header` must be a live SidereonIonexHeader handle, exclusively
+ * borrowed for the call: nothing else may read or write it meanwhile. A NULL
+ * argument this contract does not allow is refused with
+ * SIDEREON_STATUS_NULL_POINTER rather than dereferenced; a non-null pointer
+ * that is not valid for the whole call cannot be checked and is undefined
+ * behavior.
+ */
+enum SidereonStatus sidereon_ionex_header_set_maps_in_file(struct SidereonIonexHeader *header,
+                                                           uint32_t count,
+                                                           bool has_count);
+
+/**
+ * Assign observables used description on an IONEX header.
+ *
+ * Safety: `header` must be a live SidereonIonexHeader handle, exclusively
+ * borrowed for the call: nothing else may read or write it meanwhile; `text`
+ * must point to `len` readable bytes, or may be NULL when `len` is 0; the
+ * bytes are copied during the call, no NUL terminator is read or required, and
+ * a NUL among them is copied as data. A NULL argument this contract does not
+ * allow is refused with SIDEREON_STATUS_NULL_POINTER rather than dereferenced;
+ * a non-null pointer that is not valid for the whole call cannot be checked
+ * and is undefined behavior.
+ */
+enum SidereonStatus sidereon_ionex_header_set_observables_used(struct SidereonIonexHeader *header,
+                                                               const uint8_t *text,
+                                                               size_t len);
+
+/**
+ * Assign the program name on an IONEX header.
+ *
+ * Safety: `header` must be a live SidereonIonexHeader handle, exclusively
+ * borrowed for the call: nothing else may read or write it meanwhile; `text`
+ * must point to `len` readable bytes, or may be NULL when `len` is 0; the
+ * bytes are copied during the call, no NUL terminator is read or required, and
+ * a NUL among them is copied as data. A NULL argument this contract does not
+ * allow is refused with SIDEREON_STATUS_NULL_POINTER rather than dereferenced;
+ * a non-null pointer that is not valid for the whole call cannot be checked
+ * and is undefined behavior.
+ */
+enum SidereonStatus sidereon_ionex_header_set_program(struct SidereonIonexHeader *header,
+                                                      const uint8_t *text,
+                                                      size_t len);
+
+/**
+ * Assign the agency / run_by name on an IONEX header.
+ *
+ * Safety: `header` must be a live SidereonIonexHeader handle, exclusively
+ * borrowed for the call: nothing else may read or write it meanwhile; `text`
+ * must point to `len` readable bytes, or may be NULL when `len` is 0; the
+ * bytes are copied during the call, no NUL terminator is read or required, and
+ * a NUL among them is copied as data. A NULL argument this contract does not
+ * allow is refused with SIDEREON_STATUS_NULL_POINTER rather than dereferenced;
+ * a non-null pointer that is not valid for the whole call cannot be checked
+ * and is undefined behavior.
+ */
+enum SidereonStatus sidereon_ionex_header_set_run_by(struct SidereonIonexHeader *header,
+                                                     const uint8_t *text,
+                                                     size_t len);
+
+/**
+ * Assign or clear optional satellite count on an IONEX header.
+ *
+ * Safety: `header` must be a live SidereonIonexHeader handle, exclusively
+ * borrowed for the call: nothing else may read or write it meanwhile. A NULL
+ * argument this contract does not allow is refused with
+ * SIDEREON_STATUS_NULL_POINTER rather than dereferenced; a non-null pointer
+ * that is not valid for the whole call cannot be checked and is undefined
+ * behavior.
+ */
+enum SidereonStatus sidereon_ionex_header_set_satellite_count(struct SidereonIonexHeader *header,
+                                                              uint32_t count,
+                                                              bool has_count);
+
+/**
+ * Assign the satellite system string on an IONEX header.
+ *
+ * Safety: `header` must be a live SidereonIonexHeader handle, exclusively
+ * borrowed for the call: nothing else may read or write it meanwhile; `text`
+ * must point to `len` readable bytes, or may be NULL when `len` is 0; the
+ * bytes are copied during the call, no NUL terminator is read or required, and
+ * a NUL among them is copied as data. A NULL argument this contract does not
+ * allow is refused with SIDEREON_STATUS_NULL_POINTER rather than dereferenced;
+ * a non-null pointer that is not valid for the whole call cannot be checked
+ * and is undefined behavior.
+ */
+enum SidereonStatus sidereon_ionex_header_set_satellite_system(struct SidereonIonexHeader *header,
+                                                               const uint8_t *text,
+                                                               size_t len);
+
+/**
+ * Assign or clear optional station count on an IONEX header.
+ *
+ * Safety: `header` must be a live SidereonIonexHeader handle, exclusively
+ * borrowed for the call: nothing else may read or write it meanwhile. A NULL
+ * argument this contract does not allow is refused with
+ * SIDEREON_STATUS_NULL_POINTER rather than dereferenced; a non-null pointer
+ * that is not valid for the whole call cannot be checked and is undefined
+ * behavior.
+ */
+enum SidereonStatus sidereon_ionex_header_set_station_count(struct SidereonIonexHeader *header,
+                                                            uint32_t count,
+                                                            bool has_count);
+
+/**
+ * Assign the format version on an IONEX header.
+ *
+ * Safety: `header` must be a live SidereonIonexHeader handle, exclusively
+ * borrowed for the call: nothing else may read or write it meanwhile. A NULL
+ * argument this contract does not allow is refused with
+ * SIDEREON_STATUS_NULL_POINTER rather than dereferenced; a non-null pointer
+ * that is not valid for the whole call cannot be checked and is undefined
+ * behavior.
+ */
+enum SidereonStatus sidereon_ionex_header_set_version(struct SidereonIonexHeader *header,
+                                                      double version);
+
+/**
+ * Copy one owned custom mapping code using the standard variable-length byte
+ * output contract.
+ *
+ * # Safety
+ * `list` must be live. Buffer and count pointers must satisfy
+ * `copy_prefix_to_c`'s non-aliasing writable-storage contract.
+ */
+enum SidereonStatus sidereon_ionex_instant_slant_result_get_mapping_code(const struct SidereonIonexInstantSlantResultList *list,
+                                                                         size_t index,
+                                                                         uint8_t *out,
+                                                                         size_t len,
+                                                                         size_t *out_written,
+                                                                         size_t *out_required);
+
+/**
+ * Copy one owned row message using the standard variable-length byte output
+ * contract.
+ *
+ * # Safety
+ * `list` must be live. Buffer and count pointers must satisfy
+ * `copy_prefix_to_c`'s non-aliasing writable-storage contract.
+ */
+enum SidereonStatus sidereon_ionex_instant_slant_result_get_message(const struct SidereonIonexInstantSlantResultList *list,
+                                                                    size_t index,
+                                                                    uint8_t *out,
+                                                                    size_t len,
+                                                                    size_t *out_written,
+                                                                    size_t *out_required);
+
+/**
+ * Copy one typed row from an exact-time result list.
+ *
+ * # Safety
+ * `list` must be live and `out_row` must point to one writable, aligned row
+ * that does not alias the list.
+ */
+enum SidereonStatus sidereon_ionex_instant_slant_result_get_row(const struct SidereonIonexInstantSlantResultList *list,
+                                                                size_t index,
+                                                                struct SidereonIonexInstantSlantRowResult *out_row);
+
+/**
+ * Write the row count of a live exact-time result list.
+ *
+ * # Safety
+ * `list` must be live and `out_count` must point to one writable, aligned
+ * `usize` that does not alias the list.
+ */
+enum SidereonStatus sidereon_ionex_instant_slant_result_list_count(const struct SidereonIonexInstantSlantResultList *list,
+                                                                   size_t *out_count);
+
+/**
+ * Release an exact-time result list. Passing NULL is a no-op.
+ *
+ * # Safety
+ * A non-NULL pointer must be a live handle returned by this binding and must
+ * be passed exactly once.
+ */
+void sidereon_ionex_instant_slant_result_list_free(struct SidereonIonexInstantSlantResultList *list);
+
+/**
+ * Copy the latitude node axis in degrees, in the product's own order, which
+ * may run north to south or south to north. Uses variable-length output contract.
+ *
+ * Safety: `ionex` must be a live SidereonIonex handle, not freed for the
+ * duration of the call; `out` may be NULL only when `len` is 0, which queries
+ * the required count through `out_required`; otherwise it must point to `len`
+ * writable, aligned doubles that do not overlap the handle being read. `len`
+ * counts doubles, not bytes. `out_written` and `out_required` must each point
+ * to one writable, aligned size_t, must alias neither each other nor `out`,
+ * and are both set to 0 before anything else is read. A NULL argument this
+ * contract does not allow is refused with SIDEREON_STATUS_NULL_POINTER rather
+ * than dereferenced; a non-null pointer that is not valid for the whole call
+ * cannot be checked and is undefined behavior.
  */
 enum SidereonStatus sidereon_ionex_lat_nodes_deg(const struct SidereonIonex *ionex,
                                                  double *out,
@@ -24286,12 +35386,19 @@ enum SidereonStatus sidereon_ionex_lat_nodes_deg(const struct SidereonIonex *ion
                                                  size_t *out_required);
 
 /**
- * Copy the longitude node axis (degrees, ascending west-to-east). Uses the
- * variable-length output contract documented at the top of the header.
+ * Copy the longitude node axis in degrees, in the product's own order, which
+ * may run either way. Uses variable-length output contract.
  *
- * Safety: ionex must be a live handle from sidereon_ionex_parse; out (when
- * non-NULL) must point to len writable doubles; out_written and out_required
- * must point to size_t.
+ * Safety: `ionex` must be a live SidereonIonex handle, not freed for the
+ * duration of the call; `out` may be NULL only when `len` is 0, which queries
+ * the required count through `out_required`; otherwise it must point to `len`
+ * writable, aligned doubles that do not overlap the handle being read. `len`
+ * counts doubles, not bytes. `out_written` and `out_required` must each point
+ * to one writable, aligned size_t, must alias neither each other nor `out`,
+ * and are both set to 0 before anything else is read. A NULL argument this
+ * contract does not allow is refused with SIDEREON_STATUS_NULL_POINTER rather
+ * than dereferenced; a non-null pointer that is not valid for the whole call
+ * cannot be checked and is undefined behavior.
  */
 enum SidereonStatus sidereon_ionex_lon_nodes_deg(const struct SidereonIonex *ionex,
                                                  double *out,
@@ -24300,12 +35407,23 @@ enum SidereonStatus sidereon_ionex_lon_nodes_deg(const struct SidereonIonex *ion
                                                  size_t *out_required);
 
 /**
- * Copy the TEC map epoch axis as seconds since J2000 (ascending). Uses the
- * variable-length output contract documented at the top of the header.
+ * Copy the TEC map epoch axis as seconds since J2000. Uses variable-length output contract.
  *
- * Safety: ionex must be a live handle from sidereon_ionex_parse; out (when
- * non-NULL) must point to len writable int64_t; out_written and out_required
- * must point to size_t.
+ * Each value is the exact whole second the engine reads the map epoch as, at
+ * every magnitude an int64_t holds; this is the integer form of
+ * sidereon_ionex_tec_grid_samples_epochs_j2000_s.
+ *
+ * Safety: `ionex` must be a live SidereonIonex handle, not freed for the
+ * duration of the call; `out` may be NULL only when `len` is 0, which queries
+ * the required count through `out_required`; otherwise it must point to `len`
+ * writable, aligned int64_t values that do not overlap the handle being read.
+ * `len` counts int64_t values, not bytes. `out_written` and `out_required`
+ * must each point to one writable, aligned size_t, must alias neither each
+ * other nor `out`, and are both set to 0 before anything else is read. A NULL
+ * argument this contract does not allow is refused with
+ * SIDEREON_STATUS_NULL_POINTER rather than dereferenced; a non-null pointer
+ * that is not valid for the whole call cannot be checked and is undefined
+ * behavior.
  */
 enum SidereonStatus sidereon_ionex_map_epochs_j2000_s(const struct SidereonIonex *ionex,
                                                       int64_t *out,
@@ -24314,29 +35432,92 @@ enum SidereonStatus sidereon_ionex_map_epochs_j2000_s(const struct SidereonIonex
                                                       size_t *out_required);
 
 /**
- * Parse an IONEX vertical-TEC product from a byte buffer. On success writes a
- * newly owned handle to *out_ionex. Release it with sidereon_ionex_free.
+ * Parse an IONEX vertical-TEC product from a byte buffer using strict parsing.
+ * On success writes a newly owned handle to *out_ionex. Release with sidereon_ionex_free.
  *
- * Safety: data must point to len readable bytes; out_ionex must point to storage
- * for a SidereonIonex*.
+ * Safety: `data` must point to `len` readable bytes, or may be NULL when `len`
+ * is 0; the bytes are copied during the call, no NUL terminator is read or
+ * required, and a NUL among them is copied as data; `out_ionex` must point to
+ * writable, aligned storage for one `SidereonIonex *`, which is set to NULL
+ * before any work and receives a newly owned handle only on
+ * SIDEREON_STATUS_OK; release it with sidereon_ionex_free. The output slot
+ * must be disjoint from the `len` bytes at `data`: it is written while a Rust
+ * reference to that byte range is live. A NULL argument this contract does
+ * not allow is refused with SIDEREON_STATUS_NULL_POINTER rather than
+ * dereferenced; a non-null pointer that is not valid for the whole call
+ * cannot be checked and is undefined behavior.
  */
 enum SidereonStatus sidereon_ionex_parse(const uint8_t *data,
                                          size_t len,
                                          struct SidereonIonex **out_ionex);
 
 /**
- * IONEX vertical-TEC-grid slant ionospheric group delay (positive meters),
- * writing the result to *out_delay_m. Receiver geodetic latitude/longitude and
- * the satellite azimuth/elevation are in degrees; the pierce point rides on the
- * IONEX shell so no receiver height enters. `epoch_j2000_s` is integer seconds
- * since J2000, landing exactly on the product's epoch axis. `frequency_hz` is
- * the carrier the dispersive delay is reported on. Requests outside the product
- * time or grid coverage hold to the nearest product sample, matching the
- * binding's legacy scalar behavior. The numbers are exactly what the engine
- * produces under that coverage policy.
+ * Parse an IONEX product while retaining all non-fatal parser warnings.
  *
- * Safety: ionex must be a live handle from sidereon_ionex_parse; out_delay_m
- * must point to a double.
+ * On failure no owned handles are transferred and every output this call can
+ * write is NULL. Each output is cleared before the other is validated, so a
+ * refusal for a null partner still leaves the writable one NULL rather than
+ * whatever the caller left in it. The reader's own working memory is not the
+ * subject of that promise: it allocates internal temporaries while it reads
+ * the bytes and releases them before returning.
+ *
+ * Safety: `data` must point to `len` readable bytes, or may be NULL when `len`
+ * is 0; the bytes are copied during the call, no NUL terminator is read or
+ * required, and a NUL among them is copied as data; `out_ionex` must point to
+ * writable, aligned storage for one `SidereonIonex *`, which is set to NULL
+ * before any work and receives a newly owned handle only on
+ * SIDEREON_STATUS_OK; release it with sidereon_ionex_free; `out_warnings` must
+ * point to writable, aligned storage for one `SidereonIonexWarningList *`,
+ * which is set to NULL before any work and receives a newly owned handle only
+ * on SIDEREON_STATUS_OK; release it with sidereon_ionex_warning_list_free. The
+ * two output slots must be disjoint from each other and from the `len` bytes
+ * at `data`: both are written while a Rust reference to that byte range is
+ * live. A NULL argument this contract does not allow is refused with
+ * SIDEREON_STATUS_NULL_POINTER rather than dereferenced; a non-null pointer
+ * that is not valid for the whole call cannot be checked and is undefined
+ * behavior.
+ */
+enum SidereonStatus sidereon_ionex_parse_with_warnings(const uint8_t *data,
+                                                       size_t len,
+                                                       struct SidereonIonex **out_ionex,
+                                                       struct SidereonIonexWarningList **out_warnings);
+
+/**
+ * Write the number of records a forgiving read of the product skipped: an
+ * `AUX DATA` block counts as one, and so does each unrecognized header record
+ * and each summary record that could not be read. A product built from
+ * samples reports zero.
+ *
+ * Safety: `ionex` must be a live SidereonIonex handle, not freed for the
+ * duration of the call; `out_count` must point to one writable, aligned size_t
+ * that no other argument aliases. A NULL argument this contract does not allow
+ * is refused with SIDEREON_STATUS_NULL_POINTER rather than dereferenced; a
+ * non-null pointer that is not valid for the whole call cannot be checked and
+ * is undefined behavior.
+ */
+enum SidereonStatus sidereon_ionex_skipped_records(const struct SidereonIonex *ionex,
+                                                   size_t *out_count);
+
+/**
+ * IONEX vertical-TEC-grid slant ionospheric group delay (meters) under the
+ * engine default policy: a query outside the product's coverage, one whose
+ * interpolation weights a non-available node, and a product whose height maps
+ * do not give every node one height all refuse with an error status and a
+ * thread-local message. Angles are degrees; the epoch is integer UTC seconds
+ * since J2000; the delay is positive meters.
+ *
+ * `*out_delay_m` is set to 0.0 before any other argument is read and keeps
+ * 0.0 on every refusal, so a caller reading it must check the status first:
+ * 0.0 is also what a zero-TEC product gives on success. Use
+ * sidereon_ionex_slant_delay_with_policy for a refused value that is NaN and
+ * carries a typed reason.
+ *
+ * Safety: `ionex` must be a live SidereonIonex handle, not freed for the
+ * duration of the call; `out_delay_m` must point to one writable, aligned
+ * double that no other argument aliases. A NULL argument this contract does
+ * not allow is refused with SIDEREON_STATUS_NULL_POINTER rather than
+ * dereferenced; a non-null pointer that is not valid for the whole call cannot
+ * be checked and is undefined behavior.
  */
 enum SidereonStatus sidereon_ionex_slant_delay(const struct SidereonIonex *ionex,
                                                double lat_deg,
@@ -24348,13 +35529,146 @@ enum SidereonStatus sidereon_ionex_slant_delay(const struct SidereonIonex *ionex
                                                double *out_delay_m);
 
 /**
- * IONEX vertical-TEC-grid slant ionospheric group delay with explicit coverage
- * policy and status. Receiver geodetic latitude/longitude and satellite
- * azimuth/elevation are in degrees; `epoch_j2000_s` is integer seconds since
- * J2000; `frequency_hz` is the carrier the dispersive delay is reported on.
+ * Evaluate a slant delay at an exact scale-tagged instant under the engine's
+ * default policy. Epoch conversion causes are available through `out_epoch_error`.
+ */
+enum SidereonStatus sidereon_ionex_slant_delay_at_instant(const struct SidereonIonex *ionex,
+                                                          double lat_deg,
+                                                          double lon_deg,
+                                                          double azimuth_deg,
+                                                          double elevation_deg,
+                                                          const struct SidereonClockEpoch *epoch,
+                                                          double frequency_hz,
+                                                          double *out_delay_m,
+                                                          struct SidereonIonexEpochError *out_epoch_error);
+
+/**
+ * Evaluate a slant delay at a lossless scale-tagged instant. This additive
+ * route preserves fractional seconds and reports the seven core IONEX epoch
+ * conversion causes through `out_epoch_error`.
+ */
+enum SidereonStatus sidereon_ionex_slant_delay_at_instant_with_policy(const struct SidereonIonex *ionex,
+                                                                      double lat_deg,
+                                                                      double lon_deg,
+                                                                      double azimuth_deg,
+                                                                      double elevation_deg,
+                                                                      const struct SidereonClockEpoch *epoch,
+                                                                      double frequency_hz,
+                                                                      struct SidereonIonexSlantPolicy policy,
+                                                                      struct SidereonIonexSlantDelayEvaluation *out,
+                                                                      struct SidereonIonexSlantError *out_error,
+                                                                      struct SidereonIonexEpochError *out_epoch_error);
+
+/**
+ * Evaluate a batch of IONEX slant delays into a newly owned result list.
  *
- * Safety: ionex must be a live handle from sidereon_ionex_parse; out must
- * point to a SidereonIonexSlantDelayEvaluation.
+ * Every input row appears in the list in its input order, whether the engine
+ * gave it a value or refused it, including a row whose receiver geometry or
+ * carrier frequency the engine rejects. The call itself fails only on a
+ * malformed argument: a null product, a null request array with a nonzero
+ * count, an unrecognized policy tag, or a null output pointer. Release the
+ * list with sidereon_ionex_slant_result_list_free.
+ *
+ * The list takes its own copy of every string a row reports, including the
+ * custom mapping code a successful row assumed the single-layer factor over,
+ * which the engine keeps only on the product header. A row is therefore
+ * complete once the call returns and stays complete after the product and
+ * header are freed.
+ *
+ * Safety: `ionex` must be a live SidereonIonex handle, not freed for the
+ * duration of the call; `requests` must point to `count` readable, aligned
+ * SidereonIonexSlantRequest values, or may be NULL when `count` is 0;
+ * `out_results` must point to writable, aligned storage for one
+ * `SidereonIonexSlantResultList *`, which is set to NULL before any work and
+ * receives a newly owned handle only on SIDEREON_STATUS_OK; release it with
+ * sidereon_ionex_slant_result_list_free. The output slot must be disjoint
+ * from the `count` requests and from the product behind `ionex`: it is
+ * written while Rust references to both are live. A NULL argument this
+ * contract does not allow is refused with SIDEREON_STATUS_NULL_POINTER rather
+ * than dereferenced; a non-null pointer that is not valid for the whole call
+ * cannot be checked and is undefined behavior.
+ */
+enum SidereonStatus sidereon_ionex_slant_delay_results(const struct SidereonIonex *ionex,
+                                                       const struct SidereonIonexSlantRequest *requests,
+                                                       size_t count,
+                                                       struct SidereonIonexSlantPolicy policy,
+                                                       struct SidereonIonexSlantResultList **out_results);
+
+/**
+ * Evaluate exact-time IONEX requests into caller-owned, input-ordered rows.
+ * Each row keeps its own typed epoch failure; no absolute epoch is reduced to
+ * a floating-point seconds value before the core query.
+ */
+enum SidereonStatus sidereon_ionex_slant_delay_results_at_instants(const struct SidereonIonex *ionex,
+                                                                   const struct SidereonIonexInstantSlantRequest *requests,
+                                                                   size_t count,
+                                                                   struct SidereonIonexSlantPolicy policy,
+                                                                   struct SidereonIonexInstantSlantRowResult *out_rows);
+
+/**
+ * Evaluate exact-time IONEX requests into an independently owned result
+ * list. Each row retains the complete error text and any custom mapping code;
+ * an epoch-conversion failure appears in `epoch_error` and leaves `error` at
+ * its no-error value. Release the returned list with
+ * `sidereon_ionex_instant_slant_result_list_free`.
+ *
+ * # Safety
+ * `ionex` must be a live handle; `requests` must point to `count` readable,
+ * aligned requests or be NULL when `count` is zero; `out_results` must point
+ * to one writable, aligned handle slot disjoint from the input handles and
+ * request slice.
+ */
+enum SidereonStatus sidereon_ionex_slant_delay_results_at_instants_owned(const struct SidereonIonex *ionex,
+                                                                         const struct SidereonIonexInstantSlantRequest *requests,
+                                                                         size_t count,
+                                                                         struct SidereonIonexSlantPolicy policy,
+                                                                         struct SidereonIonexInstantSlantResultList **out_results);
+
+/**
+ * IONEX slant delay under an explicit coverage policy tag, with the engine
+ * default strict missing-node policy and single-layer mapping.
+ *
+ * Safety: `ionex` must be a live SidereonIonex handle, not freed for the
+ * duration of the call; `out` must point to one writable, aligned
+ * SidereonIonexSlantDelayEvaluation that no other argument aliases;
+ * `out_error` may be NULL, which discards the detail; otherwise it must point
+ * to one writable, aligned SidereonIonexSlantError that no other argument
+ * aliases. A NULL argument this contract does not allow is refused with
+ * SIDEREON_STATUS_NULL_POINTER rather than dereferenced; a non-null pointer
+ * that is not valid for the whole call cannot be checked and is undefined
+ * behavior.
+ */
+enum SidereonStatus sidereon_ionex_slant_delay_with_coverage_policy(const struct SidereonIonex *ionex,
+                                                                    double lat_deg,
+                                                                    double lon_deg,
+                                                                    double azimuth_deg,
+                                                                    double elevation_deg,
+                                                                    int64_t epoch_j2000_s,
+                                                                    double frequency_hz,
+                                                                    uint32_t coverage_policy,
+                                                                    struct SidereonIonexSlantDelayEvaluation *out,
+                                                                    struct SidereonIonexSlantError *out_error);
+
+/**
+ * IONEX slant delay under an explicit composite policy, reporting the held,
+ * degraded and assumed-mapping conditions independently. The epoch is integer
+ * UTC seconds since J2000, as for sidereon_ionex_slant_delay.
+ *
+ * `out_error` may be NULL. When it is not, a refusal fills it with the typed
+ * detail of the engine failure and `out` keeps the refused placeholder, whose
+ * delay is NaN and whose status is not valid. The text of an `Other` mapping
+ * code named by a mapping refusal stays on the product: read it with
+ * sidereon_ionex_header_get_mapping_function_code while the handle lives.
+ *
+ * Safety: `ionex` must be a live SidereonIonex handle, not freed for the
+ * duration of the call; `out` must point to one writable, aligned
+ * SidereonIonexSlantDelayEvaluation that no other argument aliases;
+ * `out_error` may be NULL, which discards the detail; otherwise it must point
+ * to one writable, aligned SidereonIonexSlantError that no other argument
+ * aliases. A NULL argument this contract does not allow is refused with
+ * SIDEREON_STATUS_NULL_POINTER rather than dereferenced; a non-null pointer
+ * that is not valid for the whole call cannot be checked and is undefined
+ * behavior.
  */
 enum SidereonStatus sidereon_ionex_slant_delay_with_policy(const struct SidereonIonex *ionex,
                                                            double lat_deg,
@@ -24363,15 +35677,199 @@ enum SidereonStatus sidereon_ionex_slant_delay_with_policy(const struct Sidereon
                                                            double elevation_deg,
                                                            int64_t epoch_j2000_s,
                                                            double frequency_hz,
-                                                           uint32_t policy,
-                                                           struct SidereonIonexSlantDelayEvaluation *out);
+                                                           struct SidereonIonexSlantPolicy policy,
+                                                           struct SidereonIonexSlantDelayEvaluation *out,
+                                                           struct SidereonIonexSlantError *out_error);
 
 /**
- * Copy TEC-grid map epochs as seconds since J2000. Uses the variable-length
+ * Batch IONEX slant delays into a caller-allocated array of `count` doubles
+ * under the engine default policy.
+ *
+ * This is the plain convenience form: it allocates nothing, and the first row
+ * the engine refuses fails the whole call, leaving every output element zero.
+ * Use sidereon_ionex_slant_delay_results when each row's own outcome matters.
+ *
+ * The output array is validated and zeroed before any other argument is read,
+ * so whenever `out_delays_m` and `count` together describe storage this call
+ * can write, that storage holds `count` zeroes on every failure the call
+ * reports: a null `ionex`, a null `requests` with a nonzero `count`, a row
+ * the marshalling refuses, and a batch the engine refuses alike.
+ *
+ * `out_delays_m` is the one argument that storage promise cannot cover. When
+ * it is NULL with a nonzero `count` the call returns
+ * SIDEREON_STATUS_NULL_POINTER, and when `count` exceeds the elements one
+ * slice can span the call returns SIDEREON_STATUS_INVALID_ARGUMENT. Neither
+ * names storage to initialize, so neither writes anything and the caller's
+ * array keeps whatever was in it.
+ *
+ * Safety: `out_delays_m` must point to `count` writable, aligned doubles that
+ * overlap neither `requests` nor the product behind `ionex`, or may be NULL
+ * when `count` is 0; `ionex` must be a live SidereonIonex handle, not freed
+ * for the duration of the call; `requests` must point to `count` readable,
+ * aligned SidereonIonexSlantRequest values, or may be NULL when `count` is 0.
+ * A NULL argument this contract does not allow is refused
+ * with SIDEREON_STATUS_NULL_POINTER rather than dereferenced; a non-null
+ * pointer that is not valid for the whole call cannot be checked and is
+ * undefined behavior.
+ */
+enum SidereonStatus sidereon_ionex_slant_delays(const struct SidereonIonex *ionex,
+                                                const struct SidereonIonexSlantRequest *requests,
+                                                size_t count,
+                                                double *out_delays_m);
+
+/**
+ * Construct the default composite IONEX slant-delay policy: Strict coverage,
+ * Strict missing nodes, and SingleLayer mapping.
+ */
+struct SidereonIonexSlantPolicy sidereon_ionex_slant_policy_default(void);
+
+/**
+ * Construct a composite IONEX slant-delay policy from an explicit coverage policy,
+ * using default Strict missing nodes and SingleLayer mapping.
+ */
+struct SidereonIonexSlantPolicy sidereon_ionex_slant_policy_from_coverage(uint32_t coverage);
+
+/**
+ * Construct a composite IONEX slant-delay policy with explicit numeric tags.
+ */
+struct SidereonIonexSlantPolicy sidereon_ionex_slant_policy_init(uint32_t coverage,
+                                                                 uint32_t missing_nodes,
+                                                                 uint32_t mapping);
+
+/**
+ * Copy the MAPPING FUNCTION code the row at `index` names, as the product
+ * wrote it. The list owns this text, so it survives the product and header
+ * handles and any number of later failing calls. Uses the variable-length
  * output contract.
  *
- * Safety: ionex must be a live handle; out points to len writable doubles or
- * NULL when len is 0; out_written and out_required point to size_t.
+ * Two kinds of row name a code. A failed row whose refusal is
+ * SIDEREON_IONEX_SLANT_REFUSAL_KIND_MAPPING_FUNCTION reports the code the
+ * declaration carries. A successful row whose status has has_assumed_mapping
+ * with assumed_mapping SIDEREON_IONEX_ASSUMED_MAPPING_KIND_OTHER reports the
+ * custom code the product declared while the single-layer factor was applied:
+ * that kind names the case without carrying its text, so this is the only
+ * place the text outlives the product. Any other row reports a required length
+ * of zero.
+ *
+ * A zero required length is therefore not by itself an absent declaration, and
+ * the row's typed fields keep the three cases apart. A failed row separates
+ * them with mapping_declaration: Declared with has_mapping_function names a
+ * code, Absent names no record at all. A successful row separates them with
+ * assumed_mapping: Other names a custom code, Absent names no record, and
+ * NoMapping or QFactor name a standard code this accessor does not repeat.
+ *
+ * A blank custom code is not excluded. sidereon_ionex_header_set_mapping_function
+ * accepts SIDEREON_IONEX_MAPPING_FUNCTION_KIND_OTHER with a zero-length code,
+ * a product built from that header keeps it, and a single-layer evaluation
+ * reports it, so a successful row can report Other with a required length of
+ * zero exactly as an Absent row does. Only serialization refuses a blank code;
+ * that refusal is sidereon_ionex_to_ionex_text's and does not reach
+ * construction or evaluation. Read assumed_mapping, not the length, to tell
+ * an empty custom code from no declaration at all.
+ *
+ * Safety: `list` must be a live SidereonIonexSlantResultList handle, not freed
+ * for the duration of the call; `out` may be NULL only when `len` is 0, which
+ * queries the required count through `out_required`; otherwise it must point
+ * to `len` writable, aligned bytes that do not overlap the handle being read.
+ * `len` is the buffer size in bytes. `out_written` and `out_required` must
+ * each point to one writable, aligned size_t, must alias neither each other
+ * nor `out`, and are both set to 0 before anything else is read. The bytes are
+ * copied verbatim: no NUL terminator is appended, so a caller wanting a C
+ * string must allocate one more byte and write it. A NULL argument this
+ * contract does not allow is refused with SIDEREON_STATUS_NULL_POINTER rather
+ * than dereferenced; a non-null pointer that is not valid for the whole call
+ * cannot be checked and is undefined behavior.
+ */
+enum SidereonStatus sidereon_ionex_slant_result_get_mapping_code(const struct SidereonIonexSlantResultList *list,
+                                                                 size_t index,
+                                                                 uint8_t *out,
+                                                                 size_t len,
+                                                                 size_t *out_written,
+                                                                 size_t *out_required);
+
+/**
+ * Copy the engine's own text for the row at `index`. A successful row reports
+ * a required length of zero. Uses the variable-length output contract.
+ *
+ * Safety: `list` must be a live SidereonIonexSlantResultList handle, not freed
+ * for the duration of the call; `out` may be NULL only when `len` is 0, which
+ * queries the required count through `out_required`; otherwise it must point
+ * to `len` writable, aligned bytes that do not overlap the handle being read.
+ * `len` is the buffer size in bytes. `out_written` and `out_required` must
+ * each point to one writable, aligned size_t, must alias neither each other
+ * nor `out`, and are both set to 0 before anything else is read. The bytes are
+ * copied verbatim: no NUL terminator is appended, so a caller wanting a C
+ * string must allocate one more byte and write it. A NULL argument this
+ * contract does not allow is refused with SIDEREON_STATUS_NULL_POINTER rather
+ * than dereferenced; a non-null pointer that is not valid for the whole call
+ * cannot be checked and is undefined behavior.
+ */
+enum SidereonStatus sidereon_ionex_slant_result_get_message(const struct SidereonIonexSlantResultList *list,
+                                                            size_t index,
+                                                            uint8_t *out,
+                                                            size_t len,
+                                                            size_t *out_written,
+                                                            size_t *out_required);
+
+/**
+ * Copy the row at `index` of an IONEX slant-delay result list.
+ *
+ * Safety: `list` must be a live SidereonIonexSlantResultList handle, not freed
+ * for the duration of the call; `out_row` must point to one writable, aligned
+ * SidereonIonexSlantRowResult that no other argument aliases. A NULL argument
+ * this contract does not allow is refused with SIDEREON_STATUS_NULL_POINTER
+ * rather than dereferenced; a non-null pointer that is not valid for the whole
+ * call cannot be checked and is undefined behavior.
+ */
+enum SidereonStatus sidereon_ionex_slant_result_get_row(const struct SidereonIonexSlantResultList *list,
+                                                        size_t index,
+                                                        struct SidereonIonexSlantRowResult *out_row);
+
+/**
+ * Write the number of rows in an IONEX slant-delay result list to *out_count.
+ *
+ * Safety: `list` must be a live SidereonIonexSlantResultList handle, not freed
+ * for the duration of the call; `out_count` must point to one writable,
+ * aligned size_t that no other argument aliases. A NULL argument this contract
+ * does not allow is refused with SIDEREON_STATUS_NULL_POINTER rather than
+ * dereferenced; a non-null pointer that is not valid for the whole call cannot
+ * be checked and is undefined behavior.
+ */
+enum SidereonStatus sidereon_ionex_slant_result_list_count(const struct SidereonIonexSlantResultList *list,
+                                                           size_t *out_count);
+
+/**
+ * Release an IONEX slant-delay result list. Passing NULL is a no-op.
+ *
+ * Safety: `list` may be NULL, which is a no-op; otherwise it must be a live
+ * SidereonIonexSlantResultList handle this binding produced, and it must be
+ * passed here exactly once. The handle and every pointer read out of it are
+ * invalid afterwards. This call returns nothing, so it reports no status: a
+ * pointer that is neither NULL nor such a handle cannot be checked and is
+ * undefined behavior.
+ */
+void sidereon_ionex_slant_result_list_free(struct SidereonIonexSlantResultList *list);
+
+/**
+ * Copy TEC-grid map epochs as seconds since J2000. Uses variable-length output.
+ *
+ * Each value is the whole second `sidereon_ionex_map_epochs_j2000_s` copies,
+ * converted to a double once, so it is exact wherever a double holds that
+ * integer, which is every second up to 2^53 in magnitude, and the nearest
+ * double past it. Read `sidereon_ionex_map_epochs_j2000_s` for the int64_t
+ * axis that is exact at every magnitude. This call never fails on an epoch:
+ * every map epoch a product holds is a whole second.
+ *
+ * Safety: `ionex` must be a live SidereonIonex handle, not freed for the
+ * duration of the call; `out` may be NULL only when `len` is 0, which queries
+ * the required count through `out_required`; otherwise it must point to `len`
+ * writable, aligned doubles that do not overlap the handle being read. `len`
+ * counts doubles, not bytes. `out_written` and `out_required` must each point
+ * to one writable, aligned size_t, must alias neither each other nor `out`,
+ * and are both set to 0 before anything else is read. A NULL argument this
+ * contract does not allow is refused with SIDEREON_STATUS_NULL_POINTER rather
+ * than dereferenced; a non-null pointer that is not valid for the whole call
+ * cannot be checked and is undefined behavior.
  */
 enum SidereonStatus sidereon_ionex_tec_grid_samples_epochs_j2000_s(const struct SidereonIonex *ionex,
                                                                    double *out,
@@ -24380,21 +35878,71 @@ enum SidereonStatus sidereon_ionex_tec_grid_samples_epochs_j2000_s(const struct 
                                                                    size_t *out_required);
 
 /**
- * Read IONEX TEC-grid sample dimensions and scalar metadata. Heights are
- * kilometers and angular fields are degrees.
+ * Copy flattened IONEX height maps, km. If no height maps exist, required length is 0.
  *
- * Safety: ionex must be a live handle; out_info must point to a
- * SidereonTecGridSamplesInfo.
+ * Safety: `ionex` must be a live SidereonIonex handle, not freed for the
+ * duration of the call; `out` may be NULL only when `len` is 0, which queries
+ * the required count through `out_required`; otherwise it must point to `len`
+ * writable, aligned doubles that do not overlap the handle being read. `len`
+ * counts doubles, not bytes. `out_written` and `out_required` must each point
+ * to one writable, aligned size_t, must alias neither each other nor `out`,
+ * and are both set to 0 before anything else is read. A NULL argument this
+ * contract does not allow is refused with SIDEREON_STATUS_NULL_POINTER rather
+ * than dereferenced; a non-null pointer that is not valid for the whole call
+ * cannot be checked and is undefined behavior.
+ */
+enum SidereonStatus sidereon_ionex_tec_grid_samples_height_maps_km(const struct SidereonIonex *ionex,
+                                                                   double *out,
+                                                                   size_t len,
+                                                                   size_t *out_written,
+                                                                   size_t *out_required);
+
+/**
+ * Copy flattened height per-cell presence flags. If no height maps exist, required length is 0.
+ *
+ * Safety: `ionex` must be a live SidereonIonex handle, not freed for the
+ * duration of the call; `out` may be NULL only when `len` is 0, which queries
+ * the required count through `out_required`; otherwise it must point to `len`
+ * writable, aligned bools that do not overlap the handle being read. `len`
+ * counts bools, not bytes. `out_written` and `out_required` must each point to
+ * one writable, aligned size_t, must alias neither each other nor `out`, and
+ * are both set to 0 before anything else is read. A NULL argument this
+ * contract does not allow is refused with SIDEREON_STATUS_NULL_POINTER rather
+ * than dereferenced; a non-null pointer that is not valid for the whole call
+ * cannot be checked and is undefined behavior.
+ */
+enum SidereonStatus sidereon_ionex_tec_grid_samples_height_presence(const struct SidereonIonex *ionex,
+                                                                    bool *out,
+                                                                    size_t len,
+                                                                    size_t *out_written,
+                                                                    size_t *out_required);
+
+/**
+ * Read IONEX TEC-grid sample dimensions and metadata.
+ *
+ * Safety: `ionex` must be a live SidereonIonex handle, not freed for the
+ * duration of the call; `out_info` must point to one writable, aligned
+ * SidereonTecGridSamplesInfo that no other argument aliases. A NULL argument
+ * this contract does not allow is refused with SIDEREON_STATUS_NULL_POINTER
+ * rather than dereferenced; a non-null pointer that is not valid for the whole
+ * call cannot be checked and is undefined behavior.
  */
 enum SidereonStatus sidereon_ionex_tec_grid_samples_info(const struct SidereonIonex *ionex,
                                                          struct SidereonTecGridSamplesInfo *out_info);
 
 /**
- * Copy flattened IONEX RMS maps in `[map][lat][lon]` order, TECU. If no RMS
- * maps are present, the required length is zero.
+ * Copy flattened IONEX RMS maps, TECU. If no RMS maps exist, required length is 0.
  *
- * Safety: ionex must be a live handle; out points to len writable doubles or
- * NULL when len is 0; out_written and out_required point to size_t.
+ * Safety: `ionex` must be a live SidereonIonex handle, not freed for the
+ * duration of the call; `out` may be NULL only when `len` is 0, which queries
+ * the required count through `out_required`; otherwise it must point to `len`
+ * writable, aligned doubles that do not overlap the handle being read. `len`
+ * counts doubles, not bytes. `out_written` and `out_required` must each point
+ * to one writable, aligned size_t, must alias neither each other nor `out`,
+ * and are both set to 0 before anything else is read. A NULL argument this
+ * contract does not allow is refused with SIDEREON_STATUS_NULL_POINTER rather
+ * than dereferenced; a non-null pointer that is not valid for the whole call
+ * cannot be checked and is undefined behavior.
  */
 enum SidereonStatus sidereon_ionex_tec_grid_samples_rms_maps_tecu(const struct SidereonIonex *ionex,
                                                                   double *out,
@@ -24403,11 +35951,38 @@ enum SidereonStatus sidereon_ionex_tec_grid_samples_rms_maps_tecu(const struct S
                                                                   size_t *out_required);
 
 /**
- * Copy flattened IONEX VTEC maps in `[map][lat][lon]` order, TECU. Uses the
- * variable-length output contract.
+ * Copy flattened RMS per-cell presence flags. If no RMS maps exist, required length is 0.
  *
- * Safety: ionex must be a live handle; out points to len writable doubles or
- * NULL when len is 0; out_written and out_required point to size_t.
+ * Safety: `ionex` must be a live SidereonIonex handle, not freed for the
+ * duration of the call; `out` may be NULL only when `len` is 0, which queries
+ * the required count through `out_required`; otherwise it must point to `len`
+ * writable, aligned bools that do not overlap the handle being read. `len`
+ * counts bools, not bytes. `out_written` and `out_required` must each point to
+ * one writable, aligned size_t, must alias neither each other nor `out`, and
+ * are both set to 0 before anything else is read. A NULL argument this
+ * contract does not allow is refused with SIDEREON_STATUS_NULL_POINTER rather
+ * than dereferenced; a non-null pointer that is not valid for the whole call
+ * cannot be checked and is undefined behavior.
+ */
+enum SidereonStatus sidereon_ionex_tec_grid_samples_rms_presence(const struct SidereonIonex *ionex,
+                                                                 bool *out,
+                                                                 size_t len,
+                                                                 size_t *out_written,
+                                                                 size_t *out_required);
+
+/**
+ * Copy flattened IONEX VTEC maps, TECU. Missing nodes write NaN. Uses variable-length output.
+ *
+ * Safety: `ionex` must be a live SidereonIonex handle, not freed for the
+ * duration of the call; `out` may be NULL only when `len` is 0, which queries
+ * the required count through `out_required`; otherwise it must point to `len`
+ * writable, aligned doubles that do not overlap the handle being read. `len`
+ * counts doubles, not bytes. `out_written` and `out_required` must each point
+ * to one writable, aligned size_t, must alias neither each other nor `out`,
+ * and are both set to 0 before anything else is read. A NULL argument this
+ * contract does not allow is refused with SIDEREON_STATUS_NULL_POINTER rather
+ * than dereferenced; a non-null pointer that is not valid for the whole call
+ * cannot be checked and is undefined behavior.
  */
 enum SidereonStatus sidereon_ionex_tec_grid_samples_tec_maps_tecu(const struct SidereonIonex *ionex,
                                                                   double *out,
@@ -24416,11 +35991,44 @@ enum SidereonStatus sidereon_ionex_tec_grid_samples_tec_maps_tecu(const struct S
                                                                   size_t *out_required);
 
 /**
- * Copy one IONEX TEC sample per grid node. Uses the variable-length output
- * contract. Angles are degrees and VTEC/RMS values are TECU.
+ * Copy flattened VTEC per-cell presence flags (true if cell holds a value).
  *
- * Safety: ionex must be a live handle; out points to len SidereonTecSample
- * entries or NULL when len is 0; out_written and out_required point to size_t.
+ * Safety: `ionex` must be a live SidereonIonex handle, not freed for the
+ * duration of the call; `out` may be NULL only when `len` is 0, which queries
+ * the required count through `out_required`; otherwise it must point to `len`
+ * writable, aligned bools that do not overlap the handle being read. `len`
+ * counts bools, not bytes. `out_written` and `out_required` must each point to
+ * one writable, aligned size_t, must alias neither each other nor `out`, and
+ * are both set to 0 before anything else is read. A NULL argument this
+ * contract does not allow is refused with SIDEREON_STATUS_NULL_POINTER rather
+ * than dereferenced; a non-null pointer that is not valid for the whole call
+ * cannot be checked and is undefined behavior.
+ */
+enum SidereonStatus sidereon_ionex_tec_grid_samples_tec_presence(const struct SidereonIonex *ionex,
+                                                                 bool *out,
+                                                                 size_t len,
+                                                                 size_t *out_written,
+                                                                 size_t *out_required);
+
+/**
+ * Copy one IONEX TEC sample per grid node. Uses variable-length output.
+ *
+ * Every sample carries its map's exact whole second in
+ * `epoch_j2000_whole_s`, with `has_epoch_j2000_whole_s` true, and the same
+ * second converted to a double once in `epoch_j2000_s`, so the samples read
+ * back through sidereon_ionex_from_tec_samples as the epochs they came from.
+ *
+ * Safety: `ionex` must be a live SidereonIonex handle, not freed for the
+ * duration of the call; `out` may be NULL only when `len` is 0, which queries
+ * the required count through `out_required`; otherwise it must point to `len`
+ * writable, aligned SidereonTecSample values that do not overlap the handle
+ * being read. `len` counts SidereonTecSample values, not bytes. `out_written`
+ * and `out_required` must each point to one writable, aligned size_t, must
+ * alias neither each other nor `out`, and are both set to 0 before anything
+ * else is read. A NULL argument this contract does not allow is refused with
+ * SIDEREON_STATUS_NULL_POINTER rather than dereferenced; a non-null pointer
+ * that is not valid for the whole call cannot be checked and is undefined
+ * behavior.
  */
 enum SidereonStatus sidereon_ionex_tec_samples(const struct SidereonIonex *ionex,
                                                struct SidereonTecSample *out,
@@ -24429,20 +36037,112 @@ enum SidereonStatus sidereon_ionex_tec_samples(const struct SidereonIonex *ionex
                                                size_t *out_required);
 
 /**
- * Serialize an IONEX product back to IONEX text. The output is not
- * null-terminated. Uses the variable-length output contract documented at the
- * top of the header: call once with out=NULL to learn *out_required, then again
- * with a buffer of that size. Round-trips with sidereon_ionex_parse.
+ * Serialize an IONEX product back to IONEX text. Fallible: propagates errors if values
+ * cannot be formatted into standard columns. Uses variable-length output contract.
  *
- * Safety: ionex must be a live handle from sidereon_ionex_parse; out must point
- * to at least len writable bytes or be NULL when len is 0; out_written and
- * out_required must point to size_t.
+ * Safety: `ionex` must be a live SidereonIonex handle, not freed for the
+ * duration of the call; `out` may be NULL only when `len` is 0, which queries
+ * the required count through `out_required`; otherwise it must point to `len`
+ * writable, aligned bytes that do not overlap the handle being read. `len` is
+ * the buffer size in bytes. `out_written` and `out_required` must each point
+ * to one writable, aligned size_t, must alias neither each other nor `out`,
+ * and are both set to 0 before anything else is read. The bytes are copied
+ * verbatim: no NUL terminator is appended, so a caller wanting a C string must
+ * allocate one more byte and write it. A NULL argument this contract does not
+ * allow is refused with SIDEREON_STATUS_NULL_POINTER rather than dereferenced;
+ * a non-null pointer that is not valid for the whole call cannot be checked
+ * and is undefined behavior.
  */
 enum SidereonStatus sidereon_ionex_to_ionex_text(const struct SidereonIonex *ionex,
                                                  uint8_t *out,
                                                  size_t len,
                                                  size_t *out_written,
                                                  size_t *out_required);
+
+/**
+ * Read typed numeric fields and coordinates of warning record at index.
+ *
+ * Safety: `list` must be a live SidereonIonexWarningList handle, not freed for
+ * the duration of the call; `out_info` must point to one writable, aligned
+ * SidereonIonexWarningInfo that no other argument aliases. A NULL argument
+ * this contract does not allow is refused with SIDEREON_STATUS_NULL_POINTER
+ * rather than dereferenced; a non-null pointer that is not valid for the whole
+ * call cannot be checked and is undefined behavior.
+ */
+enum SidereonStatus sidereon_ionex_warning_get_info(const struct SidereonIonexWarningList *list,
+                                                    size_t index,
+                                                    struct SidereonIonexWarningInfo *out_info);
+
+/**
+ * Copy the label or record identifier associated with a warning. Uses variable-length output.
+ *
+ * Safety: `list` must be a live SidereonIonexWarningList handle, not freed for
+ * the duration of the call; `out` may be NULL only when `len` is 0, which
+ * queries the required count through `out_required`; otherwise it must point
+ * to `len` writable, aligned bytes that do not overlap the handle being read.
+ * `len` is the buffer size in bytes. `out_written` and `out_required` must
+ * each point to one writable, aligned size_t, must alias neither each other
+ * nor `out`, and are both set to 0 before anything else is read. The bytes are
+ * copied verbatim: no NUL terminator is appended, so a caller wanting a C
+ * string must allocate one more byte and write it. A NULL argument this
+ * contract does not allow is refused with SIDEREON_STATUS_NULL_POINTER rather
+ * than dereferenced; a non-null pointer that is not valid for the whole call
+ * cannot be checked and is undefined behavior.
+ */
+enum SidereonStatus sidereon_ionex_warning_get_label(const struct SidereonIonexWarningList *list,
+                                                     size_t index,
+                                                     uint8_t *out,
+                                                     size_t len,
+                                                     size_t *out_written,
+                                                     size_t *out_required);
+
+/**
+ * Copy the complete formatted warning message. Uses variable-length output.
+ *
+ * Safety: `list` must be a live SidereonIonexWarningList handle, not freed for
+ * the duration of the call; `out` may be NULL only when `len` is 0, which
+ * queries the required count through `out_required`; otherwise it must point
+ * to `len` writable, aligned bytes that do not overlap the handle being read.
+ * `len` is the buffer size in bytes. `out_written` and `out_required` must
+ * each point to one writable, aligned size_t, must alias neither each other
+ * nor `out`, and are both set to 0 before anything else is read. The bytes are
+ * copied verbatim: no NUL terminator is appended, so a caller wanting a C
+ * string must allocate one more byte and write it. A NULL argument this
+ * contract does not allow is refused with SIDEREON_STATUS_NULL_POINTER rather
+ * than dereferenced; a non-null pointer that is not valid for the whole call
+ * cannot be checked and is undefined behavior.
+ */
+enum SidereonStatus sidereon_ionex_warning_get_message(const struct SidereonIonexWarningList *list,
+                                                       size_t index,
+                                                       uint8_t *out,
+                                                       size_t len,
+                                                       size_t *out_written,
+                                                       size_t *out_required);
+
+/**
+ * Write the number of warnings in an IONEX warning list to *out_count.
+ *
+ * Safety: `list` must be a live SidereonIonexWarningList handle, not freed for
+ * the duration of the call; `out_count` must point to one writable, aligned
+ * size_t that no other argument aliases. A NULL argument this contract does
+ * not allow is refused with SIDEREON_STATUS_NULL_POINTER rather than
+ * dereferenced; a non-null pointer that is not valid for the whole call cannot
+ * be checked and is undefined behavior.
+ */
+enum SidereonStatus sidereon_ionex_warning_list_count(const struct SidereonIonexWarningList *list,
+                                                      size_t *out_count);
+
+/**
+ * Release an IONEX warning list handle. Passing NULL is a no-op.
+ *
+ * Safety: `list` may be NULL, which is a no-op; otherwise it must be a live
+ * SidereonIonexWarningList handle this binding produced, and it must be passed
+ * here exactly once. The handle and every pointer read out of it are invalid
+ * afterwards. This call returns nothing, so it reports no status: a pointer
+ * that is neither NULL nor such a handle cannot be checked and is undefined
+ * behavior.
+ */
+void sidereon_ionex_warning_list_free(struct SidereonIonexWarningList *list);
 
 /**
  * Copy the combined ionosphere-free pseudoranges. Variable-length output
@@ -24502,17 +36202,14 @@ enum SidereonStatus sidereon_kalman_cv_steady_state_gains(double tracking_index,
                                                           struct SidereonScalarKalmanGains *out_gains);
 
 /**
- * Standalone GPS broadcast Klobuchar ionospheric group delay in the model's
- * native units (positive meters). This is the bit-exact (0-ULP) entry: it feeds
- * the kernel directly with no angle or time conversion.
+ * Standalone GPS broadcast Klobuchar ionospheric group delay in native units (meters).
  *
- * `alpha`/`beta` are the eight broadcast coefficients (four each).
- * Latitude/longitude and azimuth/elevation are in degrees; `t_gps_s` is the GPS
- * second-of-day in [0, 86400). The L1 delay is scaled to `frequency_hz` by the
- * dispersive (f_l1 / f)^2 factor. Writes the delay to *out_delay_m.
- *
- * Safety: alpha and beta must each point to four readable doubles; out_delay_m
- * must point to a double.
+ * Safety: `alpha` must point to four readable doubles; `beta` must point to
+ * four readable doubles; `out_delay_m` must point to one writable, aligned
+ * double that no other argument aliases. A NULL argument this contract does
+ * not allow is refused with SIDEREON_STATUS_NULL_POINTER rather than
+ * dereferenced; a non-null pointer that is not valid for the whole call cannot
+ * be checked and is undefined behavior.
  */
 enum SidereonStatus sidereon_klobuchar_native(const double *alpha,
                                               const double *beta,
@@ -24567,6 +36264,88 @@ enum SidereonStatus sidereon_lambert_battin(const double *r1_km,
                                             double *out_v2_km_s);
 
 /**
+ * Copy the last typed ANTEX failure for this thread: the most recent ANTEX
+ * parse, lookup (sidereon_antenna_pco, sidereon_antenna_pcv, epoch lookups)
+ * or encode that failed. If none is recorded, kind is
+ * SidereonAntexErrorKind::None.
+ *
+ * Safety: out_error must point to a SidereonAntexError.
+ */
+enum SidereonStatus sidereon_last_antex_error(struct SidereonAntexError *out_error);
+
+/**
+ * Copy one text part of the last typed ANTEX failure for this thread,
+ * selected by a SidereonAntexErrorText value. With no failure recorded, or a
+ * part the failure does not carry, nothing is copied. Uses the variable-length
+ * output contract; the bytes are copied verbatim and not null-terminated.
+ *
+ * Safety: out points to len writable bytes or is NULL when len is 0;
+ * out_written and out_required point to size_t values.
+ */
+enum SidereonStatus sidereon_last_antex_error_text(uint32_t part,
+                                                   uint8_t *out,
+                                                   size_t len,
+                                                   size_t *out_written,
+                                                   size_t *out_required);
+
+/**
+ * Copy the typed details of the most recent failed bias read/write on this
+ * thread. The error kind is None if no bias failure has been recorded.
+ * Reading the record does not clear it.
+ *
+ * Safety: out_error points to a SidereonBiasErrorInfo.
+ */
+enum SidereonStatus sidereon_last_bias_error(struct SidereonBiasErrorInfo *out_error);
+
+/**
+ * Copy a text part of the most recent typed bias error. For
+ * DEPARTURE_NOTICE, departure_part is a SidereonBiasNoticeText value.
+ *
+ * Safety: out points to len writable bytes or is NULL when len is zero;
+ * out_written and out_required point to writable size_t values.
+ */
+enum SidereonStatus sidereon_last_bias_error_text(uint32_t part,
+                                                  uint32_t departure_part,
+                                                  uint8_t *out,
+                                                  size_t len,
+                                                  size_t *out_written,
+                                                  size_t *out_required);
+
+/**
+ * Read the degradation reason recorded by the most recent ephemeris source
+ * state or transmit-clock query on this operating-system thread. After output
+ * pointer validation, each such query clears the record before source lookup
+ * and writes its result before returning; call this getter before another
+ * source query on the same thread.
+ */
+enum SidereonStatus sidereon_last_degrade_reason(enum SidereonDegradeReason *out_reason);
+
+/**
+ * Copy the last typed DTED tile failure for this thread: the most recent
+ * sidereon_dted_tile_load or sidereon_dted_tile_get_elevation call that
+ * failed, or the most recent terrain store builder that could not read a
+ * DTED input (SIDEREON_TERRAIN_STORE_ERROR_KIND_TILE). If none is recorded, kind is SidereonDtedTileErrorKind::None.
+ *
+ * Safety: out_error must point to a SidereonDtedTileError.
+ */
+enum SidereonStatus sidereon_last_dted_tile_error(struct SidereonDtedTileError *out_error);
+
+/**
+ * Read the typed error summary from the most recent matching producer on this
+ * OS thread. Reading does not clear the record.
+ */
+enum SidereonStatus sidereon_last_engine_error_info(struct SidereonEngineErrorInfo *out);
+
+/**
+ * Copy the retained versioned engine-error JSON. Query the required size with
+ * a null output and zero length; reads and short-buffer retries retain it.
+ */
+enum SidereonStatus sidereon_last_engine_error_payload(uint8_t *out,
+                                                       size_t len,
+                                                       size_t *out_written,
+                                                       size_t *out_required);
+
+/**
  * Copy the current thread's last error message into buf as a null-terminated
  * C string. Returns the number of bytes (excluding the terminator) the full
  * message needs; if that is greater than or equal to len, the message was
@@ -24579,12 +36358,144 @@ enum SidereonStatus sidereon_lambert_battin(const double *r1_km,
 size_t sidereon_last_error_message(char *buf, size_t len);
 
 /**
+ * Write the state the most recent FDE solve on this thread stopped in with a
+ * fault still detected. Every FDE solve clears it first, so reason is None
+ * unless the last one returned SIDEREON_STATUS_SOLVE for an unresolved fault.
+ *
+ * Safety: out_info must point to a SidereonFdeUnresolvedInfo.
+ */
+enum SidereonStatus sidereon_last_fde_unresolved(struct SidereonFdeUnresolvedInfo *out_info);
+
+/**
+ * Copy the satellites the most recent unresolved FDE solve on this thread
+ * excluded, in exclusion order. Uses the variable-length output contract.
+ *
+ * Safety: out must point to len writable SidereonSatelliteToken values or be
+ * NULL when len is 0; out_written and out_required must point to size_t
+ * values.
+ */
+enum SidereonStatus sidereon_last_fde_unresolved_excluded_sats(struct SidereonSatelliteToken *out,
+                                                               size_t len,
+                                                               size_t *out_written,
+                                                               size_t *out_required);
+
+/**
+ * Copy the stored weighted residuals from the unresolved FDE's detection
+ * test, ordered by satellite token. The result is retained on the current
+ * thread until the next FDE solve producer begins.
+ *
+ * Safety: out must point to len writable SidereonRaimNormalizedResidual
+ * values or be NULL when len is 0; out_written and out_required must point to
+ * size_t values.
+ */
+enum SidereonStatus sidereon_last_fde_unresolved_raim_normalized_residuals(struct SidereonRaimNormalizedResidual *out,
+                                                                           size_t len,
+                                                                           size_t *out_written,
+                                                                           size_t *out_required);
+
+/**
+ * Copy the last solution of the most recent unresolved FDE solve on this
+ * thread into a newly owned SidereonSppSolution (release it with
+ * sidereon_spp_solution_free); *out_solution is NULL when none is recorded.
+ *
+ * Safety: out_solution must point to storage for a SidereonSppSolution*.
+ */
+enum SidereonStatus sidereon_last_fde_unresolved_solution(struct SidereonSppSolution **out_solution);
+
+/**
+ * Copy the last typed geoid construction error on this thread. Text details
+ * are read with sidereon_last_terrain_error_text using the Geoid family.
+ *
+ * Safety: out_error must point to a SidereonGeoidError.
+ */
+enum SidereonStatus sidereon_last_geoid_error(struct SidereonGeoidError *out_error);
+
+/**
+ * Copy the retained typed details of the latest artifact producer failure.
+ *
+ * Safety: out_error must point to a SidereonPreciseInterpolantArtifactError.
+ */
+enum SidereonStatus sidereon_last_precise_interpolant_artifact_error(struct SidereonPreciseInterpolantArtifactError *out_error);
+
+/**
+ * Copy one retained text field of the latest artifact producer failure.
+ * Use a NULL output and zero length to learn the required size, then call
+ * again with a buffer of that size. Reads do not clear the retained error.
+ *
+ * Safety: out points to len writable bytes or is NULL when len is zero;
+ * out_written and out_required point to writable size_t values.
+ */
+enum SidereonStatus sidereon_last_precise_interpolant_artifact_error_text(uint32_t part,
+                                                                          uint8_t *out,
+                                                                          size_t len,
+                                                                          size_t *out_written,
+                                                                          size_t *out_required);
+
+/**
+ * Read and retain the QualityError kind from the latest quality-producing
+ * operation on this OS thread. Call immediately after that operation; other
+ * operations do not clear this slot.
+ */
+enum SidereonQualityErrorKind sidereon_last_quality_error_kind(void);
+
+/**
+ * Copy one text of one row's failure in the last terrain batch lookup on this
+ * thread that wrote its rows (sidereon_dted_terrain_height_batch_m,
+ * sidereon_mmap_terrain_height_batch or
+ * sidereon_mmap_terrain_orthometric_height_batch): `row` indexes that call's
+ * points and `part` is a SidereonTerrainErrorText value. A row's texts are
+ * those its error record's kind names: a Tile failure's path and message, a
+ * TileOrigin file's path, and the engine's MESSAGE text of an InvalidInput,
+ * Parse or Other failure. A row that succeeded, or a text the row does not
+ * carry, copies nothing. A row past the last batch's point count is refused
+ * with SIDEREON_STATUS_INVALID_ARGUMENT. The bytes are copied whole, not
+ * null-terminated, under the variable-length output contract.
+ *
+ * Safety: out points to len writable bytes or is NULL when len is 0;
+ * out_written and out_required point to size_t values.
+ */
+enum SidereonStatus sidereon_last_terrain_batch_error_text(size_t row,
+                                                           uint32_t part,
+                                                           uint8_t *out,
+                                                           size_t len,
+                                                           size_t *out_written,
+                                                           size_t *out_required);
+
+/**
  * Copy the last typed terrain datum error for this thread. If no terrain datum
  * error is recorded, kind is SidereonTerrainDatumErrorKind::None.
  *
  * Safety: out_error must point to a SidereonTerrainDatumError.
  */
 enum SidereonStatus sidereon_last_terrain_datum_error(struct SidereonTerrainDatumError *out_error);
+
+/**
+ * Copy one text of the last terrain error of `family` (a
+ * SidereonTerrainErrorFamily value) recorded on this thread: `part` is a
+ * SidereonTerrainErrorText value. The bytes are copied whole, not
+ * null-terminated, under the variable-length output contract: call once with
+ * out=NULL and len 0 to learn *out_required, then again with a buffer of that
+ * size. A text the error does not carry copies nothing.
+ *
+ * Safety: out points to len writable bytes or is NULL when len is 0;
+ * out_written and out_required point to size_t values.
+ */
+enum SidereonStatus sidereon_last_terrain_error_text(uint32_t family,
+                                                     uint32_t part,
+                                                     uint8_t *out,
+                                                     size_t len,
+                                                     size_t *out_written,
+                                                     size_t *out_required);
+
+/**
+ * Copy the last typed terrain lookup failure for this thread: the most recent
+ * single-point DTED or memory-mappable terrain height lookup that failed. If
+ * none is recorded, kind is SidereonTerrainLookupErrorKind::None. Batch
+ * lookups carry each point's failure in its own result instead.
+ *
+ * Safety: out_error must point to a SidereonTerrainLookupError.
+ */
+enum SidereonStatus sidereon_last_terrain_lookup_error(struct SidereonTerrainLookupError *out_error);
 
 /**
  * Copy the last typed terrain store error for this thread. If no terrain store
@@ -24830,7 +36741,7 @@ enum SidereonStatus sidereon_mee2rv(const struct SidereonModifiedEquinoctialElem
 
 /**
  * Initialize a SidereonMet with the engine's standard-atmosphere defaults,
- * sourced from sidereon_core::spp::SurfaceMet::default() (1013.25 hPa, 288.15 K,
+ * sourced from sidereon_core::positioning::SurfaceMet::default() (1013.25 hPa, 288.15 K,
  * 0.5 relative humidity) so C callers draw the standard atmosphere from the same
  * core source as the other bindings.
  *
@@ -24958,7 +36869,8 @@ enum SidereonStatus sidereon_mmap_terrain_from_vec(const uint8_t *bytes,
 /**
  * Query many terrain points as orthometric heights H in metres. Points are
  * longitude, latitude degrees. Per-point failures are written into
- * `out[i].status`.
+ * `out[i].status` and `out[i].error` (their texts through
+ * sidereon_last_terrain_batch_error_text).
  *
  * Safety: terrain must be a live handle; points must point to count
  * SidereonLonLatDeg values; options must point to SidereonDtedLookupOptions;
@@ -24974,6 +36886,11 @@ enum SidereonStatus sidereon_mmap_terrain_height_batch(struct SidereonMmapTerrai
 /**
  * Query one bilinear terrain height. Inputs are longitude, latitude degrees.
  * The returned value is orthometric height H in metres.
+ *
+ * A query no tile covers, or one that gives nonzero weight to a stored null
+ * posting (an unknown elevation) that no neighbouring tile answers, returns
+ * SIDEREON_STATUS_INVALID_ARGUMENT; sidereon_last_terrain_lookup_error reports
+ * it typed. The same holds for every single-point orthometric lookup below.
  *
  * Safety: terrain must be a live handle; out_height_m must point to a
  * SidereonOrthometricHeightM.
@@ -25000,7 +36917,8 @@ enum SidereonStatus sidereon_mmap_terrain_height_m_with_options(struct SidereonM
 /**
  * Query many terrain points as typed orthometric heights H in metres. Points
  * are longitude, latitude degrees. Per-point failures are written into
- * `out[i].status`.
+ * `out[i].status` and `out[i].error` (their texts through
+ * sidereon_last_terrain_batch_error_text).
  *
  * Safety: terrain must be a live handle; points must point to count
  * SidereonLonLatDeg values; options must point to SidereonDtedLookupOptions;
@@ -25296,11 +37214,14 @@ enum SidereonStatus sidereon_navcen_parse_at(const uint8_t *navcen_html,
                                              struct SidereonNavcenAssessments **out_assessments);
 
 /**
- * Full NeQuick-G slant ionospheric group delay (positive metres) on
- * `frequency_hz`. Delegates to
- * sidereon_core::atmosphere::ionosphere::nequick_g_delay_m.
+ * Full NeQuick-G slant ionospheric group delay (meters) on frequency_hz.
  *
- * Safety: ray must point to a SidereonNequickGRay; out_delay_m to a double.
+ * Safety: `ray` must point to one readable, aligned SidereonNequickGRay;
+ * `out_delay_m` must point to one writable, aligned double that no other
+ * argument aliases. A NULL argument this contract does not allow is refused
+ * with SIDEREON_STATUS_NULL_POINTER rather than dereferenced; a non-null
+ * pointer that is not valid for the whole call cannot be checked and is
+ * undefined behavior.
  */
 enum SidereonStatus sidereon_nequick_g_delay_m(double ai0,
                                                double ai1,
@@ -25310,13 +37231,14 @@ enum SidereonStatus sidereon_nequick_g_delay_m(double ai0,
                                                double *out_delay_m);
 
 /**
- * Full NeQuick-G slant total electron content along the ray, in TECU. Delegates
- * to sidereon_core::atmosphere::ionosphere::nequick_g_stec_tecu.
+ * Full NeQuick-G slant total electron content along the ray, in TECU.
  *
- * `ai0`/`ai1`/`ai2` are the three Galileo broadcast effective-ionisation
- * coefficients. Writes the slant TEC to *out_stec_tecu.
- *
- * Safety: ray must point to a SidereonNequickGRay; out_stec_tecu to a double.
+ * Safety: `ray` must point to one readable, aligned SidereonNequickGRay;
+ * `out_stec_tecu` must point to one writable, aligned double that no other
+ * argument aliases. A NULL argument this contract does not allow is refused
+ * with SIDEREON_STATUS_NULL_POINTER rather than dereferenced; a non-null
+ * pointer that is not valid for the whole call cannot be checked and is
+ * undefined behavior.
  */
 enum SidereonStatus sidereon_nequick_g_stec_tecu(double ai0,
                                                  double ai1,
@@ -25358,6 +37280,31 @@ enum SidereonStatus sidereon_nis_gate_threshold(size_t dof,
                                                 double confidence,
                                                 double *out_threshold);
 
+/**
+ * Copy parser diagnostics and every retained epoch's assembly diagnostics into
+ * an independently owned list.
+ */
+enum SidereonStatus sidereon_nmea_accumulator_diagnostics(const struct SidereonNmeaAccumulator *accumulator,
+                                                          struct SidereonNmeaDiagnosticList **out);
+
+/**
+ * Copy one accumulated epoch's full assembly diagnostics into an owned list.
+ */
+enum SidereonStatus sidereon_nmea_accumulator_epoch_diagnostics(const struct SidereonNmeaAccumulator *accumulator,
+                                                                size_t epoch_index,
+                                                                struct SidereonNmeaDiagnosticList **out);
+
+/**
+ * Copy all complete singleton, GSA and GSV fields for each accumulated epoch
+ * into an owned, epoch-ordered field list.
+ *
+ * # Safety
+ * `accumulator` must be live and `out` must point to one writable, aligned
+ * result-list pointer.
+ */
+enum SidereonStatus sidereon_nmea_accumulator_epoch_records(const struct SidereonNmeaAccumulator *accumulator,
+                                                            struct SidereonNmeaRecordList **out);
+
 enum SidereonStatus sidereon_nmea_accumulator_epochs(const struct SidereonNmeaAccumulator *accumulator,
                                                      struct SidereonNmeaEpochSummary *out,
                                                      size_t len,
@@ -25379,8 +37326,63 @@ enum SidereonStatus sidereon_nmea_accumulator_push(struct SidereonNmeaAccumulato
 enum SidereonStatus sidereon_nmea_accumulator_retained_len(const struct SidereonNmeaAccumulator *accumulator,
                                                            size_t *out_len);
 
+/**
+ * Copy the accumulator's accepted complete-line sentences into an owned,
+ * input-ordered field list.
+ *
+ * # Safety
+ * `accumulator` must be live and `out` must point to one writable, aligned
+ * result-list pointer.
+ */
+enum SidereonStatus sidereon_nmea_accumulator_sentences(const struct SidereonNmeaAccumulator *accumulator,
+                                                        struct SidereonNmeaRecordList **out);
+
 enum SidereonStatus sidereon_nmea_accumulator_summary(const struct SidereonNmeaAccumulator *accumulator,
                                                       struct SidereonNmeaSummary *out_summary);
+
+enum SidereonStatus sidereon_nmea_diagnostic_list_count(const struct SidereonNmeaDiagnosticList *list,
+                                                        size_t *out_count);
+
+void sidereon_nmea_diagnostic_list_free(struct SidereonNmeaDiagnosticList *list);
+
+enum SidereonStatus sidereon_nmea_diagnostic_list_get_info(const struct SidereonNmeaDiagnosticList *list,
+                                                           size_t index,
+                                                           struct SidereonNmeaDiagnosticInfo *out_info);
+
+enum SidereonStatus sidereon_nmea_diagnostic_list_get_payload(const struct SidereonNmeaDiagnosticList *list,
+                                                              size_t index,
+                                                              uint8_t *out,
+                                                              size_t len,
+                                                              size_t *out_written,
+                                                              size_t *out_required);
+
+/**
+ * Copy all parser and epoch-assembly diagnostics into an independently owned
+ * list. Parser-scope entries come first; epochs follow in log order. Within
+ * each scope, skips precede warnings and each core diagnostic vector keeps its
+ * original order.
+ */
+enum SidereonStatus sidereon_nmea_log_diagnostics(const struct SidereonNmeaLog *log,
+                                                  struct SidereonNmeaDiagnosticList **out);
+
+/**
+ * Copy one epoch snapshot's full assembly diagnostics into an owned list.
+ */
+enum SidereonStatus sidereon_nmea_log_epoch_diagnostics(const struct SidereonNmeaLog *log,
+                                                        size_t epoch_index,
+                                                        struct SidereonNmeaDiagnosticList **out);
+
+/**
+ * Copy all complete singleton, GSA and GSV fields for each log epoch into an
+ * owned, epoch-ordered field list. Optional singleton bodies are represented
+ * as JSON null when absent; GSA entries and GSV groups retain core ordering.
+ *
+ * # Safety
+ * `log` must be live and `out` must point to one writable, aligned
+ * result-list pointer.
+ */
+enum SidereonStatus sidereon_nmea_log_epoch_records(const struct SidereonNmeaLog *log,
+                                                    struct SidereonNmeaRecordList **out);
 
 enum SidereonStatus sidereon_nmea_log_epochs(const struct SidereonNmeaLog *log,
                                              struct SidereonNmeaEpochSummary *out,
@@ -25390,12 +37392,60 @@ enum SidereonStatus sidereon_nmea_log_epochs(const struct SidereonNmeaLog *log,
 
 void sidereon_nmea_log_free(struct SidereonNmeaLog *log);
 
+/**
+ * Copy the log's accepted sentences into an owned, input-ordered field list.
+ * Each payload is a JSON record with the talker and every decoded field from
+ * the accepted typed sentence. Optional values are JSON `null`; enum values
+ * include a stable `kind` and their raw or numeric value where applicable.
+ *
+ * # Safety
+ * `log` must be a live handle and `out` must point to one writable, aligned
+ * result-list pointer.
+ */
+enum SidereonStatus sidereon_nmea_log_sentences(const struct SidereonNmeaLog *log,
+                                                struct SidereonNmeaRecordList **out);
+
 enum SidereonStatus sidereon_nmea_log_summary(const struct SidereonNmeaLog *log,
                                               struct SidereonNmeaSummary *out_summary);
 
 enum SidereonStatus sidereon_nmea_parse(const uint8_t *data,
                                         size_t len,
                                         struct SidereonNmeaLog **out_log);
+
+/**
+ * Write the number of owned NMEA records to `out_count`.
+ *
+ * # Safety
+ * `list` must be live and `out_count` must point to one writable, aligned
+ * `usize` that does not alias the list.
+ */
+enum SidereonStatus sidereon_nmea_record_list_count(const struct SidereonNmeaRecordList *list,
+                                                    size_t *out_count);
+
+/**
+ * Free an owned NMEA sentence/epoch record list. NULL is accepted.
+ *
+ * # Safety
+ * A non-NULL pointer must be a live list returned by this binding and passed
+ * here exactly once.
+ */
+void sidereon_nmea_record_list_free(struct SidereonNmeaRecordList *list);
+
+/**
+ * Copy the JSON field payload at `index` using the standard variable-length
+ * byte output contract. A too-small buffer is left untouched and the required
+ * size is returned.
+ *
+ * # Safety
+ * `list` must be live. Buffer and count pointers must meet the non-aliasing
+ * writable-storage contract of `copy_prefix_to_c`.
+ */
+enum SidereonStatus sidereon_nmea_record_list_get_payload(const struct SidereonNmeaRecordList *list,
+                                                          size_t index,
+                                                          uint8_t *out,
+                                                          size_t len,
+                                                          size_t *out_written,
+                                                          size_t *out_required);
 
 enum SidereonStatus sidereon_nmea_write_gga(const struct SidereonNmeaGgaOptions *options,
                                             uint8_t *out,
@@ -25546,7 +37596,7 @@ enum SidereonStatus sidereon_nutation_fundamental_arguments(double t_julian_cent
  * Julian date. Delegates to
  * sidereon_core::astro::frames::nutation::skyfield_iau2000a_radians.
  *
- * Safety: out_dpsi_rad and out_deps_rad point to a double each.
+ * Safety: out_dpsi_rad and out_deps_rad point to disjoint doubles.
  */
 enum SidereonStatus sidereon_nutation_iau2000a_radians(double jd_tt,
                                                        double *out_dpsi_rad,
@@ -25585,6 +37635,43 @@ enum SidereonStatus sidereon_observability_tier_label(uint32_t tier,
                                                       size_t len,
                                                       size_t *out_written,
                                                       size_t *out_required);
+
+/**
+ * Read the number of typed row errors in an owned observable-error snapshot.
+ */
+enum SidereonStatus sidereon_observable_row_errors_count(const struct SidereonObservableRowErrors *errors,
+                                                         size_t *out_count);
+
+/**
+ * Free an owned observable-row-error snapshot; NULL is accepted.
+ */
+void sidereon_observable_row_errors_free(struct SidereonObservableRowErrors *errors);
+
+/**
+ * Read row index, legacy status, and payload length from an owned snapshot.
+ */
+enum SidereonStatus sidereon_observable_row_errors_info(const struct SidereonObservableRowErrors *errors,
+                                                        size_t index,
+                                                        struct SidereonObservableRowErrorInfo *out);
+
+/**
+ * Copy one owned row-error JSON payload. Short-buffer retries retain the
+ * snapshot; caller storage is owned by the caller and requires no library free.
+ */
+enum SidereonStatus sidereon_observable_row_errors_payload(const struct SidereonObservableRowErrors *errors,
+                                                           size_t index,
+                                                           uint8_t *out,
+                                                           size_t len,
+                                                           size_t *out_written,
+                                                           size_t *out_required);
+
+/**
+ * Snapshot the most recent observable batch's thread-local row errors into an
+ * independently owned handle. The thread-local source is replaced at the next
+ * observable producer, but this snapshot survives later operations and source
+ * handle frees. Release it with `sidereon_observable_row_errors_free`.
+ */
+enum SidereonStatus sidereon_observable_row_errors_snapshot(struct SidereonObservableRowErrors **out);
 
 /**
  * Copy the observable-state missing-position sentinel into out. The sentinel is
@@ -25781,10 +37868,36 @@ enum SidereonStatus sidereon_oem_parse_xml(const uint8_t *data,
 enum SidereonStatus sidereon_oem_segment_count(const struct SidereonOem *oem, size_t *out_count);
 
 /**
+ * Copy one retained malformed OEM state line as JSON detail, preserving its
+ * one-based source line, zero-based segment index, trimmed original text, and
+ * full typed parse reason. Uses the standard two-pass byte-copy contract.
+ *
+ * Safety: oem is a live handle; out and size pointers follow the documented
+ * variable-length output contract.
+ */
+enum SidereonStatus sidereon_oem_skipped_state(const struct SidereonOem *oem,
+                                               size_t index,
+                                               uint8_t *out,
+                                               size_t len,
+                                               size_t *out_written,
+                                               size_t *out_required);
+
+/**
+ * Write the number of malformed KVN state lines retained by the forgiving
+ * OEM parser. XML parsing refuses malformed states and has no skipped lines.
+ *
+ * Safety: oem is a live handle; out_count points to a size_t.
+ */
+enum SidereonStatus sidereon_oem_skipped_state_count(const struct SidereonOem *oem,
+                                                     size_t *out_count);
+
+/**
  * Serialize an OEM to KVN text. The output is not null-terminated. Uses the
  * variable-length output contract documented at the top of the header: call once
  * with out=NULL to learn *out_required, then again with a buffer of that size.
  * Round-trips with sidereon_oem_parse_kvn.
+ * Fails with SIDEREON_STATUS_INVALID_ARGUMENT when the writer refuses the
+ * message, naming the item it cannot write.
  *
  * Safety: oem must be a live handle; out must point to at least len writable
  * bytes or be NULL when len is 0; out_written and out_required must point to
@@ -25801,6 +37914,8 @@ enum SidereonStatus sidereon_oem_to_kvn(const struct SidereonOem *oem,
  * variable-length output contract documented at the top of the header: call once
  * with out=NULL to learn *out_required, then again with a buffer of that size.
  * Round-trips with sidereon_oem_parse_xml.
+ * Fails with SIDEREON_STATUS_INVALID_ARGUMENT when the writer refuses the
+ * message, naming the item it cannot write.
  *
  * Safety: oem must be a live handle; out must point to at least len writable
  * bytes or be NULL when len is 0; out_written and out_required must point to
@@ -25855,6 +37970,25 @@ void sidereon_omm_catalog_free(struct SidereonOmmCatalog *catalog);
  */
 enum SidereonStatus sidereon_omm_catalog_malformed_count(const struct SidereonOmmCatalog *catalog,
                                                          size_t *out_count);
+
+/**
+ * Return one parser-level malformed JSON array record as owned JSON detail.
+ * This collection is distinct from catalog identity skips, available through
+ * sidereon_omm_catalog_skipped_count and sidereon_omm_catalog_skipped.
+ * The payload preserves the original zero-based index and recursively typed
+ * OMM parse error. Uses the standard two-pass byte-copy contract.
+ *
+ * Safety: catalog is a live catalog handle; out_index, out_written and
+ * out_required point to writable size_t values; out is NULL only when len is 0
+ * or points to len writable bytes.
+ */
+enum SidereonStatus sidereon_omm_catalog_malformed_record(const struct SidereonOmmCatalog *catalog,
+                                                          size_t index,
+                                                          size_t *out_index,
+                                                          uint8_t *out,
+                                                          size_t len,
+                                                          size_t *out_written,
+                                                          size_t *out_required);
 
 /**
  * Copy one resolved record (by zero-based index, ascending (system, prn) order)
@@ -25959,6 +38093,8 @@ enum SidereonStatus sidereon_omm_parse_xml(const uint8_t *data,
  * Serialize an OMM to JSON text (not null-terminated). Round-trips with
  * sidereon_omm_parse_json. Variable-length output contract. Delegates to
  * sidereon_core::astro::omm::encode_json.
+ * Fails with SIDEREON_STATUS_INVALID_ARGUMENT when the writer refuses the
+ * message, naming the item it cannot write.
  *
  * Safety: omm is a live handle; out points to len writable bytes or NULL when
  * len is 0; out_written and out_required point to size_t.
@@ -25973,6 +38109,8 @@ enum SidereonStatus sidereon_omm_to_json(const struct SidereonOmm *omm,
  * Serialize an OMM to KVN text (not null-terminated). Round-trips with
  * sidereon_omm_parse_kvn. Variable-length output contract. Delegates to
  * sidereon_core::astro::omm::encode_kvn.
+ * Fails with SIDEREON_STATUS_INVALID_ARGUMENT when the writer refuses the
+ * message, naming the item it cannot write.
  *
  * Safety: omm is a live handle; out points to len writable bytes or NULL when
  * len is 0; out_written and out_required point to size_t.
@@ -25987,6 +38125,8 @@ enum SidereonStatus sidereon_omm_to_kvn(const struct SidereonOmm *omm,
  * Serialize an OMM to XML text (not null-terminated). Round-trips with
  * sidereon_omm_parse_xml. Variable-length output contract. Delegates to
  * sidereon_core::astro::omm::encode_xml.
+ * Fails with SIDEREON_STATUS_INVALID_ARGUMENT when the writer refuses the
+ * message, naming the item it cannot write.
  *
  * Safety: omm is a live handle; out points to len writable bytes or NULL when
  * len is 0; out_written and out_required point to size_t.
@@ -26032,6 +38172,8 @@ enum SidereonStatus sidereon_opm_parse_xml(const uint8_t *data,
  * variable-length output contract documented at the top of the header: call once
  * with out=NULL to learn *out_required, then again with a buffer of that size.
  * Round-trips with sidereon_opm_parse_kvn.
+ * Fails with SIDEREON_STATUS_INVALID_ARGUMENT when the writer refuses the
+ * message, naming the item it cannot write.
  *
  * Safety: opm must be a live handle; out must point to at least len writable
  * bytes or be NULL when len is 0; out_written and out_required must point to
@@ -26048,6 +38190,8 @@ enum SidereonStatus sidereon_opm_to_kvn(const struct SidereonOpm *opm,
  * variable-length output contract documented at the top of the header: call once
  * with out=NULL to learn *out_required, then again with a buffer of that size.
  * Round-trips with sidereon_opm_parse_xml.
+ * Fails with SIDEREON_STATUS_INVALID_ARGUMENT when the writer refuses the
+ * message, naming the item it cannot write.
  *
  * Safety: opm must be a live handle; out must point to at least len writable
  * bytes or be NULL when len is 0; out_written and out_required must point to
@@ -26203,7 +38347,10 @@ enum SidereonStatus sidereon_parse_rinex_nav_records(const uint8_t *data,
 
 /**
  * Parse comma-delimited EMS SBAS text-log lines. This is a text parser and
- * does not perform binary SBAS message decoding.
+ * does not perform binary SBAS message decoding. Lines are read under the
+ * strict policy with default options: a record line whose fields cannot be
+ * read at known positions, or whose checksum differs, fails the call. Blank
+ * and comment lines are passed over.
  *
  * Safety: data points to len readable bytes; out_blocks points to an owned
  * list handle slot.
@@ -26214,7 +38361,10 @@ enum SidereonStatus sidereon_parse_sbas_ems_lines(const uint8_t *data,
 
 /**
  * Parse RTKLIB SBAS text-log lines. This is a text parser and does not
- * perform binary SBAS message decoding.
+ * perform binary SBAS message decoding. Lines are read under the strict
+ * policy with default options: a record line whose fields cannot be read at
+ * known positions, or whose checksum differs, fails the call. Blank and
+ * comment lines are passed over.
  *
  * Safety: data points to len readable bytes; out_blocks points to an owned
  * list handle slot.
@@ -26225,13 +38375,16 @@ enum SidereonStatus sidereon_parse_sbas_rtklib_lines(const uint8_t *data,
 
 /**
  * Parse a multi-record CelesTrak/Space-Track TLE file into N initialized
- * satellites. text must point to text_len readable UTF-8 bytes (the whole
- * file); opsmode is one of SidereonTleOpsMode_* encoded as uint32_t. Handles
- * bare 2-line sets, 3-line name+line1+line2 sets, and CelesTrak "0 NAME" name
- * lines; CRLF endings, blank lines, and surrounding whitespace are tolerated.
- * A record that fails SGP4 initialization is skipped and counted (see
- * sidereon_tle_file_skipped) rather than aborting the whole parse. On success
- * writes a newly owned handle to *out_file. Release it with
+ * satellites under the strict checksum policy. text must point to text_len
+ * readable UTF-8 bytes (the whole file); opsmode is one of
+ * SidereonTleOpsMode_* encoded as uint32_t. Handles bare 2-line sets, 3-line
+ * name+line1+line2 sets, and CelesTrak "0 NAME" name lines; CRLF endings,
+ * blank lines, and surrounding whitespace are tolerated. Every element set
+ * that reads is kept, and every other non-blank line is reported as a
+ * rejected record (sidereon_tle_file_rejected) with its line and reason: an
+ * element set the grammar, checksum policy or SGP4 initialization refused, a
+ * line 1 without a line 2, a stray line 2, or a name line with no element
+ * set. On success writes a newly owned handle to *out_file. Release it with
  * sidereon_tle_file_free.
  *
  * Safety: text must point to text_len readable bytes or be NULL when text_len
@@ -26241,6 +38394,20 @@ enum SidereonStatus sidereon_parse_tle_file(const uint8_t *text,
                                             size_t text_len,
                                             uint32_t opsmode,
                                             struct SidereonTleFile **out_file);
+
+/**
+ * Parse a multi-record TLE file as sidereon_parse_tle_file does, under
+ * `policy`, a SidereonTlePolicy value. Under SIDEREON_TLE_POLICY_LENIENT a
+ * column-69 checksum that disagrees or is not a digit is read and reported
+ * in the record's checksum warnings instead of rejecting the record.
+ *
+ * Safety: as for sidereon_parse_tle_file.
+ */
+enum SidereonStatus sidereon_parse_tle_file_with_policy(const uint8_t *text,
+                                                        size_t text_len,
+                                                        uint32_t opsmode,
+                                                        uint32_t policy,
+                                                        struct SidereonTleFile **out_file);
 
 /**
  * Initialize pass-finder options with engine defaults.
@@ -26332,6 +38499,16 @@ enum SidereonStatus sidereon_ppp_corrections_build(const struct SidereonSp3 *sp3
                                                    const struct SidereonPppCorrectionsOptions *options,
                                                    struct SidereonPppCorrections **out);
 
+enum SidereonStatus sidereon_ppp_corrections_build_with_validity_and_tide_constants(const struct SidereonSp3 *sp3,
+                                                                                    const struct SidereonPppCorrectionEpoch *epochs,
+                                                                                    size_t epoch_count,
+                                                                                    const double *receiver_ecef_m,
+                                                                                    const struct SidereonPppCorrectionsOptions *options,
+                                                                                    uint32_t validity_mode,
+                                                                                    uint32_t tide_constants,
+                                                                                    enum SidereonPppCorrectionsErrorKind *out_error_kind,
+                                                                                    struct SidereonPppCorrections **out);
+
 /**
  * Copy the per-satellite code-bias correction table (scalars, meters).
  * Variable-length output contract.
@@ -26345,6 +38522,9 @@ enum SidereonStatus sidereon_ppp_corrections_code_bias(const struct SidereonPppC
                                                        size_t len,
                                                        size_t *out_written,
                                                        size_t *out_required);
+
+enum SidereonStatus sidereon_ppp_corrections_degraded_reason(const struct SidereonPppCorrections *corrections,
+                                                             enum SidereonPppCorrectionsDegradeReason *out_reason);
 
 /**
  * Release a PPP corrections handle.
@@ -26446,6 +38626,21 @@ enum SidereonStatus sidereon_ppp_corrections_windup(const struct SidereonPppCorr
 enum SidereonStatus sidereon_ppp_fixed_ambiguity_options_init(struct SidereonPppFixedAmbiguityOptions *out_options);
 
 /**
+ * Copy the receiver clock, metres, of each solved epoch, in the order of
+ * the solved epochs. Uses the variable-length output contract documented at the top of
+ * the header.
+ *
+ * Safety: sol must be a live solution handle; out must point to at least len
+ * writable entries or be NULL when len is 0; out_written and out_required must
+ * point to size_t values.
+ */
+enum SidereonStatus sidereon_ppp_fixed_solution_epoch_clocks(const struct SidereonPppFixedSolution *sol,
+                                                             double *out,
+                                                             size_t len,
+                                                             size_t *out_written,
+                                                             size_t *out_required);
+
+/**
  * Copy PPP fixed integer ambiguities. Uses the variable-length output
  * contract documented at the top of the header.
  *
@@ -26509,6 +38704,53 @@ enum SidereonStatus sidereon_ppp_fixed_solution_position_covariances(const struc
                                                                      struct SidereonPppPositionCovariances *out);
 
 /**
+ * Copy the input epoch index of each solved epoch, ascending. An input epoch left with no
+ * observations by the elevation cutoff, SSR/HAS bias exclusion or the residual screen is not
+ * solved and is absent. Uses the variable-length output contract documented at the top of
+ * the header.
+ *
+ * Safety: sol must be a live solution handle; out must point to at least len
+ * writable entries or be NULL when len is 0; out_written and out_required must
+ * point to size_t values.
+ */
+enum SidereonStatus sidereon_ppp_fixed_solution_solved_epochs(const struct SidereonPppFixedSolution *sol,
+                                                              size_t *out,
+                                                              size_t len,
+                                                              size_t *out_written,
+                                                              size_t *out_required);
+
+/**
+ * Copy the source error of SSR/HAS bias exclusion `index` (kind SOURCE), not
+ * null-terminated, under the variable-length output contract. Empty for any
+ * other kind.
+ *
+ * Safety: sol must be a live solution handle; out must point to at least len
+ * writable bytes or be NULL when len is 0; out_written and out_required must
+ * point to size_t values.
+ */
+enum SidereonStatus sidereon_ppp_fixed_solution_ssr_bias_exclusion_error_text(const struct SidereonPppFixedSolution *sol,
+                                                                              size_t index,
+                                                                              uint8_t *out,
+                                                                              size_t len,
+                                                                              size_t *out_written,
+                                                                              size_t *out_required);
+
+/**
+ * Copy the observations left out because an SSR/HAS bias they require was
+ * not resolved, in epoch and observation order. Uses the variable-length output contract documented at the top of
+ * the header.
+ *
+ * Safety: sol must be a live solution handle; out must point to at least len
+ * writable entries or be NULL when len is 0; out_written and out_required must
+ * point to size_t values.
+ */
+enum SidereonStatus sidereon_ppp_fixed_solution_ssr_bias_exclusions(const struct SidereonPppFixedSolution *sol,
+                                                                    struct SidereonPppSsrBiasExclusion *out,
+                                                                    size_t len,
+                                                                    size_t *out_written,
+                                                                    size_t *out_required);
+
+/**
  * Copy PPP fixed temporal-correlation covariance metadata into *out.
  *
  * Safety: sol must be a live solution handle; out must point to a
@@ -26525,6 +38767,35 @@ enum SidereonStatus sidereon_ppp_fixed_solution_temporal_correlation(const struc
  */
 enum SidereonStatus sidereon_ppp_fixed_solution_tropo_gradient(const struct SidereonPppFixedSolution *sol,
                                                                struct SidereonPppTropoGradientEstimate *out);
+
+/**
+ * Copy the observations the solve left out before solving because no
+ * transmission epoch can be placed from them, with the reason. Uses the
+ * variable-length output contract documented at the top of the header.
+ *
+ * Safety: sol must be a live solution handle; out must point to at least len
+ * writable entries or be NULL when len is 0; out_written and out_required must
+ * point to size_t values.
+ */
+enum SidereonStatus sidereon_ppp_fixed_solution_unplaced_observations(const struct SidereonPppFixedSolution *sol,
+                                                                      struct SidereonPppUnplacedObservation *out,
+                                                                      size_t len,
+                                                                      size_t *out_written,
+                                                                      size_t *out_required);
+
+/**
+ * Copy unplaced fixed-solve observations with optional strict-SSR size values.
+ * The existing record and accessor retain their ABI.
+ *
+ * # Safety
+ * `sol` must be live; output and count pointers must meet the variable-length
+ * buffer contract.
+ */
+enum SidereonStatus sidereon_ppp_fixed_solution_unplaced_observations_v2(const struct SidereonPppFixedSolution *sol,
+                                                                         struct SidereonPppUnplacedObservationV2 *out,
+                                                                         size_t len,
+                                                                         size_t *out_written,
+                                                                         size_t *out_required);
 
 /**
  * Copy used PPP ids from a PPP fixed solution into 65-byte SidereonPppId
@@ -26580,6 +38851,21 @@ enum SidereonStatus sidereon_ppp_float_solution_ambiguities(const struct Sidereo
                                                             size_t *out_required);
 
 /**
+ * Copy the receiver clock, metres, of each solved epoch, in the order of
+ * the solved epochs. Uses the variable-length output contract documented at the top of
+ * the header.
+ *
+ * Safety: sol must be a live solution handle; out must point to at least len
+ * writable entries or be NULL when len is 0; out_written and out_required must
+ * point to size_t values.
+ */
+enum SidereonStatus sidereon_ppp_float_solution_epoch_clocks(const struct SidereonPppFloatSolution *sol,
+                                                             double *out,
+                                                             size_t len,
+                                                             size_t *out_written,
+                                                             size_t *out_required);
+
+/**
  * Release a PPP float solution handle. Null is a no-op. A non-null handle must
  * come from sidereon_solve_ppp_float and must be freed exactly once with this
  * function.
@@ -26618,6 +38904,68 @@ enum SidereonStatus sidereon_ppp_float_solution_position_covariances(const struc
                                                                      struct SidereonPppPositionCovariances *out);
 
 /**
+ * Copy the observations the residual screen removed from the accepted
+ * solution. The fixed solve leaves them out too. Uses the variable-length output contract documented at the top of
+ * the header.
+ *
+ * Safety: sol must be a live solution handle; out must point to at least len
+ * writable entries or be NULL when len is 0; out_written and out_required must
+ * point to size_t values.
+ */
+enum SidereonStatus sidereon_ppp_float_solution_residual_screen_removals(const struct SidereonPppFloatSolution *sol,
+                                                                         struct SidereonPppEpochObservation *out,
+                                                                         size_t len,
+                                                                         size_t *out_written,
+                                                                         size_t *out_required);
+
+/**
+ * Copy the input epoch index of each solved epoch, ascending. An input epoch left with no
+ * observations by the elevation cutoff, SSR/HAS bias exclusion or the residual screen is not
+ * solved and is absent. Uses the variable-length output contract documented at the top of
+ * the header.
+ *
+ * Safety: sol must be a live solution handle; out must point to at least len
+ * writable entries or be NULL when len is 0; out_written and out_required must
+ * point to size_t values.
+ */
+enum SidereonStatus sidereon_ppp_float_solution_solved_epochs(const struct SidereonPppFloatSolution *sol,
+                                                              size_t *out,
+                                                              size_t len,
+                                                              size_t *out_written,
+                                                              size_t *out_required);
+
+/**
+ * Copy the source error of SSR/HAS bias exclusion `index` (kind SOURCE), not
+ * null-terminated, under the variable-length output contract. Empty for any
+ * other kind.
+ *
+ * Safety: sol must be a live solution handle; out must point to at least len
+ * writable bytes or be NULL when len is 0; out_written and out_required must
+ * point to size_t values.
+ */
+enum SidereonStatus sidereon_ppp_float_solution_ssr_bias_exclusion_error_text(const struct SidereonPppFloatSolution *sol,
+                                                                              size_t index,
+                                                                              uint8_t *out,
+                                                                              size_t len,
+                                                                              size_t *out_written,
+                                                                              size_t *out_required);
+
+/**
+ * Copy the observations left out because an SSR/HAS bias they require was
+ * not resolved, in epoch and observation order. Uses the variable-length output contract documented at the top of
+ * the header.
+ *
+ * Safety: sol must be a live solution handle; out must point to at least len
+ * writable entries or be NULL when len is 0; out_written and out_required must
+ * point to size_t values.
+ */
+enum SidereonStatus sidereon_ppp_float_solution_ssr_bias_exclusions(const struct SidereonPppFloatSolution *sol,
+                                                                    struct SidereonPppSsrBiasExclusion *out,
+                                                                    size_t len,
+                                                                    size_t *out_written,
+                                                                    size_t *out_required);
+
+/**
  * Copy PPP float temporal-correlation covariance metadata into *out.
  *
  * Safety: sol must be a live solution handle; out must point to a
@@ -26634,6 +38982,35 @@ enum SidereonStatus sidereon_ppp_float_solution_temporal_correlation(const struc
  */
 enum SidereonStatus sidereon_ppp_float_solution_tropo_gradient(const struct SidereonPppFloatSolution *sol,
                                                                struct SidereonPppTropoGradientEstimate *out);
+
+/**
+ * Copy the observations the solve left out before solving because no
+ * transmission epoch can be placed from them, with the reason. Uses the
+ * variable-length output contract documented at the top of the header.
+ *
+ * Safety: sol must be a live solution handle; out must point to at least len
+ * writable entries or be NULL when len is 0; out_written and out_required must
+ * point to size_t values.
+ */
+enum SidereonStatus sidereon_ppp_float_solution_unplaced_observations(const struct SidereonPppFloatSolution *sol,
+                                                                      struct SidereonPppUnplacedObservation *out,
+                                                                      size_t len,
+                                                                      size_t *out_written,
+                                                                      size_t *out_required);
+
+/**
+ * Copy unplaced float-solve observations with optional strict-SSR size values.
+ * The existing record and accessor retain their ABI.
+ *
+ * # Safety
+ * `sol` must be live; output and count pointers must meet the variable-length
+ * buffer contract.
+ */
+enum SidereonStatus sidereon_ppp_float_solution_unplaced_observations_v2(const struct SidereonPppFloatSolution *sol,
+                                                                         struct SidereonPppUnplacedObservationV2 *out,
+                                                                         size_t len,
+                                                                         size_t *out_written,
+                                                                         size_t *out_required);
 
 /**
  * Copy used PPP ids from a PPP float solution into 65-byte SidereonPppId
@@ -26705,6 +39082,33 @@ enum SidereonStatus sidereon_precession_icrs_to_j2000_matrix(double *out_matrix)
  */
 enum SidereonStatus sidereon_precession_matrix(double jd_tdb, double *out_matrix);
 
+enum SidereonStatus sidereon_precise_artifact_source_clock_relativity_at_epoch_query(const struct SidereonPreciseInterpolantArtifact *artifact,
+                                                                                     const char *sat_id,
+                                                                                     const struct SidereonExactEpochQuery *epoch,
+                                                                                     const double *position_ecef_m,
+                                                                                     enum SidereonClockRelativityKind *out_kind,
+                                                                                     double *out_term_s);
+
+enum SidereonStatus sidereon_precise_artifact_source_ephemeris_variance_at_epoch_queries(const struct SidereonPreciseInterpolantArtifact *artifact,
+                                                                                         const char *sat_id,
+                                                                                         const struct SidereonExactEpochQuery *state_epoch,
+                                                                                         const struct SidereonExactEpochQuery *selection_epoch,
+                                                                                         double *out_variance_m2);
+
+enum SidereonStatus sidereon_precise_artifact_source_state_at_epoch_queries(const struct SidereonPreciseInterpolantArtifact *artifact,
+                                                                            const char *sat_id,
+                                                                            const struct SidereonExactEpochQuery *state_epoch,
+                                                                            const struct SidereonExactEpochQuery *selection_epoch,
+                                                                            struct SidereonEphemerisSourceState *out);
+
+enum SidereonStatus sidereon_precise_artifact_source_transmit_epoch_clock_at_epoch_queries(const struct SidereonPreciseInterpolantArtifact *artifact,
+                                                                                           const char *sat_id,
+                                                                                           const struct SidereonExactEpochQuery *transmit_epoch,
+                                                                                           const struct SidereonExactEpochQuery *selection_epoch,
+                                                                                           bool *out_has_clock,
+                                                                                           double *out_clock_s,
+                                                                                           bool *out_degraded);
+
 /**
  * Release a cached precise-ephemeris interpolant. Null is a no-op.
  *
@@ -26735,6 +39139,25 @@ enum SidereonStatus sidereon_precise_ephemeris_interpolant_from_precise_ephemeri
 enum SidereonStatus sidereon_precise_ephemeris_interpolant_from_samples(const struct SidereonPreciseEphemerisSample *samples,
                                                                         size_t count,
                                                                         struct SidereonPreciseEphemerisInterpolant **out_handle);
+
+enum SidereonStatus sidereon_precise_ephemeris_interpolant_from_samples_v2(const struct SidereonPreciseEphemerisSampleV2 *samples,
+                                                                           size_t count,
+                                                                           double gap_threshold_factor,
+                                                                           struct SidereonPreciseEphemerisInterpolant **out_handle);
+
+enum SidereonStatus sidereon_precise_ephemeris_interpolant_from_samples_with_accuracy(const struct SidereonPreciseEphemerisSample *samples,
+                                                                                      const struct SidereonPreciseEphemerisAccuracySample *accuracy,
+                                                                                      size_t count,
+                                                                                      double gap_threshold_factor,
+                                                                                      struct SidereonPreciseEphemerisInterpolant **out_handle,
+                                                                                      struct SidereonPreciseSamplesError *out_error);
+
+enum SidereonStatus sidereon_precise_ephemeris_interpolant_from_samples_with_accuracy_v2(const struct SidereonPreciseEphemerisSampleV2 *samples,
+                                                                                         const struct SidereonPreciseEphemerisAccuracySampleV2 *accuracy,
+                                                                                         size_t count,
+                                                                                         double gap_threshold_factor,
+                                                                                         struct SidereonPreciseEphemerisInterpolant **out_handle,
+                                                                                         struct SidereonPreciseSamplesError *out_error);
 
 /**
  * Build a cached precise-ephemeris interpolant from canonical samples with an
@@ -26806,6 +39229,17 @@ enum SidereonStatus sidereon_precise_ephemeris_interpolant_observable_states_at_
                                                                                                enum SidereonObservableStateElementStatus *out_element_statuses,
                                                                                                enum SidereonStatus *out_result_statuses);
 
+enum SidereonStatus sidereon_precise_ephemeris_interpolant_state_at_epoch_query(const struct SidereonPreciseEphemerisInterpolant *interpolant,
+                                                                                const char *sat_id,
+                                                                                const struct SidereonExactEpochQuery *query,
+                                                                                struct SidereonSp3State *out_state);
+
+enum SidereonStatus sidereon_precise_ephemeris_samples_accuracy_records_v2(const struct SidereonPreciseEphemerisSamples *samples,
+                                                                           struct SidereonPreciseEphemerisAccuracySampleV2 *out,
+                                                                           size_t len,
+                                                                           size_t *out_written,
+                                                                           size_t *out_required);
+
 /**
  * Release a precise-ephemeris samples handle. Null is a no-op. A non-null handle
  * must come from sidereon_precise_ephemeris_samples_from_samples and must be
@@ -26832,6 +39266,25 @@ void sidereon_precise_ephemeris_samples_free(struct SidereonPreciseEphemerisSamp
 enum SidereonStatus sidereon_precise_ephemeris_samples_from_samples(const struct SidereonPreciseEphemerisSample *samples,
                                                                     size_t count,
                                                                     struct SidereonPreciseEphemerisSamples **out_handle);
+
+enum SidereonStatus sidereon_precise_ephemeris_samples_from_samples_v2(const struct SidereonPreciseEphemerisSampleV2 *samples,
+                                                                       size_t count,
+                                                                       double gap_threshold_factor,
+                                                                       struct SidereonPreciseEphemerisSamples **out_handle);
+
+enum SidereonStatus sidereon_precise_ephemeris_samples_from_samples_with_accuracy(const struct SidereonPreciseEphemerisSample *samples,
+                                                                                  const struct SidereonPreciseEphemerisAccuracySample *accuracy,
+                                                                                  size_t count,
+                                                                                  double gap_threshold_factor,
+                                                                                  struct SidereonPreciseEphemerisSamples **out_handle,
+                                                                                  struct SidereonPreciseSamplesError *out_error);
+
+enum SidereonStatus sidereon_precise_ephemeris_samples_from_samples_with_accuracy_v2(const struct SidereonPreciseEphemerisSampleV2 *samples,
+                                                                                     const struct SidereonPreciseEphemerisAccuracySampleV2 *accuracy,
+                                                                                     size_t count,
+                                                                                     double gap_threshold_factor,
+                                                                                     struct SidereonPreciseEphemerisSamples **out_handle,
+                                                                                     struct SidereonPreciseSamplesError *out_error);
 
 /**
  * Build a sample-backed precise-ephemeris source from count canonical samples
@@ -26914,6 +39367,12 @@ enum SidereonStatus sidereon_precise_ephemeris_samples_predict_ranges(const stru
                                                                       size_t count,
                                                                       const struct SidereonObservablesOptions *options,
                                                                       struct SidereonRangePrediction *out);
+
+enum SidereonStatus sidereon_precise_ephemeris_samples_records_v2(const struct SidereonPreciseEphemerisSamples *samples,
+                                                                  struct SidereonPreciseEphemerisSampleV2 *out,
+                                                                  size_t len,
+                                                                  size_t *out_written,
+                                                                  size_t *out_required);
 
 /**
  * Sample a sample-backed precise-ephemeris source over a regular grid.
@@ -27055,6 +39514,11 @@ enum SidereonStatus sidereon_precise_interpolant_artifact_state(const struct Sid
                                                                 double epoch_j2000_s,
                                                                 struct SidereonSp3State *out_state);
 
+enum SidereonStatus sidereon_precise_interpolant_artifact_state_at_epoch_query(const struct SidereonPreciseInterpolantArtifact *artifact,
+                                                                               const char *sat_id,
+                                                                               const struct SidereonExactEpochQuery *query,
+                                                                               struct SidereonSp3State *out_state);
+
 /**
  * Hash and verify file-level and per-satellite payload checksums. Success
  * changes digest provenance to SIDEREON_DIGEST_PROVENANCE_VERIFIED.
@@ -27064,6 +39528,33 @@ enum SidereonStatus sidereon_precise_interpolant_artifact_state(const struct Sid
  */
 enum SidereonStatus sidereon_precise_interpolant_artifact_verify(struct SidereonPreciseInterpolantArtifact *artifact,
                                                                  enum SidereonPreciseInterpolantArtifactErrorKind *out_error);
+
+enum SidereonStatus sidereon_precise_interpolant_clock_relativity_at_epoch_query(const struct SidereonPreciseEphemerisInterpolant *interpolant,
+                                                                                 const char *sat_id,
+                                                                                 const struct SidereonExactEpochQuery *epoch,
+                                                                                 const double *position_ecef_m,
+                                                                                 enum SidereonClockRelativityKind *out_kind,
+                                                                                 double *out_term_s);
+
+enum SidereonStatus sidereon_precise_interpolant_ephemeris_variance_at_epoch_queries(const struct SidereonPreciseEphemerisInterpolant *interpolant,
+                                                                                     const char *sat_id,
+                                                                                     const struct SidereonExactEpochQuery *state_epoch,
+                                                                                     const struct SidereonExactEpochQuery *selection_epoch,
+                                                                                     double *out_variance_m2);
+
+enum SidereonStatus sidereon_precise_interpolant_state_at_epoch_queries(const struct SidereonPreciseEphemerisInterpolant *interpolant,
+                                                                        const char *sat_id,
+                                                                        const struct SidereonExactEpochQuery *state_epoch,
+                                                                        const struct SidereonExactEpochQuery *selection_epoch,
+                                                                        struct SidereonEphemerisSourceState *out);
+
+enum SidereonStatus sidereon_precise_interpolant_transmit_epoch_clock_at_epoch_queries(const struct SidereonPreciseEphemerisInterpolant *interpolant,
+                                                                                       const char *sat_id,
+                                                                                       const struct SidereonExactEpochQuery *transmit_epoch,
+                                                                                       const struct SidereonExactEpochQuery *selection_epoch,
+                                                                                       bool *out_has_clock,
+                                                                                       double *out_clock_s,
+                                                                                       bool *out_degraded);
 
 /**
  * Prepare an ionosphere-free single-frequency RTK arc from dual-frequency input
@@ -27083,12 +39574,27 @@ enum SidereonStatus sidereon_prepare_ionosphere_free_rtk_arc(const struct Sidere
                                                              const struct SidereonRtkIonosphereFreeArcConfig *config,
                                                              struct SidereonRtkIonosphereFreeArcSolution **out_solution);
 
+enum SidereonStatus sidereon_prepare_ionosphere_free_rtk_arc_v2(const struct SidereonRtkDualFrequencyArcEpochV2 *epochs,
+                                                                size_t epoch_count,
+                                                                const struct SidereonRtkWideLaneCycle *wide_lane_cycles,
+                                                                size_t wide_lane_cycle_count,
+                                                                const struct SidereonRtkIonosphereFreeArcConfig *config,
+                                                                struct SidereonRtkIonosphereFreeArcSolution **out_solution);
+
 enum SidereonStatus sidereon_propagate_covariance(const struct SidereonStatePropagationConfig *config,
                                                   const struct SidereonCovarianceMatrix6 *covariance0,
                                                   const double *epochs_s,
                                                   size_t epoch_count,
                                                   struct SidereonCovariancePropagationOptions options,
                                                   struct SidereonCovarianceEphemeris **out_ephemeris);
+
+enum SidereonStatus sidereon_propagate_covariance_with_tide_system(const struct SidereonStatePropagationConfig *config,
+                                                                   uint32_t gravity_tide_system,
+                                                                   const struct SidereonCovarianceMatrix6 *covariance0,
+                                                                   const double *epochs_s,
+                                                                   size_t epoch_count,
+                                                                   struct SidereonCovariancePropagationOptions options,
+                                                                   struct SidereonCovarianceEphemeris **out_ephemeris);
 
 enum SidereonStatus sidereon_propagate_kepler(const struct SidereonClassicalElements *coe,
                                               double mu_km3_s2,
@@ -27107,6 +39613,12 @@ enum SidereonStatus sidereon_propagate_state(const struct SidereonStatePropagati
                                              const double *times_s,
                                              size_t time_count,
                                              struct SidereonEphemeris **out_ephemeris);
+
+enum SidereonStatus sidereon_propagate_state_with_tide_system(const struct SidereonStatePropagationConfig *config,
+                                                              uint32_t gravity_tide_system,
+                                                              const double *times_s,
+                                                              size_t time_count,
+                                                              struct SidereonEphemeris **out_ephemeris);
 
 /**
  * Propagate a fleet of TLEs over a shared UTC unix-microsecond epoch grid.
@@ -27146,20 +39658,23 @@ enum SidereonStatus sidereon_pseudorange_variance_options_init(struct SidereonPs
 
 /**
  * Run the RAIM chi-square test over used satellites and their residuals.
- * weights/unit_weights/n_systems mirror SidereonFdeOptions. Weights must be
- * inverse variances derived from per-satellite residual variances; unit
- * weights on metre-scale residuals make fault_detected saturate near 100%.
- * Delegates to sidereon_core::quality::raim.
+ * weights_mode is a SidereonRaimWeightsMode value; weights/n_systems mirror
+ * SidereonFdeOptions. Under Solution (the engine default) the statistic reads
+ * variances_m2, the variance each residual was weighted by; unit weights on
+ * metre-scale residuals make fault_detected saturate near 100%. Delegates to
+ * sidereon_core::quality::raim.
  *
  * Safety: used_sat_ids points to count null-terminated tokens; residuals_m
- * points to count doubles; weights points to weight_count SidereonFdeRaimWeight
- * when unit_weights is false; out points to a SidereonRaimResult.
+ * points to count doubles; variances_m2 points to count doubles or is NULL
+ * (no variances); weights points to weight_count SidereonFdeRaimWeight when
+ * weights_mode is BySatellite; out points to a SidereonRaimResult.
  */
 enum SidereonStatus sidereon_raim(const char *const *used_sat_ids,
                                   const double *residuals_m,
+                                  const double *variances_m2,
                                   size_t count,
                                   double p_fa,
-                                  bool unit_weights,
+                                  uint32_t weights_mode,
                                   const struct SidereonFdeRaimWeight *weights,
                                   size_t weight_count,
                                   bool n_systems_enabled,
@@ -27182,17 +39697,19 @@ enum SidereonStatus sidereon_raim_fde_design(const struct SidereonRangeFdeRow *r
                                              struct SidereonRangeFdeResult **out_result);
 
 /**
- * Run RAIM over an SPP receiver solution handle (used satellites + post-fit
- * residuals come from the solution). weights/unit_weights/n_systems mirror
- * sidereon_raim. Delegates to sidereon_core::quality::raim_for_solution.
+ * Run RAIM over an SPP receiver solution handle: the used satellites, post-fit
+ * residuals, their pseudorange variances and the solve's clock count come from
+ * the solution. weights_mode/weights/n_systems mirror sidereon_raim; an
+ * explicit n_systems overrides the solution's clock count. Delegates to
+ * sidereon_core::quality::raim_for_solution.
  *
  * Safety: solution is a live SPP-solution handle; weights points to
- * weight_count SidereonFdeRaimWeight when unit_weights is false; out points to a
- * SidereonRaimResult.
+ * weight_count SidereonFdeRaimWeight when weights_mode is BySatellite; out
+ * points to a SidereonRaimResult.
  */
 enum SidereonStatus sidereon_raim_for_solution(const struct SidereonSppSolution *solution,
                                                double p_fa,
-                                               bool unit_weights,
+                                               uint32_t weights_mode,
                                                const struct SidereonFdeRaimWeight *weights,
                                                size_t weight_count,
                                                bool n_systems_enabled,
@@ -27209,9 +39726,10 @@ enum SidereonStatus sidereon_raim_for_solution(const struct SidereonSppSolution 
  */
 enum SidereonStatus sidereon_raim_normalized_residuals(const char *const *used_sat_ids,
                                                        const double *residuals_m,
+                                                       const double *variances_m2,
                                                        size_t count,
                                                        double p_fa,
-                                                       bool unit_weights,
+                                                       uint32_t weights_mode,
                                                        const struct SidereonFdeRaimWeight *weights,
                                                        size_t weight_count,
                                                        bool n_systems_enabled,
@@ -27222,8 +39740,9 @@ enum SidereonStatus sidereon_raim_normalized_residuals(const char *const *used_s
                                                        size_t *out_required);
 
 /**
- * Initialize SidereonRangeFdeOptions with the engine defaults (RTKLIB demo5
- * p_fa, unbounded exclusions, minimum redundancy 1).
+ * Initialize SidereonRangeFdeOptions with the engine defaults: RTKLIB demo5's
+ * p_fa, single exclusion and 100 m exclusion RMS cap, and minimum redundancy
+ * 1.
  *
  * Safety: options must point to a writable SidereonRangeFdeOptions.
  */
@@ -27867,10 +40386,42 @@ enum SidereonStatus sidereon_rinex_band_wavelength_m(uint32_t system,
                                                      double *out);
 
 /**
- * Interpolate a satellite clock bias (seconds) at a GPS-seconds epoch. Writes
- * the bias to *out_bias_s and sets *out_available to whether the satellite has a
- * usable value at that epoch. Delegates to
- * sidereon_core::rinex::clock::RinexClock::clock_s_at_gps_seconds.
+ * Interpolate a satellite clock bias (seconds) at a civil epoch in the
+ * product's own time scale. The second is read as the shortest decimal of the
+ * double given, every digit kept, so a query at a record's stated epoch lands
+ * on that record. On a UTC product (including one whose time system is `GLO`)
+ * a 23:59:60.x label on a leap-second day is a valid query, and interpolation
+ * across a leap second uses elapsed time. A product whose time system resolves
+ * to no time scale is refused with SIDEREON_STATUS_INVALID_ARGUMENT.
+ *
+ * Safety: clock is a live handle; satellite_id is a null-terminated token;
+ * epoch points to a SidereonClockCivilEpoch; out_bias_s points to a double;
+ * out_available points to a bool.
+ */
+enum SidereonStatus sidereon_rinex_clock_bias_at_civil(const struct SidereonRinexClock *clock,
+                                                       const char *satellite_id,
+                                                       const struct SidereonClockCivilEpoch *epoch,
+                                                       double *out_bias_s,
+                                                       bool *out_available);
+
+/**
+ * Interpolate a satellite clock bias (seconds) at a scale-tagged instant.
+ *
+ * Safety: clock is a live handle; satellite_id is a null-terminated token;
+ * epoch points to a SidereonClockEpoch; out_bias_s points to a double;
+ * out_available points to a bool.
+ */
+enum SidereonStatus sidereon_rinex_clock_bias_at_epoch(const struct SidereonRinexClock *clock,
+                                                       const char *satellite_id,
+                                                       const struct SidereonClockEpoch *epoch,
+                                                       double *out_bias_s,
+                                                       bool *out_available);
+
+/**
+ * Interpolate a satellite clock bias (seconds) at a GPS-seconds epoch. GPST and
+ * QZSST series answer; *out_available is false, with *out_bias_s NaN, when
+ * the satellite has no usable value there. GPS seconds outside the civil years
+ * 1 through 9999 are refused with SIDEREON_STATUS_INVALID_ARGUMENT.
  *
  * Safety: clock is a live handle; satellite_id is a null-terminated token;
  * out_bias_s points to a double; out_available points to a bool.
@@ -27882,15 +40433,142 @@ enum SidereonStatus sidereon_rinex_clock_bias_at_gps_seconds(const struct Sidere
                                                              bool *out_available);
 
 /**
+ * Copy one text part of a diagnostic, selected by a SidereonRinexClockErrorText
+ * value. A part the failure does not carry copies nothing. Uses the
+ * variable-length output contract; the bytes are copied verbatim and not
+ * null-terminated.
+ *
+ * Safety: clock is a live handle; out points to len writable bytes or is NULL
+ * when len is 0; out_written and out_required point to size_t values.
+ */
+enum SidereonStatus sidereon_rinex_clock_diagnostic_text(const struct SidereonRinexClock *clock,
+                                                         size_t index,
+                                                         uint32_t part,
+                                                         uint8_t *out,
+                                                         size_t len,
+                                                         size_t *out_written,
+                                                         size_t *out_required);
+
+/**
+ * Copy the typed diagnostics: every line a lossy read kept without reading it
+ * as a record, and header time-system errors. Text parts are read with
+ * sidereon_rinex_clock_diagnostic_text. Uses the standard caller-buffer
+ * convention.
+ *
+ * Safety: clock is a live handle; out points to len writable
+ * SidereonClockDiagnostic values or is NULL when len is 0; out_written and
+ * out_required point to size_t values.
+ */
+enum SidereonStatus sidereon_rinex_clock_diagnostics(const struct SidereonRinexClock *clock,
+                                                     struct SidereonClockDiagnostic *out,
+                                                     size_t len,
+                                                     size_t *out_written,
+                                                     size_t *out_required);
+
+/**
  * Release a RINEX clock handle. Passing NULL is a no-op.
  *
- * Safety: clock must be a handle from sidereon_rinex_clock_parse or NULL.
+ * Safety: clock must be a handle from a RINEX clock creation route or NULL.
  */
 void sidereon_rinex_clock_free(struct SidereonRinexClock *clock);
 
 /**
- * Parse a RINEX clock file. On success writes a newly owned handle to
- * *out_clock. Delegates to sidereon_core::rinex::clock::RinexClock::parse.
+ * Build a product from per-satellite samples, keeping every declared value of
+ * each sample.
+ *
+ * A run of consecutive entries naming one satellite forms one series row, and
+ * each row's samples must be strictly increasing in time; a satellite named
+ * by more than one run keeps the samples of every run. The satellite names are
+ * taken as written. The records are written in the layout the time scale
+ * needs (3.00 for GPST, GST, UTC and TAI; 3.04 for QZSST and BDT); a scale no
+ * RINEX clock time system names (GLONASS system time among them, since `GLO`
+ * names UTC hours) is refused when the product is written, and a value or
+ * epoch the writer cannot state exactly is refused by name.
+ *
+ * Returns SIDEREON_STATUS_OK and a newly owned handle in *out_clock, or
+ * SIDEREON_STATUS_INVALID_ARGUMENT with *out_clock NULL. When out_result is
+ * not NULL it receives an owned SidereonRinexClockResult recording the
+ * outcome of a well-formed call.
+ *
+ * Safety: points points to count readable SidereonClockSatellitePoint values
+ * or is NULL when count is 0; out_clock points to a SidereonRinexClock*;
+ * out_result is NULL or points to a SidereonRinexClockResult*. Both output
+ * slots are set to NULL before any work.
+ */
+enum SidereonStatus sidereon_rinex_clock_from_points(uint32_t time_scale,
+                                                     const struct SidereonClockSatellitePoint *points,
+                                                     size_t count,
+                                                     struct SidereonRinexClock **out_clock,
+                                                     struct SidereonRinexClockResult **out_result);
+
+/**
+ * Take an owned snapshot of the product's header records, every header line
+ * in order with its typed reading. A built product has none.
+ *
+ * Safety: clock is a live handle; out_records points to a
+ * SidereonClockHeaderRecords*, set to NULL before any work.
+ */
+enum SidereonStatus sidereon_rinex_clock_header_records(const struct SidereonRinexClock *clock,
+                                                        struct SidereonClockHeaderRecords **out_records);
+
+/**
+ * Copy the fixed-width summary of a RINEX clock product.
+ *
+ * Safety: clock is a live handle; out_info points to a SidereonRinexClockInfo.
+ */
+enum SidereonStatus sidereon_rinex_clock_info(const struct SidereonRinexClock *clock,
+                                              struct SidereonRinexClockInfo *out_info);
+
+/**
+ * Insert a record before the record at index (in record order), or after the
+ * last record when index equals the record count.
+ *
+ * An `AS` name must be a satellite identifier and is stored in its canonical
+ * spelling; other names must be a single ASCII token the product's layout can
+ * hold. The epoch's second is taken as the shortest decimal of the double
+ * given, and an epoch the seconds field cannot state (finer than a
+ * microsecond) is refused. The record must be writable in the product's
+ * layout and its epoch valid in the product's time system.
+ *
+ * Returns SIDEREON_STATUS_OK, or SIDEREON_STATUS_INVALID_ARGUMENT with the
+ * product unchanged. When out_result is not NULL it receives an owned result.
+ *
+ * Safety: clock is a live handle no other call uses meanwhile; name is a
+ * null-terminated UTF-8 string; epoch points to a SidereonClockCivilEpoch;
+ * values points to value_count readable doubles or is NULL when value_count
+ * is 0; out_result is NULL or points to a SidereonRinexClockResult*, set to
+ * NULL before any work.
+ */
+enum SidereonStatus sidereon_rinex_clock_insert_record(struct SidereonRinexClock *clock,
+                                                       size_t index,
+                                                       uint32_t record_type,
+                                                       const char *name,
+                                                       const struct SidereonClockCivilEpoch *epoch,
+                                                       const double *values,
+                                                       size_t value_count,
+                                                       struct SidereonRinexClockResult **out_result);
+
+/**
+ * Copy the notices: findings about how the product was read that do not stop
+ * it being read. Uses the standard caller-buffer convention.
+ *
+ * Safety: clock is a live handle; out points to len writable
+ * SidereonClockNotice values or is NULL when len is 0; out_written and
+ * out_required point to size_t values.
+ */
+enum SidereonStatus sidereon_rinex_clock_notices(const struct SidereonRinexClock *clock,
+                                                 struct SidereonClockNotice *out,
+                                                 size_t len,
+                                                 size_t *out_written,
+                                                 size_t *out_required);
+
+/**
+ * Parse RINEX clock text, failing on the first line that does not read. On
+ * success writes a newly owned handle to *out_clock. Every line is retained,
+ * and sidereon_rinex_clock_to_text restates an unedited product byte for
+ * byte. A failure returns SIDEREON_STATUS_INVALID_ARGUMENT with the engine's
+ * text in the thread-local message; sidereon_rinex_clock_parse_result returns
+ * it typed.
  *
  * Safety: text points to len readable bytes; out_clock points to a
  * SidereonRinexClock*.
@@ -27900,8 +40578,11 @@ enum SidereonStatus sidereon_rinex_clock_parse(const uint8_t *text,
                                                struct SidereonRinexClock **out_clock);
 
 /**
- * Parse a RINEX clock source lossily, skipping malformed and non-AS rows as
- * defined by the public core parser.
+ * Parse RINEX clock text, keeping every line that does not read verbatim with
+ * a typed diagnostic (sidereon_rinex_clock_diagnostics) and reading the rest.
+ * Nothing is dropped: sidereon_rinex_clock_to_text restates the input
+ * exactly. An unrecognized `TIME SYSTEM ID` leaves the time system unresolved
+ * rather than assuming one.
  *
  * Safety: text points to len readable UTF-8 bytes; out_clock points to an
  * owned clock handle slot.
@@ -27909,6 +40590,185 @@ enum SidereonStatus sidereon_rinex_clock_parse(const uint8_t *text,
 enum SidereonStatus sidereon_rinex_clock_parse_lossy(const uint8_t *text,
                                                      size_t len,
                                                      struct SidereonRinexClock **out_clock);
+
+/**
+ * Parse RINEX clock text strictly and take an owned record of the attempt.
+ *
+ * Returns SIDEREON_STATUS_OK whenever the call itself is well formed and hands
+ * back a newly owned SidereonRinexClockResult; on a refusal of the text the
+ * typed failure is inside it and `*out_clock` stays NULL. A structural failure
+ * (a null pointer, text that is not UTF-8) leaves both outputs NULL and
+ * returns a status that is not OK.
+ *
+ * Safety: text points to len readable bytes; out_clock points to a
+ * SidereonRinexClock*; out_result points to a SidereonRinexClockResult*. Both
+ * output slots are set to NULL before any work.
+ */
+enum SidereonStatus sidereon_rinex_clock_parse_result(const uint8_t *text,
+                                                      size_t len,
+                                                      struct SidereonRinexClock **out_clock,
+                                                      struct SidereonRinexClockResult **out_result);
+
+/**
+ * Write the number of data records of every type.
+ *
+ * Safety: clock is a live handle; out_count points to a size_t.
+ */
+enum SidereonStatus sidereon_rinex_clock_record_count(const struct SidereonRinexClock *clock,
+                                                      size_t *out_count);
+
+/**
+ * Take an owned snapshot of every data record in file order, including
+ * duplicate records for one name and epoch (RINEX clock section 4 uses two `AR`
+ * records at one epoch to state a discontinuity). Lines a lossy read could not
+ * read are not records; sidereon_rinex_clock_diagnostics names them.
+ *
+ * Safety: clock is a live handle; out_records points to a
+ * SidereonClockRecords*, set to NULL before any work.
+ */
+enum SidereonStatus sidereon_rinex_clock_records(const struct SidereonRinexClock *clock,
+                                                 struct SidereonClockRecords **out_records);
+
+/**
+ * Remove the record at index (in record order) with every line it spans. When
+ * out_result is not NULL it receives an owned result carrying the removed
+ * record (sidereon_rinex_clock_result_record).
+ *
+ * Returns SIDEREON_STATUS_OK, or SIDEREON_STATUS_INVALID_ARGUMENT with the
+ * product unchanged.
+ *
+ * Safety: clock is a live handle no other call uses meanwhile; out_result is
+ * NULL or points to a SidereonRinexClockResult*, set to NULL before any work.
+ */
+enum SidereonStatus sidereon_rinex_clock_remove_record(struct SidereonRinexClock *clock,
+                                                       size_t index,
+                                                       struct SidereonRinexClockResult **out_result);
+
+/**
+ * Remove the records at the given indices (in record order) with every line
+ * they span, in one pass; blank and unread lines stay. An index given twice
+ * removes its record once. An index past the last record is refused as
+ * InvalidInput before anything changes. *out_removed receives the number of
+ * records removed.
+ *
+ * Safety: clock is a live handle no other call uses meanwhile; indices points
+ * to count readable size_t values or is NULL when count is 0; out_removed
+ * points to a size_t; out_result is NULL or points to a
+ * SidereonRinexClockResult*, set to NULL before any work.
+ */
+enum SidereonStatus sidereon_rinex_clock_remove_records(struct SidereonRinexClock *clock,
+                                                        const size_t *indices,
+                                                        size_t count,
+                                                        size_t *out_removed,
+                                                        struct SidereonRinexClockResult **out_result);
+
+/**
+ * Copy the name or the written epoch text of one departure, selected by a
+ * SidereonClockDepartureText value. Uses the variable-length output contract;
+ * the bytes are not null-terminated.
+ *
+ * Safety: result is a live handle; out points to len writable bytes or is
+ * NULL when len is 0; out_written and out_required point to size_t values.
+ */
+enum SidereonStatus sidereon_rinex_clock_result_departure_text(const struct SidereonRinexClockResult *result,
+                                                               size_t index,
+                                                               uint32_t part,
+                                                               uint8_t *out,
+                                                               size_t len,
+                                                               size_t *out_written,
+                                                               size_t *out_required);
+
+/**
+ * Copy the departures a write result reports, in record order. Uses the
+ * standard caller-buffer convention.
+ *
+ * Safety: result is a live handle; out points to len writable
+ * SidereonClockWriteDeparture values or is NULL when len is 0; out_written and
+ * out_required point to size_t values.
+ */
+enum SidereonStatus sidereon_rinex_clock_result_departures(const struct SidereonRinexClockResult *result,
+                                                           struct SidereonClockWriteDeparture *out,
+                                                           size_t len,
+                                                           size_t *out_written,
+                                                           size_t *out_required);
+
+/**
+ * Copy one text part of an owned result's failure, selected by a
+ * SidereonRinexClockErrorText value; Message is prefixed with the route that
+ * produced it. A successful result, or a part the failure does not carry,
+ * copies nothing. Uses the variable-length output contract; the bytes are
+ * copied verbatim and not null-terminated.
+ *
+ * Safety: result is a live handle; out points to len writable bytes or is
+ * NULL when len is 0; out_written and out_required point to size_t values.
+ */
+enum SidereonStatus sidereon_rinex_clock_result_error_text(const struct SidereonRinexClockResult *result,
+                                                           uint32_t part,
+                                                           uint8_t *out,
+                                                           size_t len,
+                                                           size_t *out_written,
+                                                           size_t *out_required);
+
+/**
+ * Release an owned RINEX clock result. Passing NULL is a no-op.
+ *
+ * Safety: result may be NULL; otherwise it must be a live
+ * SidereonRinexClockResult handle this binding produced, passed here exactly
+ * once.
+ */
+void sidereon_rinex_clock_result_free(struct SidereonRinexClockResult *result);
+
+/**
+ * Copy the fixed-width outcome of an owned RINEX clock result. *out_outcome is
+ * written before the result pointer is validated.
+ *
+ * Safety: result is a live handle; out_outcome points to a
+ * SidereonRinexClockOutcome.
+ */
+enum SidereonStatus sidereon_rinex_clock_result_get_outcome(const struct SidereonRinexClockResult *result,
+                                                            struct SidereonRinexClockOutcome *out_outcome);
+
+/**
+ * Copy the text a write result holds. A refused result has no text: the call
+ * returns SIDEREON_STATUS_INVALID_ARGUMENT, reports a required length of zero,
+ * writes nothing, and sets the thread-local message to the result's own
+ * failure text. A result of any other operation holds no text and reports a
+ * required length of zero. Uses the variable-length output contract; the
+ * bytes are not null-terminated.
+ *
+ * Safety: result is a live handle; out points to len writable bytes or is
+ * NULL when len is 0; out_written and out_required point to size_t values.
+ */
+enum SidereonStatus sidereon_rinex_clock_result_get_text(const struct SidereonRinexClockResult *result,
+                                                         uint8_t *out,
+                                                         size_t len,
+                                                         size_t *out_written,
+                                                         size_t *out_required);
+
+/**
+ * Copy the record a remove result carries. *out_present is false, and
+ * *out_record is left as cleared, for a result of any other operation.
+ *
+ * Safety: result is a live handle; out_present points to a bool; out_record
+ * points to a SidereonClockRecord.
+ */
+enum SidereonStatus sidereon_rinex_clock_result_record(const struct SidereonRinexClockResult *result,
+                                                       bool *out_present,
+                                                       struct SidereonClockRecord *out_record);
+
+/**
+ * Copy the name of the record a remove result carries; a result without a
+ * record reports a required length of zero. Uses the variable-length output
+ * contract; the bytes are not null-terminated.
+ *
+ * Safety: result is a live handle; out points to len writable bytes or is
+ * NULL when len is 0; out_written and out_required point to size_t values.
+ */
+enum SidereonStatus sidereon_rinex_clock_result_record_name(const struct SidereonRinexClockResult *result,
+                                                            uint8_t *out,
+                                                            size_t len,
+                                                            size_t *out_written,
+                                                            size_t *out_required);
 
 /**
  * Write the total number of complete scale-tagged samples in a RINEX clock.
@@ -27927,9 +40787,8 @@ enum SidereonStatus sidereon_rinex_clock_satellite_count(const struct SidereonRi
                                                          size_t *out_count);
 
 /**
- * Copy the deterministic satellite-token enumeration of a RINEX clock file.
- * The core `series_rows` API supplies the series enumeration; complete
- * scale-tagged samples are available through the series handle routes below.
+ * Copy the deterministic satellite-token enumeration of the satellite series,
+ * every satellite with an `AS` record whose epoch resolves to an instant.
  *
  * Safety: clock is a live handle; out points to len writable tokens or is
  * NULL when len is zero; count pointers point to writable size_t values.
@@ -27942,7 +40801,8 @@ enum SidereonStatus sidereon_rinex_clock_satellites(const struct SidereonRinexCl
 
 /**
  * Return one complete RINEX clock series by deterministic satellite-order
- * index. The returned handle owns a clone of the core series.
+ * index. The returned handle owns a clone of the core series, every declared
+ * value of each sample included.
  *
  * Safety: clock is a live handle; out_series points to a writable handle slot.
  */
@@ -27951,7 +40811,7 @@ enum SidereonStatus sidereon_rinex_clock_series(const struct SidereonRinexClock 
                                                 struct SidereonClockSeries **out_series);
 
 /**
- * Write the number of satellite series in a RINEX clock file.
+ * Write the number of satellite series in a RINEX clock product.
  *
  * Safety: clock is a live handle; out_count points to a size_t.
  */
@@ -27962,7 +40822,7 @@ enum SidereonStatus sidereon_rinex_clock_series_count(const struct SidereonRinex
  * Return one complete RINEX clock series for a satellite, or a null output
  * handle with status Ok when the satellite has no series.
  *
- * Safety: clock is a live handle; satellite_id is a non-empty UTF-8 C string;
+ * Safety: clock is a live handle; satellite_id is a null-terminated UTF-8 string;
  * out_series points to a writable handle slot.
  */
 enum SidereonStatus sidereon_rinex_clock_series_for(const struct SidereonRinexClock *clock,
@@ -27985,8 +40845,8 @@ enum SidereonStatus sidereon_rinex_clock_series_sample_count(const struct Sidere
                                                              size_t *out_count);
 
 /**
- * Copy complete scale-tagged samples from one clock series using the standard
- * caller-buffer convention.
+ * Copy complete scale-tagged samples, every declared value included, from one
+ * clock series using the standard caller-buffer convention.
  *
  * Safety: series is a live handle; out points to len writable samples or is
  * NULL when len is zero; count pointers point to writable size_t values.
@@ -28006,9 +40866,126 @@ enum SidereonStatus sidereon_rinex_clock_series_satellite(const struct SidereonC
                                                           struct SidereonSatelliteToken *out_satellite);
 
 /**
- * Serialize a RINEX clock product back to text (not null-terminated).
- * Variable-length output contract. Delegates to
- * sidereon_core::rinex::clock::RinexClock::to_rinex_string.
+ * Replace the declared values of the record at index (in record order), bias
+ * first. The record keeps its type, name and epoch, including the exact text
+ * of its seconds field, and is then written in the product's layout. The edit
+ * is refused, and nothing changes, when the record could not then be written
+ * (a value no 19-column field states exactly, a name or year the layout
+ * cannot hold, an epoch the seconds field cannot state), or when the source
+ * record carries values beyond its declared count that the new values do not
+ * restate: those values are never dropped.
+ *
+ * Returns SIDEREON_STATUS_OK, or SIDEREON_STATUS_INVALID_ARGUMENT with the
+ * product unchanged. When out_result is not NULL it receives an owned result.
+ *
+ * Safety: clock is a live handle no other call uses meanwhile; values points
+ * to value_count readable doubles or is NULL when value_count is 0; out_result
+ * is NULL or points to a SidereonRinexClockResult*, set to NULL before any
+ * work.
+ */
+enum SidereonStatus sidereon_rinex_clock_set_record_values(struct SidereonRinexClock *clock,
+                                                           size_t index,
+                                                           const double *values,
+                                                           size_t value_count,
+                                                           struct SidereonRinexClockResult **out_result);
+
+/**
+ * Replace the declared values of several records in one pass, each as
+ * sidereon_rinex_clock_set_record_values describes. The whole batch is checked
+ * before anything changes: if one edit is refused, none is applied. An index
+ * past the last record, or one index given two different value lists, is
+ * refused as InvalidInput; an index given the same values twice is edited
+ * once. *out_edited receives the number of records edited.
+ *
+ * Safety: clock is a live handle no other call uses meanwhile; edits points to
+ * count readable SidereonClockRecordValues or is NULL when count is 0;
+ * out_edited points to a size_t; out_result is NULL or points to a
+ * SidereonRinexClockResult*, set to NULL before any work.
+ */
+enum SidereonStatus sidereon_rinex_clock_set_records_values(struct SidereonRinexClock *clock,
+                                                            const struct SidereonClockRecordValues *edits,
+                                                            size_t count,
+                                                            size_t *out_edited,
+                                                            struct SidereonRinexClockResult **out_result);
+
+/**
+ * Declare the product's time system. Every `TIME SYSTEM ID` record is replaced
+ * by one written at the `3X,A3` columns of the product's layout, or one is
+ * inserted before the first header record Table A15 orders after it. Every
+ * record epoch is checked in the new system first; if one does not convert (a
+ * 23:59:60 label in a continuous scale), nothing changes. A product with no
+ * header section, or one built from points, is refused.
+ *
+ * Returns SIDEREON_STATUS_OK, or SIDEREON_STATUS_INVALID_ARGUMENT with the
+ * product unchanged. When out_result is not NULL it receives an owned
+ * SidereonRinexClockResult recording the outcome of a well-formed call.
+ *
+ * Safety: clock is a live handle no other call uses meanwhile; out_result is
+ * NULL or points to a SidereonRinexClockResult*, set to NULL before any work.
+ */
+enum SidereonStatus sidereon_rinex_clock_set_time_system(struct SidereonRinexClock *clock,
+                                                         uint32_t time_system,
+                                                         struct SidereonRinexClockResult **out_result);
+
+/**
+ * Copy the records read from the source that are not in the satellite
+ * series, every `AR`, `CR`, `DR` and `MS` record, in line order. The records
+ * themselves are in sidereon_rinex_clock_records. Uses the standard
+ * caller-buffer convention.
+ *
+ * Safety: clock is a live handle; out points to len writable SidereonClockSkip
+ * values or is NULL when len is 0; out_written and out_required point to
+ * size_t values.
+ */
+enum SidereonStatus sidereon_rinex_clock_skipped_records(const struct SidereonRinexClock *clock,
+                                                         struct SidereonClockSkip *out,
+                                                         size_t len,
+                                                         size_t *out_written,
+                                                         size_t *out_required);
+
+/**
+ * Copy one line of the text the product was read from, by one-based line
+ * number, without its terminator. *out_present is false, with nothing
+ * copied, for a line number the text does not have and for a built product.
+ * Uses the variable-length output contract; the bytes are not
+ * null-terminated.
+ *
+ * Safety: clock is a live handle; out points to len writable bytes or is NULL
+ * when len is 0; out_written, out_required and out_present point to writable
+ * values.
+ */
+enum SidereonStatus sidereon_rinex_clock_source_line(const struct SidereonRinexClock *clock,
+                                                     size_t line,
+                                                     uint8_t *out,
+                                                     size_t len,
+                                                     size_t *out_written,
+                                                     size_t *out_required,
+                                                     bool *out_present);
+
+/**
+ * Copy one label an Unrecognized or Conflicting time-system status carries,
+ * by index in file order. Uses the variable-length output contract; the bytes
+ * are not null-terminated.
+ *
+ * Safety: clock is a live handle; out points to len writable bytes or is NULL
+ * when len is 0; out_written and out_required point to size_t values.
+ */
+enum SidereonStatus sidereon_rinex_clock_time_system_label(const struct SidereonRinexClock *clock,
+                                                           size_t index,
+                                                           uint8_t *out,
+                                                           size_t len,
+                                                           size_t *out_written,
+                                                           size_t *out_required);
+
+/**
+ * Serialize a RINEX clock product back to text (not null-terminated), allowing
+ * no departure. A product read from text restates every retained line byte for
+ * byte. Records held as typed values are written in the product's layout;
+ * values are written only when their 19-column field reads back to the same
+ * bits, and an epoch only when a microsecond text states it exactly. A refusal
+ * returns SIDEREON_STATUS_INVALID_ARGUMENT, reports a required length of zero
+ * and writes nothing; sidereon_rinex_clock_to_text_result returns it typed.
+ * Variable-length output contract.
  *
  * Safety: clock is a live handle; out points to len writable bytes or NULL when
  * len is 0; out_written and out_required point to size_t.
@@ -28018,6 +40995,25 @@ enum SidereonStatus sidereon_rinex_clock_to_text(const struct SidereonRinexClock
                                                  size_t len,
                                                  size_t *out_written,
                                                  size_t *out_required);
+
+/**
+ * Write the product under a policy and take an owned record of the attempt:
+ * the text and every departure the policy allowed and the writer emitted, or
+ * the typed refusal. With nearest_microsecond_epochs allowed, an epoch no
+ * microsecond text states exactly is written at the nearest microsecond and
+ * reported as a departure naming the record, its name, its epoch and the
+ * epoch text written. A NULL policy allows no departure.
+ *
+ * Returns SIDEREON_STATUS_OK whenever the call itself is well formed and
+ * hands back a newly owned SidereonRinexClockResult.
+ *
+ * Safety: clock is a live handle; policy is NULL or points to a
+ * SidereonClockWritePolicy; out_result points to a SidereonRinexClockResult*,
+ * set to NULL before any work.
+ */
+enum SidereonStatus sidereon_rinex_clock_to_text_result(const struct SidereonRinexClock *clock,
+                                                        const struct SidereonClockWritePolicy *policy,
+                                                        struct SidereonRinexClockResult **out_result);
 
 /**
  * Serialize a parsed broadcast-ephemeris store back to RINEX navigation text.
@@ -28061,8 +41057,8 @@ enum SidereonStatus sidereon_rinex_glonass_records_item(const struct SidereonRin
                                                         struct SidereonGlonassRecord *out_record);
 
 /**
- * Write the number of GLONASS records skipped because their extended slots
- * are not representable by the core satellite identifier.
+ * Write the number of GLONASS records skipped because their satellite token
+ * names no satellite.
  *
  * Safety: records is a live handle; out_count points to a size_t.
  */
@@ -28071,8 +41067,8 @@ enum SidereonStatus sidereon_rinex_glonass_records_skipped_count(const struct Si
 
 /**
  * Copy one skipped GLONASS record by deterministic file-order index. The
- * returned satellite token is the raw token from the input record, including
- * extended slots such as `R28`.
+ * returned satellite token is the raw token from the input record, such as
+ * `R00`.
  *
  * Safety: records is a live handle; out_skipped points to a writable value.
  */
@@ -28126,7 +41122,19 @@ enum SidereonStatus sidereon_rinex_nav_records_item(const struct SidereonRinexNa
                                                     struct SidereonBroadcastRecord *out_record);
 
 /**
- * Copy flattened carrier-phase rows for one epoch.
+ * Copy flattened carrier-phase rows for one epoch, in satellite then
+ * header-code order.
+ *
+ * Every row is copied whether or not the header states its phase-shift
+ * correction. A row whose correction is unknown or ambiguous keeps its phase,
+ * frequency and wavelength, and reports the correction through
+ * phase_shift_status; an ambiguous row's corrections are copied with
+ * sidereon_rinex_obs_carrier_phase_conflicts by the row's index here.
+ *
+ * The rows are read under the header in effect at the epoch, so a phase shift
+ * or GLONASS channel an event declares applies to the epochs after it. An
+ * event record that does not read fails the call with
+ * SIDEREON_STATUS_INVALID_ARGUMENT; a product read from text never holds one.
  *
  * Safety: obs must be a live handle from sidereon_rinex_obs_parse; out must
  * point to at least len writable SidereonRinexObsCarrierPhase entries or be NULL
@@ -28138,6 +41146,29 @@ enum SidereonStatus sidereon_rinex_obs_carrier_phase(const struct SidereonRinexO
                                                      size_t len,
                                                      size_t *out_written,
                                                      size_t *out_required);
+
+/**
+ * Copy the corrections an ambiguous header block gives one carrier-phase row,
+ * in the order the records give them. `row_index` indexes the rows
+ * sidereon_rinex_obs_carrier_phase copies for the same epoch. A row whose
+ * phase_shift_status is not Ambiguous reports a required count of zero. Uses
+ * the variable-length output contract.
+ *
+ * Returns SIDEREON_STATUS_INVALID_ARGUMENT when epoch_index or row_index is
+ * out of range.
+ *
+ * Safety: obs must be a live handle from sidereon_rinex_obs_parse; out must
+ * point to at least len writable SidereonRinexPhaseShiftCorrection entries or
+ * be NULL when len is 0; out_written and out_required must point to size_t
+ * values.
+ */
+enum SidereonStatus sidereon_rinex_obs_carrier_phase_conflicts(const struct SidereonRinexObs *obs,
+                                                               size_t epoch_index,
+                                                               size_t row_index,
+                                                               struct SidereonRinexPhaseShiftCorrection *out,
+                                                               size_t len,
+                                                               size_t *out_written,
+                                                               size_t *out_required);
 
 /**
  * Copy the per-system observation-code table from the header. Uses the
@@ -28219,7 +41250,8 @@ enum SidereonStatus sidereon_rinex_obs_load(const char *path, struct SidereonRin
  *
  * Safety: obs must be a live handle from sidereon_rinex_obs_parse; sat_id and
  * code must be null-terminated C strings; out_value, out_present, out_lli and
- * out_ssi must each point to writable storage of the documented type.
+ * out_ssi must each point to writable storage of the documented type. These
+ * output ranges must not overlap.
  */
 enum SidereonStatus sidereon_rinex_obs_observation(const struct SidereonRinexObs *obs,
                                                    size_t epoch_index,
@@ -28270,10 +41302,21 @@ enum SidereonStatus sidereon_rinex_obs_receiver_clock_phase_deviations(const str
                                                                        size_t *out_required);
 
 /**
- * Serialize a RINEX 3 observation product back to RINEX text. The output is not
+ * Serialize a RINEX observation product back to RINEX text. The output is not
  * null-terminated. Uses the variable-length output contract documented at the
  * top of the header: call once with out=NULL to learn *out_required, then again
- * with a buffer of that size. Round-trips with sidereon_rinex_obs_parse.
+ * with a buffer of that size. The version the header carries decides the
+ * records written: below 3.0 the file is version 2 throughout, otherwise
+ * version 3. Round-trips with sidereon_rinex_obs_parse.
+ *
+ * The text is returned only when reading it back gives the product itself.
+ * Anything the file cannot state exactly -- a value its column cannot hold, an
+ * epoch flag wider than its field, an observation epoch with no time,
+ * picoseconds below version 4.02, a version 2 product holding what version 2
+ * cannot say -- is refused with SIDEREON_STATUS_INVALID_ARGUMENT and the
+ * engine's text in the thread-local message. A refusal reports a required
+ * length of zero and writes nothing. sidereon_rinex_obs_to_rinex_text_result
+ * returns the same refusal typed, with owned text.
  *
  * Safety: obs must be a live handle from sidereon_rinex_obs_parse; out must point
  * to at least len writable bytes or be NULL when len is 0; out_written and
@@ -28284,6 +41327,23 @@ enum SidereonStatus sidereon_rinex_obs_to_rinex_text(const struct SidereonRinexO
                                                      size_t len,
                                                      size_t *out_written,
                                                      size_t *out_required);
+
+/**
+ * Write a RINEX observation product and take an owned record of the attempt.
+ *
+ * Returns SIDEREON_STATUS_OK whenever the call itself is well formed and hands
+ * back a newly owned SidereonRinexObsWriteResult: the text when the product
+ * was written, or the typed refusal sidereon_rinex_obs_to_rinex_text reports
+ * only as text. A null argument leaves `*out_result` NULL, returns
+ * SIDEREON_STATUS_NULL_POINTER and allocates nothing.
+ *
+ * Safety: `obs` must be a live SidereonRinexObs handle; `out_result` must
+ * point to writable storage for one `SidereonRinexObsWriteResult *`, which is
+ * set to NULL before any work and receives a newly owned handle only on
+ * SIDEREON_STATUS_OK; release it with sidereon_rinex_obs_write_result_free.
+ */
+enum SidereonStatus sidereon_rinex_obs_to_rinex_text_result(const struct SidereonRinexObs *obs,
+                                                            struct SidereonRinexObsWriteResult **out_result);
 
 /**
  * Copy flattened raw observation values for one epoch. Uses every observation
@@ -28308,6 +41368,84 @@ enum SidereonStatus sidereon_rinex_obs_values(const struct SidereonRinexObs *obs
  */
 enum SidereonStatus sidereon_rinex_obs_version(const struct SidereonRinexObs *obs,
                                                double *out_version);
+
+/**
+ * Release an owned RINEX observation write result. Passing NULL is a no-op.
+ *
+ * Safety: `result` may be NULL; otherwise it must be a live
+ * SidereonRinexObsWriteResult handle this binding produced, passed here exactly
+ * once.
+ */
+void sidereon_rinex_obs_write_result_free(struct SidereonRinexObsWriteResult *result);
+
+/**
+ * Copy the observation code a refused write names, as the product holds it.
+ * The error's has_code says whether the refusal names one; when it does not,
+ * the required length is zero. Uses the variable-length output contract.
+ *
+ * Safety: as sidereon_rinex_obs_write_result_get_text.
+ */
+enum SidereonStatus sidereon_rinex_obs_write_result_get_code(const struct SidereonRinexObsWriteResult *result,
+                                                             uint8_t *out,
+                                                             size_t len,
+                                                             size_t *out_written,
+                                                             size_t *out_required);
+
+/**
+ * Copy the detail text a refused write carries: the reader's text for an
+ * unreadable event record, the `LEAP SECONDS` time-system identifier as the
+ * product holds it, or the first field that would read back changed. The
+ * error's has_detail says whether the refusal carries one. Uses the
+ * variable-length output contract; the bytes are copied verbatim.
+ *
+ * Safety: as sidereon_rinex_obs_write_result_get_text.
+ */
+enum SidereonStatus sidereon_rinex_obs_write_result_get_detail(const struct SidereonRinexObsWriteResult *result,
+                                                               uint8_t *out,
+                                                               size_t len,
+                                                               size_t *out_written,
+                                                               size_t *out_required);
+
+/**
+ * Copy the refusal text of an owned RINEX observation write result, prefixed
+ * with the route that produced it. A written result reports a required length
+ * of zero. Uses the variable-length output contract.
+ *
+ * Safety: as sidereon_rinex_obs_write_result_get_text.
+ */
+enum SidereonStatus sidereon_rinex_obs_write_result_get_message(const struct SidereonRinexObsWriteResult *result,
+                                                                uint8_t *out,
+                                                                size_t len,
+                                                                size_t *out_written,
+                                                                size_t *out_required);
+
+/**
+ * Copy the fixed-width outcome of an owned RINEX observation write result.
+ * `*out_outcome` is written before the result pointer is validated.
+ *
+ * Safety: `result` must be a live SidereonRinexObsWriteResult handle;
+ * `out_outcome` must point to one writable SidereonRinexObsWriteOutcome.
+ */
+enum SidereonStatus sidereon_rinex_obs_write_result_get_outcome(const struct SidereonRinexObsWriteResult *result,
+                                                                struct SidereonRinexObsWriteOutcome *out_outcome);
+
+/**
+ * Copy the text of an owned RINEX observation write result. Uses the
+ * variable-length output contract; the bytes are not null-terminated.
+ *
+ * A refused result has no text: the call returns
+ * SIDEREON_STATUS_INVALID_ARGUMENT, reports a required length of zero, writes
+ * nothing, and sets the thread-local message to the result's own refusal text.
+ *
+ * Safety: `result` must be a live SidereonRinexObsWriteResult handle; `out`
+ * may be NULL only when `len` is 0; `out_written` and `out_required` must each
+ * point to a writable size_t.
+ */
+enum SidereonStatus sidereon_rinex_obs_write_result_get_text(const struct SidereonRinexObsWriteResult *result,
+                                                             uint8_t *out,
+                                                             size_t len,
+                                                             size_t *out_written,
+                                                             size_t *out_required);
 
 /**
  * RINEX observation-code frequency in hertz for a system and full observation
@@ -28347,6 +41485,19 @@ enum SidereonStatus sidereon_rinex_repair_actions(const struct SidereonRinexRepa
                                                   size_t *out_written,
                                                   size_t *out_required);
 
+/**
+ * Copy the repaired observation product as CRINEX. Uses the variable-length
+ * output contract; the bytes are not null-terminated.
+ *
+ * A navigation repair has no CRINEX form, and a repaired observation product
+ * that cannot be written as CRINEX is refused; both return
+ * SIDEREON_STATUS_INVALID_ARGUMENT with the reason in the thread-local message
+ * and write nothing.
+ *
+ * Safety: repair must be a live repair handle; out must point to at least len
+ * writable bytes or be NULL when len is 0; out_written and out_required must
+ * point to size_t values.
+ */
 enum SidereonStatus sidereon_rinex_repair_crinex_text(const struct SidereonRinexRepair *repair,
                                                       uint8_t *out,
                                                       size_t len,
@@ -28370,11 +41521,40 @@ enum SidereonStatus sidereon_rinex_repair_options_init(struct SidereonRinexRepai
 enum SidereonStatus sidereon_rinex_repair_summary(const struct SidereonRinexRepair *repair,
                                                   struct SidereonRinexLintSummary *out_summary);
 
+/**
+ * Copy the repaired text. Uses the variable-length output contract; the bytes
+ * are not null-terminated.
+ *
+ * A repaired observation product is written through the same exact writer as
+ * sidereon_rinex_obs_to_rinex_text. When that writer refuses it, the repair
+ * handle still holds its actions and remaining lint, and this call returns
+ * SIDEREON_STATUS_INVALID_ARGUMENT with the refusal in the thread-local
+ * message, reports a required length of zero and writes nothing.
+ * sidereon_rinex_repair_text_result returns the same refusal typed.
+ *
+ * Safety: repair must be a live repair handle; out must point to at least len
+ * writable bytes or be NULL when len is 0; out_written and out_required must
+ * point to size_t values.
+ */
 enum SidereonStatus sidereon_rinex_repair_text(const struct SidereonRinexRepair *repair,
                                                uint8_t *out,
                                                size_t len,
                                                size_t *out_written,
                                                size_t *out_required);
+
+/**
+ * Take an owned record of the repaired text: the text, or the typed refusal
+ * writing the repaired observation product gave. A navigation repair's text
+ * is always present. Read the result with the
+ * sidereon_rinex_obs_write_result_* accessors.
+ *
+ * Safety: `repair` must be a live repair handle; `out_result` must point to
+ * writable storage for one `SidereonRinexObsWriteResult *`, which is set to
+ * NULL before any work and receives a newly owned handle only on
+ * SIDEREON_STATUS_OK; release it with sidereon_rinex_obs_write_result_free.
+ */
+enum SidereonStatus sidereon_rinex_repair_text_result(const struct SidereonRinexRepair *repair,
+                                                      struct SidereonRinexObsWriteResult **out_result);
 
 /**
  * Write the number of assembled RINEX-SPP epochs to *out_count.
@@ -28448,6 +41628,33 @@ enum SidereonStatus sidereon_rinex_spp_solution_error(const struct SidereonRinex
                                                       size_t len,
                                                       size_t *out_written,
                                                       size_t *out_required);
+
+/**
+ * Read the typed engine-error family and required JSON payload size for one
+ * RINEX-SPP epoch. A successful epoch reports family None and payload_len 0.
+ * The payload bytes can be copied with sidereon_rinex_spp_solution_error_payload.
+ *
+ * Safety: solutions is a live handle; out_info points to a
+ * SidereonEngineErrorInfo.
+ */
+enum SidereonStatus sidereon_rinex_spp_solution_error_info(const struct SidereonRinexSppSolutions *solutions,
+                                                           size_t index,
+                                                           struct SidereonEngineErrorInfo *out_info);
+
+/**
+ * Copy the owned-schema JSON details for a failed RINEX-SPP epoch. The
+ * legacy sidereon_rinex_spp_solution_error continues to return its diagnostic
+ * string. A successful epoch copies zero bytes.
+ *
+ * Safety: solutions is a live handle; out points to len writable bytes or
+ * NULL when len is zero; out_written and out_required point to size_t.
+ */
+enum SidereonStatus sidereon_rinex_spp_solution_error_payload(const struct SidereonRinexSppSolutions *solutions,
+                                                              size_t index,
+                                                              uint8_t *out,
+                                                              size_t len,
+                                                              size_t *out_written,
+                                                              size_t *out_required);
 
 /**
  * Write whether RINEX-SPP result `index` solved to *out_ok.
@@ -28527,6 +41734,13 @@ enum SidereonStatus sidereon_rtcm_build_antenna_descriptor(uint16_t message_numb
 enum SidereonStatus sidereon_rtcm_build_beidou_ephemeris(const struct SidereonRtcmBeidouEphemeris *eph,
                                                          struct SidereonRtcmMessages **out_messages);
 
+enum SidereonStatus sidereon_rtcm_build_fkp_gradients(const struct SidereonRtcmFkpGradients *fields,
+                                                      const struct SidereonRtcmFkpGradient *satellites,
+                                                      size_t satellite_len,
+                                                      const bool *trailing_bits,
+                                                      size_t trailing_bit_count,
+                                                      struct SidereonRtcmMessages **out_messages);
+
 /**
  * Build a 1045 Galileo F/NAV broadcast ephemeris message from raw
  * transmitted-integer fields and wrap it in a single-element
@@ -28548,6 +41762,11 @@ enum SidereonStatus sidereon_rtcm_build_galileo_fnav_ephemeris(const struct Side
  */
 enum SidereonStatus sidereon_rtcm_build_galileo_inav_ephemeris(const struct SidereonRtcmGalileoInavEphemeris *eph,
                                                                struct SidereonRtcmMessages **out_messages);
+
+enum SidereonStatus sidereon_rtcm_build_glonass_code_phase_biases(const struct SidereonRtcmGlonassCodePhaseBiases *fields,
+                                                                  const bool *trailing_bits,
+                                                                  size_t trailing_bit_count,
+                                                                  struct SidereonRtcmMessages **out_messages);
 
 /**
  * Build a 1020 GLONASS broadcast ephemeris message from raw transmitted-integer
@@ -28571,6 +41790,24 @@ enum SidereonStatus sidereon_rtcm_build_glonass_ephemeris(const struct SidereonR
 enum SidereonStatus sidereon_rtcm_build_gps_ephemeris(const struct SidereonRtcmGpsEphemeris *eph,
                                                       struct SidereonRtcmMessages **out_messages);
 
+enum SidereonStatus sidereon_rtcm_build_helmert_transformation(const struct SidereonRtcmHelmertTransformation *fields,
+                                                               const bool *trailing_bits,
+                                                               size_t trailing_bit_count,
+                                                               struct SidereonRtcmMessages **out_messages);
+
+enum SidereonStatus sidereon_rtcm_build_legacy(uint16_t message_number,
+                                               uint16_t reference_station_id,
+                                               uint32_t epoch_time,
+                                               bool synchronous_gnss,
+                                               uint8_t satellite_count,
+                                               bool divergence_free_smoothing,
+                                               uint8_t smoothing_interval,
+                                               const struct SidereonRtcmLegacySatellite *satellites,
+                                               size_t satellite_len,
+                                               const bool *trailing_bits,
+                                               size_t trailing_bit_count,
+                                               struct SidereonRtcmMessages **out_messages);
+
 /**
  * Build an MSM4 / MSM7 observation message from a header summary plus the
  * per-satellite and per-cell arrays, and wrap it in a single-element
@@ -28589,6 +41826,43 @@ enum SidereonStatus sidereon_rtcm_build_msm(const struct SidereonRtcmMsmInfo *in
                                             size_t signal_count,
                                             struct SidereonRtcmMessages **out_messages);
 
+enum SidereonStatus sidereon_rtcm_build_navic_ephemeris(const struct SidereonRtcmNavicEphemeris *eph,
+                                                        struct SidereonRtcmMessages **out_messages);
+
+enum SidereonStatus sidereon_rtcm_build_navic_ephemeris_with_trailing_bits(const struct SidereonRtcmNavicEphemeris *eph,
+                                                                           const bool *trailing_bits,
+                                                                           size_t trailing_bit_len,
+                                                                           struct SidereonRtcmMessages **out_messages);
+
+enum SidereonStatus sidereon_rtcm_build_network_auxiliary_station(const struct SidereonRtcmNetworkAuxiliaryStation *fields,
+                                                                  const bool *trailing_bits,
+                                                                  size_t trailing_bit_count,
+                                                                  struct SidereonRtcmMessages **out_messages);
+
+enum SidereonStatus sidereon_rtcm_build_network_differences(const struct SidereonRtcmNetworkDifferences *fields,
+                                                            const struct SidereonRtcmNetworkDifference *satellites,
+                                                            size_t satellite_len,
+                                                            const bool *trailing_bits,
+                                                            size_t trailing_bit_count,
+                                                            struct SidereonRtcmMessages **out_messages);
+
+enum SidereonStatus sidereon_rtcm_build_network_residuals(const struct SidereonRtcmNetworkResiduals *fields,
+                                                          const struct SidereonRtcmNetworkResidual *satellites,
+                                                          size_t satellite_len,
+                                                          const bool *trailing_bits,
+                                                          size_t trailing_bit_count,
+                                                          struct SidereonRtcmMessages **out_messages);
+
+enum SidereonStatus sidereon_rtcm_build_physical_reference_station(const struct SidereonRtcmPhysicalReferenceStation *fields,
+                                                                   const bool *trailing_bits,
+                                                                   size_t trailing_bit_count,
+                                                                   struct SidereonRtcmMessages **out_messages);
+
+enum SidereonStatus sidereon_rtcm_build_projection(const struct SidereonRtcmProjection *fields,
+                                                   const bool *trailing_bits,
+                                                   size_t trailing_bit_count,
+                                                   struct SidereonRtcmMessages **out_messages);
+
 /**
  * Build a 1044 QZSS broadcast ephemeris message from raw transmitted-integer
  * fields and wrap it in a single-element SidereonRtcmMessages handle. Release
@@ -28599,6 +41873,52 @@ enum SidereonStatus sidereon_rtcm_build_msm(const struct SidereonRtcmMsmInfo *in
  */
 enum SidereonStatus sidereon_rtcm_build_qzss_ephemeris(const struct SidereonRtcmQzssEphemeris *eph,
                                                        struct SidereonRtcmMessages **out_messages);
+
+enum SidereonStatus sidereon_rtcm_build_residual_grid(const struct SidereonRtcmResidualGrid *fields,
+                                                      const bool *trailing_bits,
+                                                      size_t trailing_bit_count,
+                                                      struct SidereonRtcmMessages **out_messages);
+
+/**
+ * Construct a native RTCM SSR or IGS 4076 satellite message from raw record
+ * arrays. Bias signal arrays are concatenated in satellite-record order.
+ *
+ * # Safety
+ * Every pointer must reference the stated number of readable elements, and
+ * `out_messages` must point to a writable handle pointer. Null pointers are
+ * accepted only for arrays with zero length. On success the returned handle
+ * is owned by the caller and must be released with
+ * `sidereon_rtcm_messages_free`.
+ */
+enum SidereonStatus sidereon_rtcm_build_ssr_v2(const struct SidereonRtcmSsrInfoV2 *info,
+                                               const struct SidereonRtcmSsrOrbitRecord *orbit,
+                                               size_t orbit_len,
+                                               const struct SidereonRtcmSsrClockRecord *clock,
+                                               size_t clock_len,
+                                               const struct SidereonRtcmSsrUraRecord *ura,
+                                               size_t ura_len,
+                                               const struct SidereonRtcmSsrCodeBiasRecord *code_bias,
+                                               size_t code_bias_len,
+                                               const struct SidereonRtcmSsrCodeBiasSignal *code_bias_signals,
+                                               size_t code_bias_signal_len,
+                                               const struct SidereonRtcmSsrPhaseBiasRecord *phase_bias,
+                                               size_t phase_bias_len,
+                                               const struct SidereonRtcmSsrPhaseBiasSignal *phase_bias_signals,
+                                               size_t phase_bias_signal_len,
+                                               const bool *padding_bits,
+                                               size_t padding_bit_len,
+                                               struct SidereonRtcmMessages **out_messages);
+
+enum SidereonStatus sidereon_rtcm_build_ssr_vtec(const struct SidereonRtcmSsrVtecInfo *info,
+                                                 const struct SidereonRtcmSsrVtecLayer *layers,
+                                                 size_t layer_len,
+                                                 const int16_t *cosine,
+                                                 size_t cosine_len,
+                                                 const int16_t *sine,
+                                                 size_t sine_len,
+                                                 const bool *trailing_bits,
+                                                 size_t trailing_bit_len,
+                                                 struct SidereonRtcmMessages **out_messages);
 
 /**
  * Build a 1005 / 1006 station antenna reference point message from fields and
@@ -28611,6 +41931,43 @@ enum SidereonStatus sidereon_rtcm_build_qzss_ephemeris(const struct SidereonRtcm
  */
 enum SidereonStatus sidereon_rtcm_build_station_coordinates(const struct SidereonRtcmStationCoordinates *station,
                                                             struct SidereonRtcmMessages **out_messages);
+
+enum SidereonStatus sidereon_rtcm_build_system_parameters(uint16_t reference_station_id,
+                                                          uint16_t mjd,
+                                                          uint32_t seconds_of_day,
+                                                          uint8_t announcement_count,
+                                                          uint8_t leap_seconds,
+                                                          const struct SidereonRtcmMessageAnnouncement *announcements,
+                                                          size_t announcement_len,
+                                                          const bool *trailing_bits,
+                                                          size_t trailing_bit_count,
+                                                          struct SidereonRtcmMessages **out_messages);
+
+enum SidereonStatus sidereon_rtcm_build_text(uint16_t reference_station_id,
+                                             uint16_t mjd,
+                                             uint32_t seconds_of_day,
+                                             uint8_t character_count,
+                                             const uint8_t *code_units,
+                                             size_t code_unit_count,
+                                             const bool *trailing_bits,
+                                             size_t trailing_bit_count,
+                                             struct SidereonRtcmMessages **out_messages);
+
+/**
+ * Construct an unsupported-message record while retaining its complete raw
+ * body. The core encoder validates that the supplied body carries the stated
+ * message number; this constructor does not rewrite wire bits.
+ *
+ * # Safety
+ * `body` must point to `body_len` readable bytes or be null when the length is
+ * zero; `out_messages` must point to a writable handle pointer. The returned
+ * handle belongs to the caller and must be freed with
+ * `sidereon_rtcm_messages_free`.
+ */
+enum SidereonStatus sidereon_rtcm_build_unsupported(uint16_t message_number,
+                                                    const uint8_t *body,
+                                                    size_t body_len,
+                                                    struct SidereonRtcmMessages **out_messages);
 
 /**
  * Decode the single RTCM 3 frame at the start of a buffer, copying its message
@@ -28630,9 +41987,14 @@ enum SidereonStatus sidereon_rtcm_decode_frame(const uint8_t *bytes,
                                                size_t *out_frame_len);
 
 /**
- * Decode every CRC-valid RTCM 3 frame in a byte buffer into a message list.
- * Forgiving: bad frames are skipped. On success writes a newly owned handle to
- * *out_messages. Release it with sidereon_rtcm_messages_free. Delegates to
+ * Decode a complete RTCM 3 byte stream into a message list under the strict
+ * policy. The stream is refused unless every byte belongs to a CRC-valid
+ * frame whose body decodes: a stray byte, a CRC-24Q failure, a trailing
+ * partial frame or a skipped frame fails the call with
+ * SIDEREON_STATUS_SP3_PARSE, naming what was not read.
+ * sidereon_rtcm_decode_stream reads a noisy stream frame by frame instead. On
+ * success writes a newly owned handle to *out_messages. Release it with
+ * sidereon_rtcm_messages_free. Delegates to
  * sidereon_core::rtcm::decode_messages.
  *
  * Safety: bytes points to len readable bytes; out_messages points to a
@@ -28643,10 +42005,11 @@ enum SidereonStatus sidereon_rtcm_decode_messages(const uint8_t *bytes,
                                                   struct SidereonRtcmMessages **out_messages);
 
 /**
- * Decode an RTCM 3 byte stream into messages plus forgiving stream diagnostics.
- * Bad CRC frames and incomplete trailing bytes count as resync bytes; CRC-valid
- * frames with undecodable bodies are reported in diagnostics. On success writes
- * newly owned handles to *out_messages and *out_diagnostics. Release them with
+ * Decode an RTCM 3 byte stream into messages plus stream diagnostics under the
+ * strict policy. Bad CRC frames and incomplete trailing bytes count as resync
+ * bytes; CRC-valid frames with undecodable bodies, and frames that depart
+ * from the format, are reported in diagnostics. On success writes newly owned
+ * handles to *out_messages and *out_diagnostics. Release them with
  * sidereon_rtcm_messages_free and sidereon_rtcm_stream_diagnostics_free.
  *
  * Safety: bytes points to len readable bytes; out_messages points to a
@@ -28657,6 +42020,20 @@ enum SidereonStatus sidereon_rtcm_decode_stream(const uint8_t *bytes,
                                                 size_t len,
                                                 struct SidereonRtcmMessages **out_messages,
                                                 struct SidereonRtcmStreamDiagnostics **out_diagnostics);
+
+/**
+ * Decode an RTCM 3 byte stream as sidereon_rtcm_decode_stream does, under
+ * `policy`, a SidereonRtcmPolicy value. Under SIDEREON_RTCM_POLICY_LENIENT a
+ * frame that departs from the format is read, and each departure is recorded
+ * in the diagnostics (sidereon_rtcm_stream_diagnostics_departure).
+ *
+ * Safety: as for sidereon_rtcm_decode_stream.
+ */
+enum SidereonStatus sidereon_rtcm_decode_stream_with_policy(const uint8_t *bytes,
+                                                            size_t len,
+                                                            uint32_t policy,
+                                                            struct SidereonRtcmMessages **out_messages,
+                                                            struct SidereonRtcmStreamDiagnostics **out_diagnostics);
 
 /**
  * Derive the RINEX LLI value for one MSM signal cell. Pass previous as NULL
@@ -28726,6 +42103,34 @@ enum SidereonStatus sidereon_rtcm_frames_count(const struct SidereonRtcmFrames *
  */
 void sidereon_rtcm_frames_free(struct SidereonRtcmFrames *frames);
 
+enum SidereonStatus sidereon_rtcm_last_error_info(struct SidereonRtcmErrorInfo *out);
+
+/**
+ * Copies the JSON payload for the most recent thread-local RTCM encode/conversion or SBAS encode error.
+ * The payload belongs to the calling OS thread; querying it does not clear it.
+ *
+ * The payload is UTF-8 JSON with root object
+ * `{"schema_version":1,"error":{"variant":"...","field":"..."}}`. The `error` value is a structured
+ * object whose `variant` string identifies its case and whose other fields
+ * carry that variant's data; nested errors are structured objects, not
+ * debug-formatted text. Every integer-valued payload field is a base-10
+ * decimal string, preserving its exact value. Floating-point quantities are
+ * JSON numbers with units documented by their field names and error variant.
+ * Booleans and textual fields use
+ * their corresponding JSON types. The version and field encodings are part
+ * of this C API. The payload is not NUL terminated; callers can query the
+ * required byte count with a null output and zero length, allocate storage,
+ * and call again.
+ *
+ * # Safety
+ * `out_written` and `out_required` must be valid writable pointers. `out` must
+ * point to `len` writable bytes unless `len` is zero.
+ */
+enum SidereonStatus sidereon_rtcm_last_error_payload(uint8_t *out,
+                                                     size_t len,
+                                                     size_t *out_written,
+                                                     size_t *out_required);
+
 /**
  * Copy the RINEX LLI bit constants derived from RTCM MSM fields: loss of lock
  * bit and half-cycle bit.
@@ -28771,6 +42176,11 @@ enum SidereonStatus sidereon_rtcm_lock_time_tracker_observe(struct SidereonRtcmL
  */
 enum SidereonStatus sidereon_rtcm_lock_time_tracker_reset(struct SidereonRtcmLockTimeTracker *tracker);
 
+enum SidereonStatus sidereon_rtcm_message_announcement(const struct SidereonRtcmMessages *messages,
+                                                       size_t index,
+                                                       size_t announcement_index,
+                                                       struct SidereonRtcmMessageAnnouncement *out);
+
 /**
  * Copy a decoded 1007 / 1008 / 1033 antenna descriptor's scalar fields into
  * *out. Read the string fields with sidereon_rtcm_message_antenna_string.
@@ -28813,6 +42223,17 @@ enum SidereonStatus sidereon_rtcm_message_beidou_ephemeris(const struct Sidereon
  * frame). Variable-length output contract. Delegates to
  * sidereon_core::rtcm::Message::encode.
  *
+ * A message whose fields the body cannot state is refused with
+ * SIDEREON_STATUS_INVALID_ARGUMENT and the engine's reason in the thread-local
+ * message, reporting a required length of zero and writing nothing: an MSM
+ * with a satellite id outside 1..=64, a signal id outside 1..=32, a satellite
+ * or satellite/signal cell listed twice, or a signal whose satellite is not
+ * listed; an ephemeris whose satellite id is wider than the message's field
+ * (six bits, four for QZSS 1044); an SSR message whose satellite field is
+ * wider than the message's (five bits for GLONASS, four for the native QZSS
+ * messages 1246..1251 and 1268, six otherwise). Each of those would otherwise
+ * be written as a different mask or satellite.
+ *
  * Safety: messages is a live handle; out points to len writable bytes or NULL
  * when len is 0; out_written and out_required point to size_t.
  */
@@ -28822,6 +42243,29 @@ enum SidereonStatus sidereon_rtcm_message_encode(const struct SidereonRtcmMessag
                                                  size_t len,
                                                  size_t *out_written,
                                                  size_t *out_required);
+
+enum SidereonStatus sidereon_rtcm_message_encode_with_policy(const struct SidereonRtcmMessages *messages,
+                                                             size_t index,
+                                                             uint32_t policy,
+                                                             uint8_t *out,
+                                                             size_t len,
+                                                             size_t *out_written,
+                                                             size_t *out_required,
+                                                             struct SidereonRtcmDeparture *out_departures,
+                                                             size_t departures_capacity,
+                                                             size_t *departures_written,
+                                                             size_t *departures_required);
+
+enum SidereonStatus sidereon_rtcm_message_fkp_gradient_satellites(const struct SidereonRtcmMessages *messages,
+                                                                  size_t index,
+                                                                  struct SidereonRtcmFkpGradient *out,
+                                                                  size_t len,
+                                                                  size_t *out_written,
+                                                                  size_t *out_required);
+
+enum SidereonStatus sidereon_rtcm_message_fkp_gradients(const struct SidereonRtcmMessages *messages,
+                                                        size_t index,
+                                                        struct SidereonRtcmFkpGradients *out);
 
 /**
  * Copy a decoded 1045 Galileo F/NAV broadcast ephemeris into *out.
@@ -28843,6 +42287,10 @@ enum SidereonStatus sidereon_rtcm_message_galileo_inav_ephemeris(const struct Si
                                                                  size_t index,
                                                                  struct SidereonRtcmGalileoInavEphemeris *out);
 
+enum SidereonStatus sidereon_rtcm_message_glonass_code_phase_biases(const struct SidereonRtcmMessages *messages,
+                                                                    size_t index,
+                                                                    struct SidereonRtcmGlonassCodePhaseBiases *out);
+
 /**
  * Copy a decoded 1020 GLONASS broadcast ephemeris into *out.
  *
@@ -28862,6 +42310,10 @@ enum SidereonStatus sidereon_rtcm_message_gps_ephemeris(const struct SidereonRtc
                                                         size_t index,
                                                         struct SidereonRtcmGpsEphemeris *out);
 
+enum SidereonStatus sidereon_rtcm_message_helmert_transformation(const struct SidereonRtcmMessages *messages,
+                                                                 size_t index,
+                                                                 struct SidereonRtcmHelmertTransformation *out);
+
 /**
  * Report the IR variant and RTCM message number of one decoded message.
  *
@@ -28872,6 +42324,15 @@ enum SidereonStatus sidereon_rtcm_message_kind(const struct SidereonRtcmMessages
                                                size_t index,
                                                enum SidereonRtcmMessageKind *out_kind,
                                                uint16_t *out_message_number);
+
+enum SidereonStatus sidereon_rtcm_message_legacy_header(const struct SidereonRtcmMessages *messages,
+                                                        size_t index,
+                                                        struct SidereonRtcmLegacyHeader *out);
+
+enum SidereonStatus sidereon_rtcm_message_legacy_satellite(const struct SidereonRtcmMessages *messages,
+                                                           size_t index,
+                                                           size_t satellite_index,
+                                                           struct SidereonRtcmLegacySatellite *out);
 
 /**
  * Copy a decoded MSM observation message summary into *out. Read the cells with
@@ -28913,6 +42374,51 @@ enum SidereonStatus sidereon_rtcm_message_msm_signals(const struct SidereonRtcmM
                                                       size_t *out_written,
                                                       size_t *out_required);
 
+enum SidereonStatus sidereon_rtcm_message_navic_ephemeris(const struct SidereonRtcmMessages *messages,
+                                                          size_t index,
+                                                          struct SidereonRtcmNavicEphemeris *out);
+
+enum SidereonStatus sidereon_rtcm_message_navic_trailing_bits(const struct SidereonRtcmMessages *messages,
+                                                              size_t index,
+                                                              bool *out,
+                                                              size_t len,
+                                                              size_t *out_written,
+                                                              size_t *out_required);
+
+enum SidereonStatus sidereon_rtcm_message_network_auxiliary_station(const struct SidereonRtcmMessages *messages,
+                                                                    size_t index,
+                                                                    struct SidereonRtcmNetworkAuxiliaryStation *out);
+
+enum SidereonStatus sidereon_rtcm_message_network_difference_satellites(const struct SidereonRtcmMessages *messages,
+                                                                        size_t index,
+                                                                        struct SidereonRtcmNetworkDifference *out,
+                                                                        size_t len,
+                                                                        size_t *out_written,
+                                                                        size_t *out_required);
+
+enum SidereonStatus sidereon_rtcm_message_network_differences(const struct SidereonRtcmMessages *messages,
+                                                              size_t index,
+                                                              struct SidereonRtcmNetworkDifferences *out);
+
+enum SidereonStatus sidereon_rtcm_message_network_residual_satellites(const struct SidereonRtcmMessages *messages,
+                                                                      size_t index,
+                                                                      struct SidereonRtcmNetworkResidual *out,
+                                                                      size_t len,
+                                                                      size_t *out_written,
+                                                                      size_t *out_required);
+
+enum SidereonStatus sidereon_rtcm_message_network_residuals(const struct SidereonRtcmMessages *messages,
+                                                            size_t index,
+                                                            struct SidereonRtcmNetworkResiduals *out);
+
+enum SidereonStatus sidereon_rtcm_message_physical_reference_station(const struct SidereonRtcmMessages *messages,
+                                                                     size_t index,
+                                                                     struct SidereonRtcmPhysicalReferenceStation *out);
+
+enum SidereonStatus sidereon_rtcm_message_projection(const struct SidereonRtcmMessages *messages,
+                                                     size_t index,
+                                                     struct SidereonRtcmProjection *out);
+
 /**
  * Copy a decoded 1044 QZSS broadcast ephemeris into *out.
  *
@@ -28921,6 +42427,10 @@ enum SidereonStatus sidereon_rtcm_message_msm_signals(const struct SidereonRtcmM
 enum SidereonStatus sidereon_rtcm_message_qzss_ephemeris(const struct SidereonRtcmMessages *messages,
                                                          size_t index,
                                                          struct SidereonRtcmQzssEphemeris *out);
+
+enum SidereonStatus sidereon_rtcm_message_residual_grid(const struct SidereonRtcmMessages *messages,
+                                                        size_t index,
+                                                        struct SidereonRtcmResidualGrid *out);
 
 enum SidereonStatus sidereon_rtcm_message_ssr_clocks(const struct SidereonRtcmMessages *messages,
                                                      size_t index,
@@ -28964,6 +42474,18 @@ enum SidereonStatus sidereon_rtcm_message_ssr_code_biases(const struct SidereonR
 enum SidereonStatus sidereon_rtcm_message_ssr_info(const struct SidereonRtcmMessages *messages,
                                                    size_t index,
                                                    struct SidereonRtcmSsrInfo *out_info);
+
+/**
+ * Read the extended metadata of an SSR satellite message, including its IGS
+ * version and raw post-record bit count.
+ *
+ * # Safety
+ * `messages` must be a live RTCM message handle; `out_info` must point to a
+ * writable `SidereonRtcmSsrInfoV2`.
+ */
+enum SidereonStatus sidereon_rtcm_message_ssr_info_v2(const struct SidereonRtcmMessages *messages,
+                                                      size_t index,
+                                                      struct SidereonRtcmSsrInfoV2 *out_info);
 
 enum SidereonStatus sidereon_rtcm_message_ssr_orbits(const struct SidereonRtcmMessages *messages,
                                                      size_t index,
@@ -29011,6 +42533,33 @@ enum SidereonStatus sidereon_rtcm_message_ssr_ura(const struct SidereonRtcmMessa
                                                   size_t *out_written,
                                                   size_t *out_required);
 
+enum SidereonStatus sidereon_rtcm_message_ssr_vtec_coefficients(const struct SidereonRtcmMessages *messages,
+                                                                size_t index,
+                                                                size_t layer_index,
+                                                                bool cosine,
+                                                                int16_t *out,
+                                                                size_t len,
+                                                                size_t *out_written,
+                                                                size_t *out_required);
+
+enum SidereonStatus sidereon_rtcm_message_ssr_vtec_info(const struct SidereonRtcmMessages *messages,
+                                                        size_t index,
+                                                        struct SidereonRtcmSsrVtecInfo *out_info);
+
+enum SidereonStatus sidereon_rtcm_message_ssr_vtec_layers(const struct SidereonRtcmMessages *messages,
+                                                          size_t index,
+                                                          struct SidereonRtcmSsrVtecLayer *out,
+                                                          size_t len,
+                                                          size_t *out_written,
+                                                          size_t *out_required);
+
+enum SidereonStatus sidereon_rtcm_message_ssr_vtec_trailing_bits(const struct SidereonRtcmMessages *messages,
+                                                                 size_t index,
+                                                                 bool *out,
+                                                                 size_t len,
+                                                                 size_t *out_written,
+                                                                 size_t *out_required);
+
 /**
  * Copy a decoded 1005 / 1006 station coordinates message into *out.
  *
@@ -29021,10 +42570,24 @@ enum SidereonStatus sidereon_rtcm_message_station_coordinates(const struct Sider
                                                               size_t index,
                                                               struct SidereonRtcmStationCoordinates *out);
 
+enum SidereonStatus sidereon_rtcm_message_system_parameters(const struct SidereonRtcmMessages *messages,
+                                                            size_t index,
+                                                            struct SidereonRtcmSystemParameters *out);
+
+enum SidereonStatus sidereon_rtcm_message_text(const struct SidereonRtcmMessages *messages,
+                                               size_t index,
+                                               struct SidereonRtcmTextMessage *out,
+                                               uint8_t *code_units,
+                                               size_t code_unit_capacity,
+                                               size_t *out_written,
+                                               size_t *out_required);
+
 /**
  * Encode one decoded message into a complete RTCM transport frame (with a fresh
  * CRC-24Q). Variable-length output contract. Delegates to
- * sidereon_core::rtcm::Message::to_frame.
+ * sidereon_core::rtcm::Message::to_frame. A message body the encoder refuses,
+ * as sidereon_rtcm_message_encode describes, or a body longer than the frame
+ * length field is refused with SIDEREON_STATUS_INVALID_ARGUMENT.
  *
  * Safety: messages is a live handle; out points to len writable bytes or NULL
  * when len is 0; out_written and out_required point to size_t.
@@ -29035,6 +42598,66 @@ enum SidereonStatus sidereon_rtcm_message_to_frame(const struct SidereonRtcmMess
                                                    size_t len,
                                                    size_t *out_written,
                                                    size_t *out_required);
+
+enum SidereonStatus sidereon_rtcm_message_to_frame_with_policy(const struct SidereonRtcmMessages *messages,
+                                                               size_t index,
+                                                               uint32_t policy,
+                                                               uint8_t *out,
+                                                               size_t len,
+                                                               size_t *out_written,
+                                                               size_t *out_required,
+                                                               struct SidereonRtcmDeparture *out_departures,
+                                                               size_t departures_capacity,
+                                                               size_t *departures_written,
+                                                               size_t *departures_required);
+
+/**
+ * Copy the raw trailing or SSR padding bits of a message into caller memory.
+ * Unsupported messages have a raw body rather than a separate tail and are
+ * not accepted by this accessor.
+ *
+ * # Safety
+ * `messages` must be a live handle; `out` must point to `len` writable bools
+ * or be null when `len` is zero; both count pointers must be writable.
+ */
+enum SidereonStatus sidereon_rtcm_message_trailing_bits(const struct SidereonRtcmMessages *messages,
+                                                        size_t index,
+                                                        bool *out,
+                                                        size_t len,
+                                                        size_t *out_written,
+                                                        size_t *out_required);
+
+/**
+ * Copy the undecoded raw body of an unsupported message.
+ *
+ * # Safety
+ * `messages` must be a live handle; `out` must point to `len` writable bytes
+ * or be null when `len` is zero; both count pointers must be writable.
+ */
+enum SidereonStatus sidereon_rtcm_message_unsupported_body(const struct SidereonRtcmMessages *messages,
+                                                           size_t index,
+                                                           uint8_t *out,
+                                                           size_t len,
+                                                           size_t *out_written,
+                                                           size_t *out_required);
+
+/**
+ * Clone one supported message, replacing its raw trailing/padding bits.
+ * This is the additive tail-aware constructor path for message families
+ * whose original field constructors predate tail inputs.
+ *
+ * # Safety
+ * `messages` must be a live handle; `trailing_bits` must point to
+ * `trailing_bit_len` readable bools or be null when the length is zero;
+ * `out_messages` must point to a writable handle pointer. On success the new
+ * handle is owned by the caller and must be freed with
+ * `sidereon_rtcm_messages_free`.
+ */
+enum SidereonStatus sidereon_rtcm_message_with_trailing_bits(const struct SidereonRtcmMessages *messages,
+                                                             size_t index,
+                                                             const bool *trailing_bits,
+                                                             size_t trailing_bit_len,
+                                                             struct SidereonRtcmMessages **out_messages);
 
 /**
  * Number of messages in a decoded RTCM list.
@@ -29103,6 +42726,40 @@ enum SidereonStatus sidereon_rtcm_msm_signal_rinex_code(uint32_t system,
 enum SidereonStatus sidereon_rtcm_scan_frames(const uint8_t *bytes,
                                               size_t len,
                                               struct SidereonRtcmFrames **out_frames);
+
+/**
+ * Copy the number of preambles whose declared frame lay within the buffer
+ * but failed its CRC-24Q. Each also counts one resync byte.
+ *
+ * Safety: diagnostics is a live handle; out_count points to a size_t.
+ */
+enum SidereonStatus sidereon_rtcm_stream_diagnostics_crc_failures(const struct SidereonRtcmStreamDiagnostics *diagnostics,
+                                                                  size_t *out_count);
+
+/**
+ * Copy one departure read under the lenient policy: the byte offset of its
+ * frame preamble to *out_offset, and its description (not null-terminated)
+ * into out under the variable-length output contract.
+ *
+ * Safety: diagnostics is a live handle; out_offset points to a size_t; out
+ * points to len writable bytes or is NULL when len is 0; out_written and
+ * out_required point to size_t.
+ */
+enum SidereonStatus sidereon_rtcm_stream_diagnostics_departure(const struct SidereonRtcmStreamDiagnostics *diagnostics,
+                                                               size_t index,
+                                                               size_t *out_offset,
+                                                               uint8_t *out,
+                                                               size_t len,
+                                                               size_t *out_written,
+                                                               size_t *out_required);
+
+/**
+ * Copy the number of departures read under the lenient policy.
+ *
+ * Safety: diagnostics is a live handle; out_count points to a size_t.
+ */
+enum SidereonStatus sidereon_rtcm_stream_diagnostics_departure_count(const struct SidereonRtcmStreamDiagnostics *diagnostics,
+                                                                     size_t *out_count);
 
 /**
  * Release a stream diagnostics handle from sidereon_rtcm_decode_stream. Passing
@@ -29758,6 +43415,22 @@ enum SidereonStatus sidereon_rtk_rinex_arc_skipped_epoch_count(const struct Side
                                                                size_t *out_count);
 
 /**
+ * Copy the measurements the single-frequency RINEX RTK arc builder left out
+ * for want of a carrier frequency, in the order the builder met them: epoch by
+ * epoch, base before rover, satellites in token order. Uses the
+ * variable-length output contract documented at the top of the header.
+ *
+ * Safety: arc must be a live handle; out must point to len writable
+ * SidereonRtkRinexUnresolvedCarrier values or be NULL when len is 0;
+ * out_written and out_required must point to size_t values.
+ */
+enum SidereonStatus sidereon_rtk_rinex_arc_unresolved_carriers(const struct SidereonRtkRinexArc *arc,
+                                                               struct SidereonRtkRinexUnresolvedCarrier *out,
+                                                               size_t len,
+                                                               size_t *out_written,
+                                                               size_t *out_required);
+
+/**
  * Copy the single-frequency RINEX RTK arc's carrier wavelengths in ambiguity
  * id order.
  *
@@ -29879,6 +43552,23 @@ void sidereon_rtk_rinex_dual_frequency_arc_free(struct SidereonRtkRinexDualFrequ
  */
 enum SidereonStatus sidereon_rtk_rinex_dual_frequency_arc_skipped_epoch_count(const struct SidereonRtkRinexDualFrequencyArc *arc,
                                                                               size_t *out_count);
+
+/**
+ * Copy the measurements the dual-frequency RINEX RTK arc builder left out for
+ * want of a carrier frequency, in the order the builder met them: epoch by
+ * epoch, base before rover, satellites in token order. A pair names two phase
+ * observables; each one without a frequency is reported once. Uses the
+ * variable-length output contract documented at the top of the header.
+ *
+ * Safety: arc must be a live handle; out must point to len writable
+ * SidereonRtkRinexUnresolvedCarrier values or be NULL when len is 0;
+ * out_written and out_required must point to size_t values.
+ */
+enum SidereonStatus sidereon_rtk_rinex_dual_frequency_arc_unresolved_carriers(const struct SidereonRtkRinexDualFrequencyArc *arc,
+                                                                              struct SidereonRtkRinexUnresolvedCarrier *out,
+                                                                              size_t len,
+                                                                              size_t *out_written,
+                                                                              size_t *out_required);
 
 /**
  * Initialize static RINEX RTK baseline config with engine defaults.
@@ -30307,6 +43997,20 @@ enum SidereonStatus sidereon_satellite_constellation_ground_tracks(const struct 
                                                                    struct SidereonSatelliteConstellationGroundTracks **out_tracks);
 
 /**
+ * Copy the complete typed SGP4/transform error payload for a failed satellite
+ * ground track, using the caller-buffer contract documented above.
+ *
+ * Safety: tracks must be a live handle; when `len` is nonzero, `out_payload`
+ * must point to `len` writable bytes; both count outputs must be writable.
+ */
+enum SidereonStatus sidereon_satellite_constellation_ground_tracks_error_payload(const struct SidereonSatelliteConstellationGroundTracks *tracks,
+                                                                                 size_t satellite_index,
+                                                                                 uint8_t *out_payload,
+                                                                                 size_t len,
+                                                                                 size_t *out_written,
+                                                                                 size_t *out_required);
+
+/**
  * Release a constellation ground-track result handle. Null is a no-op. A
  * non-null handle must come from sidereon_satellite_constellation_ground_tracks
  * and must be freed exactly once with this function.
@@ -30388,6 +44092,21 @@ enum SidereonStatus sidereon_satellite_constellation_look_angles_arc_len(const s
                                                                          size_t *out_len);
 
 /**
+ * Copy the complete typed error payload for a failed satellite look-angle arc.
+ * Query the required byte count with a NULL output and zero capacity, then retry
+ * with a caller buffer. A successful satellite or invalid index is rejected.
+ *
+ * Safety: arcs must be a live handle; when `len` is nonzero, `out_payload` must
+ * point to `len` writable bytes; both count outputs must be writable.
+ */
+enum SidereonStatus sidereon_satellite_constellation_look_angles_error_payload(const struct SidereonSatelliteConstellationLookAngles *arcs,
+                                                                               size_t satellite_index,
+                                                                               uint8_t *out_payload,
+                                                                               size_t len,
+                                                                               size_t *out_written,
+                                                                               size_t *out_required);
+
+/**
  * Release a constellation look-angle result handle. Null is a no-op. A non-null
  * handle must come from sidereon_satellite_constellation_look_angle_arcs and
  * must be freed exactly once with this function.
@@ -30449,6 +44168,20 @@ enum SidereonStatus sidereon_satellite_constellation_passes(const struct Sidereo
  */
 enum SidereonStatus sidereon_satellite_constellation_passes_count(const struct SidereonSatelliteConstellationPasses *passes,
                                                                   size_t *out_count);
+
+/**
+ * Copy the complete typed pass-search error payload for a satellite with a
+ * failed scan, using the caller-buffer contract documented above.
+ *
+ * Safety: passes must be a live handle; when `len` is nonzero, `out_payload`
+ * must point to `len` writable bytes; both count outputs must be writable.
+ */
+enum SidereonStatus sidereon_satellite_constellation_passes_error_payload(const struct SidereonSatelliteConstellationPasses *passes,
+                                                                          size_t satellite_index,
+                                                                          uint8_t *out_payload,
+                                                                          size_t len,
+                                                                          size_t *out_written,
+                                                                          size_t *out_required);
 
 /**
  * Release a constellation pass result handle. Null is a no-op. A non-null handle
@@ -30521,6 +44254,20 @@ enum SidereonStatus sidereon_satellite_constellation_visible(const struct Sidere
                                                              int64_t epoch_unix_us,
                                                              double min_elevation_deg,
                                                              struct SidereonVisibleList **out_visible);
+
+/**
+ * Map an SBAS satellite-id token (`S20`..`S58`) to its broadcast PRN
+ * (120..158). Delegates to `sidereon_core::sbas::sat_to_sbas_prn`.
+ * *out_present is false, with *out_prn 0, for a token of another
+ * constellation and for an SBAS slot outside 20..58: `S01`, `S19`, `S59` and
+ * `S99` are valid satellite tokens but name no broadcast PRN.
+ *
+ * Safety: sat_id is a null-terminated satellite token; out_prn points to a
+ * uint16_t; out_present points to a bool.
+ */
+enum SidereonStatus sidereon_satellite_id_to_sbas_prn(const char *sat_id,
+                                                      uint16_t *out_prn,
+                                                      bool *out_present);
 
 /**
  * Apparent visual magnitude of a sunlit body from a diffuse-sphere phase law.
@@ -30697,6 +44444,16 @@ enum SidereonStatus sidereon_sbas_block_raw_data(const struct SidereonSbasBlock 
                                                  size_t *out_written,
                                                  size_t *out_required);
 
+enum SidereonStatus sidereon_sbas_clock_relativity_at_epoch_query(const struct SidereonBroadcastEphemeris *broadcast,
+                                                                  const struct SidereonSbasCorrectionStore *store,
+                                                                  const char *geo_sat_id,
+                                                                  uint32_t mode,
+                                                                  const char *sat_id,
+                                                                  const struct SidereonExactEpochQuery *epoch,
+                                                                  const double *position_ecef_m,
+                                                                  enum SidereonClockRelativityKind *out_kind,
+                                                                  double *out_term_s);
+
 enum SidereonStatus sidereon_sbas_corrected_state(const struct SidereonBroadcastEphemeris *broadcast,
                                                   const struct SidereonSbasCorrectionStore *store,
                                                   const char *geo_sat_id,
@@ -30707,12 +44464,30 @@ enum SidereonStatus sidereon_sbas_corrected_state(const struct SidereonBroadcast
                                                   double *out_position_ecef_m,
                                                   double *out_clock_s);
 
+enum SidereonStatus sidereon_sbas_corrected_state_at_epoch_queries(const struct SidereonBroadcastEphemeris *broadcast,
+                                                                   const struct SidereonSbasCorrectionStore *store,
+                                                                   const char *geo_sat_id,
+                                                                   uint32_t mode,
+                                                                   const char *sat_id,
+                                                                   const struct SidereonExactEpochQuery *state_epoch,
+                                                                   const struct SidereonExactEpochQuery *selection_epoch,
+                                                                   struct SidereonEphemerisSourceState *out);
+
 /**
  * Initialize degradation terms to the no-extra-degradation values.
  *
  * Safety: out_params must point to writable SidereonDegradationParams storage.
  */
 enum SidereonStatus sidereon_sbas_degradation_params_none(struct SidereonDegradationParams *out_params);
+
+enum SidereonStatus sidereon_sbas_ephemeris_variance_at_epoch_queries(const struct SidereonBroadcastEphemeris *broadcast,
+                                                                      const struct SidereonSbasCorrectionStore *store,
+                                                                      const char *geo_sat_id,
+                                                                      uint32_t mode,
+                                                                      const char *sat_id,
+                                                                      const struct SidereonExactEpochQuery *state_epoch,
+                                                                      const struct SidereonExactEpochQuery *selection_epoch,
+                                                                      double *out_variance_m2);
 
 /**
  * Initialize the en-route through non-precision-approach SBAS K multipliers.
@@ -30825,6 +44600,23 @@ enum SidereonStatus sidereon_sbas_solve_broadcast(const struct SidereonBroadcast
                                                   const struct SidereonSppInputs *inputs,
                                                   struct SidereonSppSolution **out_solution);
 
+enum SidereonStatus sidereon_sbas_solve_broadcast_at_exact_epoch(const struct SidereonBroadcastEphemeris *broadcast,
+                                                                 const struct SidereonSbasCorrectionStore *store,
+                                                                 const char *geo_sat_id,
+                                                                 uint32_t mode,
+                                                                 const struct SidereonSppInputs *inputs,
+                                                                 const struct SidereonExactEpoch *receive_epoch,
+                                                                 struct SidereonSppSolution **out_solution);
+
+enum SidereonStatus sidereon_sbas_solve_broadcast_v2_with_models_at_exact_epoch(const struct SidereonBroadcastEphemeris *broadcast,
+                                                                                const struct SidereonSbasCorrectionStore *store,
+                                                                                const char *geo_sat_id,
+                                                                                uint32_t mode,
+                                                                                const struct SidereonSppInputsV2 *inputs,
+                                                                                const struct SidereonSppModelOptions *models,
+                                                                                const struct SidereonExactEpoch *receive_epoch,
+                                                                                struct SidereonSppSolution **out_solution);
+
 enum SidereonStatus sidereon_sbas_store_fast_correction(const struct SidereonSbasCorrectionStore *store,
                                                         const char *geo_sat_id,
                                                         const char *sat_id,
@@ -30878,6 +44670,40 @@ enum SidereonStatus sidereon_sbas_store_ready_geos(const struct SidereonSbasCorr
                                                    size_t len,
                                                    size_t *out_written,
                                                    size_t *out_required);
+
+/**
+ * Copy the corrections a source GEO addressed to active PRN-mask bits that name
+ * no satellite the store holds (a future-GNSS or unassigned mask number), per
+ * mask number in ascending order. Such a bit keeps its place among the active
+ * bits, so the corrections after it still reach their own satellites; the
+ * corrections addressed to it are applied to no satellite and are counted here
+ * instead of being dropped. *out_present is false, with nothing copied, when
+ * the GEO has no partition in the store. Uses the standard caller-buffer
+ * convention.
+ *
+ * Safety: store is a live handle; geo_sat_id is a null-terminated satellite
+ * token; out_present points to a bool; out points to len writable
+ * SidereonSbasUnassignedMaskCorrections values or is NULL when len is 0;
+ * out_written and out_required point to size_t values.
+ */
+enum SidereonStatus sidereon_sbas_store_unassigned_mask_corrections(const struct SidereonSbasCorrectionStore *store,
+                                                                    const char *geo_sat_id,
+                                                                    bool *out_present,
+                                                                    struct SidereonSbasUnassignedMaskCorrections *out,
+                                                                    size_t len,
+                                                                    size_t *out_written,
+                                                                    size_t *out_required);
+
+enum SidereonStatus sidereon_sbas_transmit_epoch_clock_at_epoch_queries(const struct SidereonBroadcastEphemeris *broadcast,
+                                                                        const struct SidereonSbasCorrectionStore *store,
+                                                                        const char *geo_sat_id,
+                                                                        uint32_t mode,
+                                                                        const char *sat_id,
+                                                                        const struct SidereonExactEpochQuery *transmit_epoch,
+                                                                        const struct SidereonExactEpochQuery *selection_epoch,
+                                                                        bool *out_has_clock,
+                                                                        double *out_clock_s,
+                                                                        bool *out_degraded);
 
 /**
  * Copy epoch offsets from a scenario simulation.
@@ -31113,8 +44939,34 @@ enum SidereonSelectionStatus sidereon_select_ionex(const struct SidereonIonex *c
                                                    struct SidereonStalenessMetadata *out_metadata);
 
 /**
- * Select an IONEX product usable across the range [start, end] (J2000 seconds),
- * degrading to a whole-day diurnal-shifted prior product within policy. On
+ * Select one IONEX product at an exact scale-tagged instant.
+ */
+enum SidereonSelectionStatus sidereon_select_ionex_at_instant(const struct SidereonIonex *const *products,
+                                                              size_t product_count,
+                                                              const struct SidereonClockEpoch *requested,
+                                                              struct SidereonStalenessPolicy policy,
+                                                              struct SidereonIonex **out_selection,
+                                                              struct SidereonStalenessMetadata *out_metadata,
+                                                              struct SidereonIonexEpochError *out_epoch_error);
+
+/**
+ * Select an IONEX product across an exact, scale-tagged interval. The
+ * endpoints retain their split/nanosecond precision through the core
+ * selection call. `out_epoch_error` carries any of the seven typed IONEX
+ * epoch conversion causes.
+ */
+enum SidereonSelectionStatus sidereon_select_ionex_over_instant_range(const struct SidereonIonex *const *products,
+                                                                      size_t product_count,
+                                                                      const struct SidereonClockEpoch *start,
+                                                                      const struct SidereonClockEpoch *end,
+                                                                      struct SidereonStalenessPolicy policy,
+                                                                      struct SidereonIonex **out_selection,
+                                                                      struct SidereonStalenessMetadata *out_metadata,
+                                                                      struct SidereonIonexEpochError *out_epoch_error);
+
+/**
+ * Select an IONEX product usable across the range [start, end] (integer UTC
+ * seconds since J2000, as for sidereon_ionex_slant_delay), degrading to a whole-day diurnal-shifted prior product within policy. On
  * success writes a newly owned product to *out_selection (a SidereonIonex usable
  * with sidereon_ionex_slant_delay and released with sidereon_ionex_free) and the
  * staleness provenance to *out_metadata. For an exact selection the product is
@@ -31205,6 +45057,8 @@ enum SidereonStatus sidereon_sgp4_fit_tle(const struct SidereonSgp4FitSample *sa
                                           const struct SidereonSgp4FitConfig *config,
                                           struct SidereonSgp4TleFit **out_fit);
 
+enum SidereonStatus sidereon_sgp4_last_error_info(struct SidereonSgp4ErrorInfo *out_info);
+
 void sidereon_sgp4_tle_fit_free(struct SidereonSgp4TleFit *fit);
 
 enum SidereonStatus sidereon_sgp4_tle_fit_lines(const struct SidereonSgp4TleFit *fit,
@@ -31212,6 +45066,21 @@ enum SidereonStatus sidereon_sgp4_tle_fit_lines(const struct SidereonSgp4TleFit 
 
 enum SidereonStatus sidereon_sgp4_tle_fit_omm(const struct SidereonSgp4TleFit *fit,
                                               struct SidereonOmm **out_omm);
+
+/**
+ * Copy the complete lossless fit result as JSON. The payload includes every
+ * ElementSet field, OMM field, generated TLE line, and fit statistic. Query
+ * the required byte count with a NULL output and zero capacity, then retry
+ * with a caller-owned buffer. A short-buffer retry leaves the fit unchanged.
+ *
+ * Safety: fit must be a live handle. If len is nonzero, out_payload must point
+ * to len writable bytes. Both count outputs must be writable.
+ */
+enum SidereonStatus sidereon_sgp4_tle_fit_result_payload(const struct SidereonSgp4TleFit *fit,
+                                                         uint8_t *out_payload,
+                                                         size_t len,
+                                                         size_t *out_written,
+                                                         size_t *out_required);
 
 enum SidereonStatus sidereon_sgp4_tle_fit_statistics(const struct SidereonSgp4TleFit *fit,
                                                      struct SidereonSgp4FitStatistics *out_stats);
@@ -31770,6 +45639,15 @@ enum SidereonStatus sidereon_smooth_code(const struct SidereonArcEpoch *arc,
                                          size_t *out_written,
                                          size_t *out_required);
 
+enum SidereonStatus sidereon_smooth_code_v2(const struct SidereonArcEpochV2 *arc,
+                                            size_t count,
+                                            const struct SidereonCycleSlipOptions *options,
+                                            size_t hatch_window_cap,
+                                            struct SidereonSmoothCodeResult *out,
+                                            size_t len,
+                                            size_t *out_written,
+                                            size_t *out_required);
+
 /**
  * Apply fixed-interval RTS smoothing to a recorded fusion history.
  *
@@ -31796,6 +45674,15 @@ enum SidereonStatus sidereon_smooth_iono_free_code(const struct SidereonArcEpoch
                                                    size_t len,
                                                    size_t *out_written,
                                                    size_t *out_required);
+
+enum SidereonStatus sidereon_smooth_iono_free_code_v2(const struct SidereonArcEpochV2 *arc,
+                                                      size_t count,
+                                                      const struct SidereonCycleSlipOptions *options,
+                                                      size_t hatch_window_cap,
+                                                      struct SidereonIonoFreeSmoothResult *out,
+                                                      size_t len,
+                                                      size_t *out_written,
+                                                      size_t *out_required);
 
 /**
  * Smooth a finished RTS history with the fixed-interval RTS smoother.
@@ -31979,6 +45866,25 @@ enum SidereonStatus sidereon_solid_earth_tide(const double *station_ecef_m,
                                               double *out_m);
 
 /**
+ * Evaluate the core solid-Earth tide using caller-provided Sun and Moon ECEF
+ * positions. `constants` is the integer value of `SidereonStationTideConstants`.
+ *
+ * # Safety
+ * `station_ecef_m`, `sun_ecef_m` and `moon_ecef_m` must each point to three
+ * readable doubles and `out_displacement_ecef_m` to three writable doubles.
+ * A NULL pointer is refused with SIDEREON_STATUS_NULL_POINTER.
+ */
+enum SidereonStatus sidereon_solid_earth_tide_with_constants(const double *station_ecef_m,
+                                                             int32_t year,
+                                                             int32_t month,
+                                                             int32_t day,
+                                                             double fractional_hour,
+                                                             const double *sun_ecef_m,
+                                                             const double *moon_ecef_m,
+                                                             uint32_t constants,
+                                                             double *out_displacement_ecef_m);
+
+/**
  * Fill *out_options with the engine default receiver-solution validation gates.
  *
  * Safety: out_options must point to writable storage.
@@ -32015,6 +45921,17 @@ enum SidereonStatus sidereon_solve_broadcast_with_doppler_velocity(const struct 
                                                                    const struct SidereonSppDopplerObservation *doppler_observations,
                                                                    size_t doppler_count,
                                                                    struct SidereonSppDopplerSolution **out_solution);
+
+enum SidereonStatus sidereon_solve_broadcast_with_models(const struct SidereonBroadcastEphemeris *broadcast,
+                                                         const struct SidereonSppInputsV2 *inputs,
+                                                         const struct SidereonSppModelOptions *models,
+                                                         struct SidereonSppSolution **out_solution);
+
+enum SidereonStatus sidereon_solve_broadcast_with_models_at_exact_epoch(const struct SidereonBroadcastEphemeris *broadcast,
+                                                                        const struct SidereonSppInputsV2 *inputs,
+                                                                        const struct SidereonSppModelOptions *models,
+                                                                        const struct SidereonExactEpoch *receive_epoch,
+                                                                        struct SidereonSppSolution **out_solution);
 
 /**
  * Solve a data-driven least-squares problem, transferring a solution handle to
@@ -32138,6 +46055,11 @@ enum SidereonStatus sidereon_solve_rtk_arc(const struct SidereonRtkArcEpoch *epo
                                            const struct SidereonRtkArcConfig *config,
                                            struct SidereonRtkArcSolution **out_solution);
 
+enum SidereonStatus sidereon_solve_rtk_arc_v2(const struct SidereonRtkArcEpochV2 *epochs,
+                                              size_t epoch_count,
+                                              const struct SidereonRtkArcConfig *config,
+                                              struct SidereonRtkArcSolution **out_solution);
+
 /**
  * Solve a static integer-fixed RTK baseline with residual validation. On
  * success writes a newly owned solution handle to *out_solution. Release it
@@ -32173,11 +46095,16 @@ enum SidereonStatus sidereon_solve_spp(const struct SidereonSp3 *sp3,
                                        const struct SidereonSppInputs *inputs,
                                        struct SidereonSppSolution **out_solution);
 
+enum SidereonStatus sidereon_solve_spp_at_exact_epoch(const struct SidereonSp3 *sp3,
+                                                      const struct SidereonSppInputs *inputs,
+                                                      const struct SidereonExactEpoch *receive_epoch,
+                                                      struct SidereonSppSolution **out_solution);
+
 /**
  * Solve a batch of independent SPP epochs in parallel over a shared ephemeris.
  * Element i is byte-for-byte identical to the serial element i. On success
  * writes a newly owned batch handle to *out_batch. Delegates to
- * sidereon_core::spp::solve_spp_batch_parallel.
+ * sidereon_core::positioning::solve_spp_batch_parallel.
  *
  * Safety: sp3 is a live handle; inputs points to input_count SidereonSppInputsV2
  * (or NULL when 0); policy points to a SidereonSppSolvePolicy; out_batch points
@@ -32193,7 +46120,7 @@ enum SidereonStatus sidereon_solve_spp_batch_parallel(const struct SidereonSp3 *
 /**
  * Solve a batch of independent SPP epochs serially over a shared ephemeris. On
  * success writes a newly owned batch handle to *out_batch. Delegates to
- * sidereon_core::spp::solve_spp_batch_serial.
+ * sidereon_core::positioning::solve_spp_batch_serial.
  *
  * Safety: sp3 is a live handle; inputs points to input_count SidereonSppInputsV2
  * (or NULL when 0); policy points to a SidereonSppSolvePolicy; out_batch points
@@ -32205,6 +46132,11 @@ enum SidereonStatus sidereon_solve_spp_batch_serial(const struct SidereonSp3 *sp
                                                     bool with_geodetic,
                                                     const struct SidereonSppSolvePolicy *policy,
                                                     struct SidereonSppBatch **out_batch);
+
+enum SidereonStatus sidereon_solve_spp_batch_v2_serial(const struct SidereonSp3 *sp3,
+                                                       const struct SidereonSppBatchInputV2 *epochs,
+                                                       size_t epoch_count,
+                                                       struct SidereonSppBatch **out_batch);
 
 /**
  * Solve every usable RINEX OBS epoch serially against a broadcast NAV source.
@@ -32224,6 +46156,14 @@ enum SidereonStatus sidereon_solve_spp_from_rinex_obs(const struct SidereonBroad
                                                       const struct SidereonSppSolvePolicy *policy,
                                                       struct SidereonRinexSppSolutions **out_solutions);
 
+enum SidereonStatus sidereon_solve_spp_from_rinex_obs_with_models(const struct SidereonBroadcastEphemeris *broadcast,
+                                                                  const struct SidereonRinexObs *obs,
+                                                                  const struct SidereonRinexSppOptions *options,
+                                                                  const struct SidereonSppModelOptions *models,
+                                                                  bool with_geodetic,
+                                                                  const struct SidereonSppSolvePolicy *policy,
+                                                                  struct SidereonRinexSppSolutions **out_solutions);
+
 /**
  * Run single-point positioning with extended V2 controls. On success writes a
  * newly owned solution handle to *out_solution. Release it with
@@ -32238,6 +46178,22 @@ enum SidereonStatus sidereon_solve_spp_from_rinex_obs(const struct SidereonBroad
 enum SidereonStatus sidereon_solve_spp_v2(const struct SidereonSp3 *sp3,
                                           const struct SidereonSppInputsV2 *inputs,
                                           struct SidereonSppSolution **out_solution);
+
+enum SidereonStatus sidereon_solve_spp_v2_at_exact_epoch(const struct SidereonSp3 *sp3,
+                                                         const struct SidereonSppInputsV2 *inputs,
+                                                         const struct SidereonExactEpoch *receive_epoch,
+                                                         struct SidereonSppSolution **out_solution);
+
+enum SidereonStatus sidereon_solve_spp_v2_with_models(const struct SidereonSp3 *sp3,
+                                                      const struct SidereonSppInputsV2 *inputs,
+                                                      const struct SidereonSppModelOptions *models,
+                                                      struct SidereonSppSolution **out_solution);
+
+enum SidereonStatus sidereon_solve_spp_v2_with_models_at_exact_epoch(const struct SidereonSp3 *sp3,
+                                                                     const struct SidereonSppInputsV2 *inputs,
+                                                                     const struct SidereonSppModelOptions *models,
+                                                                     const struct SidereonExactEpoch *receive_epoch,
+                                                                     struct SidereonSppSolution **out_solution);
 
 /**
  * Solve SPP position from an SP3 source and attach a Doppler velocity solution
@@ -32267,6 +46223,13 @@ enum SidereonStatus sidereon_solve_static_position_broadcast(const struct Sidere
                                                              enum SidereonStaticPositionErrorKind *out_error,
                                                              struct SidereonStaticPositionSolution **out_solution);
 
+enum SidereonStatus sidereon_solve_static_position_broadcast_v2(const struct SidereonBroadcastEphemeris *broadcast,
+                                                                const struct SidereonStaticPositionEpoch *epochs,
+                                                                size_t epoch_count,
+                                                                const struct SidereonStaticPositionOptionsV2 *options,
+                                                                enum SidereonStaticPositionErrorKind *out_error,
+                                                                struct SidereonStaticPositionSolution **out_solution);
+
 /**
  * Solve a static multi-epoch pseudorange position from a loaded SP3 source.
  *
@@ -32280,6 +46243,13 @@ enum SidereonStatus sidereon_solve_static_position_sp3(const struct SidereonSp3 
                                                        const struct SidereonStaticPositionOptions *options,
                                                        enum SidereonStaticPositionErrorKind *out_error,
                                                        struct SidereonStaticPositionSolution **out_solution);
+
+enum SidereonStatus sidereon_solve_static_position_sp3_v2(const struct SidereonSp3 *sp3,
+                                                          const struct SidereonStaticPositionEpoch *epochs,
+                                                          size_t epoch_count,
+                                                          const struct SidereonStaticPositionOptionsV2 *options,
+                                                          enum SidereonStaticPositionErrorKind *out_error,
+                                                          struct SidereonStaticPositionSolution **out_solution);
 
 /**
  * Solve a multi-epoch static reference-station coordinate from parsed RINEX
@@ -32324,6 +46294,11 @@ enum SidereonStatus sidereon_solve_static_rtk_arc(const struct SidereonRtkArcEpo
                                                   size_t epoch_count,
                                                   const struct SidereonRtkStaticArcConfig *config,
                                                   struct SidereonRtkStaticArcSolution **out_solution);
+
+enum SidereonStatus sidereon_solve_static_rtk_arc_v2(const struct SidereonRtkArcEpochV2 *epochs,
+                                                     size_t epoch_count,
+                                                     const struct SidereonRtkStaticArcConfig *config,
+                                                     struct SidereonRtkStaticArcSolution **out_solution);
 
 /**
  * Solve receiver ECEF velocity and clock drift from one epoch of range-rate or
@@ -32445,7 +46420,7 @@ enum SidereonStatus sidereon_source_locate_options_init(struct SidereonSourceLoc
  * Copy the source solution covariance when available.
  *
  * Safety: solution must be a live handle; out_covariance and out_available
- * must point to writable values.
+ * must point to writable values. The two output ranges must not overlap.
  */
 enum SidereonStatus sidereon_source_solution_covariance(const struct SidereonSourceSolution *solution,
                                                         struct SidereonSourceCovariance *out_covariance,
@@ -32503,13 +46478,31 @@ enum SidereonStatus sidereon_source_solution_summary(const struct SidereonSource
  * (use sidereon_sourced_solution_staleness for that case).
  *
  * Safety: sol must be a live handle; every out pointer must point to writable
- * storage of the documented type.
+ * storage of the documented type, and the output ranges must be disjoint.
  */
 enum SidereonStatus sidereon_sourced_solution_broadcast_reason(const struct SidereonSourcedSolution *sol,
                                                                enum SidereonBroadcastReasonKind *out_kind,
                                                                enum SidereonSelectionStatus *out_precise_unavailable_reason,
                                                                struct SidereonStalenessMetadata *out_attempted_staleness,
                                                                bool *out_has_attempted_staleness);
+
+/**
+ * Copy the complete typed broadcast-fallback reason as JSON bytes. The payload
+ * owns every field of the selection or precise SPP refusal; the legacy typed
+ * accessor remains available for its stable compact fields.
+ *
+ * A size query uses `out = NULL`, `len = 0`; the returned byte sequence is not
+ * NUL-terminated. `out_written` and `out_required` follow the other byte-copy
+ * accessors in this binding.
+ *
+ * Safety: `sol` must be a live handle; `out` must point to `len` writable
+ * bytes or be NULL when `len` is zero; both count pointers must be writable.
+ */
+enum SidereonStatus sidereon_sourced_solution_broadcast_reason_detail(const struct SidereonSourcedSolution *sol,
+                                                                      uint8_t *out,
+                                                                      size_t len,
+                                                                      size_t *out_written,
+                                                                      size_t *out_required);
 
 /**
  * Release a sourced-solution handle from sidereon_solve_with_fallback. Passing
@@ -32558,7 +46551,8 @@ enum SidereonStatus sidereon_sourced_solution_source_kind(const struct SidereonS
  * sidereon_sourced_solution_broadcast_reason.
  *
  * Safety: sol must be a live handle; out_metadata and out_present must point to
- * writable storage of the documented type.
+ * writable storage of the documented type, and the output ranges must be
+ * disjoint.
  */
 enum SidereonStatus sidereon_sourced_solution_staleness(const struct SidereonSourcedSolution *sol,
                                                         struct SidereonStalenessMetadata *out_metadata,
@@ -32643,14 +46637,67 @@ enum SidereonStatus sidereon_sp3_clock_reference_offsets(const struct SidereonSp
                                                          size_t *out_required);
 
 /**
+ * Initialize SP3 merge options with engine defaults.
+ *
+ * Safety: out_options must point to a SidereonSp3MergeOptions.
+ * Fill *out_options with sidereon-core's ContinuityOptions::for_orbit_class:
+ * the class speed bound, a 1 m hold-out residual tolerance and the default
+ * gap threshold. orbit_class is a SidereonSp3OrbitClass value.
+ *
+ * Safety: out_options must point to a SidereonSp3ContinuityOptions.
+ */
+enum SidereonStatus sidereon_sp3_continuity_options_for_orbit_class(uint32_t orbit_class,
+                                                                    struct SidereonSp3ContinuityOptions *out_options);
+
+/**
+ * Check the product's continuity under `options` (a
+ * SidereonSp3ContinuityOptions; see
+ * sidereon_sp3_continuity_options_for_orbit_class) and copy the whole report
+ * as JSON: `attested`, `defects` (each as the verdict JSON describes it, ordered
+ * by satellite then epoch), `pairs_checked`, `residuals_checked` and
+ * `residuals_skipped`. Reports rather than refuses.
+ *
+ * Uses the standard variable-length byte-output contract; JSON bytes are not
+ * null-terminated.
+ *
+ * Safety: `sp3` must be a live handle; `options` must point to a
+ * SidereonSp3ContinuityOptions; `out` must reference `out_len` writable bytes,
+ * or be NULL when `out_len` is zero; both count pointers must reference
+ * writable size_t values.
+ */
+enum SidereonStatus sidereon_sp3_continuity_report_json(const struct SidereonSp3 *sp3,
+                                                        const struct SidereonSp3ContinuityOptions *options,
+                                                        uint8_t *out,
+                                                        size_t out_len,
+                                                        size_t *out_written,
+                                                        size_t *out_required);
+
+/**
  * Decide whether product-wide continuity findings can influence an inclusive
  * evaluation window through this product's derived interpolation stencil.
  *
  * The JSON object contains `decision` (`"accept"` or `"refuse"`), `accepted`,
- * the influencing defect and splice arrays, and the complete defect and splice
- * arrays. Standalone checks always have empty splice arrays. `orbit_class` and
- * `residual_tolerance_m` use the same selectors as
+ * the influencing defect and splice arrays (`influencing_defects`,
+ * `influencing_splices`), and the complete defect and splice arrays
+ * (`all_defects`, `all_splices`). Standalone checks always have empty splice
+ * arrays. `orbit_class` and `residual_tolerance_m` use the same selectors as
  * `sidereon_sp3_check_continuity`.
+ *
+ * A defect object has `kind` (`"duplicate_epoch"`, `"single_sample_series"`,
+ * `"unusable_sample"`, `"speed_bound"` or `"hold_out_residual"`), `satellite`, the summary
+ * `from_j2000_s`, `to_j2000_s`, `magnitude` and `bound` (null where the kind
+ * has none), and every field of its kind under the engine's name:
+ * `epoch_j2000_s` and `occurrences`; `sample_index`, `epoch_j2000_s` and
+ * `reason` for unusable samples; `interval_s`, `displacement_m`,
+ * `implied_speed_m_s` and `bound_m_s`; or `epoch_j2000_s`,
+ * `preceding_j2000_s`, `residual_m`, `tolerance_m` and `node_epochs_j2000_s`.
+ * A splice object has `defect`, `from_sources`, `to_sources`, `sources`,
+ * `crosses_contributors` and `cells`: each cell has `epoch_j2000_s`, `role`
+ * (`"held_out"`, `"interpolation_node"`, `"pair_end"` or `"repeated_epoch"`)
+ * and `selection`, null or an object whose `kind` is `"single_source"`
+ * (with `source`), `"precedence"` (with `source` and `members`) or
+ * `"combined"` (with `rule`, `"mean"`, `"median"` or `"precedence"`, and
+ * `members`).
  *
  * Uses the standard variable-length byte-output contract; JSON bytes are not
  * null-terminated.
@@ -32676,10 +46723,26 @@ enum SidereonStatus sidereon_sp3_continuity_verdict_json(const struct SidereonSp
  * the core default of 1.5 is used.
  *
  * The JSON object contains `decision` (`"accept"` or `"refuse"`), `accepted`,
- * the influencing defect and splice arrays, and the complete defect and splice
- * arrays. Standalone checks always have empty splice arrays. `orbit_class` and
- * `residual_tolerance_m` use the same selectors as
+ * the influencing defect and splice arrays (`influencing_defects`,
+ * `influencing_splices`), and the complete defect and splice arrays
+ * (`all_defects`, `all_splices`). Standalone checks always have empty splice
+ * arrays. `orbit_class` and `residual_tolerance_m` use the same selectors as
  * `sidereon_sp3_check_continuity`.
+ *
+ * A defect object has `kind` (`"duplicate_epoch"`, `"single_sample_series"`,
+ * `"speed_bound"` or `"hold_out_residual"`), `satellite`, the summary
+ * `from_j2000_s`, `to_j2000_s`, `magnitude` and `bound` (null where the kind
+ * has none), and every field of its kind under the engine's name:
+ * `epoch_j2000_s` and `occurrences`; `interval_s`, `displacement_m`,
+ * `implied_speed_m_s` and `bound_m_s`; or `epoch_j2000_s`,
+ * `preceding_j2000_s`, `residual_m`, `tolerance_m` and `node_epochs_j2000_s`.
+ * A splice object has `defect`, `from_sources`, `to_sources`, `sources`,
+ * `crosses_contributors` and `cells`: each cell has `epoch_j2000_s`, `role`
+ * (`"held_out"`, `"interpolation_node"`, `"pair_end"` or `"repeated_epoch"`)
+ * and `selection`, null or an object whose `kind` is `"single_source"`
+ * (with `source`), `"precedence"` (with `source` and `members`) or
+ * `"combined"` (with `rule`, `"mean"`, `"median"` or `"precedence"`, and
+ * `members`).
  *
  * Uses the standard variable-length byte-output contract; JSON bytes are not
  * null-terminated.
@@ -32698,6 +46761,117 @@ enum SidereonStatus sidereon_sp3_continuity_verdict_json_with_gap_threshold_fact
                                                                                    size_t out_len,
                                                                                    size_t *out_written,
                                                                                    size_t *out_required);
+
+/**
+ * As sidereon_sp3_continuity_verdict_json_with_gap_threshold_factor, with the
+ * checks stated by a SidereonSp3ContinuityOptions record, which can also set
+ * an explicit speed bound.
+ *
+ * Safety: `sp3` must be a live handle; `options` must point to a
+ * SidereonSp3ContinuityOptions; `out` must reference `out_len` writable bytes,
+ * or be NULL when `out_len` is zero; both count pointers must reference
+ * writable size_t values.
+ */
+enum SidereonStatus sidereon_sp3_continuity_verdict_json_with_options(const struct SidereonSp3 *sp3,
+                                                                      const struct SidereonSp3ContinuityOptions *options,
+                                                                      double from_j2000_s,
+                                                                      double through_j2000_s,
+                                                                      uint8_t *out,
+                                                                      size_t out_len,
+                                                                      size_t *out_written,
+                                                                      size_t *out_required);
+
+/**
+ * Release a coverage handle. Passing NULL is a no-op.
+ *
+ * Safety: coverage must be NULL or a live handle from
+ * sidereon_sp3_satellite_coverage that has not already been freed.
+ */
+void sidereon_sp3_coverage_free(struct SidereonSp3Coverage *coverage);
+
+/**
+ * Copy the gaps of one satellite's channel (channel is a SidereonSp3Channel
+ * value), in time order. Uses the variable-length output contract.
+ *
+ * Safety: coverage must be a live handle; out must point to len writable
+ * SidereonSp3CoverageGap values or be NULL when len is 0; out_written and
+ * out_required must point to size_t values.
+ */
+enum SidereonStatus sidereon_sp3_coverage_gaps(const struct SidereonSp3Coverage *coverage,
+                                               size_t satellite_index,
+                                               uint32_t channel,
+                                               struct SidereonSp3CoverageGap *out,
+                                               size_t len,
+                                               size_t *out_written,
+                                               size_t *out_required);
+
+/**
+ * Write the epoch grid the product's epochs lie on.
+ *
+ * Safety: coverage must be a live handle; out_grid must point to a
+ * SidereonSp3EpochGrid.
+ */
+enum SidereonStatus sidereon_sp3_coverage_grid(const struct SidereonSp3Coverage *coverage,
+                                               struct SidereonSp3EpochGrid *out_grid);
+
+/**
+ * Copy the indices of the product epochs that are out of time order. Uses
+ * the variable-length output contract.
+ *
+ * Safety: coverage must be a live handle; out must point to len writable
+ * size_t values or be NULL when len is 0; out_written and out_required must
+ * point to size_t values.
+ */
+enum SidereonStatus sidereon_sp3_coverage_grid_out_of_order(const struct SidereonSp3Coverage *coverage,
+                                                            size_t *out,
+                                                            size_t len,
+                                                            size_t *out_written,
+                                                            size_t *out_required);
+
+/**
+ * Copy the indices of the product epochs that no SP3 record states exactly.
+ * Uses the variable-length output contract.
+ *
+ * Safety: coverage must be a live handle; out must point to len writable
+ * size_t values or be NULL when len is 0; out_written and out_required must
+ * point to size_t values.
+ */
+enum SidereonStatus sidereon_sp3_coverage_grid_unplaced(const struct SidereonSp3Coverage *coverage,
+                                                        size_t *out,
+                                                        size_t len,
+                                                        size_t *out_written,
+                                                        size_t *out_required);
+
+/**
+ * Copy the coverage of every satellite, declared satellites first as the
+ * header lists them, then any the records carry. Uses the variable-length
+ * output contract; a satellite's spans and gaps are read by its index here.
+ *
+ * Safety: coverage must be a live handle; out must point to len writable
+ * SidereonSp3SatelliteCoverage values or be NULL when len is 0; out_written
+ * and out_required must point to size_t values.
+ */
+enum SidereonStatus sidereon_sp3_coverage_satellites(const struct SidereonSp3Coverage *coverage,
+                                                     struct SidereonSp3SatelliteCoverage *out,
+                                                     size_t len,
+                                                     size_t *out_written,
+                                                     size_t *out_required);
+
+/**
+ * Copy the spans of one satellite's channel (channel is a SidereonSp3Channel
+ * value), in time order. Uses the variable-length output contract.
+ *
+ * Safety: coverage must be a live handle; out must point to len writable
+ * SidereonSp3CoverageSpan values or be NULL when len is 0; out_written and
+ * out_required must point to size_t values.
+ */
+enum SidereonStatus sidereon_sp3_coverage_spans(const struct SidereonSp3Coverage *coverage,
+                                                size_t satellite_index,
+                                                uint32_t channel,
+                                                struct SidereonSp3CoverageSpan *out,
+                                                size_t len,
+                                                size_t *out_written,
+                                                size_t *out_required);
 
 /**
  * Write the epoch count declared on SP3 header line 1.
@@ -32722,7 +46896,7 @@ enum SidereonStatus sidereon_sp3_declared_epoch_count(const struct SidereonSp3 *
  * when the field is absent.
  *
  * Safety: `sp3` must be a live handle and both output pointers must reference
- * writable storage.
+ * disjoint writable storage.
  */
 enum SidereonStatus sidereon_sp3_declared_start_j2000_seconds(const struct SidereonSp3 *sp3,
                                                               uint8_t *out_present,
@@ -32958,6 +47132,25 @@ enum SidereonStatus sidereon_sp3_interpolate(const struct SidereonSp3 *sp3,
                                              size_t *out_written);
 
 /**
+ * Copy the structured summary of the latest SP3 validation failure, or a
+ * `None` record after success or before any matching failure. Reading it does
+ * not clear the per-thread error.
+ */
+enum SidereonStatus sidereon_sp3_last_error_info(struct SidereonSp3ErrorInfo *out);
+
+/**
+ * Copy the latest structured SP3 validation failure as UTF-8 JSON. Integer
+ * tick counts and offending floating-point values are decimal strings, so no
+ * precision is lost and non-finite values remain valid JSON. Use a null
+ * output and zero length to query the required byte count. Reading the
+ * payload does not clear it.
+ */
+enum SidereonStatus sidereon_sp3_last_error_payload(uint8_t *out,
+                                                    size_t len,
+                                                    size_t *out_written,
+                                                    size_t *out_required);
+
+/**
  * Parse an SP3-c or SP3-d byte buffer into a precise-ephemeris product. On
  * success writes a newly owned handle to *out_sp3. Release it with
  * sidereon_sp3_free.
@@ -33104,18 +47297,28 @@ enum SidereonStatus sidereon_sp3_merge_input_identity_stable_id(const struct Sid
                                                                 size_t *out_written,
                                                                 size_t *out_required);
 
-/**
- * Initialize SP3 merge options with engine defaults.
- *
- * Safety: out_options must point to a SidereonSp3MergeOptions.
- */
 enum SidereonStatus sidereon_sp3_merge_options_init(struct SidereonSp3MergeOptions *out_options);
+
+/**
+ * Copy the agreement statistics of every accepted cell, in output (epoch,
+ * then satellite) order: one entry per cell written to the merged product.
+ * Uses the variable-length output contract.
+ *
+ * Safety: report must be a live merge report handle; out must point to len
+ * writable SidereonSp3AgreementMetric values or be NULL when len is 0;
+ * out_written and out_required must point to size_t values.
+ */
+enum SidereonStatus sidereon_sp3_merge_report_agreement_metrics(const struct SidereonSp3MergeReport *report,
+                                                                struct SidereonSp3AgreementMetric *out,
+                                                                size_t len,
+                                                                size_t *out_written,
+                                                                size_t *out_required);
 
 /**
  * Write the whole-product agreement rollup (pooled position/clock dispersion of
  * the consensus members about the combined values) to *out_summary. Each scalar
- * carries a present flag; an absent value (no accepted multi-source cell on that
- * channel) sets the flag false and the scalar to 0.
+ * carries a present flag; an absent value sets the flag false and the scalar to
+ * NaN. See SidereonSp3AgreementSummary for when each one is absent.
  *
  * Safety: report must be a live merge report handle; out_summary must point to a
  * SidereonSp3AgreementSummary.
@@ -33124,30 +47327,105 @@ enum SidereonStatus sidereon_sp3_merge_report_agreement_summary(const struct Sid
                                                                 struct SidereonSp3AgreementSummary *out_summary);
 
 /**
- * Decide whether an optional merge continuity post-condition can influence an
- * inclusive evaluation window through the merged product's derived stencil.
+ * Copy every source clock the merge did not write, with the reason, in
+ * (epoch, satellite, source) order. Uses the variable-length output contract.
  *
- * The result is the same JSON object returned by
- * `sidereon_sp3_continuity_verdict_json`, or JSON `null` when continuity
- * verification was not requested for the merge. The `merged` handle supplies
- * the epoch interval and grid origin; no caller-provided stencil value is
- * accepted.
+ * Safety: report must be a live merge report handle; out must point to len
+ * writable SidereonSp3ClockOmission values or be NULL when len is 0;
+ * out_written and out_required must point to size_t values.
+ */
+enum SidereonStatus sidereon_sp3_merge_report_clock_omissions(const struct SidereonSp3MergeReport *report,
+                                                              struct SidereonSp3ClockOmission *out,
+                                                              size_t len,
+                                                              size_t *out_written,
+                                                              size_t *out_required);
+
+/**
+ * Copy the merge's continuity post-condition as JSON: `null` when the merge
+ * did not verify continuity, otherwise an object with `attested`, `defects`
+ * (every defect over the merged product, as the verdict JSON describes each),
+ * `pairs_checked`, `residuals_checked`, `residuals_skipped` and `violations`:
+ * every violation attributed to the contributors it rests on, splices and
+ * single-contributor discontinuities alike, each as a splice object of the
+ * verdict JSON (`defect`, `from_sources`, `to_sources`, `sources`,
+ * `crosses_contributors`, `cells`).
  *
  * Uses the standard variable-length byte-output contract; JSON bytes are not
  * null-terminated.
  *
- * Safety: `report` and `merged` must be live handles; `out` must reference
+ * Safety: `report` must be a live handle; `out` must reference `out_len`
+ * writable bytes, or be NULL when `out_len` is zero; both count pointers must
+ * reference writable size_t values.
+ */
+enum SidereonStatus sidereon_sp3_merge_report_continuity_json(const struct SidereonSp3MergeReport *report,
+                                                              uint8_t *out,
+                                                              size_t out_len,
+                                                              size_t *out_written,
+                                                              size_t *out_required);
+
+/**
+ * As sidereon_sp3_selected_nodes, over the merged product's nodes the merge
+ * report holds for its continuity verdicts. *out_verified is false, and
+ * nothing is copied, when the merge did not verify continuity
+ * (SidereonSp3MergeOptions.verify_continuity_enabled).
+ *
+ * Safety: report must be a live merge report handle; sat_id must be a
+ * null-terminated token; out_verified must point to a bool; out must point to
+ * len writable doubles or be NULL when len is 0; out_written and out_required
+ * must point to size_t values.
+ */
+enum SidereonStatus sidereon_sp3_merge_report_continuity_selected_nodes(const struct SidereonSp3MergeReport *report,
+                                                                        const char *sat_id,
+                                                                        double from_j2000_s,
+                                                                        double through_j2000_s,
+                                                                        bool *out_verified,
+                                                                        double *out,
+                                                                        size_t len,
+                                                                        size_t *out_written,
+                                                                        size_t *out_required);
+
+/**
+ * Decide whether an optional merge continuity post-condition influences an
+ * inclusive evaluation window.
+ *
+ * The result is the same JSON object returned by
+ * `sidereon_sp3_continuity_verdict_json`, or JSON `null` when continuity
+ * verification was not requested for the merge. The report carries the
+ * merged product's interpolation nodes: a violation influences the window when
+ * the nodes the window's interpolations select include its held-out, repeated
+ * or pair-end record, or straddle a handover between two of its records
+ * written from different sources. A single-sample series influences every
+ * window. As in sidereon-core, the verdict takes the window alone: no merged
+ * product and no caller-provided stencil value.
+ *
+ * Uses the standard variable-length byte-output contract; JSON bytes are not
+ * null-terminated.
+ *
+ * Safety: `report` must be a live handle; `out` must reference
  * `out_len` writable bytes, or be NULL when `out_len` is zero; both count
  * pointers must reference writable size_t values.
  */
 enum SidereonStatus sidereon_sp3_merge_report_continuity_verdict_json(const struct SidereonSp3MergeReport *report,
-                                                                      const struct SidereonSp3 *merged,
                                                                       double from_j2000_s,
                                                                       double through_j2000_s,
                                                                       uint8_t *out,
                                                                       size_t out_len,
                                                                       size_t *out_written,
                                                                       size_t *out_required);
+
+/**
+ * Copy the input epochs that took no part in the merge, with the reason, in
+ * (source, epoch) order. Uses the variable-length output contract.
+ *
+ * Safety: report must be a live merge report handle; out must point to len
+ * writable SidereonSp3DroppedInputEpoch values or be NULL when len is 0;
+ * out_written and out_required must point to size_t values.
+ */
+enum SidereonStatus sidereon_sp3_merge_report_dropped_input_epochs(const struct SidereonSp3MergeReport *report,
+                                                                   struct SidereonSp3DroppedInputEpoch *out,
+                                                                   size_t len,
+                                                                   size_t *out_written,
+                                                                   size_t *out_required);
 
 /**
  * Copy one per-epoch agreement entry (by zero-based output-epoch index) into
@@ -33164,9 +47442,7 @@ enum SidereonStatus sidereon_sp3_merge_report_epoch_agreement(const struct Sider
 /**
  * Write the number of per-epoch agreement entries to *out_count. This is the
  * length of the list copied element-wise by
- * sidereon_sp3_merge_report_epoch_agreement (one entry per output epoch, with
- * epochs sharing an integer second pooled, per the SidereonSp3EpochAgreement
- * note).
+ * sidereon_sp3_merge_report_epoch_agreement (one entry per output epoch).
  *
  * Safety: report must be a live merge report handle; out_count must point to a
  * size_t.
@@ -33297,6 +47573,99 @@ enum SidereonStatus sidereon_sp3_merge_report_frame_reconciliation_target_label(
 void sidereon_sp3_merge_report_free(struct SidereonSp3MergeReport *report);
 
 /**
+ * Copy the union-grid epochs at which the merge accepted no cell, in time
+ * order. The merged product does not carry them; every position a source
+ * carried there is an arc-withheld or quarantined flag, and every clock a
+ * clock omission. Uses the variable-length output contract documented at the
+ * top of the header.
+ *
+ * Safety: report must be a live merge report handle; out must point to len
+ * writable SidereonSp3MergeEpoch values or be NULL when len is 0; out_written
+ * and out_required must point to size_t values.
+ */
+enum SidereonStatus sidereon_sp3_merge_report_omitted_epochs(const struct SidereonSp3MergeReport *report,
+                                                             struct SidereonSp3MergeEpoch *out,
+                                                             size_t len,
+                                                             size_t *out_written,
+                                                             size_t *out_required);
+
+/**
+ * Write whether the merge recorded per-epoch provenance, its mode and the
+ * length of each list. Provenance is recorded only when
+ * SidereonSp3MergeOptions.provenance_mode asked for it; recorded false means
+ * it was not requested.
+ *
+ * Safety: report must be a live merge report handle; out_info must point to a
+ * SidereonSp3MergeProvenanceInfo.
+ */
+enum SidereonStatus sidereon_sp3_merge_report_provenance(const struct SidereonSp3MergeReport *report,
+                                                         struct SidereonSp3MergeProvenanceInfo *out_info);
+
+/**
+ * Copy the consensus members of one provenance cell's channel (channel is a
+ * SidereonSp3Channel value), ascending. A channel the cell does not carry
+ * copies nothing; a cell index past the provenance cells is refused with
+ * SIDEREON_STATUS_INVALID_ARGUMENT. Uses the variable-length output contract.
+ *
+ * Safety: report must be a live merge report handle; out must point to len
+ * writable size_t values or be NULL when len is 0; out_written and
+ * out_required must point to size_t values.
+ */
+enum SidereonStatus sidereon_sp3_merge_report_provenance_cell_members(const struct SidereonSp3MergeReport *report,
+                                                                      size_t index,
+                                                                      uint32_t channel,
+                                                                      size_t *out,
+                                                                      size_t len,
+                                                                      size_t *out_written,
+                                                                      size_t *out_required);
+
+/**
+ * Copy the per-cell provenance entries, one per accepted cell in output
+ * order (Full mode only; Summary and unrecorded provenance copy nothing).
+ * Uses the variable-length output contract.
+ *
+ * Safety: report must be a live merge report handle; out must point to len
+ * writable SidereonSp3CellProvenance values or be NULL when len is 0;
+ * out_written and out_required must point to size_t values.
+ */
+enum SidereonStatus sidereon_sp3_merge_report_provenance_cells(const struct SidereonSp3MergeReport *report,
+                                                               struct SidereonSp3CellProvenance *out,
+                                                               size_t len,
+                                                               size_t *out_written,
+                                                               size_t *out_required);
+
+/**
+ * Copy what each input source contributed, indexed by source order.
+ * Unrecorded provenance copies nothing. Uses the variable-length output
+ * contract.
+ *
+ * Safety: report must be a live merge report handle; out must point to len
+ * writable SidereonSp3ContributorCoverage values or be NULL when len is 0;
+ * out_written and out_required must point to size_t values.
+ */
+enum SidereonStatus sidereon_sp3_merge_report_provenance_coverage(const struct SidereonSp3MergeReport *report,
+                                                                  struct SidereonSp3ContributorCoverage *out,
+                                                                  size_t len,
+                                                                  size_t *out_written,
+                                                                  size_t *out_required);
+
+/**
+ * Copy every change in which source supplied a satellite's position, in
+ * output order, including each satellite's opening entry (from no source).
+ * Unrecorded provenance copies nothing. Uses the variable-length output
+ * contract.
+ *
+ * Safety: report must be a live merge report handle; out must point to len
+ * writable SidereonSp3PrecedenceTransition values or be NULL when len is 0;
+ * out_written and out_required must point to size_t values.
+ */
+enum SidereonStatus sidereon_sp3_merge_report_provenance_transitions(const struct SidereonSp3MergeReport *report,
+                                                                     struct SidereonSp3PrecedenceTransition *out,
+                                                                     size_t len,
+                                                                     size_t *out_written,
+                                                                     size_t *out_required);
+
+/**
  * Evaluate an SP3 precise product at a J2000 second for one satellite via the
  * same ObservableEphemerisSource contract as the broadcast path. Delegates to
  * sidereon_core::observables::ObservableEphemerisSource::observable_state_at_j2000_s.
@@ -33388,6 +47757,18 @@ enum SidereonStatus sidereon_sp3_observables_batch(const struct SidereonSp3 *sp3
                                                    struct SidereonPredictedObservables *out,
                                                    bool *out_ok);
 
+enum SidereonStatus sidereon_sp3_precise_ephemeris_accuracy_samples(const struct SidereonSp3 *sp3,
+                                                                    struct SidereonPreciseEphemerisAccuracySample *out,
+                                                                    size_t len,
+                                                                    size_t *out_written,
+                                                                    size_t *out_required);
+
+enum SidereonStatus sidereon_sp3_precise_ephemeris_accuracy_samples_v2(const struct SidereonSp3 *sp3,
+                                                                       struct SidereonPreciseEphemerisAccuracySampleV2 *out,
+                                                                       size_t len,
+                                                                       size_t *out_written,
+                                                                       size_t *out_required);
+
 /**
  * Extract a loaded SP3 product as its canonical precise-ephemeris samples, in
  * SI units, one per real position record in ascending epoch order. Round-tripping
@@ -33404,6 +47785,12 @@ enum SidereonStatus sidereon_sp3_precise_ephemeris_samples(const struct Sidereon
                                                            size_t len,
                                                            size_t *out_written,
                                                            size_t *out_required);
+
+enum SidereonStatus sidereon_sp3_precise_ephemeris_samples_v2(const struct SidereonSp3 *sp3,
+                                                              struct SidereonPreciseEphemerisSampleV2 *out,
+                                                              size_t len,
+                                                              size_t *out_written,
+                                                              size_t *out_required);
 
 /**
  * Build memory-mappable precise-interpolant artifact bytes from a loaded SP3
@@ -33447,6 +47834,29 @@ enum SidereonStatus sidereon_sp3_predict_ranges(const struct SidereonSp3 *sp3,
 enum SidereonStatus sidereon_sp3_prediction_summary(const struct SidereonSp3 *sp3,
                                                     struct SidereonSp3PredictionSummary *out_summary);
 
+enum SidereonStatus sidereon_sp3_record_accuracy(const struct SidereonSp3 *sp3,
+                                                 const char *sat_id,
+                                                 size_t epoch_index,
+                                                 struct SidereonSp3RecordAccuracy *out_accuracy);
+
+enum SidereonStatus sidereon_sp3_record_accuracy_codes(const struct SidereonSp3 *sp3,
+                                                       const char *sat_id,
+                                                       size_t epoch_index,
+                                                       struct SidereonSp3RawRecordAccuracy *out_accuracy);
+
+/**
+ * Build the per-satellite coverage of an SP3 product: for each satellite the
+ * product declares or carries, the spans and gaps of its positions and of its
+ * clocks on the product's epoch grid, and the grid itself. On success writes a
+ * newly owned handle to *out_coverage; release it with
+ * sidereon_sp3_coverage_free.
+ *
+ * Safety: sp3 must be a live handle; out_coverage must point to storage for a
+ * SidereonSp3Coverage*.
+ */
+enum SidereonStatus sidereon_sp3_satellite_coverage(const struct SidereonSp3 *sp3,
+                                                    struct SidereonSp3Coverage **out_coverage);
+
 /**
  * Copy satellite tokens present in the product. Uses the variable-length
  * output contract documented at the top of the header.
@@ -33462,6 +47872,54 @@ enum SidereonStatus sidereon_sp3_satellites(const struct SidereonSp3 *sp3,
                                             size_t *out_required);
 
 /**
+ * Copy the epochs (seconds since J2000, ascending) of the position nodes that
+ * some query of `sat_id` in the inclusive window [from_j2000_s,
+ * through_j2000_s] selects, by the product's own interpolation rule
+ * (sidereon_core::ephemeris::InterpolationNodes::selected_nodes). A
+ * satellite the product does not carry, or a window no query serves, copies
+ * nothing. Uses the variable-length output contract.
+ *
+ * Safety: sp3 must be a live handle; sat_id must be a null-terminated token;
+ * out must point to len writable doubles or be NULL when len is 0;
+ * out_written and out_required must point to size_t values.
+ */
+enum SidereonStatus sidereon_sp3_selected_nodes(const struct SidereonSp3 *sp3,
+                                                const char *sat_id,
+                                                double from_j2000_s,
+                                                double through_j2000_s,
+                                                double *out,
+                                                size_t len,
+                                                size_t *out_written,
+                                                size_t *out_required);
+
+enum SidereonStatus sidereon_sp3_source_clock_relativity_at_epoch_query(const struct SidereonSp3 *sp3,
+                                                                        const char *sat_id,
+                                                                        const struct SidereonExactEpochQuery *epoch,
+                                                                        const double *position_ecef_m,
+                                                                        enum SidereonClockRelativityKind *out_kind,
+                                                                        double *out_term_s);
+
+enum SidereonStatus sidereon_sp3_source_ephemeris_variance_at_epoch_queries(const struct SidereonSp3 *sp3,
+                                                                            const char *sat_id,
+                                                                            const struct SidereonExactEpochQuery *state_epoch,
+                                                                            const struct SidereonExactEpochQuery *selection_epoch,
+                                                                            double *out_variance_m2);
+
+enum SidereonStatus sidereon_sp3_source_state_at_epoch_queries(const struct SidereonSp3 *sp3,
+                                                               const char *sat_id,
+                                                               const struct SidereonExactEpochQuery *state_epoch,
+                                                               const struct SidereonExactEpochQuery *selection_epoch,
+                                                               struct SidereonEphemerisSourceState *out);
+
+enum SidereonStatus sidereon_sp3_source_transmit_epoch_clock_at_epoch_queries(const struct SidereonSp3 *sp3,
+                                                                              const char *sat_id,
+                                                                              const struct SidereonExactEpochQuery *transmit_epoch,
+                                                                              const struct SidereonExactEpochQuery *selection_epoch,
+                                                                              bool *out_has_clock,
+                                                                              double *out_clock_s,
+                                                                              bool *out_degraded);
+
+/**
  * Copy the exact parsed state of satellite sat_id at epoch_index into
  * *out_state.
  *
@@ -33473,6 +47931,11 @@ enum SidereonStatus sidereon_sp3_state(const struct SidereonSp3 *sp3,
                                        const char *sat_id,
                                        size_t epoch_index,
                                        struct SidereonSp3State *out_state);
+
+enum SidereonStatus sidereon_sp3_state_at_epoch_query(const struct SidereonSp3 *sp3,
+                                                      const char *sat_id,
+                                                      const struct SidereonExactEpochQuery *query,
+                                                      struct SidereonSp3State *out_state);
 
 /**
  * Write the time reach of the SP3 position interpolator before and after a
@@ -33493,6 +47956,15 @@ enum SidereonStatus sidereon_sp3_stencil_extent(const struct SidereonSp3 *sp3,
  * Uses the variable-length output contract documented at the top of the
  * header.
  *
+ * The write is refused when the product holds something SP3 text cannot state
+ * exactly: a value its column would read back as a different number or as an
+ * absence sentinel, a field wider than its columns, an epoch no record
+ * restates, or a header that disagrees with the records. A refusal returns
+ * SIDEREON_STATUS_INVALID_ARGUMENT with the engine's text in the thread-local
+ * message, reports a required length of zero and writes nothing, so it never
+ * reads as a successful empty file. sidereon_sp3_to_sp3_text_result returns
+ * the same refusal typed, with owned text.
+ *
  * Safety: sp3 must be a live handle; out must point to at least len writable
  * bytes or be NULL when len is 0; out_written and out_required must point to
  * size_t values.
@@ -33502,6 +47974,26 @@ enum SidereonStatus sidereon_sp3_to_sp3_text(const struct SidereonSp3 *sp3,
                                              size_t len,
                                              size_t *out_written,
                                              size_t *out_required);
+
+/**
+ * Write the product as SP3 text and take an owned record of the attempt.
+ *
+ * Returns SIDEREON_STATUS_OK whenever the call itself is well formed and hands
+ * back a newly owned SidereonSp3WriteResult: the SP3 text when the product was
+ * written, or the typed refusal sidereon_sp3_to_sp3_text reports only as text.
+ * Read it with sidereon_sp3_write_result_get_outcome, _get_text,
+ * _get_message, _get_field and _get_text_value. A null argument leaves
+ * `*out_result` NULL, returns SIDEREON_STATUS_NULL_POINTER and allocates
+ * nothing.
+ *
+ * Safety: `sp3` must be a live SidereonSp3 handle, not freed for the duration
+ * of the call; `out_result` must point to writable, aligned storage for one
+ * `SidereonSp3WriteResult *`, which is set to NULL before any work and
+ * receives a newly owned handle only on SIDEREON_STATUS_OK; release it with
+ * sidereon_sp3_write_result_free.
+ */
+enum SidereonStatus sidereon_sp3_to_sp3_text_result(const struct SidereonSp3 *sp3,
+                                                    struct SidereonSp3WriteResult **out_result);
 
 /**
  * Validate an already parsed SP3 product against an exact request.
@@ -33517,11 +48009,113 @@ enum SidereonStatus sidereon_sp3_validate_exact(const struct SidereonSp3 *sp3,
                                                 enum SidereonExactSp3Coverage *out_coverage);
 
 /**
+ * Release an owned SP3 write result. Passing NULL is a no-op.
+ *
+ * Safety: `result` may be NULL; otherwise it must be a live
+ * SidereonSp3WriteResult handle this binding produced, passed here exactly
+ * once. The handle is invalid afterwards.
+ */
+void sidereon_sp3_write_result_free(struct SidereonSp3WriteResult *result);
+
+/**
+ * Copy the name of the header or record field a refused SP3 write names,
+ * exactly as the engine names it, such as "pos/vel base". The error's
+ * has_field says whether the refusal names one; when it does not, the
+ * required length is zero. Uses the variable-length output contract; the
+ * bytes are not null-terminated.
+ *
+ * Safety: as sidereon_sp3_write_result_get_text.
+ */
+enum SidereonStatus sidereon_sp3_write_result_get_field(const struct SidereonSp3WriteResult *result,
+                                                        uint8_t *out,
+                                                        size_t len,
+                                                        size_t *out_written,
+                                                        size_t *out_required);
+
+/**
+ * Copy the refusal text of an owned SP3 write result, prefixed with the route
+ * that produced it. A written result reports a required length of zero. Uses
+ * the variable-length output contract; the bytes are not null-terminated.
+ *
+ * Safety: as sidereon_sp3_write_result_get_text.
+ */
+enum SidereonStatus sidereon_sp3_write_result_get_message(const struct SidereonSp3WriteResult *result,
+                                                          uint8_t *out,
+                                                          size_t len,
+                                                          size_t *out_written,
+                                                          size_t *out_required);
+
+/**
+ * Copy the fixed-width outcome of an owned SP3 write result.
+ *
+ * `*out_outcome` is written before the result pointer is validated, so it
+ * never keeps whatever the caller left in it.
+ *
+ * Safety: `result` must be a live SidereonSp3WriteResult handle;
+ * `out_outcome` must point to one writable, aligned SidereonSp3WriteOutcome
+ * that no other argument aliases.
+ */
+enum SidereonStatus sidereon_sp3_write_result_get_outcome(const struct SidereonSp3WriteResult *result,
+                                                          struct SidereonSp3WriteOutcome *out_outcome);
+
+/**
+ * Copy the SP3 text of an owned write result. Uses the variable-length output
+ * contract; the bytes are not null-terminated.
+ *
+ * A refused result has no text: the call returns
+ * SIDEREON_STATUS_INVALID_ARGUMENT, reports a required length of zero, writes
+ * nothing, and sets the thread-local message to the result's own refusal text.
+ *
+ * Safety: `result` must be a live SidereonSp3WriteResult handle; `out` may be
+ * NULL only when `len` is 0; otherwise it must point to `len` writable bytes;
+ * `out_written` and `out_required` must each point to a writable size_t.
+ */
+enum SidereonStatus sidereon_sp3_write_result_get_text(const struct SidereonSp3WriteResult *result,
+                                                       uint8_t *out,
+                                                       size_t len,
+                                                       size_t *out_written,
+                                                       size_t *out_required);
+
+/**
+ * Copy the text a refused SP3 write names, as the product holds it: the
+ * header text or comment the columns could not carry. The error's
+ * has_text_value says whether the refusal carries one; the text itself may
+ * be empty, as for a blank descriptor. Uses the variable-length output
+ * contract; the bytes are copied verbatim and not null-terminated.
+ *
+ * Safety: as sidereon_sp3_write_result_get_text.
+ */
+enum SidereonStatus sidereon_sp3_write_result_get_text_value(const struct SidereonSp3WriteResult *result,
+                                                             uint8_t *out,
+                                                             size_t len,
+                                                             size_t *out_written,
+                                                             size_t *out_required);
+
+/**
  * Fill *out_weather with the core default quiet-Sun drag inputs.
  *
  * Safety: out_weather must point to a SidereonSpaceWeather.
  */
 enum SidereonStatus sidereon_space_weather_default(struct SidereonSpaceWeather *out_weather);
+
+/**
+ * Write the engine's default space-weather policy to *out_policy: every row
+ * class but the ones that state no observation, and no geomagnetic value the
+ * file does not state. This is the policy a NULL policy argument selects.
+ *
+ * Safety: out_policy points to a SidereonSpaceWeatherPolicy.
+ */
+enum SidereonStatus sidereon_space_weather_policy_default(struct SidereonSpaceWeatherPolicy *out_policy);
+
+/**
+ * Write the engine's lenient space-weather policy to *out_policy: every row
+ * class, with the quiet default Ap or the daily Ap substituted where the file
+ * leaves a geomagnetic value blank and each substitution reported on the
+ * returned sample.
+ *
+ * Safety: out_policy points to a SidereonSpaceWeatherPolicy.
+ */
+enum SidereonStatus sidereon_space_weather_policy_lenient(struct SidereonSpaceWeatherPolicy *out_policy);
 
 enum SidereonStatus sidereon_space_weather_table_ap_array_at(const struct SidereonSpaceWeatherTable *table,
                                                              double epoch_j2000_s,
@@ -33615,8 +48209,9 @@ enum SidereonStatus sidereon_spk_load(const uint8_t *data,
 /**
  * Query the state of NAIF `target` relative to NAIF `center` at
  * `et_seconds_tdb` (ET/TDB seconds past J2000), writing the resolved relative
- * state into *out_state. Resolves the segment chain connecting the two bodies
- * and evaluates SPK Types 2, 3, and 21. The numbers are exactly what the
+ * state into *out_state. Chooses segments as CSPICE `SPKSFS` and `SPKGEO` do
+ * (for each body the highest-priority segment covering the epoch, the later
+ * segment first) and evaluates SPK Types 2, 3, and 21. The numbers are exactly what the
  * engine's SPK reader produces.
  *
  * Safety: spk must be a live handle from sidereon_spk_load that has not been
@@ -33627,6 +48222,25 @@ enum SidereonStatus sidereon_spk_state(const struct SidereonSpk *spk,
                                        int32_t center,
                                        double et_seconds_tdb,
                                        struct SidereonSpkState *out_state);
+
+/**
+ * Query the state of NAIF `target` relative to NAIF `center` at
+ * `et_seconds_tdb` in the NAIF frame `frame`, as CSPICE `SPKGEO` does with
+ * the reference frame `REF`: segments are chosen as for sidereon_spk_state
+ * and the composed state is rotated into `frame` with the constant NAIF
+ * inertial-frame rotation when it is expressed in another frame. A rotation
+ * involving a frame outside the NAIF inertial frames 1-21 fails with
+ * SIDEREON_STATUS_SOLVE.
+ *
+ * Safety: spk must be a live handle from sidereon_spk_load that has not been
+ * freed; out_state must point to a SidereonSpkState.
+ */
+enum SidereonStatus sidereon_spk_state_in_frame(const struct SidereonSpk *spk,
+                                                int32_t target,
+                                                int32_t center,
+                                                double et_seconds_tdb,
+                                                int32_t frame,
+                                                struct SidereonSpkState *out_state);
 
 /**
  * J2000 seconds for a split Julian date. Delegates to
@@ -33669,6 +48283,31 @@ enum SidereonStatus sidereon_spp_batch_error(const struct SidereonSppBatch *batc
                                              size_t len,
                                              size_t *out_written,
                                              size_t *out_required);
+
+/**
+ * Read the structured error summary for epoch `index` in an SPP batch.
+ * An epoch that solved reports SidereonEngineErrorFamily::None and payload_len 0.
+ *
+ * Safety: batch is a live handle; out_info points to a SidereonEngineErrorInfo.
+ */
+enum SidereonStatus sidereon_spp_batch_error_info(const struct SidereonSppBatch *batch,
+                                                  size_t index,
+                                                  struct SidereonEngineErrorInfo *out_info);
+
+/**
+ * Copy the owned Schema 1 UTF-8 JSON payload for epoch `index` in an SPP batch.
+ * Follows standard variable-length copy semantics. An epoch that solved reports
+ * *out_written 0 and *out_required 0.
+ *
+ * Safety: batch is a live handle; out points to len writable bytes or NULL when
+ * len is 0; out_written and out_required point to size_t.
+ */
+enum SidereonStatus sidereon_spp_batch_error_payload(const struct SidereonSppBatch *batch,
+                                                     size_t index,
+                                                     uint8_t *out,
+                                                     size_t len,
+                                                     size_t *out_written,
+                                                     size_t *out_required);
 
 /**
  * Release a batch SPP handle. Passing NULL is a no-op.
@@ -33728,6 +48367,13 @@ enum SidereonStatus sidereon_spp_doppler_solution_velocity(const struct Sidereon
                                                            struct SidereonVelocitySolution **out_velocity);
 
 /**
+ * Read the owned structured velocity-error summary retained by a combined
+ * SPP Doppler result. Successful or absent velocity results report None/0.
+ */
+enum SidereonStatus sidereon_spp_doppler_solution_velocity_error_info(const struct SidereonSppDopplerSolution *solution,
+                                                                      struct SidereonEngineErrorInfo *out_info);
+
+/**
  * Write the retained Doppler velocity error kind. The kind is None when the
  * combined result has a velocity solution or no Doppler rows were supplied.
  *
@@ -33736,6 +48382,16 @@ enum SidereonStatus sidereon_spp_doppler_solution_velocity(const struct Sidereon
  */
 enum SidereonStatus sidereon_spp_doppler_solution_velocity_error_kind(const struct SidereonSppDopplerSolution *solution,
                                                                       enum SidereonSppDopplerVelocityErrorKind *out_error);
+
+/**
+ * Copy the complete owned velocity-error JSON payload retained by a combined
+ * SPP Doppler result.
+ */
+enum SidereonStatus sidereon_spp_doppler_solution_velocity_error_payload(const struct SidereonSppDopplerSolution *solution,
+                                                                         uint8_t *out,
+                                                                         size_t len,
+                                                                         size_t *out_written,
+                                                                         size_t *out_required);
 
 /**
  * Assemble every usable RINEX OBS epoch into SPP inputs using a broadcast NAV
@@ -33752,6 +48408,12 @@ enum SidereonStatus sidereon_spp_inputs_from_rinex_obs(const struct SidereonRine
                                                        const struct SidereonRinexSppOptions *options,
                                                        struct SidereonRinexSppInputs **out_inputs);
 
+enum SidereonStatus sidereon_spp_inputs_from_rinex_obs_with_models(const struct SidereonRinexObs *obs,
+                                                                   const struct SidereonBroadcastEphemeris *broadcast,
+                                                                   const struct SidereonRinexSppOptions *options,
+                                                                   const struct SidereonSppModelOptions *models,
+                                                                   struct SidereonRinexSppInputs **out_inputs);
+
 /**
  * Initialize an SPP V2 input struct with engine defaults for optional controls.
  * After this call, fill inputs->base with the ordinary SPP fields and override
@@ -33760,6 +48422,8 @@ enum SidereonStatus sidereon_spp_inputs_from_rinex_obs(const struct SidereonRine
  * Safety: out_inputs must point to a SidereonSppInputsV2.
  */
 enum SidereonStatus sidereon_spp_inputs_v2_init(struct SidereonSppInputsV2 *out_inputs);
+
+enum SidereonStatus sidereon_spp_model_options_init(struct SidereonSppModelOptions *out_options);
 
 /**
  * Copy the DOP (geometry-covariance) scalars into *out_dop. Fails with
@@ -33836,6 +48500,22 @@ enum SidereonStatus sidereon_spp_solution_position_covariance_enu_m2(const struc
                                                                      size_t len);
 
 /**
+ * Copy the pseudorange variance (square metres) of each used satellite, in
+ * used-satellite order: the RTKLIB rescode variance the solve weighted its
+ * residual by, which RAIM standardizes the residual with. Uses the
+ * variable-length output contract.
+ *
+ * Safety: sol must be a live solution handle; out must point to at least len
+ * writable doubles or be NULL when len is 0; out_written and out_required must
+ * point to size_t values.
+ */
+enum SidereonStatus sidereon_spp_solution_pseudorange_variances(const struct SidereonSppSolution *sol,
+                                                                double *out,
+                                                                size_t len,
+                                                                size_t *out_written,
+                                                                size_t *out_required);
+
+/**
  * Copy rejected satellites and reasons. Uses the variable-length output
  * contract documented at the top of the header.
  *
@@ -33848,6 +48528,21 @@ enum SidereonStatus sidereon_spp_solution_rejected_sats(const struct SidereonSpp
                                                         size_t len,
                                                         size_t *out_written,
                                                         size_t *out_required);
+
+/**
+ * Copy rejected satellites with optional strict-SSR refusal magnitudes.
+ * Existing rejected-satellite records remain ABI-compatible through the V1
+ * accessor.
+ *
+ * # Safety
+ * `sol` must be a live handle; output/count pointers must satisfy the standard
+ * variable-length buffer contract.
+ */
+enum SidereonStatus sidereon_spp_solution_rejected_sats_v2(const struct SidereonSppSolution *sol,
+                                                           struct SidereonSppRejectedSatV2 *out,
+                                                           size_t len,
+                                                           size_t *out_written,
+                                                           size_t *out_required);
 
 /**
  * Copy the post-fit residuals (meters, in used-satellite order) into out.
@@ -33942,6 +48637,35 @@ enum SidereonStatus sidereon_spp_solution_used_sat_ids(const struct SidereonSppS
                                                        size_t *out_written,
                                                        size_t *out_required);
 
+/**
+ * Copy the weight each used satellite carried in the reported solve, in
+ * used-satellite order: the inverse pseudorange variance, times the final
+ * Huber factor on the robust path. Uses the variable-length output contract.
+ *
+ * Safety: sol must be a live solution handle; out must point to at least len
+ * writable doubles or be NULL when len is 0; out_written and out_required must
+ * point to size_t values.
+ */
+enum SidereonStatus sidereon_spp_solution_weights(const struct SidereonSppSolution *sol,
+                                                  double *out,
+                                                  size_t len,
+                                                  size_t *out_written,
+                                                  size_t *out_required);
+
+enum SidereonStatus sidereon_ssr_clock_relativity_at_epoch_query(const struct SidereonBroadcastEphemeris *broadcast,
+                                                                 const struct SidereonSsrCorrectionStore *store,
+                                                                 const char *sat_id,
+                                                                 const struct SidereonExactEpochQuery *epoch,
+                                                                 const double *position_ecef_m,
+                                                                 double staleness_s,
+                                                                 uint32_t missing_action,
+                                                                 bool allow_regional_provider,
+                                                                 uint16_t regional_provider_id,
+                                                                 uint32_t size_policy,
+                                                                 enum SidereonClockRelativityKind *out_kind,
+                                                                 double *out_term_s,
+                                                                 struct SidereonSsrCorrectedStateResult *out_policy_result);
+
 enum SidereonStatus sidereon_ssr_corrected_state(const struct SidereonBroadcastEphemeris *broadcast,
                                                  const struct SidereonSsrCorrectionStore *store,
                                                  const char *sat_id,
@@ -33953,6 +48677,18 @@ enum SidereonStatus sidereon_ssr_corrected_state(const struct SidereonBroadcastE
                                                  bool *out_present,
                                                  double *out_position_ecef_m,
                                                  double *out_clock_s);
+
+enum SidereonStatus sidereon_ssr_corrected_state_at_epoch_queries(const struct SidereonBroadcastEphemeris *broadcast,
+                                                                  const struct SidereonSsrCorrectionStore *store,
+                                                                  const char *sat_id,
+                                                                  const struct SidereonExactEpochQuery *state_epoch,
+                                                                  const struct SidereonExactEpochQuery *selection_epoch,
+                                                                  double staleness_s,
+                                                                  uint32_t missing_action,
+                                                                  bool allow_regional_provider,
+                                                                  uint16_t regional_provider_id,
+                                                                  uint32_t size_policy,
+                                                                  struct SidereonSsrCorrectedStateResult *out_result);
 
 enum SidereonStatus sidereon_ssr_ephemeris_sample(const struct SidereonBroadcastEphemeris *broadcast,
                                                   const struct SidereonSsrCorrectionStore *store,
@@ -33969,6 +48705,51 @@ enum SidereonStatus sidereon_ssr_ephemeris_sample(const struct SidereonBroadcast
                                                   size_t len,
                                                   size_t *out_written,
                                                   size_t *out_required);
+
+enum SidereonStatus sidereon_ssr_ephemeris_variance_at_epoch_queries(const struct SidereonBroadcastEphemeris *broadcast,
+                                                                     const struct SidereonSsrCorrectionStore *store,
+                                                                     const char *sat_id,
+                                                                     const struct SidereonExactEpochQuery *state_epoch,
+                                                                     const struct SidereonExactEpochQuery *selection_epoch,
+                                                                     double staleness_s,
+                                                                     uint32_t missing_action,
+                                                                     bool allow_regional_provider,
+                                                                     uint16_t regional_provider_id,
+                                                                     uint32_t size_policy,
+                                                                     double *out_variance_m2,
+                                                                     struct SidereonSsrCorrectedStateResult *out_policy_result);
+
+/**
+ * Copy refusal `index`: its RTCM message number to *out_message_number and
+ * the refusal text (not null-terminated) into out under the variable-length
+ * output contract.
+ *
+ * Safety: refusals is a live handle; out_message_number points to a
+ * uint16_t; out points to len writable bytes or is NULL when len is 0;
+ * out_written and out_required point to size_t.
+ */
+enum SidereonStatus sidereon_ssr_ingest_refusal(const struct SidereonSsrIngestRefusals *refusals,
+                                                size_t index,
+                                                uint16_t *out_message_number,
+                                                uint8_t *out,
+                                                size_t len,
+                                                size_t *out_written,
+                                                size_t *out_required);
+
+/**
+ * Write the number of refused messages.
+ *
+ * Safety: refusals is a live handle; out_count points to a size_t.
+ */
+enum SidereonStatus sidereon_ssr_ingest_refusals_count(const struct SidereonSsrIngestRefusals *refusals,
+                                                       size_t *out_count);
+
+/**
+ * Release a refusal list. Passing NULL is a no-op.
+ *
+ * Safety: refusals is NULL or a live handle not yet freed.
+ */
+void sidereon_ssr_ingest_refusals_free(struct SidereonSsrIngestRefusals *refusals);
 
 /**
  * Copy the bare RTCM SSR message's clock records. Values are raw wire
@@ -34112,23 +48893,102 @@ enum SidereonStatus sidereon_ssr_solve_broadcast(const struct SidereonBroadcastE
                                                  const struct SidereonSppInputs *inputs,
                                                  struct SidereonSppSolution **out_solution);
 
+enum SidereonStatus sidereon_ssr_solve_broadcast_at_exact_epoch(const struct SidereonBroadcastEphemeris *broadcast,
+                                                                const struct SidereonSsrCorrectionStore *store,
+                                                                double staleness_s,
+                                                                uint32_t missing_action,
+                                                                bool allow_regional_provider,
+                                                                uint16_t regional_provider_id,
+                                                                uint32_t size_policy,
+                                                                const struct SidereonSppInputs *inputs,
+                                                                const struct SidereonExactEpoch *receive_epoch,
+                                                                struct SidereonSppSolution **out_solution);
+
+enum SidereonStatus sidereon_ssr_solve_broadcast_v2_with_models_at_exact_epoch(const struct SidereonBroadcastEphemeris *broadcast,
+                                                                               const struct SidereonSsrCorrectionStore *store,
+                                                                               double staleness_s,
+                                                                               uint32_t missing_action,
+                                                                               bool allow_regional_provider,
+                                                                               uint16_t regional_provider_id,
+                                                                               uint32_t size_policy,
+                                                                               const struct SidereonSppInputsV2 *inputs,
+                                                                               const struct SidereonSppModelOptions *models,
+                                                                               const struct SidereonExactEpoch *receive_epoch,
+                                                                               struct SidereonSppSolution **out_solution);
+
 enum SidereonStatus sidereon_ssr_store_clock(const struct SidereonSsrCorrectionStore *store,
                                              const char *sat_id,
                                              bool *out_present,
                                              struct SidereonSsrClockCorrection *out_clock);
 
+/**
+ * The latest code bias, metres, stored for satellite `sat_id` and the raw
+ * signal index `signal` its source transmitted. `source` is 0 for RTCM SSR
+ * (a signal and tracking mode identifier), 1 for Galileo HAS (HAS SIS ICD
+ * Table 20), or 2 for IGS SSR (IGS SSR signal identifiers); an index the
+ * source's table assigns to a physical signal is looked up as that signal, so
+ * biases from different source tables for one physical signal share an entry.
+ * This inspector ignores lifetime, staleness, do-not-use exclusion and phase
+ * continuity.
+ *
+ * Safety: store is a live handle; sat_id is a null-terminated token;
+ * out_present points to a bool; out_bias_m points to a double.
+ */
 enum SidereonStatus sidereon_ssr_store_code_bias_m(const struct SidereonSsrCorrectionStore *store,
                                                    const char *sat_id,
+                                                   uint32_t source,
                                                    uint8_t signal,
                                                    bool *out_present,
                                                    double *out_bias_m);
 
+enum SidereonStatus sidereon_ssr_store_evaluate_vtec(const struct SidereonSsrCorrectionStore *store,
+                                                     const double *receiver_ecef_m,
+                                                     const double *satellite_transmit_ecef_m,
+                                                     const struct SidereonGnssWeekTow *query_time,
+                                                     double frequency_hz,
+                                                     struct SidereonSsrVtecQueryResult *out_result,
+                                                     struct SidereonSsrVtecLayerEvaluation *out_layers,
+                                                     size_t layer_len,
+                                                     size_t *out_written,
+                                                     size_t *out_required);
+
 void sidereon_ssr_store_free(struct SidereonSsrCorrectionStore *store);
 
+/**
+ * Build an SSR correction store from framed RTCM bytes, refusing anything it
+ * cannot read and apply in full: every byte must belong to a CRC-valid frame
+ * whose body decodes under the strict RTCM policy, and the store must ingest
+ * every message. sidereon_ssr_store_from_rtcm_reading reads what it can and
+ * reports the rest.
+ *
+ * Safety: bytes points to len readable bytes; epoch points to a
+ * SidereonGnssWeekTow; out_store points to a SidereonSsrCorrectionStore*.
+ */
 enum SidereonStatus sidereon_ssr_store_from_rtcm(const uint8_t *bytes,
                                                  size_t len,
                                                  const struct SidereonGnssWeekTow *epoch,
                                                  struct SidereonSsrCorrectionStore **out_store);
+
+/**
+ * Build an SSR correction store from every readable frame of framed RTCM
+ * bytes under the lenient RTCM policy, reporting what was not read or not
+ * applied instead of failing. Writes newly owned handles to *out_store,
+ * *out_diagnostics (bytes passed over while resynchronizing, CRC-24Q
+ * failures, frames that did not decode, departures read) and *out_refusals
+ * (messages that decoded but that the store refused), and the length of a
+ * trailing partial frame to *out_trailing_partial_frame_len.
+ * sidereon_ssr_store_from_rtcm refuses all of these instead.
+ *
+ * Safety: bytes points to len readable bytes; epoch points to a
+ * SidereonGnssWeekTow; each out pointer points to storage of its type.
+ */
+enum SidereonStatus sidereon_ssr_store_from_rtcm_reading(const uint8_t *bytes,
+                                                         size_t len,
+                                                         const struct SidereonGnssWeekTow *epoch,
+                                                         struct SidereonSsrCorrectionStore **out_store,
+                                                         struct SidereonRtcmStreamDiagnostics **out_diagnostics,
+                                                         size_t *out_trailing_partial_frame_len,
+                                                         struct SidereonSsrIngestRefusals **out_refusals);
 
 enum SidereonStatus sidereon_ssr_store_ingest_messages(struct SidereonSsrCorrectionStore *store,
                                                        const struct SidereonRtcmMessages *messages,
@@ -34142,16 +49002,48 @@ enum SidereonStatus sidereon_ssr_store_orbit(const struct SidereonSsrCorrectionS
                                              bool *out_present,
                                              struct SidereonSsrOrbitCorrection *out_orbit);
 
+/**
+ * The latest phase bias, metres, stored for satellite `sat_id` and the raw
+ * signal index `signal` of `source`, as for sidereon_ssr_store_code_bias_m.
+ *
+ * Safety: as for sidereon_ssr_store_code_bias_m.
+ */
 enum SidereonStatus sidereon_ssr_store_phase_bias_m(const struct SidereonSsrCorrectionStore *store,
                                                     const char *sat_id,
+                                                    uint32_t source,
                                                     uint8_t signal,
                                                     bool *out_present,
                                                     double *out_bias_m);
+
+enum SidereonStatus sidereon_ssr_store_set_vtec_max_age(struct SidereonSsrCorrectionStore *store,
+                                                        double max_age_s);
 
 enum SidereonStatus sidereon_ssr_store_ura_index(const struct SidereonSsrCorrectionStore *store,
                                                  const char *sat_id,
                                                  bool *out_present,
                                                  uint8_t *out_ura_index);
+
+/**
+ * Query clock at exact transmit and selection epochs while returning typed
+ * policy diagnostics.
+ *
+ * Safety: non-null output pointers must each point to writable storage of the
+ * documented type, and all output ranges must be disjoint.
+ */
+enum SidereonStatus sidereon_ssr_transmit_epoch_clock_at_epoch_queries(const struct SidereonBroadcastEphemeris *broadcast,
+                                                                       const struct SidereonSsrCorrectionStore *store,
+                                                                       const char *sat_id,
+                                                                       const struct SidereonExactEpochQuery *transmit_epoch,
+                                                                       const struct SidereonExactEpochQuery *selection_epoch,
+                                                                       double staleness_s,
+                                                                       uint32_t missing_action,
+                                                                       bool allow_regional_provider,
+                                                                       uint16_t regional_provider_id,
+                                                                       uint32_t size_policy,
+                                                                       bool *out_has_clock,
+                                                                       double *out_clock_s,
+                                                                       bool *out_degraded,
+                                                                       struct SidereonSsrCorrectedStateResult *out_policy_result);
 
 /**
  * A staleness policy with a cap expressed in days.
@@ -34181,6 +49073,8 @@ enum SidereonStatus sidereon_state_propagation_config_init(struct SidereonStateP
  * Safety: out_options must point to a SidereonStaticPositionOptions.
  */
 enum SidereonStatus sidereon_static_position_options_init(struct SidereonStaticPositionOptions *out_options);
+
+enum SidereonStatus sidereon_static_position_options_v2_init(struct SidereonStaticPositionOptionsV2 *out_options);
 
 /**
  * Copy epoch-local receiver clocks. Output uses the variable-length contract.
@@ -34218,7 +49112,7 @@ void sidereon_static_position_solution_free(struct SidereonStaticPositionSolutio
  * Copy the optional geodetic receiver position and set *out_present.
  *
  * Safety: solution must be a live handle; out_geodetic and out_present must
- * point to writable storage.
+ * point to disjoint writable storage.
  */
 enum SidereonStatus sidereon_static_position_solution_geodetic(const struct SidereonStaticPositionSolution *solution,
                                                                struct SidereonGeodetic *out_geodetic,
@@ -34276,6 +49170,21 @@ enum SidereonStatus sidereon_static_position_solution_rejected_sats(const struct
                                                                     size_t len,
                                                                     size_t *out_written,
                                                                     size_t *out_required);
+
+/**
+ * Copy static-position rejected satellites with strict-SSR size payloads.
+ * The existing accessor remains ABI-compatible.
+ *
+ * # Safety
+ * `solution` must be a live handle and the output pointers must satisfy the
+ * variable-length buffer contract.
+ */
+enum SidereonStatus sidereon_static_position_solution_rejected_sats_v2(const struct SidereonStaticPositionSolution *solution,
+                                                                       size_t epoch_index,
+                                                                       struct SidereonSppRejectedSatV2 *out,
+                                                                       size_t len,
+                                                                       size_t *out_written,
+                                                                       size_t *out_required);
 
 /**
  * Copy post-fit residual rows. Output uses the variable-length contract.
@@ -34416,6 +49325,81 @@ enum SidereonStatus sidereon_static_reference_station_solution_mode_reports(cons
 enum SidereonStatus sidereon_static_reference_station_solution_position_ecef(const struct SidereonStaticReferenceStationSolution *solution,
                                                                              double *out_xyz,
                                                                              size_t len);
+
+/**
+ * Copy field or reason text for one failed batch row. The text storage is
+ * thread-local and is replaced by the next batch call on this thread.
+ *
+ * # Safety
+ * `out_written` and `out_required` must be writable; `out` must reference
+ * `len` writable bytes unless `len` is zero.
+ */
+enum SidereonStatus sidereon_station_tide_batch_error_text(size_t row,
+                                                           uint32_t part,
+                                                           uint8_t *out,
+                                                           size_t len,
+                                                           size_t *out_written,
+                                                           size_t *out_required);
+
+/**
+ * Return the core default station Step 2 constant set (Conventions).
+ */
+enum SidereonStationTideConstants sidereon_station_tide_constants_default(void);
+
+/**
+ * Evaluate station displacement in ECEF metres using the core tide models.
+ * The output marks omitted optional components as absent and reports UT1
+ * extrapolation separately when permissive validity is selected.
+ *
+ * # Safety
+ * `position` must point to three readable doubles (ECEF x, y, z metres);
+ * `epoch` and `options` must point to readable records and `out` to writable
+ * storage. A NULL pointer is refused with SIDEREON_STATUS_NULL_POINTER.
+ */
+enum SidereonStatus sidereon_station_tide_displacement(const double *position,
+                                                       const struct SidereonStationTideEpoch *epoch,
+                                                       const struct SidereonStationTideOptions *options,
+                                                       struct SidereonStationTideDisplacement *out);
+
+/**
+ * Evaluate station displacement for each epoch. Per-row failures are returned
+ * in `out_rows`; text fields for a failed row remain available through
+ * `sidereon_station_tide_batch_error_text` until the next batch call on this
+ * thread.
+ *
+ * # Safety
+ * `position` must point to three readable doubles (ECEF x, y, z metres) and
+ * `options` to a readable record. `epochs` and `out_rows` must reference `count`
+ * readable and writable rows when `count` is nonzero. A NULL pointer is refused with SIDEREON_STATUS_NULL_POINTER.
+ */
+enum SidereonStatus sidereon_station_tide_displacement_batch(const double *position,
+                                                             const struct SidereonStationTideEpoch *epochs,
+                                                             size_t count,
+                                                             const struct SidereonStationTideOptions *options,
+                                                             struct SidereonStationTideBatchRow *out_rows);
+
+/**
+ * Copy the last station-tide failure for this thread, or `None` if no such
+ * call has failed.
+ *
+ * # Safety
+ * `out_error` must point to writable storage.
+ */
+enum SidereonStatus sidereon_station_tide_last_error(struct SidereonStationTideError *out_error);
+
+/**
+ * Copy a field or reason from the last station-tide error using the standard
+ * count-query buffer convention; returned bytes are not NUL-terminated.
+ *
+ * # Safety
+ * `out_written` and `out_required` must be writable. `out` must point to
+ * `len` writable bytes unless `len` is zero.
+ */
+enum SidereonStatus sidereon_station_tide_last_error_text(uint32_t part,
+                                                          uint8_t *out,
+                                                          size_t len,
+                                                          size_t *out_written,
+                                                          size_t *out_required);
 
 /**
  * Return a static, null-terminated, human-readable name for a status code.
@@ -34659,6 +49643,522 @@ enum SidereonStatus sidereon_tdm_to_kvn(const struct SidereonTdm *tdm,
                                         size_t *out_required);
 
 /**
+ * Write the axis lengths and the flat value count of a standalone TecGrid.
+ *
+ * Every output pointer must be non-NULL. The value count is the product of
+ * the three axis lengths and sizes both the value and the presence buffer.
+ *
+ * Safety: `grid` must be a live SidereonTecGrid handle, not freed for the
+ * duration of the call; `out_epoch_count` must point to one writable, aligned
+ * size_t that no other argument aliases; `out_latitude_count` must point to
+ * one writable, aligned size_t that no other argument aliases;
+ * `out_longitude_count` must point to one writable, aligned size_t that no
+ * other argument aliases; `out_value_count` must point to one writable,
+ * aligned size_t that no other argument aliases. A NULL argument this contract
+ * does not allow is refused with SIDEREON_STATUS_NULL_POINTER rather than
+ * dereferenced; a non-null pointer that is not valid for the whole call cannot
+ * be checked and is undefined behavior.
+ */
+enum SidereonStatus sidereon_tec_grid_dimensions(const struct SidereonTecGrid *grid,
+                                                 size_t *out_epoch_count,
+                                                 size_t *out_latitude_count,
+                                                 size_t *out_longitude_count,
+                                                 size_t *out_value_count);
+
+/**
+ * Copy the epoch axis of a standalone TecGrid, in Unix nanoseconds.
+ *
+ * The axis is `f64`, so adjacent nanoseconds are not distinguishable at large
+ * magnitudes; a query takes an exact `i64` and the engine converts it. Uses
+ * the variable-length output contract.
+ *
+ * Safety: `grid` must be a live SidereonTecGrid handle, not freed for the
+ * duration of the call; `out` may be NULL only when `len` is 0, which queries
+ * the required count through `out_required`; otherwise it must point to `len`
+ * writable, aligned doubles that do not overlap the handle being read. `len`
+ * counts doubles, not bytes. `out_written` and `out_required` must each point
+ * to one writable, aligned size_t, must alias neither each other nor `out`,
+ * and are both set to 0 before anything else is read. A NULL argument this
+ * contract does not allow is refused with SIDEREON_STATUS_NULL_POINTER rather
+ * than dereferenced; a non-null pointer that is not valid for the whole call
+ * cannot be checked and is undefined behavior.
+ */
+enum SidereonStatus sidereon_tec_grid_epochs_ns(const struct SidereonTecGrid *grid,
+                                                double *out,
+                                                size_t len,
+                                                size_t *out_written,
+                                                size_t *out_required);
+
+/**
+ * Release a standalone TecGrid handle. Passing NULL is a no-op.
+ *
+ * Safety: `grid` may be NULL, which is a no-op; otherwise it must be a live
+ * SidereonTecGrid handle this binding produced, and it must be passed here
+ * exactly once. The handle and every pointer read out of it are invalid
+ * afterwards. This call returns nothing, so it reports no status: a pointer
+ * that is neither NULL nor such a handle cannot be checked and is undefined
+ * behavior.
+ */
+void sidereon_tec_grid_free(struct SidereonTecGrid *grid);
+
+/**
+ * Copy the latitude axis of a standalone TecGrid, in degrees. Uses the
+ * variable-length output contract.
+ *
+ * Safety: `grid` must be a live SidereonTecGrid handle, not freed for the
+ * duration of the call; `out` may be NULL only when `len` is 0, which queries
+ * the required count through `out_required`; otherwise it must point to `len`
+ * writable, aligned doubles that do not overlap the handle being read. `len`
+ * counts doubles, not bytes. `out_written` and `out_required` must each point
+ * to one writable, aligned size_t, must alias neither each other nor `out`,
+ * and are both set to 0 before anything else is read. A NULL argument this
+ * contract does not allow is refused with SIDEREON_STATUS_NULL_POINTER rather
+ * than dereferenced; a non-null pointer that is not valid for the whole call
+ * cannot be checked and is undefined behavior.
+ */
+enum SidereonStatus sidereon_tec_grid_latitudes_deg(const struct SidereonTecGrid *grid,
+                                                    double *out,
+                                                    size_t len,
+                                                    size_t *out_written,
+                                                    size_t *out_required);
+
+/**
+ * Copy the longitude axis of a standalone TecGrid, in degrees. Uses the
+ * variable-length output contract.
+ *
+ * Safety: `grid` must be a live SidereonTecGrid handle, not freed for the
+ * duration of the call; `out` may be NULL only when `len` is 0, which queries
+ * the required count through `out_required`; otherwise it must point to `len`
+ * writable, aligned doubles that do not overlap the handle being read. `len`
+ * counts doubles, not bytes. `out_written` and `out_required` must each point
+ * to one writable, aligned size_t, must alias neither each other nor `out`,
+ * and are both set to 0 before anything else is read. A NULL argument this
+ * contract does not allow is refused with SIDEREON_STATUS_NULL_POINTER rather
+ * than dereferenced; a non-null pointer that is not valid for the whole call
+ * cannot be checked and is undefined behavior.
+ */
+enum SidereonStatus sidereon_tec_grid_longitudes_deg(const struct SidereonTecGrid *grid,
+                                                     double *out,
+                                                     size_t len,
+                                                     size_t *out_written,
+                                                     size_t *out_required);
+
+/**
+ * Construct a standalone TecGrid from epoch, latitude and longitude axes and
+ * flat values in epoch-latitude-longitude order, longitude varying fastest.
+ *
+ * `presence` may be NULL, which treats every value as present, or point at
+ * `values_count` flags. A flag that is false marks a node without a value and
+ * the matching entry in `values` is ignored, so a caller need not write NaN
+ * there. A present value must be finite; an explicit zero is a value.
+ *
+ * On success a newly owned handle is written to `*out_grid`; release it with
+ * sidereon_tec_grid_free. On any failure `*out_grid` stays NULL, nothing is
+ * allocated, and `out_error`, when it is not NULL, takes the typed detail.
+ *
+ * This is the convenience route. Its failure text is the thread-local message,
+ * which the next failing call in this thread overwrites, and an InvalidField's
+ * field label and reason exist only inside that text. Use
+ * sidereon_tec_grid_new_result for a failure the caller owns in full.
+ *
+ * Safety: `epochs_ns` must point to `epochs_count` readable, aligned doubles,
+ * or may be NULL when `epochs_count` is 0; `latitudes_deg` must point to
+ * `latitudes_count` readable, aligned doubles, or may be NULL when
+ * `latitudes_count` is 0; `longitudes_deg` must point to `longitudes_count`
+ * readable, aligned doubles, or may be NULL when `longitudes_count` is 0;
+ * `values` must point to `values_count` readable, aligned doubles, or may be
+ * NULL when `values_count` is 0; `presence` may be NULL at any count, which
+ * reads every value as present; otherwise it must point to `values_count`
+ * readable, aligned bools; `out_grid` must point to writable, aligned storage
+ * for one `SidereonTecGrid *`, which is set to NULL before any work and
+ * receives a newly owned handle only on SIDEREON_STATUS_OK; release it with
+ * sidereon_tec_grid_free; `out_error` may be NULL, which discards the detail;
+ * otherwise it must point to one writable, aligned SidereonTecGridError that
+ * no other argument aliases. Both outputs must be disjoint from every input
+ * buffer above and from each other: they are written while Rust references to
+ * those buffers are live. The input buffers themselves are read-only and may
+ * overlap one another. A NULL argument this contract does not allow is
+ * refused with SIDEREON_STATUS_NULL_POINTER rather than dereferenced; a
+ * non-null pointer that is not valid for the whole call cannot be checked and
+ * is undefined behavior.
+ */
+enum SidereonStatus sidereon_tec_grid_new(const double *epochs_ns,
+                                          size_t epochs_count,
+                                          const double *latitudes_deg,
+                                          size_t latitudes_count,
+                                          const double *longitudes_deg,
+                                          size_t longitudes_count,
+                                          const double *values,
+                                          const bool *presence,
+                                          size_t values_count,
+                                          struct SidereonTecGrid **out_grid,
+                                          struct SidereonTecGridError *out_error);
+
+/**
+ * Construct a standalone TecGrid and take an owned record of the attempt.
+ *
+ * Same inputs as sidereon_tec_grid_new. The difference is where the failure
+ * detail lives: this route returns SIDEREON_STATUS_OK whenever the call itself
+ * was well formed and hands back a newly owned SidereonTecGridResult that
+ * keeps the complete engine message, the exact InvalidField label and reason,
+ * and every indexed detail, for as long as the caller holds it. Neither a
+ * later failing call nor releasing the grid disturbs it.
+ *
+ * On a construction failure the outer status is still SIDEREON_STATUS_OK,
+ * `*out_grid` stays NULL, and the result reports is_ok false with the failure.
+ * Read it with sidereon_tec_grid_result_get_outcome. On a structural failure
+ * of the call itself -- a null out-parameter, a null buffer with a nonzero
+ * count, or a count no slice can span -- both outputs are set to NULL, the
+ * returned status is not OK, nothing is allocated, and the text is in the
+ * thread-local message.
+ *
+ * Release the grid with sidereon_tec_grid_free and the result with
+ * sidereon_tec_grid_result_free; they are independent allocations.
+ *
+ * Safety: `epochs_ns` must point to `epochs_count` readable, aligned doubles,
+ * or may be NULL when `epochs_count` is 0; `latitudes_deg` must point to
+ * `latitudes_count` readable, aligned doubles, or may be NULL when
+ * `latitudes_count` is 0; `longitudes_deg` must point to `longitudes_count`
+ * readable, aligned doubles, or may be NULL when `longitudes_count` is 0;
+ * `values` must point to `values_count` readable, aligned doubles, or may be
+ * NULL when `values_count` is 0; `presence` may be NULL at any count, which
+ * reads every value as present; otherwise it must point to `values_count`
+ * readable, aligned bools; `out_grid` must point to writable, aligned storage
+ * for one `SidereonTecGrid *`, which is set to NULL before any work and
+ * receives a newly owned handle only on SIDEREON_STATUS_OK; release it with
+ * sidereon_tec_grid_free; `out_result` must point to writable, aligned storage
+ * for one `SidereonTecGridResult *`, which is set to NULL before any work and
+ * receives a newly owned handle only on SIDEREON_STATUS_OK; release it with
+ * sidereon_tec_grid_result_free. Both output slots must be disjoint from
+ * every input buffer above and from each other: they are written while Rust
+ * references to those buffers are live. The input buffers themselves are
+ * read-only and may overlap one another. A NULL argument this contract does
+ * not allow is refused with SIDEREON_STATUS_NULL_POINTER rather than
+ * dereferenced; a non-null pointer that is not valid for the whole call
+ * cannot be checked and is undefined behavior.
+ */
+enum SidereonStatus sidereon_tec_grid_new_result(const double *epochs_ns,
+                                                 size_t epochs_count,
+                                                 const double *latitudes_deg,
+                                                 size_t latitudes_count,
+                                                 const double *longitudes_deg,
+                                                 size_t longitudes_count,
+                                                 const double *values,
+                                                 const bool *presence,
+                                                 size_t values_count,
+                                                 struct SidereonTecGrid **out_grid,
+                                                 struct SidereonTecGridResult **out_result);
+
+/**
+ * Release an owned standalone TEC-grid result. Passing NULL is a no-op.
+ *
+ * Safety: `result` may be NULL, which is a no-op; otherwise it must be a live
+ * SidereonTecGridResult handle this binding produced, and it must be passed
+ * here exactly once. The handle and every pointer read out of it are invalid
+ * afterwards. This call returns nothing, so it reports no status: a pointer
+ * that is neither NULL nor such a handle cannot be checked and is undefined
+ * behavior.
+ */
+void sidereon_tec_grid_result_free(struct SidereonTecGridResult *result);
+
+/**
+ * Copy the stable field label of an InvalidField failure, exactly as the
+ * engine's shared validation named it. Any other outcome reports a required
+ * length of zero; this binding never invents a label. Uses the variable-length
+ * output contract.
+ *
+ * Safety: `result` must be a live SidereonTecGridResult handle, not freed for
+ * the duration of the call; `out` may be NULL only when `len` is 0, which
+ * queries the required count through `out_required`; otherwise it must point
+ * to `len` writable, aligned bytes that do not overlap the handle being read.
+ * `len` is the buffer size in bytes. `out_written` and `out_required` must
+ * each point to one writable, aligned size_t, must alias neither each other
+ * nor `out`, and are both set to 0 before anything else is read. The bytes are
+ * copied verbatim: no NUL terminator is appended, so a caller wanting a C
+ * string must allocate one more byte and write it. A NULL argument this
+ * contract does not allow is refused with SIDEREON_STATUS_NULL_POINTER rather
+ * than dereferenced; a non-null pointer that is not valid for the whole call
+ * cannot be checked and is undefined behavior.
+ */
+enum SidereonStatus sidereon_tec_grid_result_get_field(const struct SidereonTecGridResult *result,
+                                                       uint8_t *out,
+                                                       size_t len,
+                                                       size_t *out_written,
+                                                       size_t *out_required);
+
+/**
+ * Copy the engine's own text from an owned standalone TEC-grid result. A
+ * successful result reports a required length of zero. The result owns this
+ * text, so it is unaffected by later calls. Uses the variable-length output
+ * contract.
+ *
+ * Safety: `result` must be a live SidereonTecGridResult handle, not freed for
+ * the duration of the call; `out` may be NULL only when `len` is 0, which
+ * queries the required count through `out_required`; otherwise it must point
+ * to `len` writable, aligned bytes that do not overlap the handle being read.
+ * `len` is the buffer size in bytes. `out_written` and `out_required` must
+ * each point to one writable, aligned size_t, must alias neither each other
+ * nor `out`, and are both set to 0 before anything else is read. The bytes are
+ * copied verbatim: no NUL terminator is appended, so a caller wanting a C
+ * string must allocate one more byte and write it. A NULL argument this
+ * contract does not allow is refused with SIDEREON_STATUS_NULL_POINTER rather
+ * than dereferenced; a non-null pointer that is not valid for the whole call
+ * cannot be checked and is undefined behavior.
+ */
+enum SidereonStatus sidereon_tec_grid_result_get_message(const struct SidereonTecGridResult *result,
+                                                         uint8_t *out,
+                                                         size_t len,
+                                                         size_t *out_written,
+                                                         size_t *out_required);
+
+/**
+ * Copy the fixed-width outcome of an owned standalone TEC-grid result.
+ *
+ * `out_outcome` is written before the result pointer is validated, so it never
+ * keeps whatever the caller left in it.
+ *
+ * Safety: `result` must be a live SidereonTecGridResult handle, not freed for
+ * the duration of the call; `out_outcome` must point to one writable, aligned
+ * SidereonTecGridOutcome that no other argument aliases. A NULL argument this
+ * contract does not allow is refused with SIDEREON_STATUS_NULL_POINTER rather
+ * than dereferenced; a non-null pointer that is not valid for the whole call
+ * cannot be checked and is undefined behavior.
+ */
+enum SidereonStatus sidereon_tec_grid_result_get_outcome(const struct SidereonTecGridResult *result,
+                                                         struct SidereonTecGridOutcome *out_outcome);
+
+/**
+ * Copy the short reason of an InvalidField failure, exactly as the engine's
+ * shared validation named it. Any other outcome reports a required length of
+ * zero. Uses the variable-length output contract.
+ *
+ * Safety: `result` must be a live SidereonTecGridResult handle, not freed for
+ * the duration of the call; `out` may be NULL only when `len` is 0, which
+ * queries the required count through `out_required`; otherwise it must point
+ * to `len` writable, aligned bytes that do not overlap the handle being read.
+ * `len` is the buffer size in bytes. `out_written` and `out_required` must
+ * each point to one writable, aligned size_t, must alias neither each other
+ * nor `out`, and are both set to 0 before anything else is read. The bytes are
+ * copied verbatim: no NUL terminator is appended, so a caller wanting a C
+ * string must allocate one more byte and write it. A NULL argument this
+ * contract does not allow is refused with SIDEREON_STATUS_NULL_POINTER rather
+ * than dereferenced; a non-null pointer that is not valid for the whole call
+ * cannot be checked and is undefined behavior.
+ */
+enum SidereonStatus sidereon_tec_grid_result_get_reason(const struct SidereonTecGridResult *result,
+                                                        uint8_t *out,
+                                                        size_t len,
+                                                        size_t *out_written,
+                                                        size_t *out_required);
+
+/**
+ * Copy the per-node presence flags of a standalone TecGrid, in the same flat
+ * order as the values. A flag is true where the node holds a value, including
+ * an explicit zero. Uses the variable-length output contract.
+ *
+ * Safety: `grid` must be a live SidereonTecGrid handle, not freed for the
+ * duration of the call; `out` may be NULL only when `len` is 0, which queries
+ * the required count through `out_required`; otherwise it must point to `len`
+ * writable, aligned bools that do not overlap the handle being read. `len`
+ * counts bools, not bytes. `out_written` and `out_required` must each point to
+ * one writable, aligned size_t, must alias neither each other nor `out`, and
+ * are both set to 0 before anything else is read. A NULL argument this
+ * contract does not allow is refused with SIDEREON_STATUS_NULL_POINTER rather
+ * than dereferenced; a non-null pointer that is not valid for the whole call
+ * cannot be checked and is undefined behavior.
+ */
+enum SidereonStatus sidereon_tec_grid_value_presence(const struct SidereonTecGrid *grid,
+                                                     bool *out,
+                                                     size_t len,
+                                                     size_t *out_written,
+                                                     size_t *out_required);
+
+/**
+ * Copy the flat TEC values of a standalone TecGrid, in TECU, in
+ * epoch-latitude-longitude order with longitude varying fastest.
+ *
+ * A node without a value writes NaN; read
+ * sidereon_tec_grid_value_presence for the authority on which nodes hold one.
+ * Uses the variable-length output contract.
+ *
+ * Safety: `grid` must be a live SidereonTecGrid handle, not freed for the
+ * duration of the call; `out` may be NULL only when `len` is 0, which queries
+ * the required count through `out_required`; otherwise it must point to `len`
+ * writable, aligned doubles that do not overlap the handle being read. `len`
+ * counts doubles, not bytes. `out_written` and `out_required` must each point
+ * to one writable, aligned size_t, must alias neither each other nor `out`,
+ * and are both set to 0 before anything else is read. A NULL argument this
+ * contract does not allow is refused with SIDEREON_STATUS_NULL_POINTER rather
+ * than dereferenced; a non-null pointer that is not valid for the whole call
+ * cannot be checked and is undefined behavior.
+ */
+enum SidereonStatus sidereon_tec_grid_values_tecu(const struct SidereonTecGrid *grid,
+                                                  double *out,
+                                                  size_t len,
+                                                  size_t *out_written,
+                                                  size_t *out_required);
+
+/**
+ * Evaluate vertical TEC at a pierce point on a standalone TecGrid.
+ *
+ * The pierce-point latitude and longitude are degrees, the unit the engine
+ * takes, and reach it unchanged, so a query on a grid node is evaluated at
+ * that node exactly. The engine clamps the latitude to `[-87.5, 87.5]`
+ * degrees, the band an IONEX grid covers, and evaluates at that effective
+ * coordinate: a query at 89 degrees returns the value at 87.5 degrees with
+ * SIDEREON_STATUS_OK and no degraded or gap marker, because nothing was
+ * interpolated around.
+ *
+ * The clamp compares, so it takes an infinite latitude too: a positive
+ * infinity is above the upper bound and evaluates at 87.5, a negative
+ * infinity is below the lower bound and evaluates at -87.5, each as ordinary
+ * a success or an ordinary out-of-bounds failure as any other latitude
+ * reaching that effective coordinate. A NaN latitude compares false against
+ * both bounds, so it passes through unchanged and the engine's shared
+ * validation refuses it as an InvalidField naming `latitude` and `not
+ * finite`. The longitude and the epoch are not clamped. `unix_nanos` is an
+ * exact integer the engine converts to its own `f64` epoch axis.
+ * `missing_node_policy` is a SidereonIonexMissingNodePolicy tag: strict
+ * refuses a query that weights a node without a value, renormalizing
+ * interpolates from the weighted nodes that hold values and marks the result
+ * degraded.
+ *
+ * `out_gap` carries the non-available nodes in both directions: the ones a
+ * renormalized value was interpolated around, and the ones a strict refusal
+ * names. `out_error` may be NULL; when it is not, a failure fills it with the
+ * typed detail. Every writable output is cleared before any argument is
+ * validated: `*out_vtec` to NaN, `*out_gap` to no gap and `*out_error` to no
+ * failure, so a null partner never leaves another output stale.
+ *
+ * This is the convenience route. Its failure text is the thread-local message,
+ * which the next failing call in this thread overwrites, and an InvalidField's
+ * field label and reason exist only inside that text. Use
+ * sidereon_tec_grid_vtec_at_pierce_point_result for a failure the caller owns
+ * in full.
+ *
+ * Safety: `grid` must be a live SidereonTecGrid handle, not freed for the
+ * duration of the call; `out_vtec` must point to one writable, aligned double
+ * that no other argument aliases; `out_gap` must point to one writable,
+ * aligned SidereonIonexNodeGap that no other argument aliases; `out_error` may
+ * be NULL, which discards the detail; otherwise it must point to one writable,
+ * aligned SidereonTecGridError that no other argument aliases. A NULL argument
+ * this contract does not allow is refused with SIDEREON_STATUS_NULL_POINTER
+ * rather than dereferenced; a non-null pointer that is not valid for the whole
+ * call cannot be checked and is undefined behavior.
+ */
+enum SidereonStatus sidereon_tec_grid_vtec_at_pierce_point(const struct SidereonTecGrid *grid,
+                                                           int64_t unix_nanos,
+                                                           double lat_deg,
+                                                           double lon_deg,
+                                                           uint32_t missing_node_policy,
+                                                           double *out_vtec,
+                                                           struct SidereonIonexNodeGap *out_gap,
+                                                           struct SidereonTecGridError *out_error);
+
+/**
+ * Evaluate vertical TEC at a pierce point and take an owned record of it.
+ *
+ * Same inputs and same angular contract as
+ * sidereon_tec_grid_vtec_at_pierce_point: the pierce-point latitude and
+ * longitude are degrees and reach the engine unchanged, `unix_nanos` is an
+ * exact integer, and `missing_node_policy` is a
+ * SidereonIonexMissingNodePolicy tag. The engine clamps the latitude to
+ * `[-87.5, 87.5]` degrees here too, and this route reports no more about the
+ * clamp than the convenience one does: the effective coordinate is what the
+ * grid was queried at, and an out-of-bounds `axis_value` on the latitude axis
+ * is that effective coordinate, not the latitude the caller supplied. An
+ * infinite latitude is clamped here
+ * the same way, positive to 87.5 and negative to -87.5; a NaN latitude is
+ * not clamped and is refused, and this route is where its InvalidField label
+ * `latitude` and reason `not finite` survive as owned text.
+ *
+ * The difference is ownership. This route returns SIDEREON_STATUS_OK whenever
+ * the call itself was well formed and hands back a newly owned
+ * SidereonTecGridResult carrying the value or the complete failure: the
+ * status, the typed detail with its indexed corner masks, axis name and
+ * counts, the exact InvalidField label and reason, and the engine's whole
+ * message. All of it survives freeing the grid and any number of later
+ * failing calls in this thread.
+ *
+ * On a structural failure of the call itself -- a null grid, a null
+ * out-parameter, or a policy tag this binding does not name -- `*out_result`
+ * is set to NULL, the returned status is not OK, nothing is allocated, and
+ * the text is in the thread-local message. Release the result with
+ * sidereon_tec_grid_result_free.
+ *
+ * Safety: `grid` must be a live SidereonTecGrid handle, not freed for the
+ * duration of the call; `out_result` must point to writable, aligned storage
+ * for one `SidereonTecGridResult *`, which is set to NULL before any work and
+ * receives a newly owned handle only on SIDEREON_STATUS_OK; release it with
+ * sidereon_tec_grid_result_free. The output slot must be disjoint from the
+ * grid's own storage: it is written while a Rust reference to the grid is
+ * live. A NULL argument this contract does not allow is refused with
+ * SIDEREON_STATUS_NULL_POINTER rather than dereferenced; a non-null pointer
+ * that is not valid for the whole call cannot be checked and is undefined
+ * behavior.
+ */
+enum SidereonStatus sidereon_tec_grid_vtec_at_pierce_point_result(const struct SidereonTecGrid *grid,
+                                                                  int64_t unix_nanos,
+                                                                  double lat_deg,
+                                                                  double lon_deg,
+                                                                  uint32_t missing_node_policy,
+                                                                  struct SidereonTecGridResult **out_result);
+
+/**
+ * Release an owned IONEX sample-construction result. Passing NULL is a no-op.
+ *
+ * Safety: `result` may be NULL, which is a no-op; otherwise it must be a live
+ * SidereonTecSamplesResult handle this binding produced, and it must be
+ * passed here exactly once. The handle and every pointer read out of it are
+ * invalid afterwards. This call returns nothing, so it reports no status: a
+ * pointer that is neither NULL nor such a handle cannot be checked and is
+ * undefined behavior.
+ */
+void sidereon_tec_samples_result_free(struct SidereonTecSamplesResult *result);
+
+/**
+ * Copy the failure text of an owned IONEX sample-construction result. A
+ * successful result reports a required length of zero. The result owns this
+ * text, so it is unaffected by later calls. Uses the variable-length output
+ * contract.
+ *
+ * Safety: `result` must be a live SidereonTecSamplesResult handle, not freed
+ * for the duration of the call; `out` may be NULL only when `len` is 0, which
+ * queries the required count through `out_required`; otherwise it must point
+ * to `len` writable, aligned bytes that do not overlap the handle being read.
+ * `len` is the buffer size in bytes. `out_written` and `out_required` must
+ * each point to one writable, aligned size_t, must alias neither each other
+ * nor `out`, and are both set to 0 before anything else is read. The bytes are
+ * copied verbatim: no NUL terminator is appended, so a caller wanting a C
+ * string must allocate one more byte and write it. A NULL argument this
+ * contract does not allow is refused with SIDEREON_STATUS_NULL_POINTER rather
+ * than dereferenced; a non-null pointer that is not valid for the whole call
+ * cannot be checked and is undefined behavior.
+ */
+enum SidereonStatus sidereon_tec_samples_result_get_message(const struct SidereonTecSamplesResult *result,
+                                                            uint8_t *out,
+                                                            size_t len,
+                                                            size_t *out_written,
+                                                            size_t *out_required);
+
+/**
+ * Copy the fixed-width outcome of an owned IONEX sample-construction result.
+ *
+ * `out_outcome` is written before the result pointer is validated, so it never
+ * keeps whatever the caller left in it.
+ *
+ * Safety: `result` must be a live SidereonTecSamplesResult handle, not freed
+ * for the duration of the call; `out_outcome` must point to one writable,
+ * aligned SidereonTecSamplesOutcome that no other argument aliases. A NULL
+ * argument this contract does not allow is refused with
+ * SIDEREON_STATUS_NULL_POINTER rather than dereferenced; a non-null pointer
+ * that is not valid for the whole call cannot be checked and is undefined
+ * behavior.
+ */
+enum SidereonStatus sidereon_tec_samples_result_get_outcome(const struct SidereonTecSamplesResult *result,
+                                                            struct SidereonTecSamplesOutcome *out_outcome);
+
+/**
  * Latitude (degrees) of the day-night terminator at a query longitude, given
  * the sub-solar point. Delegates to
  * sidereon_core::astro::observation::terminator_latitude_deg.
@@ -34870,6 +50370,16 @@ enum SidereonStatus sidereon_tle_file_count(const struct SidereonTleFile *file, 
 void sidereon_tle_file_free(struct SidereonTleFile *file);
 
 /**
+ * Write the one-based line number of record `index`'s line 1 in the file
+ * text to *out_line_number.
+ *
+ * Safety: file must be a live handle; out_line_number must point to a size_t.
+ */
+enum SidereonStatus sidereon_tle_file_line_number(const struct SidereonTleFile *file,
+                                                  size_t index,
+                                                  size_t *out_line_number);
+
+/**
  * Copy the name line for the record at index into buf as a null-terminated C
  * string. Writes the total number of bytes required (including the
  * terminator) to *out_required. Pass buf NULL with len 0 to query the size;
@@ -34887,6 +50397,46 @@ enum SidereonStatus sidereon_tle_file_name(const struct SidereonTleFile *file,
                                            size_t *out_required);
 
 /**
+ * Copy rejected record `index` of a TLE file into *out_record. Its name line
+ * is read with sidereon_tle_file_rejected_name and, for an INVALID record,
+ * the refusal with sidereon_tle_file_rejected_error.
+ *
+ * Safety: file must be a live handle; out_record must point to a
+ * SidereonTleRejectedRecord.
+ */
+enum SidereonStatus sidereon_tle_file_rejected(const struct SidereonTleFile *file,
+                                               size_t index,
+                                               struct SidereonTleRejectedRecord *out_record);
+
+/**
+ * Copy the refusal of rejected record `index` (not null-terminated) under
+ * the variable-length output contract. Empty for a record whose issue is not
+ * SIDEREON_TLE_RECORD_ISSUE_INVALID.
+ *
+ * Safety: as for sidereon_tle_file_rejected_name.
+ */
+enum SidereonStatus sidereon_tle_file_rejected_error(const struct SidereonTleFile *file,
+                                                     size_t index,
+                                                     uint8_t *out,
+                                                     size_t len,
+                                                     size_t *out_written,
+                                                     size_t *out_required);
+
+/**
+ * Copy the name line of rejected record `index` (not null-terminated, empty
+ * when the record had none) under the variable-length output contract.
+ *
+ * Safety: file must be a live handle; out points to len writable bytes or is
+ * NULL when len is 0; out_written and out_required point to size_t.
+ */
+enum SidereonStatus sidereon_tle_file_rejected_name(const struct SidereonTleFile *file,
+                                                    size_t index,
+                                                    uint8_t *out,
+                                                    size_t len,
+                                                    size_t *out_written,
+                                                    size_t *out_required);
+
+/**
  * Write a newly owned, independent copy of the TLE handle for the record at
  * index to *out_tle. The returned handle can be used with any sidereon_tle_*
  * entry point (propagation, look-angles, metadata) and outlives the file; it
@@ -34900,10 +50450,9 @@ enum SidereonStatus sidereon_tle_file_satellite(const struct SidereonTleFile *fi
                                                 struct SidereonTle **out_tle);
 
 /**
- * Write the number of records that were found but skipped because their element
- * set failed SGP4 initialization to *out_skipped. An empty file
- * (count == 0, skipped == 0) is thus distinguishable from a fully corrupt one
- * (count == 0, skipped > 0).
+ * Write the number of rejected records (sidereon_tle_file_rejected) to
+ * *out_skipped. An empty file (count == 0, skipped == 0) is thus
+ * distinguishable from a fully corrupt one (count == 0, skipped > 0).
  *
  * Safety: file must be a live handle; out_skipped must point to a size_t.
  */
@@ -34959,6 +50508,22 @@ enum SidereonStatus sidereon_tle_load(const char *line1,
                                       const char *line2,
                                       uint32_t opsmode,
                                       struct SidereonTle **out_tle);
+
+/**
+ * Parse a TLE line pair under `policy`, a SidereonTlePolicy value, and
+ * initialize an SGP4 satellite. SIDEREON_TLE_POLICY_LENIENT reads a
+ * column-69 checksum that disagrees or is not a digit and reports it through
+ * sidereon_tle_checksum_warnings; sidereon_tle_load refuses both. On success
+ * writes a newly owned handle to *out_tle. Release it with sidereon_tle_free.
+ *
+ * Safety: line1 and line2 must be null-terminated within 128 bytes; out_tle
+ * must point to storage for a SidereonTle*.
+ */
+enum SidereonStatus sidereon_tle_load_with_policy(const char *line1,
+                                                  const char *line2,
+                                                  uint32_t opsmode,
+                                                  uint32_t policy,
+                                                  struct SidereonTle **out_tle);
 
 /**
  * Compute topocentric look angles from a TLE over UTC unix-microsecond epochs.

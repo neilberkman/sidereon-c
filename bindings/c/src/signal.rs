@@ -1,5 +1,41 @@
 use super::*;
 
+pub(crate) fn record_signal_error(
+    operation: &str,
+    error: sidereon_core::signal::SignalError,
+) -> SidereonStatus {
+    crate::engine_error::record_engine_error(
+        crate::engine_error::SidereonEngineErrorFamily::Signal,
+        operation,
+        crate::engine_error::signal_error_value(&error),
+    );
+    extra_invalid_arg(operation, error)
+}
+
+pub(crate) fn record_carrier_phase_error(
+    operation: &str,
+    error: sidereon_core::carrier_phase::CarrierPhaseError,
+) -> SidereonStatus {
+    crate::engine_error::record_engine_error(
+        crate::engine_error::SidereonEngineErrorFamily::CarrierPhase,
+        operation,
+        crate::engine_error::carrier_phase_error_value(error),
+    );
+    extra_invalid_arg(operation, error)
+}
+
+fn record_signal_analysis_error(
+    operation: &str,
+    error: sidereon_core::signal::analysis::SignalAnalysisError,
+) -> SidereonStatus {
+    crate::engine_error::record_engine_error(
+        crate::engine_error::SidereonEngineErrorFamily::SignalAnalysis,
+        operation,
+        crate::engine_error::signal_analysis_error_value(&error),
+    );
+    extra_invalid_arg(operation, error)
+}
+
 // --- GNSS carrier frequencies (sidereon_core::frequencies) -------------------
 
 /// A GNSS carrier band, mirroring sidereon_core::frequencies::CarrierBand.
@@ -371,7 +407,7 @@ pub unsafe extern "C" fn sidereon_rinex_observation_wavelength_m(
 /// valid systems have no constellation-wide default. Delegates to
 /// `sidereon_core::frequencies::default_iono_free_pair`.
 ///
-/// Safety: out_pair and out_present point to writable storage.
+/// Safety: out_pair and out_present point to disjoint writable storage.
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_default_iono_free_pair(
     system: u32,
@@ -382,6 +418,32 @@ pub unsafe extern "C" fn sidereon_default_iono_free_pair(
         "sidereon_default_iono_free_pair",
         SidereonStatus::Panic,
         || {
+            if !out_pair.is_null() && !out_present.is_null() {
+                let outputs = [
+                    Some((
+                        c_try!(super::checked_output_range(
+                            "sidereon_default_iono_free_pair",
+                            out_pair,
+                            1,
+                            "out_pair"
+                        )),
+                        "out_pair",
+                    )),
+                    Some((
+                        c_try!(super::checked_output_range(
+                            "sidereon_default_iono_free_pair",
+                            out_present,
+                            1,
+                            "out_present"
+                        )),
+                        "out_present",
+                    )),
+                ];
+                c_try!(super::reject_overlapping_optional_outputs(
+                    "sidereon_default_iono_free_pair",
+                    &outputs
+                ));
+            }
             let out_pair = c_try!(require_out(
                 out_pair,
                 "sidereon_default_iono_free_pair",
@@ -462,7 +524,7 @@ pub unsafe extern "C" fn sidereon_carrier_phase_meters(
     f_hz: f64,
     out: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_carrier_phase_meters",
         SidereonStatus::Panic,
         || {
@@ -473,7 +535,7 @@ pub unsafe extern "C" fn sidereon_carrier_phase_meters(
                     *out = v;
                     SidereonStatus::Ok
                 }
-                Err(err) => extra_invalid_arg("sidereon_carrier_phase_meters", err),
+                Err(err) => record_carrier_phase_error("sidereon_carrier_phase_meters", err),
             }
         },
     )
@@ -489,7 +551,7 @@ pub unsafe extern "C" fn sidereon_carrier_geometry_free(
     l2_m: f64,
     out: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_carrier_geometry_free",
         SidereonStatus::Panic,
         || {
@@ -500,7 +562,7 @@ pub unsafe extern "C" fn sidereon_carrier_geometry_free(
                     *out = v;
                     SidereonStatus::Ok
                 }
-                Err(err) => extra_invalid_arg("sidereon_carrier_geometry_free", err),
+                Err(err) => record_carrier_phase_error("sidereon_carrier_geometry_free", err),
             }
         },
     )
@@ -516,7 +578,7 @@ pub unsafe extern "C" fn sidereon_carrier_wide_lane_wavelength(
     f2_hz: f64,
     out: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_carrier_wide_lane_wavelength",
         SidereonStatus::Panic,
         || {
@@ -531,7 +593,9 @@ pub unsafe extern "C" fn sidereon_carrier_wide_lane_wavelength(
                     *out = v;
                     SidereonStatus::Ok
                 }
-                Err(err) => extra_invalid_arg("sidereon_carrier_wide_lane_wavelength", err),
+                Err(err) => {
+                    record_carrier_phase_error("sidereon_carrier_wide_lane_wavelength", err)
+                }
             }
         },
     )
@@ -549,7 +613,7 @@ pub unsafe extern "C" fn sidereon_carrier_narrow_lane_code(
     f2_hz: f64,
     out: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_carrier_narrow_lane_code",
         SidereonStatus::Panic,
         || {
@@ -560,7 +624,7 @@ pub unsafe extern "C" fn sidereon_carrier_narrow_lane_code(
                     *out = v;
                     SidereonStatus::Ok
                 }
-                Err(err) => extra_invalid_arg("sidereon_carrier_narrow_lane_code", err),
+                Err(err) => record_carrier_phase_error("sidereon_carrier_narrow_lane_code", err),
             }
         },
     )
@@ -580,7 +644,7 @@ pub unsafe extern "C" fn sidereon_carrier_melbourne_wubbena(
     f2_hz: f64,
     out: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_carrier_melbourne_wubbena",
         SidereonStatus::Panic,
         || {
@@ -602,7 +666,7 @@ pub unsafe extern "C" fn sidereon_carrier_melbourne_wubbena(
                     *out = v;
                     SidereonStatus::Ok
                 }
-                Err(err) => extra_invalid_arg("sidereon_carrier_melbourne_wubbena", err),
+                Err(err) => record_carrier_phase_error("sidereon_carrier_melbourne_wubbena", err),
             }
         },
     )
@@ -622,7 +686,7 @@ pub unsafe extern "C" fn sidereon_carrier_wide_lane_cycles(
     f2_hz: f64,
     out: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_carrier_wide_lane_cycles",
         SidereonStatus::Panic,
         || {
@@ -640,7 +704,7 @@ pub unsafe extern "C" fn sidereon_carrier_wide_lane_cycles(
                     *out = v;
                     SidereonStatus::Ok
                 }
-                Err(err) => extra_invalid_arg("sidereon_carrier_wide_lane_cycles", err),
+                Err(err) => record_carrier_phase_error("sidereon_carrier_wide_lane_cycles", err),
             }
         },
     )
@@ -657,7 +721,7 @@ pub unsafe extern "C" fn sidereon_carrier_code_minus_carrier(
     f_hz: f64,
     out: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_carrier_code_minus_carrier",
         SidereonStatus::Panic,
         || {
@@ -672,7 +736,7 @@ pub unsafe extern "C" fn sidereon_carrier_code_minus_carrier(
                     *out = v;
                     SidereonStatus::Ok
                 }
-                Err(err) => extra_invalid_arg("sidereon_carrier_code_minus_carrier", err),
+                Err(err) => record_carrier_phase_error("sidereon_carrier_code_minus_carrier", err),
             }
         },
     )
@@ -690,17 +754,21 @@ pub unsafe extern "C" fn sidereon_signal_ca_chip(
     index: i64,
     out: *mut i8,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_signal_ca_chip", SidereonStatus::Panic, || {
-        let out = c_try!(require_out(out, "sidereon_signal_ca_chip", "out"));
-        *out = 0;
-        match sidereon_core::signal::ca_chip(prn, index) {
-            Ok(v) => {
-                *out = v;
-                SidereonStatus::Ok
+    crate::engine_error::engine_error_operation_boundary(
+        "sidereon_signal_ca_chip",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(out, "sidereon_signal_ca_chip", "out"));
+            *out = 0;
+            match sidereon_core::signal::ca_chip(prn, index) {
+                Ok(v) => {
+                    *out = v;
+                    SidereonStatus::Ok
+                }
+                Err(err) => record_signal_error("sidereon_signal_ca_chip", err),
             }
-            Err(err) => extra_invalid_arg("sidereon_signal_ca_chip", err),
-        }
-    })
+        },
+    )
 }
 
 /// Coherent-integration power loss (fraction in 0..=1) from a frequency error.
@@ -713,7 +781,7 @@ pub unsafe extern "C" fn sidereon_signal_coherent_loss(
     integration_time_s: f64,
     out: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_signal_coherent_loss",
         SidereonStatus::Panic,
         || {
@@ -724,7 +792,7 @@ pub unsafe extern "C" fn sidereon_signal_coherent_loss(
                     *out = v;
                     SidereonStatus::Ok
                 }
-                Err(err) => extra_invalid_arg("sidereon_signal_coherent_loss", err),
+                Err(err) => record_signal_error("sidereon_signal_coherent_loss", err),
             }
         },
     )
@@ -740,7 +808,7 @@ pub unsafe extern "C" fn sidereon_signal_coherent_loss_db(
     integration_time_s: f64,
     out: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_signal_coherent_loss_db",
         SidereonStatus::Panic,
         || {
@@ -751,7 +819,7 @@ pub unsafe extern "C" fn sidereon_signal_coherent_loss_db(
                     *out = v;
                     SidereonStatus::Ok
                 }
-                Err(err) => extra_invalid_arg("sidereon_signal_coherent_loss_db", err),
+                Err(err) => record_signal_error("sidereon_signal_coherent_loss_db", err),
             }
         },
     )
@@ -767,17 +835,21 @@ pub unsafe extern "C" fn sidereon_signal_snr_post_db(
     integration_time_s: f64,
     out: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_signal_snr_post_db", SidereonStatus::Panic, || {
-        let out = c_try!(require_out(out, "sidereon_signal_snr_post_db", "out"));
-        *out = 0.0;
-        match sidereon_core::signal::snr_post_db(cn0_dbhz, integration_time_s) {
-            Ok(v) => {
-                *out = v;
-                SidereonStatus::Ok
+    crate::engine_error::engine_error_operation_boundary(
+        "sidereon_signal_snr_post_db",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(out, "sidereon_signal_snr_post_db", "out"));
+            *out = 0.0;
+            match sidereon_core::signal::snr_post_db(cn0_dbhz, integration_time_s) {
+                Ok(v) => {
+                    *out = v;
+                    SidereonStatus::Ok
+                }
+                Err(err) => record_signal_error("sidereon_signal_snr_post_db", err),
             }
-            Err(err) => extra_invalid_arg("sidereon_signal_snr_post_db", err),
-        }
-    })
+        },
+    )
 }
 
 // --- GNSS signal correlation / acquisition (sidereon_core::signal) -----------
@@ -889,27 +961,31 @@ pub unsafe extern "C" fn sidereon_signal_ca_code(
     out_written: *mut usize,
     out_required: *mut usize,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_signal_ca_code", SidereonStatus::Panic, || {
-        c_try!(init_copy_counts(
-            "sidereon_signal_ca_code",
-            out_written,
-            out_required
-        ));
-        let code = match sidereon_core::signal::ca_code(prn) {
-            Ok(c) => c,
-            Err(err) => return extra_invalid_arg("sidereon_signal_ca_code", err),
-        };
-        c_try!(copy_prefix_to_c(
-            "sidereon_signal_ca_code",
-            "out",
-            &code,
-            out,
-            len,
-            out_written,
-            out_required,
-        ));
-        SidereonStatus::Ok
-    })
+    crate::engine_error::engine_error_operation_boundary(
+        "sidereon_signal_ca_code",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_signal_ca_code",
+                out_written,
+                out_required
+            ));
+            let code = match sidereon_core::signal::ca_code(prn) {
+                Ok(c) => c,
+                Err(err) => return record_signal_error("sidereon_signal_ca_code", err),
+            };
+            c_try!(copy_prefix_to_c(
+                "sidereon_signal_ca_code",
+                "out",
+                &code,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
 }
 
 /// Build a sampled C/A-code replica. Variable-length output contract. Delegates
@@ -926,34 +1002,38 @@ pub unsafe extern "C" fn sidereon_signal_replica(
     out_written: *mut usize,
     out_required: *mut usize,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_signal_replica", SidereonStatus::Panic, || {
-        c_try!(init_copy_counts(
-            "sidereon_signal_replica",
-            out_written,
-            out_required
-        ));
-        let options = c_try!(require_ref(options, "sidereon_signal_replica", "options"));
-        let opts = sidereon_core::signal::ReplicaOptions::new(
-            options.sample_rate_hz,
-            options.num_samples,
-            options.code_phase_chips,
-            options.code_doppler_hz,
-        );
-        let code = match sidereon_core::signal::replica(prn, opts) {
-            Ok(c) => c,
-            Err(err) => return extra_invalid_arg("sidereon_signal_replica", err),
-        };
-        c_try!(copy_prefix_to_c(
-            "sidereon_signal_replica",
-            "out",
-            &code,
-            out,
-            len,
-            out_written,
-            out_required,
-        ));
-        SidereonStatus::Ok
-    })
+    crate::engine_error::engine_error_operation_boundary(
+        "sidereon_signal_replica",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_signal_replica",
+                out_written,
+                out_required
+            ));
+            let options = c_try!(require_ref(options, "sidereon_signal_replica", "options"));
+            let opts = sidereon_core::signal::ReplicaOptions::new(
+                options.sample_rate_hz,
+                options.num_samples,
+                options.code_phase_chips,
+                options.code_doppler_hz,
+            );
+            let code = match sidereon_core::signal::replica(prn, opts) {
+                Ok(c) => c,
+                Err(err) => return record_signal_error("sidereon_signal_replica", err),
+            };
+            c_try!(copy_prefix_to_c(
+                "sidereon_signal_replica",
+                "out",
+                &code,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
 }
 
 /// Coherently correlate a complex sample record against a PRN replica. Delegates
@@ -969,32 +1049,36 @@ pub unsafe extern "C" fn sidereon_signal_correlate(
     options: *const SidereonCorrelateOptions,
     out: *mut SidereonCorrelationResult,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_signal_correlate", SidereonStatus::Panic, || {
-        let out = c_try!(require_out(out, "sidereon_signal_correlate", "out"));
-        *out = SidereonCorrelationResult {
-            i: 0.0,
-            q: 0.0,
-            power: 0.0,
-        };
-        let options = c_try!(require_ref(options, "sidereon_signal_correlate", "options"));
-        let samples = c_try!(iq_samples_from_c("sidereon_signal_correlate", iq, count));
-        let mut opts = sidereon_core::signal::CorrelateOptions::default();
-        opts.sample_rate_hz = options.sample_rate_hz;
-        opts.doppler_hz = options.doppler_hz;
-        opts.code_phase_chips = options.code_phase_chips;
-        opts.code_doppler_hz = options.code_doppler_hz;
-        match sidereon_core::signal::correlate(&samples, prn, opts) {
-            Ok(r) => {
-                *out = SidereonCorrelationResult {
-                    i: r.i,
-                    q: r.q,
-                    power: r.power,
-                };
-                SidereonStatus::Ok
+    crate::engine_error::engine_error_operation_boundary(
+        "sidereon_signal_correlate",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(out, "sidereon_signal_correlate", "out"));
+            *out = SidereonCorrelationResult {
+                i: 0.0,
+                q: 0.0,
+                power: 0.0,
+            };
+            let options = c_try!(require_ref(options, "sidereon_signal_correlate", "options"));
+            let samples = c_try!(iq_samples_from_c("sidereon_signal_correlate", iq, count));
+            let mut opts = sidereon_core::signal::CorrelateOptions::default();
+            opts.sample_rate_hz = options.sample_rate_hz;
+            opts.doppler_hz = options.doppler_hz;
+            opts.code_phase_chips = options.code_phase_chips;
+            opts.code_doppler_hz = options.code_doppler_hz;
+            match sidereon_core::signal::correlate(&samples, prn, opts) {
+                Ok(r) => {
+                    *out = SidereonCorrelationResult {
+                        i: r.i,
+                        q: r.q,
+                        power: r.power,
+                    };
+                    SidereonStatus::Ok
+                }
+                Err(err) => record_signal_error("sidereon_signal_correlate", err),
             }
-            Err(err) => extra_invalid_arg("sidereon_signal_correlate", err),
-        }
-    })
+        },
+    )
 }
 
 /// Coherent correlation against an explicit sampled code. Writes the in-phase
@@ -1014,7 +1098,7 @@ pub unsafe extern "C" fn sidereon_signal_correlate_against(
     out_i: *mut f64,
     out_q: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_signal_correlate_against",
         SidereonStatus::Panic,
         || {
@@ -1047,7 +1131,7 @@ pub unsafe extern "C" fn sidereon_signal_correlate_against(
                     *out_q = q;
                     SidereonStatus::Ok
                 }
-                Err(err) => extra_invalid_arg("sidereon_signal_correlate_against", err),
+                Err(err) => record_signal_error("sidereon_signal_correlate_against", err),
             }
         },
     )
@@ -1074,61 +1158,65 @@ pub unsafe extern "C" fn sidereon_signal_acquire(
     out_written: *mut usize,
     out_required: *mut usize,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_signal_acquire", SidereonStatus::Panic, || {
-        c_try!(init_copy_counts(
-            "sidereon_signal_acquire",
-            out_written,
-            out_required
-        ));
-        let out_result = c_try!(require_out(
-            out_result,
-            "sidereon_signal_acquire",
-            "out_result"
-        ));
-        *out_result = SidereonAcquisitionResult {
-            code_phase_chips: 0.0,
-            doppler_hz: 0.0,
-            peak_metric: 0.0,
-            metric: 0.0,
-            peak_power: 0.0,
-            grid_code_phase_bins: 0,
-            grid_doppler_step_hz: 0.0,
-            grid_samples_per_chip: 0.0,
-            grid_doppler_bin_count: 0,
-        };
-        let options = c_try!(require_ref(options, "sidereon_signal_acquire", "options"));
-        let iq = c_try!(iq_samples_from_c("sidereon_signal_acquire", samples, count));
-        let mut opts = sidereon_core::signal::AcquisitionOptions::default();
-        opts.sample_rate_hz = options.sample_rate_hz;
-        opts.doppler_min_hz = options.doppler_min_hz;
-        opts.doppler_max_hz = options.doppler_max_hz;
-        opts.doppler_step_hz = options.doppler_step_hz;
-        let result = match sidereon_core::signal::acquire(&iq, prn, opts) {
-            Ok(r) => r,
-            Err(err) => return extra_invalid_arg("sidereon_signal_acquire", err),
-        };
-        *out_result = SidereonAcquisitionResult {
-            code_phase_chips: result.code_phase_chips,
-            doppler_hz: result.doppler_hz,
-            peak_metric: result.peak_metric,
-            metric: result.metric,
-            peak_power: result.peak_power,
-            grid_code_phase_bins: result.grid.code_phase_bins,
-            grid_doppler_step_hz: result.grid.doppler_step_hz,
-            grid_samples_per_chip: result.grid.samples_per_chip,
-            grid_doppler_bin_count: result.grid.doppler_hz.len(),
-        };
-        c_try!(copy_prefix_to_c(
-            "sidereon_signal_acquire",
-            "out_doppler_hz",
-            &result.grid.doppler_hz,
-            out_doppler_hz,
-            len,
-            out_written,
-            out_required,
-        ));
-        SidereonStatus::Ok
-    })
+    crate::engine_error::engine_error_operation_boundary(
+        "sidereon_signal_acquire",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_signal_acquire",
+                out_written,
+                out_required
+            ));
+            let out_result = c_try!(require_out(
+                out_result,
+                "sidereon_signal_acquire",
+                "out_result"
+            ));
+            *out_result = SidereonAcquisitionResult {
+                code_phase_chips: 0.0,
+                doppler_hz: 0.0,
+                peak_metric: 0.0,
+                metric: 0.0,
+                peak_power: 0.0,
+                grid_code_phase_bins: 0,
+                grid_doppler_step_hz: 0.0,
+                grid_samples_per_chip: 0.0,
+                grid_doppler_bin_count: 0,
+            };
+            let options = c_try!(require_ref(options, "sidereon_signal_acquire", "options"));
+            let iq = c_try!(iq_samples_from_c("sidereon_signal_acquire", samples, count));
+            let mut opts = sidereon_core::signal::AcquisitionOptions::default();
+            opts.sample_rate_hz = options.sample_rate_hz;
+            opts.doppler_min_hz = options.doppler_min_hz;
+            opts.doppler_max_hz = options.doppler_max_hz;
+            opts.doppler_step_hz = options.doppler_step_hz;
+            let result = match sidereon_core::signal::acquire(&iq, prn, opts) {
+                Ok(r) => r,
+                Err(err) => return record_signal_error("sidereon_signal_acquire", err),
+            };
+            *out_result = SidereonAcquisitionResult {
+                code_phase_chips: result.code_phase_chips,
+                doppler_hz: result.doppler_hz,
+                peak_metric: result.peak_metric,
+                metric: result.metric,
+                peak_power: result.peak_power,
+                grid_code_phase_bins: result.grid.code_phase_bins,
+                grid_doppler_step_hz: result.grid.doppler_step_hz,
+                grid_samples_per_chip: result.grid.samples_per_chip,
+                grid_doppler_bin_count: result.grid.doppler_hz.len(),
+            };
+            c_try!(copy_prefix_to_c(
+                "sidereon_signal_acquire",
+                "out_doppler_hz",
+                &result.grid.doppler_hz,
+                out_doppler_hz,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
 }
 
 /// Single-lag circular correlation between two equal-length codes. Delegates to
@@ -1144,7 +1232,7 @@ pub unsafe extern "C" fn sidereon_signal_correlation_at(
     lag: i64,
     out: *mut i32,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_signal_correlation_at",
         SidereonStatus::Panic,
         || {
@@ -1167,7 +1255,7 @@ pub unsafe extern "C" fn sidereon_signal_correlation_at(
                     *out = v;
                     SidereonStatus::Ok
                 }
-                Err(err) => extra_invalid_arg("sidereon_signal_correlation_at", err),
+                Err(err) => record_signal_error("sidereon_signal_correlation_at", err),
             }
         },
     )
@@ -1189,7 +1277,7 @@ pub unsafe extern "C" fn sidereon_signal_cross_correlation(
     out_written: *mut usize,
     out_required: *mut usize,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_signal_cross_correlation",
         SidereonStatus::Panic,
         || {
@@ -1212,7 +1300,7 @@ pub unsafe extern "C" fn sidereon_signal_cross_correlation(
             ));
             let corr = match sidereon_core::signal::cross_correlation(code_a, code_b) {
                 Ok(c) => c,
-                Err(err) => return extra_invalid_arg("sidereon_signal_cross_correlation", err),
+                Err(err) => return record_signal_error("sidereon_signal_cross_correlation", err),
             };
             c_try!(copy_prefix_to_c(
                 "sidereon_signal_cross_correlation",
@@ -1476,7 +1564,7 @@ pub unsafe extern "C" fn sidereon_signal_modulation_label(
     out_written: *mut usize,
     out_required: *mut usize,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_signal_modulation_label",
         SidereonStatus::Panic,
         || {
@@ -1511,7 +1599,7 @@ pub unsafe extern "C" fn sidereon_signal_modulation_code_rate_hz(
     modulation: *const SidereonSignalAnalysisModulation,
     out: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_signal_modulation_code_rate_hz",
         SidereonStatus::Panic,
         || {
@@ -1530,7 +1618,9 @@ pub unsafe extern "C" fn sidereon_signal_modulation_code_rate_hz(
                     *out = value;
                     SidereonStatus::Ok
                 }
-                Err(err) => extra_invalid_arg("sidereon_signal_modulation_code_rate_hz", err),
+                Err(err) => {
+                    record_signal_analysis_error("sidereon_signal_modulation_code_rate_hz", err)
+                }
             }
         },
     )
@@ -1545,7 +1635,7 @@ pub unsafe extern "C" fn sidereon_signal_analysis_psd(
     offset_hz: f64,
     out: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_signal_analysis_psd",
         SidereonStatus::Panic,
         || {
@@ -1560,7 +1650,7 @@ pub unsafe extern "C" fn sidereon_signal_analysis_psd(
                     *out = value;
                     SidereonStatus::Ok
                 }
-                Err(err) => extra_invalid_arg("sidereon_signal_analysis_psd", err),
+                Err(err) => record_signal_analysis_error("sidereon_signal_analysis_psd", err),
             }
         },
     )
@@ -1576,21 +1666,25 @@ pub unsafe extern "C" fn sidereon_signal_psd_hz(
     offset_hz: f64,
     out: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_signal_psd_hz", SidereonStatus::Panic, || {
-        let out = c_try!(require_out(out, "sidereon_signal_psd_hz", "out"));
-        *out = 0.0;
-        let modulation = c_try!(signal_analysis_modulation_from_c(
-            "sidereon_signal_psd_hz",
-            modulation
-        ));
-        match modulation.psd_hz(offset_hz) {
-            Ok(value) => {
-                *out = value;
-                SidereonStatus::Ok
+    crate::engine_error::engine_error_operation_boundary(
+        "sidereon_signal_psd_hz",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(out, "sidereon_signal_psd_hz", "out"));
+            *out = 0.0;
+            let modulation = c_try!(signal_analysis_modulation_from_c(
+                "sidereon_signal_psd_hz",
+                modulation
+            ));
+            match modulation.psd_hz(offset_hz) {
+                Ok(value) => {
+                    *out = value;
+                    SidereonStatus::Ok
+                }
+                Err(err) => record_signal_analysis_error("sidereon_signal_psd_hz", err),
             }
-            Err(err) => extra_invalid_arg("sidereon_signal_psd_hz", err),
-        }
-    })
+        },
+    )
 }
 
 /// Integrate normalized PSD over a two-sided receiver bandwidth.
@@ -1602,7 +1696,7 @@ pub unsafe extern "C" fn sidereon_signal_power_in_band(
     receiver_bandwidth_hz: f64,
     out: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_signal_power_in_band",
         SidereonStatus::Panic,
         || {
@@ -1618,7 +1712,7 @@ pub unsafe extern "C" fn sidereon_signal_power_in_band(
                     *out = value;
                     SidereonStatus::Ok
                 }
-                Err(err) => extra_invalid_arg("sidereon_signal_power_in_band", err),
+                Err(err) => record_signal_analysis_error("sidereon_signal_power_in_band", err),
             }
         },
     )
@@ -1633,7 +1727,7 @@ pub unsafe extern "C" fn sidereon_signal_fraction_power_in_band(
     receiver_bandwidth_hz: f64,
     out: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_signal_fraction_power_in_band",
         SidereonStatus::Panic,
         || {
@@ -1655,7 +1749,9 @@ pub unsafe extern "C" fn sidereon_signal_fraction_power_in_band(
                     *out = value;
                     SidereonStatus::Ok
                 }
-                Err(err) => extra_invalid_arg("sidereon_signal_fraction_power_in_band", err),
+                Err(err) => {
+                    record_signal_analysis_error("sidereon_signal_fraction_power_in_band", err)
+                }
             }
         },
     )
@@ -1670,7 +1766,7 @@ pub unsafe extern "C" fn sidereon_signal_analysis_fraction_power(
     receiver_bandwidth_hz: f64,
     out: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_signal_analysis_fraction_power",
         SidereonStatus::Panic,
         || {
@@ -1692,7 +1788,9 @@ pub unsafe extern "C" fn sidereon_signal_analysis_fraction_power(
                     *out = value;
                     SidereonStatus::Ok
                 }
-                Err(err) => extra_invalid_arg("sidereon_signal_analysis_fraction_power", err),
+                Err(err) => {
+                    record_signal_analysis_error("sidereon_signal_analysis_fraction_power", err)
+                }
             }
         },
     )
@@ -1707,7 +1805,7 @@ pub unsafe extern "C" fn sidereon_signal_rms_bandwidth_hz(
     receiver_bandwidth_hz: f64,
     out: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_signal_rms_bandwidth_hz",
         SidereonStatus::Panic,
         || {
@@ -1725,7 +1823,7 @@ pub unsafe extern "C" fn sidereon_signal_rms_bandwidth_hz(
                     *out = value;
                     SidereonStatus::Ok
                 }
-                Err(err) => extra_invalid_arg("sidereon_signal_rms_bandwidth_hz", err),
+                Err(err) => record_signal_analysis_error("sidereon_signal_rms_bandwidth_hz", err),
             }
         },
     )
@@ -1740,7 +1838,7 @@ pub unsafe extern "C" fn sidereon_signal_analysis_rms_bandwidth_hz(
     receiver_bandwidth_hz: f64,
     out: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_signal_analysis_rms_bandwidth_hz",
         SidereonStatus::Panic,
         || {
@@ -1762,7 +1860,9 @@ pub unsafe extern "C" fn sidereon_signal_analysis_rms_bandwidth_hz(
                     *out = value;
                     SidereonStatus::Ok
                 }
-                Err(err) => extra_invalid_arg("sidereon_signal_analysis_rms_bandwidth_hz", err),
+                Err(err) => {
+                    record_signal_analysis_error("sidereon_signal_analysis_rms_bandwidth_hz", err)
+                }
             }
         },
     )
@@ -1779,7 +1879,7 @@ pub unsafe extern "C" fn sidereon_signal_analysis_spectral_separation(
     receiver_bandwidth_hz: f64,
     out: *mut SidereonSignalAnalysisSpectralSeparation,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_signal_analysis_spectral_separation",
         SidereonStatus::Panic,
         || {
@@ -1807,7 +1907,10 @@ pub unsafe extern "C" fn sidereon_signal_analysis_spectral_separation(
             ) {
                 Ok(value) => value,
                 Err(err) => {
-                    return extra_invalid_arg("sidereon_signal_analysis_spectral_separation", err)
+                    return record_signal_analysis_error(
+                        "sidereon_signal_analysis_spectral_separation",
+                        err,
+                    );
                 }
             };
             let db_hz = match sidereon_core::signal::analysis::spectral_separation_coefficient_db_hz(
@@ -1817,7 +1920,10 @@ pub unsafe extern "C" fn sidereon_signal_analysis_spectral_separation(
             ) {
                 Ok(value) => value,
                 Err(err) => {
-                    return extra_invalid_arg("sidereon_signal_analysis_spectral_separation", err)
+                    return record_signal_analysis_error(
+                        "sidereon_signal_analysis_spectral_separation",
+                        err,
+                    );
                 }
             };
             *out = SidereonSignalAnalysisSpectralSeparation { hz, db_hz };
@@ -1839,7 +1945,7 @@ pub unsafe extern "C" fn sidereon_signal_spectral_separation_coefficient_hz(
     receiver_bandwidth_hz: f64,
     out: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_signal_spectral_separation_coefficient_hz",
         SidereonStatus::Panic,
         || {
@@ -1866,9 +1972,10 @@ pub unsafe extern "C" fn sidereon_signal_spectral_separation_coefficient_hz(
                     *out = value;
                     SidereonStatus::Ok
                 }
-                Err(err) => {
-                    extra_invalid_arg("sidereon_signal_spectral_separation_coefficient_hz", err)
-                }
+                Err(err) => record_signal_analysis_error(
+                    "sidereon_signal_spectral_separation_coefficient_hz",
+                    err,
+                ),
             }
         },
     )
@@ -1886,7 +1993,7 @@ pub unsafe extern "C" fn sidereon_signal_spectral_separation_coefficient_db_hz(
     receiver_bandwidth_hz: f64,
     out: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_signal_spectral_separation_coefficient_db_hz",
         SidereonStatus::Panic,
         || {
@@ -1913,9 +2020,10 @@ pub unsafe extern "C" fn sidereon_signal_spectral_separation_coefficient_db_hz(
                     *out = value;
                     SidereonStatus::Ok
                 }
-                Err(err) => {
-                    extra_invalid_arg("sidereon_signal_spectral_separation_coefficient_db_hz", err)
-                }
+                Err(err) => record_signal_analysis_error(
+                    "sidereon_signal_spectral_separation_coefficient_db_hz",
+                    err,
+                ),
             }
         },
     )
@@ -1931,7 +2039,7 @@ pub unsafe extern "C" fn sidereon_signal_white_noise_spectral_separation_hz(
     receiver_bandwidth_hz: f64,
     out: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_signal_white_noise_spectral_separation_hz",
         SidereonStatus::Panic,
         || {
@@ -1953,9 +2061,10 @@ pub unsafe extern "C" fn sidereon_signal_white_noise_spectral_separation_hz(
                     *out = value;
                     SidereonStatus::Ok
                 }
-                Err(err) => {
-                    extra_invalid_arg("sidereon_signal_white_noise_spectral_separation_hz", err)
-                }
+                Err(err) => record_signal_analysis_error(
+                    "sidereon_signal_white_noise_spectral_separation_hz",
+                    err,
+                ),
             }
         },
     )
@@ -2170,7 +2279,7 @@ unsafe fn signal_effective_cn0_degradation_impl(
     interference_count: usize,
     out: *mut SidereonSignalAnalysisCn0Degradation,
 ) -> SidereonStatus {
-    ffi_boundary(fn_name, SidereonStatus::Panic, || {
+    crate::engine_error::engine_error_operation_boundary(fn_name, SidereonStatus::Panic, || {
         let out = c_try!(require_out(out, fn_name, "out"));
         *out = SidereonSignalAnalysisCn0Degradation {
             effective_cn0_hz: 0.0,
@@ -2197,7 +2306,7 @@ unsafe fn signal_effective_cn0_degradation_impl(
                 };
                 SidereonStatus::Ok
             }
-            Err(err) => extra_invalid_arg(fn_name, err),
+            Err(err) => record_signal_analysis_error(fn_name, err),
         }
     })
 }
@@ -2209,7 +2318,7 @@ unsafe fn signal_dll_jitter_impl(
     processing: u32,
     out: *mut SidereonSignalAnalysisDllJitter,
 ) -> SidereonStatus {
-    ffi_boundary(fn_name, SidereonStatus::Panic, || {
+    crate::engine_error::engine_error_operation_boundary(fn_name, SidereonStatus::Panic, || {
         let out = c_try!(require_out(out, fn_name, "out"));
         *out = zero_signal_jitter();
         let modulation = c_try!(signal_analysis_modulation_from_c(fn_name, modulation));
@@ -2224,7 +2333,7 @@ unsafe fn signal_dll_jitter_impl(
                 *out = signal_jitter_to_c(value);
                 SidereonStatus::Ok
             }
-            Err(err) => extra_invalid_arg(fn_name, err),
+            Err(err) => record_signal_analysis_error(fn_name, err),
         }
     })
 }
@@ -2235,7 +2344,7 @@ unsafe fn signal_dll_lower_bound_impl(
     options: *const SidereonSignalAnalysisDllTrackingOptions,
     out: *mut SidereonSignalAnalysisDllJitter,
 ) -> SidereonStatus {
-    ffi_boundary(fn_name, SidereonStatus::Panic, || {
+    crate::engine_error::engine_error_operation_boundary(fn_name, SidereonStatus::Panic, || {
         let out = c_try!(require_out(out, fn_name, "out"));
         *out = zero_signal_jitter();
         let modulation = c_try!(signal_analysis_modulation_from_c(fn_name, modulation));
@@ -2245,7 +2354,7 @@ unsafe fn signal_dll_lower_bound_impl(
                 *out = signal_jitter_to_c(value);
                 SidereonStatus::Ok
             }
-            Err(err) => extra_invalid_arg(fn_name, err),
+            Err(err) => record_signal_analysis_error(fn_name, err),
         }
     })
 }
@@ -2254,7 +2363,7 @@ unsafe fn signal_multipath_envelope_impl(
     fn_name: &'static str,
     request: SignalMultipathEnvelopeRequest,
 ) -> SidereonStatus {
-    ffi_boundary(fn_name, SidereonStatus::Panic, || {
+    crate::engine_error::engine_error_operation_boundary(fn_name, SidereonStatus::Panic, || {
         c_try!(init_copy_counts(
             fn_name,
             request.out_written,
@@ -2280,7 +2389,7 @@ unsafe fn signal_multipath_envelope_impl(
             delays,
         ) {
             Ok(points) => points,
-            Err(err) => return extra_invalid_arg(fn_name, err),
+            Err(err) => return record_signal_analysis_error(fn_name, err),
         };
         let rows: Vec<_> = points.into_iter().map(multipath_point_to_c).collect();
         c_try!(copy_prefix_to_c(
@@ -2376,6 +2485,18 @@ mod tests {
         text.as_ptr().cast()
     }
 
+    use sidereon_core::frequencies as core_frequencies;
+
+    // Every expected value is sidereon-core's own result for the same
+    // system, band or code, version and channel.
+    fn core_band_hz(system: GnssSystem, band: char, channel: Option<i8>) -> Option<f64> {
+        core_frequencies::rinex_band_frequency_hz(system, band, channel)
+    }
+
+    fn core_code_hz(system: GnssSystem, code: &str, version: f64) -> Option<f64> {
+        core_frequencies::rinex_observation_frequency_hz(system, code, version, None)
+    }
+
     #[test]
     fn rinex_frequency_routes_preserve_band_code_version_and_channel_policy() {
         let mut frequency_hz = 0.0;
@@ -2391,7 +2512,12 @@ mod tests {
             },
             SidereonStatus::Ok
         );
-        assert_eq!(frequency_hz.to_bits(), (1_575_420_000.0_f64).to_bits());
+        assert_eq!(
+            frequency_hz.to_bits(),
+            core_band_hz(GnssSystem::Gps, '1', None)
+                .expect("core GPS band 1")
+                .to_bits()
+        );
 
         assert_eq!(
             unsafe {
@@ -2405,7 +2531,14 @@ mod tests {
             },
             SidereonStatus::Ok
         );
-        assert_eq!(frequency_hz.to_bits(), (1_599_750_000.0_f64).to_bits());
+        assert_eq!(
+            frequency_hz.to_bits(),
+            core_band_hz(GnssSystem::Glonass, '1', Some(-4))
+                .expect("core GLONASS band 1")
+                .to_bits()
+        );
+        // sidereon-core has no GLONASS FDMA frequency without a channel.
+        assert_eq!(core_band_hz(GnssSystem::Glonass, '1', None), None);
         assert_eq!(
             unsafe {
                 sidereon_rinex_band_frequency_hz(
@@ -2432,7 +2565,12 @@ mod tests {
             },
             SidereonStatus::Ok
         );
-        assert_eq!(frequency_hz.to_bits(), (1_561_098_000.0_f64).to_bits());
+        assert_eq!(
+            frequency_hz.to_bits(),
+            core_code_hz(GnssSystem::BeiDou, "C1I", 3.02)
+                .expect("core C1I 3.02")
+                .to_bits()
+        );
         assert_eq!(
             unsafe {
                 sidereon_rinex_observation_frequency_hz(
@@ -2446,7 +2584,12 @@ mod tests {
             },
             SidereonStatus::Ok
         );
-        assert_eq!(frequency_hz.to_bits(), (1_575_420_000.0_f64).to_bits());
+        assert_eq!(
+            frequency_hz.to_bits(),
+            core_code_hz(GnssSystem::BeiDou, "C1I", 3.03)
+                .expect("core C1I 3.03")
+                .to_bits()
+        );
         assert_eq!(
             unsafe {
                 sidereon_rinex_band_frequency_hz(
@@ -2491,6 +2634,19 @@ mod tests {
             },
             SidereonStatus::Ok
         );
+        assert_eq!(
+            frequency_hz.to_bits(),
+            core_code_hz(GnssSystem::Gps, "L1C", 3.05)
+                .expect("core L1C")
+                .to_bits()
+        );
+        assert_eq!(
+            wavelength_m.to_bits(),
+            core_frequencies::rinex_observation_wavelength_m(GnssSystem::Gps, "L1C", 3.05, None)
+                .expect("core L1C wavelength")
+                .to_bits()
+        );
+        // Frequency times wavelength is the speed of light.
         assert!((frequency_hz * wavelength_m - 299_792_458.0).abs() < 1.0e-6);
         assert_eq!(
             unsafe {
@@ -2504,26 +2660,20 @@ mod tests {
             },
             SidereonStatus::Ok
         );
-        assert!((wavelength_m - 299_792_458.0 / 1_248_625_000.0).abs() < 1.0e-15);
+        assert_eq!(
+            wavelength_m.to_bits(),
+            core_frequencies::rinex_band_wavelength_m(GnssSystem::Glonass, '2', Some(6))
+                .expect("core GLONASS band 2 wavelength")
+                .to_bits()
+        );
 
-        let expected = [
-            (
-                SidereonGnssSystem::Gps,
-                SidereonCarrierBand::L1,
-                SidereonCarrierBand::L2,
-            ),
-            (
-                SidereonGnssSystem::Galileo,
-                SidereonCarrierBand::E1,
-                SidereonCarrierBand::E5a,
-            ),
-            (
-                SidereonGnssSystem::BeiDou,
-                SidereonCarrierBand::B1i,
-                SidereonCarrierBand::B3i,
-            ),
-        ];
-        for (system, band1, band2) in expected {
+        for (system, core_system) in [
+            (SidereonGnssSystem::Gps, GnssSystem::Gps),
+            (SidereonGnssSystem::Galileo, GnssSystem::Galileo),
+            (SidereonGnssSystem::BeiDou, GnssSystem::BeiDou),
+        ] {
+            let core_pair =
+                core_frequencies::default_iono_free_pair(core_system).expect("core default pair");
             let mut pair = SidereonCarrierPair {
                 band1: SidereonCarrierBand::L1,
                 band2: SidereonCarrierBand::L1,
@@ -2534,9 +2684,11 @@ mod tests {
                 SidereonStatus::Ok
             );
             assert!(present);
-            assert_eq!(pair.band1, band1);
-            assert_eq!(pair.band2, band2);
+            assert_eq!(pair.band1, carrier_band_to_c(core_pair.band1));
+            assert_eq!(pair.band2, carrier_band_to_c(core_pair.band2));
         }
+        // sidereon-core has no constellation-wide GLONASS default.
+        assert!(core_frequencies::default_iono_free_pair(GnssSystem::Glonass).is_none());
         let mut pair = SidereonCarrierPair {
             band1: SidereonCarrierBand::L1,
             band2: SidereonCarrierBand::L1,
@@ -2575,26 +2727,16 @@ unsafe fn signal_analysis_modulation_from_c(
     let raw = require_ref(modulation, fn_name, "modulation")?;
     match raw.kind {
         value if value == SidereonSignalAnalysisModulationKind::Bpsk as u32 => {
-            sidereon_core::signal::analysis::SignalModulation::bpsk(raw.order).map_err(|err| {
-                set_last_error(format!("{fn_name}: {err}"));
-                SidereonStatus::InvalidArgument
-            })
+            sidereon_core::signal::analysis::SignalModulation::bpsk(raw.order)
+                .map_err(|err| record_signal_analysis_error(fn_name, err))
         }
         value if value == SidereonSignalAnalysisModulationKind::BocSine as u32 => {
-            sidereon_core::signal::analysis::SignalModulation::boc_sine(raw.m, raw.n).map_err(
-                |err| {
-                    set_last_error(format!("{fn_name}: {err}"));
-                    SidereonStatus::InvalidArgument
-                },
-            )
+            sidereon_core::signal::analysis::SignalModulation::boc_sine(raw.m, raw.n)
+                .map_err(|err| record_signal_analysis_error(fn_name, err))
         }
         value if value == SidereonSignalAnalysisModulationKind::BocCosine as u32 => {
-            sidereon_core::signal::analysis::SignalModulation::boc_cosine(raw.m, raw.n).map_err(
-                |err| {
-                    set_last_error(format!("{fn_name}: {err}"));
-                    SidereonStatus::InvalidArgument
-                },
-            )
+            sidereon_core::signal::analysis::SignalModulation::boc_cosine(raw.m, raw.n)
+                .map_err(|err| record_signal_analysis_error(fn_name, err))
         }
         value if value == SidereonSignalAnalysisModulationKind::Mboc611Over11 as u32 => {
             Ok(sidereon_core::signal::analysis::SignalModulation::mboc_6_1_1_over_11())
@@ -2717,5 +2859,211 @@ fn multipath_point_to_c(
         running_average_chips: point.running_average_chips,
         running_average_s: point.running_average_s,
         running_average_m: point.running_average_m,
+    }
+}
+
+#[cfg(test)]
+mod signal_engine_error_tests {
+    use super::*;
+    use crate::engine_error::{snapshot_engine_error_for_test, SidereonEngineErrorFamily};
+
+    #[test]
+    fn ca_chip_retains_full_signal_error_and_resets_on_success_and_null() {
+        let mut chip = 0;
+        assert_eq!(
+            unsafe { sidereon_signal_ca_chip(0, 0, &mut chip) },
+            SidereonStatus::InvalidArgument
+        );
+        let (info, payload) = snapshot_engine_error_for_test().expect("typed signal refusal");
+        assert_eq!(info.family, SidereonEngineErrorFamily::Signal);
+        assert_eq!(info.payload_len, payload.len());
+        let value: serde_json::Value = serde_json::from_str(&payload).expect("valid JSON");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "schema_version": 1,
+                "family": "signal",
+                "operation": "sidereon_signal_ca_chip",
+                "error": {"kind":"unsupported_prn","fields":{"prn":0}}
+            })
+        );
+        let mut message = vec![0 as std::os::raw::c_char; 128];
+        unsafe { crate::sidereon_last_error_message(message.as_mut_ptr(), message.len()) };
+        let message = unsafe { std::ffi::CStr::from_ptr(message.as_ptr()) }
+            .to_str()
+            .expect("legacy UTF-8");
+        assert_eq!(
+            message,
+            "sidereon_signal_ca_chip: unsupported GPS C/A PRN 0"
+        );
+
+        assert_eq!(
+            unsafe { sidereon_signal_ca_chip(1, 0, &mut chip) },
+            SidereonStatus::Ok
+        );
+        assert!(snapshot_engine_error_for_test().is_none());
+        assert_eq!(
+            unsafe { sidereon_signal_ca_chip(0, 0, &mut chip) },
+            SidereonStatus::InvalidArgument
+        );
+        assert_eq!(
+            unsafe { sidereon_signal_ca_chip(1, 0, std::ptr::null_mut()) },
+            SidereonStatus::NullPointer
+        );
+        assert!(snapshot_engine_error_for_test().is_none());
+    }
+
+    #[test]
+    fn carrier_phase_and_analysis_errors_keep_their_domain_family() {
+        let mut output = 0.0;
+        assert_eq!(
+            unsafe { sidereon_carrier_phase_meters(1.0, 0.0, &mut output) },
+            SidereonStatus::InvalidArgument
+        );
+        let (info, payload) = snapshot_engine_error_for_test().expect("carrier refusal");
+        assert_eq!(info.family, SidereonEngineErrorFamily::CarrierPhase);
+        assert_eq!(info.payload_len, payload.len());
+        let value: serde_json::Value = serde_json::from_str(&payload).expect("valid JSON");
+        assert_eq!(value["operation"], "sidereon_carrier_phase_meters");
+        assert_eq!(value["error"]["kind"], "invalid_frequency");
+        let mut message = vec![0 as std::os::raw::c_char; 128];
+        unsafe { crate::sidereon_last_error_message(message.as_mut_ptr(), message.len()) };
+        assert_eq!(
+            unsafe { std::ffi::CStr::from_ptr(message.as_ptr()) }
+                .to_str()
+                .expect("legacy UTF-8"),
+            "sidereon_carrier_phase_meters: carrier frequency must be positive"
+        );
+        assert_eq!(
+            unsafe { sidereon_carrier_phase_meters(1.0, 1575.42e6, &mut output) },
+            SidereonStatus::Ok
+        );
+        assert!(snapshot_engine_error_for_test().is_none());
+        assert_eq!(
+            unsafe { sidereon_carrier_phase_meters(1.0, 0.0, &mut output) },
+            SidereonStatus::InvalidArgument
+        );
+        assert_eq!(
+            unsafe { sidereon_carrier_phase_meters(1.0, 1575.42e6, std::ptr::null_mut()) },
+            SidereonStatus::NullPointer
+        );
+        assert!(snapshot_engine_error_for_test().is_none());
+
+        let modulation = SidereonSignalAnalysisModulation {
+            kind: SidereonSignalAnalysisModulationKind::Bpsk as u32,
+            order: 1.0,
+            m: 0.0,
+            n: 0.0,
+        };
+        assert_eq!(
+            unsafe { sidereon_signal_analysis_psd(&modulation, f64::NAN, &mut output) },
+            SidereonStatus::InvalidArgument
+        );
+        let (info, payload) = snapshot_engine_error_for_test().expect("analysis refusal");
+        assert_eq!(info.family, SidereonEngineErrorFamily::SignalAnalysis);
+        assert_eq!(info.payload_len, payload.len());
+        let value: serde_json::Value = serde_json::from_str(&payload).expect("valid JSON");
+        assert_eq!(value["operation"], "sidereon_signal_analysis_psd");
+        assert_eq!(value["error"]["kind"], "invalid_input");
+        assert_eq!(value["error"]["fields"]["field"], "offset_hz");
+        assert_eq!(value["error"]["fields"]["reason"], "not finite");
+        let mut message = vec![0 as std::os::raw::c_char; 160];
+        unsafe { crate::sidereon_last_error_message(message.as_mut_ptr(), message.len()) };
+        assert_eq!(
+            unsafe { std::ffi::CStr::from_ptr(message.as_ptr()) }
+                .to_str()
+                .expect("legacy UTF-8"),
+            "sidereon_signal_analysis_psd: invalid signal-analysis input offset_hz: not finite"
+        );
+        assert_eq!(
+            unsafe { sidereon_signal_analysis_psd(&modulation, 0.0, &mut output) },
+            SidereonStatus::Ok
+        );
+        assert!(snapshot_engine_error_for_test().is_none());
+        assert_eq!(
+            unsafe { sidereon_signal_analysis_psd(&modulation, f64::NAN, &mut output) },
+            SidereonStatus::InvalidArgument
+        );
+        assert!(snapshot_engine_error_for_test().is_some());
+        assert_eq!(
+            unsafe { sidereon_signal_analysis_psd(&modulation, 0.0, std::ptr::null_mut()) },
+            SidereonStatus::NullPointer
+        );
+        assert!(snapshot_engine_error_for_test().is_none());
+
+        let invalid_modulation = SidereonSignalAnalysisModulation {
+            order: 0.0,
+            ..modulation
+        };
+        let mut written = 0;
+        let mut required = 0;
+        let mut label = [0_u8; 32];
+        assert_eq!(
+            unsafe {
+                sidereon_signal_modulation_label(
+                    &invalid_modulation,
+                    label.as_mut_ptr(),
+                    label.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+        let (info, payload) = snapshot_engine_error_for_test().expect("modulation refusal");
+        assert_eq!(info.family, SidereonEngineErrorFamily::SignalAnalysis);
+        assert_eq!(info.payload_len, payload.len());
+        let value: serde_json::Value = serde_json::from_str(&payload).expect("valid JSON");
+        assert_eq!(value["operation"], "sidereon_signal_modulation_label");
+        assert_eq!(value["error"]["kind"], "invalid_input");
+        assert_eq!(value["error"]["fields"]["field"], "order");
+        assert_eq!(value["error"]["fields"]["reason"], "not positive");
+        let mut message = vec![0 as std::os::raw::c_char; 160];
+        unsafe { crate::sidereon_last_error_message(message.as_mut_ptr(), message.len()) };
+        assert_eq!(
+            unsafe { std::ffi::CStr::from_ptr(message.as_ptr()) }
+                .to_str()
+                .expect("legacy UTF-8"),
+            "sidereon_signal_modulation_label: invalid signal-analysis input order: not positive"
+        );
+        assert_eq!(
+            unsafe {
+                sidereon_signal_modulation_label(
+                    &modulation,
+                    label.as_mut_ptr(),
+                    label.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert!(snapshot_engine_error_for_test().is_none());
+        assert_eq!(
+            unsafe {
+                sidereon_signal_modulation_label(
+                    &invalid_modulation,
+                    label.as_mut_ptr(),
+                    label.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+        assert!(snapshot_engine_error_for_test().is_some());
+        assert_eq!(
+            unsafe {
+                sidereon_signal_modulation_label(
+                    &modulation,
+                    label.as_mut_ptr(),
+                    label.len(),
+                    std::ptr::null_mut(),
+                    &mut required,
+                )
+            },
+            SidereonStatus::NullPointer
+        );
+        assert!(snapshot_engine_error_for_test().is_none());
     }
 }

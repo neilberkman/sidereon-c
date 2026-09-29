@@ -13,6 +13,7 @@
 #include <string.h>
 
 #include "sidereon.h"
+#include "w5_cap013_pins.h"
 
 static int fail(const char *what) {
     char message[512];
@@ -36,6 +37,13 @@ static bool last_error_contains(const char *needle) {
     char message[512];
     size_t written = sidereon_last_error_message(message, sizeof(message));
     return written > 0 && strstr(message, needle) != NULL;
+}
+
+/* Exact agreement with a pinned engine value (tests/valgen, bin w5_cap013). */
+static bool same_bits(double actual, uint64_t expected) {
+    uint64_t bits = 0;
+    memcpy(&bits, &actual, sizeof(bits));
+    return bits == expected;
 }
 
 static bool close_abs(double actual, double expected, double tol) {
@@ -117,8 +125,8 @@ static int exercise_observable_states(const char *sp3_path) {
                    "precise sample count") != 0) {
         goto cleanup;
     }
-    if (required < 8) {
-        rc = fail("observable states: insufficient SP3 samples");
+    if (required != W5_CAP013_SAMPLE_COUNT) {
+        rc = fail("observable states: SP3 sample count");
         goto cleanup;
     }
     samples = calloc(required, sizeof(*samples));
@@ -192,13 +200,39 @@ static int exercise_observable_states(const char *sp3_path) {
         goto cleanup;
     }
 
+    if (strcmp(sat_id, W5_CAP013_MID_SATELLITE) != 0 ||
+        !same_bits(t0, W5_CAP013_MID_EPOCH_J2000_S_BITS)) {
+        rc = fail("observable states: middle sample");
+        goto cleanup;
+    }
+    const SidereonObservableStateElementStatus pinned_status[COUNT] = {
+        W5_CAP013_ELEMENT_0_STATUS, W5_CAP013_ELEMENT_1_STATUS, W5_CAP013_ELEMENT_2_STATUS};
+    const bool pinned_result_ok[COUNT] = {W5_CAP013_ELEMENT_0_RESULT_OK,
+                                          W5_CAP013_ELEMENT_1_RESULT_OK,
+                                          W5_CAP013_ELEMENT_2_RESULT_OK};
+    for (size_t i = 0; i < COUNT; i++) {
+        /* The engine's batch for the same satellites and epochs
+         * (Sp3::observable_states_at_j2000_s); the binding reports a failed
+         * element as INVALID_ARGUMENT. */
+        if (sp3_status[i] != pinned_status[i] ||
+            (sp3_result[i] == SIDEREON_STATUS_OK) != pinned_result_ok[i] ||
+            sp3_has_clock[i] != W5_CAP013_STATE_HAS_CLOCKS[i] ||
+            !same_bits(sp3_clock[i], W5_CAP013_STATE_CLOCKS_S_BITS[i])) {
+            rc = fail("observable states: engine row");
+            goto cleanup;
+        }
+        for (size_t axis = 0; axis < 3; axis++) {
+            if (!same_bits(sp3_pos[i * 3 + axis],
+                           W5_CAP013_STATE_POSITIONS_ECEF_M_BITS[i * 3 + axis])) {
+                rc = fail("observable states: engine position");
+                goto cleanup;
+            }
+        }
+    }
     for (size_t i = 0; i < 2; i++) {
-        if (sp3_status[i] != SIDEREON_OBSERVABLE_STATE_ELEMENT_STATUS_VALID ||
-            interp_status[i] != SIDEREON_OBSERVABLE_STATE_ELEMENT_STATUS_VALID ||
-            sample_status[i] != SIDEREON_OBSERVABLE_STATE_ELEMENT_STATUS_VALID ||
-            source_status[i] != SIDEREON_OBSERVABLE_STATE_ELEMENT_STATUS_VALID ||
-            sp3_result[i] != SIDEREON_STATUS_OK || interp_result[i] != SIDEREON_STATUS_OK ||
-            sample_result[i] != SIDEREON_STATUS_OK || source_result[i] != SIDEREON_STATUS_OK) {
+        if (interp_status[i] != sp3_status[i] || sample_status[i] != sp3_status[i] ||
+            source_status[i] != sp3_status[i] || interp_result[i] != sp3_result[i] ||
+            sample_result[i] != sp3_result[i] || source_result[i] != sp3_result[i]) {
             rc = fail("observable states: valid row status");
             goto cleanup;
         }
@@ -214,9 +248,8 @@ static int exercise_observable_states(const char *sp3_path) {
             goto cleanup;
         }
     }
-    if (sp3_status[2] != SIDEREON_OBSERVABLE_STATE_ELEMENT_STATUS_ERROR ||
-        sp3_result[2] != SIDEREON_STATUS_INVALID_ARGUMENT || !isnan(sp3_pos[6]) ||
-        !isnan(sp3_pos[7]) || !isnan(sp3_pos[8]) || sp3_has_clock[2]) {
+    if ((!W5_CAP013_ELEMENT_2_RESULT_OK && sp3_result[2] != SIDEREON_STATUS_INVALID_ARGUMENT) ||
+        !isnan(sp3_pos[6]) || !isnan(sp3_pos[7]) || !isnan(sp3_pos[8])) {
         rc = fail("observable states: invalid element sentinel");
         goto cleanup;
     }
@@ -274,7 +307,11 @@ static int exercise_estimation_primitives(void) {
                    "kalman gains") != 0) {
         return 1;
     }
-    if (!close_abs(kalman.position_gain, gains.alpha, 1.0e-9) ||
+    if (!same_bits(gains.alpha, W5_CAP013_ALPHA_BITS) ||
+        !same_bits(gains.beta, W5_CAP013_BETA_BITS) ||
+        !same_bits(kalman.position_gain, W5_CAP013_KALMAN_POSITION_GAIN_BITS) ||
+        !same_bits(kalman.rate_gain, W5_CAP013_KALMAN_RATE_GAIN_BITS) ||
+        !close_abs(kalman.position_gain, gains.alpha, 1.0e-9) ||
         !close_abs(kalman.rate_gain * 2.0, gains.beta, 1.0e-9)) {
         return fail("estimation primitives: gain relation");
     }
@@ -285,7 +322,12 @@ static int exercise_estimation_primitives(void) {
                    "alpha-beta step") != 0) {
         return 1;
     }
-    if (!close_abs(step.predicted.level, 12.0, 0.0) ||
+    if (!same_bits(step.predicted.level, W5_CAP013_STEP_PREDICTED_LEVEL_BITS) ||
+        !same_bits(step.predicted.rate, W5_CAP013_STEP_PREDICTED_RATE_BITS) ||
+        !same_bits(step.innovation, W5_CAP013_STEP_INNOVATION_BITS) ||
+        !same_bits(step.updated.level, W5_CAP013_STEP_UPDATED_LEVEL_BITS) ||
+        !same_bits(step.updated.rate, W5_CAP013_STEP_UPDATED_RATE_BITS) ||
+        !close_abs(step.predicted.level, 12.0, 0.0) ||
         !close_abs(step.predicted.rate, 1.0, 0.0) ||
         !close_abs(step.innovation, 2.0, 0.0) ||
         !close_abs(step.updated.level, 12.0 + gains.alpha * 2.0, 1.0e-15) ||
@@ -296,38 +338,39 @@ static int exercise_estimation_primitives(void) {
     double value = 0.0;
     if (require_ok(sidereon_normalized_innovation(2.0, 4.0, &value),
                    "normalized innovation") != 0 ||
-        !close_abs(value, 1.0, 0.0) ||
+        !same_bits(value, W5_CAP013_NORMALIZED_INNOVATION_BITS) ||
         require_ok(sidereon_nis(2.0, 4.0, &value), "nis") != 0 ||
-        !close_abs(value, 1.0, 0.0) ||
+        !same_bits(value, W5_CAP013_NIS_BITS) ||
         require_ok(sidereon_nis_expected_value(3, &value), "nis expected") != 0 ||
-        !close_abs(value, 3.0, 0.0)) {
+        !same_bits(value, W5_CAP013_NIS_EXPECTED_BITS)) {
         return fail("estimation primitives: innovation values");
     }
 
     double threshold = 0.0;
     SidereonNisGate gate;
     if (require_ok(sidereon_nis_gate_threshold(1, 0.95, &threshold), "nis threshold") != 0 ||
-        threshold < 3.84 || threshold > 3.85 ||
+        !same_bits(threshold, W5_CAP013_NIS_THRESHOLD_BITS) ||
         require_ok(sidereon_nis_gate_test(2.0, 4.0, 1, 0.95, &gate), "nis gate") != 0 ||
-        !gate.in_gate || !close_abs(gate.nis, 1.0, 0.0) ||
-        !close_abs(gate.threshold, threshold, 0.0) || gate.dof != 1) {
+        gate.in_gate != W5_CAP013_GATE_IN_GATE || !same_bits(gate.nis, W5_CAP013_GATE_NIS_BITS) ||
+        !same_bits(gate.threshold, W5_CAP013_GATE_THRESHOLD_BITS) ||
+        gate.dof != W5_CAP013_GATE_DOF) {
         return fail("estimation primitives: nis gate");
     }
 
     double mad_constant = 0.0;
     double values[3] = {1.0, 2.0, 100.0};
     if (require_ok(sidereon_mad_gaussian_consistency(&mad_constant), "mad constant") != 0 ||
-        !close_abs(mad_constant, 1.482602218505602, 1.0e-15) ||
+        !same_bits(mad_constant, W5_CAP013_MAD_CONSTANT_BITS) ||
         require_ok(sidereon_mad_spread(values, 3, 0.0, &value), "mad spread") != 0 ||
-        !close_abs(value, mad_constant, 1.0e-15)) {
+        !same_bits(value, W5_CAP013_MAD_SPREAD_BITS)) {
         return fail("estimation primitives: mad");
     }
 
     if (require_ok(sidereon_ewma_update(10.0, 14.0, 0.25, &value), "ewma") != 0 ||
-        !close_abs(value, 11.0, 0.0) ||
+        !same_bits(value, W5_CAP013_EWMA_BITS) ||
         require_ok(sidereon_ewma_update_power_of_two(10.0, 14.0, 2, &value),
                    "ewma power of two") != 0 ||
-        !close_abs(value, 11.0, 0.0)) {
+        !same_bits(value, W5_CAP013_EWMA_POW2_BITS)) {
         return fail("estimation primitives: ewma");
     }
 
@@ -338,13 +381,14 @@ static int exercise_estimation_primitives(void) {
                    "cfar multiplier") != 0 ||
         require_ok(sidereon_cfar_ca_pfa_from_multiplier(16, multiplier, &pfa),
                    "cfar pfa") != 0 ||
-        !close_abs(pfa, 1.0e-3, 1.0e-15) ||
+        !same_bits(multiplier, W5_CAP013_CFAR_MULTIPLIER_BITS) ||
+        !same_bits(pfa, W5_CAP013_CFAR_PFA_BITS) ||
         require_ok(sidereon_cfar_ca_threshold(16, 1.0e-3, 2.5, &cfar_threshold),
                    "cfar threshold") != 0 ||
-        !close_abs(cfar_threshold, multiplier * 2.5, 1.0e-12) ||
+        !same_bits(cfar_threshold, W5_CAP013_CFAR_THRESHOLD_BITS) ||
         require_ok(sidereon_cfar_ca_false_alarm_probability(16, cfar_threshold, 2.5, &pfa),
                    "cfar false alarm") != 0 ||
-        !close_abs(pfa, 1.0e-3, 1.0e-15)) {
+        !same_bits(pfa, W5_CAP013_CFAR_FALSE_ALARM_BITS)) {
         return fail("estimation primitives: cfar");
     }
 
@@ -400,9 +444,17 @@ static int exercise_source_localization(void) {
                    "chan-ho toa") != 0) {
         return 1;
     }
-    if (guess.dimension != 3 || !guess.has_origin_time_s ||
-        !vec_close3(guess.position_m, toa_source, 3, 1.0e-7) ||
-        !close_abs(guess.origin_time_s, 1.25, 1.0e-10) || guess.residual_rms_s > 1.0e-10) {
+    bool guess_exact = guess.dimension == W5_CAP013_GUESS_DIMENSION &&
+                       guess.has_origin_time_s == W5_CAP013_GUESS_HAS_ORIGIN_TIME &&
+                       same_bits(guess.origin_time_s, W5_CAP013_GUESS_ORIGIN_TIME_S_BITS) &&
+                       same_bits(guess.residual_rms_s, W5_CAP013_GUESS_RESIDUAL_RMS_S_BITS);
+    for (size_t axis = 0; axis < W5_CAP013_GUESS_POSITION_M_BITS_COUNT; axis++) {
+        guess_exact = guess_exact &&
+                      same_bits(guess.position_m[axis], W5_CAP013_GUESS_POSITION_M_BITS[axis]);
+    }
+    /* The planted source and origin are the inputs; the seed recovers them. */
+    if (!guess_exact || !vec_close3(guess.position_m, toa_source, 3, 1.0e-7) ||
+        !close_abs(guess.origin_time_s, 1.25, 1.0e-10)) {
         return fail("source localization: toa seed");
     }
 
@@ -422,14 +474,23 @@ static int exercise_source_localization(void) {
         sidereon_source_solution_free(solution);
         return 1;
     }
-    if (summary.dimension != 3 || !summary.has_origin_time_s || !summary.has_covariance ||
-        summary.residual_count != 5 || summary.influence_count != 5 ||
-        summary.geometry_quality.tier != SIDEREON_OBSERVABILITY_TIER_NOMINAL ||
-        summary.geometry_quality.redundancy != 1 || summary.geometry_quality.rank != 4 ||
-        !summary.geometry_quality.raim_checkable ||
-        !summary.geometry_quality.covariance_validated ||
-        !isfinite(summary.geometry_quality.condition_number) ||
-        !isfinite(summary.geometry_quality.gdop) || summary.geometry_quality.gdop <= 0.0 ||
+    bool toa_exact = true;
+    for (size_t axis = 0; axis < W5_CAP013_TOA_POSITION_M_BITS_COUNT; axis++) {
+        toa_exact = toa_exact && same_bits(summary.position_m[axis], W5_CAP013_TOA_POSITION_M_BITS[axis]);
+    }
+    if (!toa_exact || summary.dimension != W5_CAP013_TOA_DIMENSION ||
+        summary.has_origin_time_s != W5_CAP013_TOA_HAS_ORIGIN_TIME ||
+        !same_bits(summary.origin_time_s, W5_CAP013_TOA_ORIGIN_TIME_S_BITS) ||
+        summary.has_covariance != W5_CAP013_TOA_HAS_COVARIANCE ||
+        summary.residual_count != W5_CAP013_TOA_RESIDUAL_COUNT ||
+        summary.influence_count != W5_CAP013_TOA_INFLUENCE_COUNT ||
+        summary.geometry_quality.tier != W5_CAP013_TOA_TIER ||
+        summary.geometry_quality.redundancy != W5_CAP013_TOA_REDUNDANCY ||
+        summary.geometry_quality.rank != W5_CAP013_TOA_RANK ||
+        summary.geometry_quality.raim_checkable != W5_CAP013_TOA_RAIM_CHECKABLE ||
+        summary.geometry_quality.covariance_validated != W5_CAP013_TOA_COVARIANCE_VALIDATED ||
+        !same_bits(summary.geometry_quality.condition_number, W5_CAP013_TOA_CONDITION_NUMBER_BITS) ||
+        !same_bits(summary.geometry_quality.gdop, W5_CAP013_TOA_GDOP_BITS) ||
         !vec_close3(summary.position_m, toa_source, 3, 1.0e-7) ||
         !close_abs(summary.origin_time_s, 1.25, 1.0e-10)) {
         sidereon_source_solution_free(solution);
@@ -453,14 +514,16 @@ static int exercise_source_localization(void) {
     if (require_ok(sidereon_source_solution_covariance(solution, &covariance,
                                                        &covariance_available),
                    "source covariance") != 0 ||
-        !covariance_available || covariance.dimension != 3 || covariance.state_dimension != 4) {
+        covariance_available != W5_CAP013_TOA_HAS_COVARIANCE ||
+        covariance.dimension != W5_CAP013_TOA_COVARIANCE_DIMENSION ||
+        covariance.state_dimension != W5_CAP013_TOA_COVARIANCE_STATE_DIMENSION) {
         sidereon_source_solution_free(solution);
         return fail("source localization: covariance");
     }
 
     if (require_ok(sidereon_source_solution_residuals(solution, NULL, 0, &written, &required),
                    "source residual count") != 0 ||
-        written != 0 || required != 5) {
+        written != 0 || required != W5_CAP013_TOA_RESIDUAL_COUNT) {
         sidereon_source_solution_free(solution);
         return fail("source localization: residual count");
     }
@@ -473,8 +536,9 @@ static int exercise_source_localization(void) {
         return 1;
     }
     for (size_t i = 0; i < 5; i++) {
-        if (residuals[i].sensor_index != i || residuals[i].has_reference_sensor_index ||
-            fabs(residuals[i].residual_s) > 1.0e-10) {
+        if (residuals[i].sensor_index != W5_CAP013_TOA_RESIDUAL_SENSOR_INDEX[i] ||
+            residuals[i].has_reference_sensor_index != W5_CAP013_TOA_RESIDUAL_HAS_REFERENCE[i] ||
+            !same_bits(residuals[i].residual_s, W5_CAP013_TOA_RESIDUALS_S_BITS[i])) {
             sidereon_source_solution_free(solution);
             return fail("source localization: residual values");
         }
@@ -484,12 +548,13 @@ static int exercise_source_localization(void) {
     if (require_ok(sidereon_source_solution_influences(solution, influences, 5, &written,
                                                        &required),
                    "source influence fill") != 0 ||
-        written != 5 || required != 5) {
+        written != W5_CAP013_TOA_INFLUENCE_COUNT || required != W5_CAP013_TOA_INFLUENCE_COUNT) {
         sidereon_source_solution_free(solution);
         return 1;
     }
     for (size_t i = 0; i < 5; i++) {
-        if (influences[i].sensor_index != i || !isfinite(influences[i].score)) {
+        if (influences[i].sensor_index != W5_CAP013_TOA_INFLUENCE_SENSOR_INDEX[i] ||
+            !same_bits(influences[i].score, W5_CAP013_TOA_INFLUENCE_SCORE_BITS[i])) {
             sidereon_source_solution_free(solution);
             return fail("source localization: influence values");
         }
@@ -518,7 +583,13 @@ static int exercise_source_localization(void) {
         sidereon_source_solution_free(solution);
         return 1;
     }
-    if (summary.dimension != 2 || summary.residual_count != 3 ||
+    bool tdoa_exact = true;
+    for (size_t axis = 0; axis < W5_CAP013_TDOA_POSITION_M_BITS_COUNT; axis++) {
+        tdoa_exact = tdoa_exact && same_bits(summary.position_m[axis], W5_CAP013_TDOA_POSITION_M_BITS[axis]);
+    }
+    if (!tdoa_exact || summary.dimension != W5_CAP013_TDOA_DIMENSION ||
+        summary.residual_count != W5_CAP013_TDOA_RESIDUAL_COUNT ||
+        !same_bits(summary.origin_time_s, W5_CAP013_TDOA_ORIGIN_TIME_S_BITS) ||
         !vec_close3(summary.position_m, tdoa_source, 2, 1.0e-7) ||
         !close_abs(summary.origin_time_s, 4.0, 1.0e-9)) {
         sidereon_source_solution_free(solution);
@@ -537,15 +608,17 @@ static int exercise_source_localization(void) {
     SidereonSourceCrlb crlb;
     if (require_ok(sidereon_source_dop(dop_sensors, 4, dop_source, 2, 10.0, &dop),
                    "source dop") != 0 ||
-        !close_abs(dop.pdop, 10.0, 1.0e-12) || !close_abs(dop.hdop, 10.0, 1.0e-12) ||
-        !close_abs(dop.vdop, 0.0, 0.0) || !close_abs(dop.tdop, 0.5, 1.0e-12) ||
-        !close_abs(dop.gdop, sqrt(100.25), 1.0e-12) ||
+        !same_bits(dop.pdop, W5_CAP013_DOP_PDOP_BITS) ||
+        !same_bits(dop.hdop, W5_CAP013_DOP_HDOP_BITS) ||
+        !same_bits(dop.vdop, W5_CAP013_DOP_VDOP_BITS) ||
+        !same_bits(dop.tdop, W5_CAP013_DOP_TDOP_BITS) ||
+        !same_bits(dop.gdop, W5_CAP013_DOP_GDOP_BITS) ||
         require_ok(sidereon_source_crlb(dop_sensors, 4, dop_source, 2, 10.0, 0.01, &crlb),
                    "source crlb") != 0 ||
-        !close_abs(crlb.covariance.position_m2[0], 0.005, 1.0e-15) ||
-        !close_abs(crlb.covariance.position_m2[4], 0.005, 1.0e-15) ||
-        !crlb.covariance.has_origin_time_s2 ||
-        !close_abs(crlb.covariance.origin_time_s2, 0.000025, 1.0e-18)) {
+        !same_bits(crlb.covariance.position_m2[0], W5_CAP013_CRLB_POSITION_M2_00_BITS) ||
+        !same_bits(crlb.covariance.position_m2[4], W5_CAP013_CRLB_POSITION_M2_11_BITS) ||
+        crlb.covariance.has_origin_time_s2 != W5_CAP013_CRLB_HAS_ORIGIN_TIME_S2 ||
+        !same_bits(crlb.covariance.origin_time_s2, W5_CAP013_CRLB_ORIGIN_TIME_S2_BITS)) {
         return fail("source localization: dop crlb");
     }
 
@@ -556,9 +629,13 @@ static int exercise_source_localization(void) {
         {2, {300.0, 0.0, 0.0}, false, 0.0},
     };
     double singular_source[2] = {50.0, 0.0};
-    if (sidereon_source_dop(singular_sensors, 4, singular_source, 2, 300.0, &dop) !=
+    /* The engine refuses the collinear geometry (pinned outcome); the binding
+     * reports this refusal as SOLVE with the engine's message
+     * (src/source_localization.rs, map_source_localization_error). */
+    if (W5_CAP013_SINGULAR_DOP_OK ||
+        sidereon_source_dop(singular_sensors, 4, singular_source, 2, 300.0, &dop) !=
             SIDEREON_STATUS_SOLVE ||
-        !last_error_contains("singular")) {
+        !last_error_contains(W5_CAP013_SINGULAR_DOP_ERROR_TEXT)) {
         return fail("source localization: singular geometry status");
     }
 

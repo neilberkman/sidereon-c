@@ -19,6 +19,7 @@
 
 #include "sidereon.h"
 #include "spp_fixture.h"
+#include "w4_r2_pins.h"
 
 static double bits_to_f64(uint64_t bits) {
     double value;
@@ -37,17 +38,27 @@ static int fail(const char *what, int code) {
     return code;
 }
 
-static int finite3(const double v[3]) {
-    return isfinite(v[0]) && isfinite(v[1]) && isfinite(v[2]);
-}
-
-static int finite9(const double m[9]) {
-    for (int i = 0; i < 9; i++) {
-        if (!isfinite(m[i])) {
+/* True when each of the n doubles has the bit pattern the generated pins
+ * give (tests/valgen w4_r2). */
+static int same_bits(const double *values, const uint64_t *expected, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        if (f64_to_bits(values[i]) != expected[i]) {
             return 0;
         }
     }
     return 1;
+}
+
+/* FNV-1a 64 of a byte string; the pins carry the same hash of the engine's
+ * bytes. */
+static uint64_t fnv1a64(const void *data, size_t len) {
+    const uint8_t *bytes = (const uint8_t *)data;
+    uint64_t hash = UINT64_C(0xcbf29ce484222325);
+    for (size_t i = 0; i < len; i++) {
+        hash ^= bytes[i];
+        hash *= UINT64_C(0x00000100000001b3);
+    }
+    return hash;
 }
 
 /* ----------------------------- frame transforms ------------------------- */
@@ -57,8 +68,9 @@ static int exercise_frames(void) {
     if (sidereon_timescales_from_utc(2020, 6, 25, 12, 0, 0.0, &ts) != SIDEREON_STATUS_OK) {
         return fail("sidereon_timescales_from_utc", 1);
     }
-    if (!isfinite(ts.jd_tt) || ts.jd_whole <= 0.0) {
-        return fail("timescales fields finite", 1);
+    if (f64_to_bits(ts.jd_whole) != W4_R2_TS_JD_WHOLE_BITS ||
+        f64_to_bits(ts.jd_tt) != W4_R2_TS_JD_TT_BITS) {
+        return fail("timescales fields", 1);
     }
 
     double gi[9];
@@ -67,13 +79,14 @@ static int exercise_frames(void) {
         sidereon_frame_itrs_to_gcrs_matrix(&ts, ig) != SIDEREON_STATUS_OK) {
         return fail("frame matrices", 1);
     }
-    if (!finite9(gi) || !finite9(ig)) {
-        return fail("frame matrices finite", 1);
+    if (!same_bits(gi, W4_R2_GCRS_TO_ITRS_MATRIX_BITS, 9) ||
+        !same_bits(ig, W4_R2_ITRS_TO_GCRS_MATRIX_BITS, 9)) {
+        return fail("frame matrices", 1);
     }
     /* itrs_to_gcrs is the transpose of gcrs_to_itrs. */
     for (int r = 0; r < 3; r++) {
         for (int c = 0; c < 3; c++) {
-            if (fabs(gi[r * 3 + c] - ig[c * 3 + r]) > 1e-12) {
+            if (f64_to_bits(gi[r * 3 + c]) != f64_to_bits(ig[c * 3 + r])) {
                 return fail("frame matrices transpose relation", 1);
             }
         }
@@ -84,10 +97,8 @@ static int exercise_frames(void) {
         return fail("polar_motion_matrix", 1);
     }
     const double identity[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
-    for (int i = 0; i < 9; i++) {
-        if (fabs(pole[i] - identity[i]) > 1e-15) {
-            return fail("zero polar motion is identity", 1);
-        }
+    if (!same_bits(pole, W4_R2_POLAR_MOTION_ZERO_BITS, 9)) {
+        return fail("zero polar motion matrix", 1);
     }
 
     double gmst = 0.0;
@@ -96,8 +107,8 @@ static int exercise_frames(void) {
         sidereon_frame_gast_radians(&ts, &gast) != SIDEREON_STATUS_OK) {
         return fail("sidereal time", 1);
     }
-    if (!isfinite(gmst) || !isfinite(gast)) {
-        return fail("sidereal time finite", 1);
+    if (f64_to_bits(gmst) != W4_R2_GMST_BITS || f64_to_bits(gast) != W4_R2_GAST_BITS) {
+        return fail("sidereal time values", 1);
     }
 
     /* GCRS -> ITRS -> GCRS round trip. */
@@ -108,10 +119,9 @@ static int exercise_frames(void) {
         sidereon_frame_itrs_to_gcrs(itrs, &ts, back) != SIDEREON_STATUS_OK) {
         return fail("gcrs/itrs round trip", 1);
     }
-    for (int i = 0; i < 3; i++) {
-        if (fabs(back[i] - gcrs[i]) > 1e-6) {
-            return fail("gcrs/itrs round trip closes", 1);
-        }
+    if (!same_bits(itrs, W4_R2_GCRS_TO_ITRS_BITS, 3) ||
+        !same_bits(back, W4_R2_ITRS_TO_GCRS_BACK_BITS, 3)) {
+        return fail("gcrs/itrs round trip values", 1);
     }
 
     /* geodetic -> ITRS -> geodetic round trip. */
@@ -121,11 +131,12 @@ static int exercise_frames(void) {
         sidereon_frame_itrs_to_geodetic(itrs_km, geo) != SIDEREON_STATUS_OK) {
         return fail("geodetic/itrs round trip", 1);
     }
-    if (fabs(geo[0] - 37.0) > 1e-6 || fabs(geo[1] - (-122.0)) > 1e-6 || fabs(geo[2] - 0.1) > 1e-6) {
-        return fail("geodetic/itrs round trip closes", 1);
+    if (!same_bits(itrs_km, W4_R2_GEODETIC_TO_ITRS_BITS, 3) ||
+        !same_bits(geo, W4_R2_ITRS_TO_GEODETIC_BITS, 3)) {
+        return fail("geodetic/itrs round trip values", 1);
     }
 
-    /* TEME -> GCRS produces finite output. */
+    /* TEME -> GCRS. */
     const double teme_pos[3] = {-4000.0, 5000.0, 3000.0};
     const double teme_vel[3] = {-3.0, -2.0, 6.0};
     double gpos[3];
@@ -133,11 +144,14 @@ static int exercise_frames(void) {
     if (sidereon_frame_teme_to_gcrs(teme_pos, teme_vel, &ts, true, gpos, gvel) != SIDEREON_STATUS_OK) {
         return fail("teme_to_gcrs", 1);
     }
-    if (!finite3(gpos) || !finite3(gvel)) {
-        return fail("teme_to_gcrs finite", 1);
+    if (!same_bits(gpos, W4_R2_TEME_TO_GCRS_POSITION_BITS, 3) ||
+        !same_bits(gvel, W4_R2_TEME_TO_GCRS_VELOCITY_BITS, 3)) {
+        return fail("teme_to_gcrs values", 1);
     }
 
-    /* Independent Skyfield 1.49 oracle, captured as IEEE-754 bit patterns. */
+    /* Independent Skyfield 1.49 oracle, captured as IEEE-754 bit patterns: an
+     * external reference implementation's output, not sidereon-core's, so it
+     * stays here as the check it is. */
     SidereonTimeScales skyfield_ts;
     if (sidereon_timescales_from_utc(2018, 7, 4, 0, 0, 0.0, &skyfield_ts) != SIDEREON_STATUS_OK) {
         return fail("skyfield reference epoch", 1);
@@ -182,20 +196,18 @@ static int exercise_frames(void) {
     if (sidereon_frame_mat3_vec3_mul(identity, vec, prod) != SIDEREON_STATUS_OK) {
         return fail("mat3_vec3_mul", 1);
     }
-    for (int i = 0; i < 3; i++) {
-        if (fabs(prod[i] - vec[i]) > 1e-15) {
-            return fail("mat3_vec3_mul identity", 1);
-        }
+    if (!same_bits(prod, W4_R2_MAT3_VEC3_IDENTITY_BITS, 3)) {
+        return fail("mat3_vec3_mul identity", 1);
     }
 
-    /* topocentric az/el/range finite. */
+    /* topocentric az/el/range. */
     double topo[3];
     if (sidereon_frame_gcrs_to_topocentric(gcrs, 37.0, -122.0, 0.0, &ts, false, topo) !=
         SIDEREON_STATUS_OK) {
         return fail("gcrs_to_topocentric", 1);
     }
-    if (!finite3(topo)) {
-        return fail("gcrs_to_topocentric finite", 1);
+    if (!same_bits(topo, W4_R2_TOPOCENTRIC_BITS, 3)) {
+        return fail("gcrs_to_topocentric values", 1);
     }
     return 0;
 }
@@ -204,37 +216,41 @@ static int exercise_nutation_precession(void) {
     double dpsi = 0.0;
     double deps = 0.0;
     if (sidereon_nutation_iau2000a_radians(2459000.0, &dpsi, &deps) != SIDEREON_STATUS_OK ||
-        !isfinite(dpsi) || !isfinite(deps)) {
+        f64_to_bits(dpsi) != W4_R2_NUTATION_DPSI_BITS ||
+        f64_to_bits(deps) != W4_R2_NUTATION_DEPS_BITS) {
         return fail("nutation_iau2000a_radians", 1);
     }
     double mean_ob = 0.0;
     if (sidereon_nutation_mean_obliquity_radians(2459000.0, &mean_ob) != SIDEREON_STATUS_OK ||
-        !(mean_ob > 0.4 && mean_ob < 0.42)) {
+        f64_to_bits(mean_ob) != W4_R2_MEAN_OBLIQUITY_BITS) {
         return fail("mean_obliquity_radians", 1);
     }
     double fa[5];
     for (int i = 0; i < 5; i++) {
         fa[i] = 0.0;
     }
-    if (sidereon_nutation_fundamental_arguments(0.2, fa) != SIDEREON_STATUS_OK) {
+    if (sidereon_nutation_fundamental_arguments(0.2, fa) != SIDEREON_STATUS_OK ||
+        !same_bits(fa, W4_R2_FUNDAMENTAL_ARGUMENTS_BITS, 5)) {
         return fail("fundamental_arguments", 1);
     }
     double eqe = 0.0;
     if (sidereon_nutation_equation_of_equinoxes_terms(2459000.0, &eqe) != SIDEREON_STATUS_OK ||
-        !isfinite(eqe)) {
+        f64_to_bits(eqe) != W4_R2_EQUATION_OF_EQUINOXES_BITS) {
         return fail("equation_of_equinoxes_terms", 1);
     }
     double nmat[9];
     if (sidereon_nutation_matrix(mean_ob, mean_ob + deps, dpsi, nmat) != SIDEREON_STATUS_OK ||
-        !finite9(nmat)) {
+        !same_bits(nmat, W4_R2_NUTATION_MATRIX_BITS, 9)) {
         return fail("nutation_matrix", 1);
     }
     double pmat[9];
-    if (sidereon_precession_matrix(2459000.0, pmat) != SIDEREON_STATUS_OK || !finite9(pmat)) {
+    if (sidereon_precession_matrix(2459000.0, pmat) != SIDEREON_STATUS_OK ||
+        !same_bits(pmat, W4_R2_PRECESSION_MATRIX_BITS, 9)) {
         return fail("precession_matrix", 1);
     }
     double bias[9];
-    if (sidereon_precession_icrs_to_j2000_matrix(bias) != SIDEREON_STATUS_OK || !finite9(bias)) {
+    if (sidereon_precession_icrs_to_j2000_matrix(bias) != SIDEREON_STATUS_OK ||
+        !same_bits(bias, W4_R2_ICRS_TO_J2000_MATRIX_BITS, 9)) {
         return fail("icrs_to_j2000_matrix", 1);
     }
     return 0;
@@ -267,9 +283,9 @@ static int exercise_broadcast_keplerian(void) {
         SIDEREON_STATUS_OK) {
         return fail("broadcast_satellite_position_ecef", 1);
     }
-    double r = sqrt(orbit.x_m * orbit.x_m + orbit.y_m * orbit.y_m + orbit.z_m * orbit.z_m);
-    if (!(r > 1.5e7 && r < 3.0e7)) {
-        return fail("broadcast orbit radius plausible", 1);
+    const double orbit_xyz[3] = {orbit.x_m, orbit.y_m, orbit.z_m};
+    if (!same_bits(orbit_xyz, W4_R2_ORBIT_ECEF_BITS, 3)) {
+        return fail("broadcast orbit position", 1);
     }
 
     SidereonClockPolynomial clock = {
@@ -279,8 +295,8 @@ static int exercise_broadcast_keplerian(void) {
                                                     3.0e-9, &offset) != SIDEREON_STATUS_OK) {
         return fail("broadcast_satellite_clock_offset_s", 1);
     }
-    if (!isfinite(offset.dt_clock_total_s)) {
-        return fail("clock offset finite", 1);
+    if (f64_to_bits(offset.dt_clock_total_s) != W4_R2_CLOCK_TOTAL_BITS) {
+        return fail("clock offset value", 1);
     }
 
     SidereonSatelliteState state;
@@ -288,8 +304,11 @@ static int exercise_broadcast_keplerian(void) {
         SIDEREON_STATUS_OK) {
         return fail("broadcast_satellite_state", 1);
     }
-    if (fabs(state.orbit.x_m - orbit.x_m) > 1e-3 ||
-        fabs(state.clock.dt_clock_total_s - offset.dt_clock_total_s) > 1e-15) {
+    /* satellite_state composes the two routes above, so its values are theirs. */
+    if (f64_to_bits(state.orbit.x_m) != f64_to_bits(orbit.x_m) ||
+        f64_to_bits(state.orbit.y_m) != f64_to_bits(orbit.y_m) ||
+        f64_to_bits(state.orbit.z_m) != f64_to_bits(orbit.z_m) ||
+        f64_to_bits(state.clock.dt_clock_total_s) != f64_to_bits(offset.dt_clock_total_s)) {
         return fail("satellite_state matches components", 1);
     }
     return 0;
@@ -341,7 +360,7 @@ static int exercise_rinex_encode_nav(const char *nav_path) {
     size_t written = 0;
     size_t required = 0;
     if (sidereon_rinex_encode_nav(eph, NULL, 0, &written, &required) != SIDEREON_STATUS_OK ||
-        required == 0) {
+        required != W4_R2_ENCODED_NAV_LEN) {
         sidereon_broadcast_ephemeris_free(eph);
         return fail("encode_nav sizing", 1);
     }
@@ -358,12 +377,11 @@ static int exercise_rinex_encode_nav(const char *nav_path) {
         return fail("encode_nav write", 1);
     }
     out[written] = '\0';
-    int ok = (strstr(out, "RINEX VERSION / TYPE") != NULL) &&
-             (strstr(out, "END OF HEADER") != NULL);
+    int ok = fnv1a64(out, written) == W4_R2_ENCODED_NAV_FNV1A64;
     free(out);
     sidereon_broadcast_ephemeris_free(eph);
     if (!ok) {
-        return fail("encode_nav header content", 1);
+        return fail("encode_nav bytes", 1);
     }
     return 0;
 }
@@ -380,21 +398,15 @@ static int exercise_iod_gauss(void) {
     const double jdf[3] = {0.4864351851851852, 0.49199074074074073, 0.4947685185185185};
     const double rseci[9] = {4054.881, 2748.195, 4074.237, 3956.224, 2888.232,
                              4074.364, 3905.073, 2956.935, 4074.430};
-    const double expected_pos[3] = {6313.378130210396, 5247.50563344895,
-                                    6467.707164431651};
-    const double expected_vel[3] = {-4.185488280436629, 4.7884929168898145,
-                                    1.721714659663034};
     double pos[3];
     double vel[3];
     SidereonStatus st = sidereon_iod_gauss_angles(decl, rtasc, jd, jdf, rseci, pos, vel);
     if (st != SIDEREON_STATUS_OK) {
         return fail("iod_gauss_angles Vallado solve", 1);
     }
-    for (int axis = 0; axis < 3; axis++) {
-        if (fabs(pos[axis] - expected_pos[axis]) > 1.0e-12 * fabs(expected_pos[axis]) ||
-            fabs(vel[axis] - expected_vel[axis]) > 1.0e-12 * fabs(expected_vel[axis])) {
-            return fail("iod_gauss_angles Vallado reference", 1);
-        }
+    if (!same_bits(pos, W4_R2_IOD_POSITION_BITS, 3) ||
+        !same_bits(vel, W4_R2_IOD_VELOCITY_BITS, 3)) {
+        return fail("iod_gauss_angles values", 1);
     }
     return 0;
 }
@@ -405,7 +417,7 @@ static int exercise_combination_and_covariance(void) {
     double iono_free = 0.0;
     if (sidereon_combination_ionosphere_free_phase_cycles(1.0e8, 0.9e8, 1575.42e6, 1227.6e6,
                                                           &iono_free) != SIDEREON_STATUS_OK ||
-        !isfinite(iono_free)) {
+        f64_to_bits(iono_free) != W4_R2_IONO_FREE_PHASE_BITS) {
         return fail("ionosphere_free_phase_cycles", 1);
     }
 
@@ -432,12 +444,12 @@ static int exercise_combination_and_covariance(void) {
     size_t w = 0;
     size_t req = 0;
     if (sidereon_iono_free_pseudoranges_combined(ifp, comb, 4, &w, &req) != SIDEREON_STATUS_OK ||
-        req != 1) {
+        req != W4_R2_IONO_FREE_COMBINED_COUNT) {
         sidereon_iono_free_pseudoranges_free(ifp);
         return fail("iono_free combined", 1);
     }
     if (sidereon_iono_free_pseudoranges_dropped(ifp, drop, 4, &w, &req) != SIDEREON_STATUS_OK ||
-        req != 1 || drop[0].reason != SIDEREON_PSEUDORANGE_DROP_MISSING_BAND2) {
+        req != W4_R2_IONO_FREE_DROPPED_COUNT || drop[0].reason != W4_R2_IONO_FREE_DROPPED0_REASON) {
         sidereon_iono_free_pseudoranges_free(ifp);
         return fail("iono_free dropped", 1);
     }
@@ -456,9 +468,8 @@ static int exercise_combination_and_covariance(void) {
     if (sidereon_encounter_plane_covariance(&frame, cov, plane) != SIDEREON_STATUS_OK) {
         return fail("encounter_plane_covariance", 1);
     }
-    if (!isfinite(plane[0]) || !isfinite(plane[3]) || plane[0] < 0.0 || plane[3] < 0.0 ||
-        fabs(plane[1] - plane[2]) > 1e-9) {
-        return fail("encounter_plane_covariance symmetric psd", 1);
+    if (!same_bits(plane, W4_R2_ENCOUNTER_PLANE_COVARIANCE_BITS, 4)) {
+        return fail("encounter_plane_covariance values", 1);
     }
     return 0;
 }
@@ -469,34 +480,32 @@ static int exercise_signal(void) {
     size_t written = 0;
     size_t required = 0;
     if (sidereon_signal_ca_code(1, NULL, 0, &written, &required) != SIDEREON_STATUS_OK ||
-        required != 1023) {
+        required != W4_R2_CA_CODE_LEN) {
         return fail("ca_code sizing", 1);
     }
-    int8_t *code = malloc(1023);
+    int8_t *code = malloc(W4_R2_CA_CODE_LEN);
     if (!code) {
         return fail("ca_code alloc", 1);
     }
-    if (sidereon_signal_ca_code(1, code, 1023, &written, &required) != SIDEREON_STATUS_OK ||
-        written != 1023) {
+    if (sidereon_signal_ca_code(1, code, W4_R2_CA_CODE_LEN, &written, &required) != SIDEREON_STATUS_OK ||
+        written != W4_R2_CA_CODE_LEN) {
         free(code);
         return fail("ca_code write", 1);
     }
-    for (size_t i = 0; i < 1023; i++) {
-        if (code[i] != 1 && code[i] != -1) {
-            free(code);
-            return fail("ca_code bipolar", 1);
-        }
+    if (fnv1a64(code, W4_R2_CA_CODE_LEN) != W4_R2_CA_CODE_FNV1A64) {
+        free(code);
+        return fail("ca_code chips", 1);
     }
 
-    /* autocorrelation peak at lag 0 equals the code length. */
-    int32_t *acorr = malloc(1023 * sizeof(int32_t));
+    /* autocorrelation, correlation and cross-correlation at lag 0. */
+    int32_t *acorr = malloc(W4_R2_CA_CODE_LEN * sizeof(int32_t));
     if (!acorr) {
         free(code);
         return fail("autocorr alloc", 1);
     }
-    if (sidereon_signal_autocorrelation(code, 1023, acorr, 1023, &written, &required) !=
+    if (sidereon_signal_autocorrelation(code, W4_R2_CA_CODE_LEN, acorr, W4_R2_CA_CODE_LEN, &written, &required) !=
             SIDEREON_STATUS_OK ||
-        acorr[0] != 1023) {
+        acorr[0] != W4_R2_AUTOCORRELATION_0) {
         free(acorr);
         free(code);
         return fail("autocorrelation peak", 1);
@@ -504,20 +513,20 @@ static int exercise_signal(void) {
     free(acorr);
 
     int32_t single = 0;
-    if (sidereon_signal_correlation_at(code, code, 1023, 0, &single) != SIDEREON_STATUS_OK ||
-        single != 1023) {
+    if (sidereon_signal_correlation_at(code, code, W4_R2_CA_CODE_LEN, 0, &single) != SIDEREON_STATUS_OK ||
+        single != W4_R2_CORRELATION_AT_0) {
         free(code);
         return fail("correlation_at lag 0", 1);
     }
 
-    int32_t *xcorr = malloc(1023 * sizeof(int32_t));
+    int32_t *xcorr = malloc(W4_R2_CA_CODE_LEN * sizeof(int32_t));
     if (!xcorr) {
         free(code);
         return fail("xcorr alloc", 1);
     }
-    if (sidereon_signal_cross_correlation(code, code, 1023, xcorr, 1023, &written, &required) !=
+    if (sidereon_signal_cross_correlation(code, code, W4_R2_CA_CODE_LEN, xcorr, W4_R2_CA_CODE_LEN, &written, &required) !=
             SIDEREON_STATUS_OK ||
-        xcorr[0] != 1023) {
+        xcorr[0] != W4_R2_CROSS_CORRELATION_0) {
         free(xcorr);
         free(code);
         return fail("cross_correlation self", 1);
@@ -557,11 +566,11 @@ static int exercise_signal(void) {
         free(rep);
         return fail("correlate_against", 1);
     }
-    /* Aligned replica against itself accumulates full code energy. */
-    if (!(ci > 1000.0)) {
+    if (f64_to_bits(ci) != W4_R2_CORRELATE_AGAINST_I_BITS ||
+        f64_to_bits(cq) != W4_R2_CORRELATE_AGAINST_Q_BITS) {
         free(iq);
         free(rep);
-        return fail("correlate_against energy", 1);
+        return fail("correlate_against values", 1);
     }
 
     SidereonCorrelateOptions copts = {
@@ -569,7 +578,7 @@ static int exercise_signal(void) {
         .code_doppler_hz = 0.0};
     SidereonCorrelationResult cres;
     if (sidereon_signal_correlate(iq, 2046, 1, &copts, &cres) != SIDEREON_STATUS_OK ||
-        !(cres.power > 0.0)) {
+        f64_to_bits(cres.power) != W4_R2_CORRELATE_POWER_BITS) {
         free(iq);
         free(rep);
         return fail("correlate", 1);
@@ -581,7 +590,7 @@ static int exercise_signal(void) {
     SidereonAcquisitionResult ares;
     if (sidereon_signal_acquire(iq, 2046, 1, &aopts, &ares, NULL, 0, &written, &required) !=
             SIDEREON_STATUS_OK ||
-        required == 0) {
+        required != W4_R2_ACQUIRE_BIN_COUNT) {
         free(iq);
         free(rep);
         return fail("acquire sizing", 1);
@@ -594,7 +603,9 @@ static int exercise_signal(void) {
     }
     if (sidereon_signal_acquire(iq, 2046, 1, &aopts, &ares, bins, required, &written, &required) !=
             SIDEREON_STATUS_OK ||
-        written != required || !(ares.peak_power > 0.0)) {
+        written != required || f64_to_bits(ares.peak_power) != W4_R2_ACQUIRE_PEAK_POWER_BITS ||
+        f64_to_bits(ares.code_phase_chips) != W4_R2_ACQUIRE_CODE_PHASE_BITS ||
+        f64_to_bits(ares.doppler_hz) != W4_R2_ACQUIRE_DOPPLER_BITS) {
         free(bins);
         free(iq);
         free(rep);
@@ -627,13 +638,15 @@ static int exercise_quality(const SidereonSp3 *sp3) {
     double sig[2];
     bool sig_present[2];
     if (sidereon_sigmas(entries, 2, &vopts, sig, sig_present) != SIDEREON_STATUS_OK ||
-        !sig_present[0] || !sig_present[1] || !(sig[0] > 0.0) || !(sig[1] > 0.0)) {
+        sig_present[0] != W4_R2_SIGMA0_PRESENT || sig_present[1] != W4_R2_SIGMA1_PRESENT ||
+        f64_to_bits(sig[0]) != W4_R2_SIGMA0_BITS || f64_to_bits(sig[1]) != W4_R2_SIGMA1_BITS) {
         return fail("sigmas", 1);
     }
     double wt[2];
     bool wt_present[2];
     if (sidereon_weight_vector(entries, 2, &vopts, wt, wt_present) != SIDEREON_STATUS_OK ||
-        !wt_present[0] || !(wt[0] > 0.0)) {
+        wt_present[0] != W4_R2_WEIGHT0_PRESENT || wt_present[1] != W4_R2_WEIGHT1_PRESENT ||
+        f64_to_bits(wt[0]) != W4_R2_WEIGHT0_BITS || f64_to_bits(wt[1]) != W4_R2_WEIGHT1_BITS) {
         return fail("weight_vector", 1);
     }
     /* Higher elevation has smaller sigma and larger weight. */
@@ -675,14 +688,15 @@ static int exercise_quality(const SidereonSp3 *sp3) {
     }
 
     SidereonRaimResult raim;
-    if (sidereon_raim_for_solution(sol, 0.001, true, NULL, 0, false, 0, &raim) !=
+    if (sidereon_raim_for_solution(sol, 0.001, SIDEREON_RAIM_WEIGHTS_MODE_UNIT, NULL, 0, false, 0,
+                                   &raim) !=
         SIDEREON_STATUS_OK) {
         sidereon_spp_solution_free(sol);
         return fail("raim_for_solution", 1);
     }
-    if (!isfinite(raim.test_statistic)) {
+    if (f64_to_bits(raim.test_statistic) != W4_R2_RAIM_TEST_STATISTIC_BITS) {
         sidereon_spp_solution_free(sol);
-        return fail("raim test statistic finite", 1);
+        return fail("raim test statistic", 1);
     }
 
     SidereonSolutionValidationOptions svo;
@@ -690,7 +704,10 @@ static int exercise_quality(const SidereonSp3 *sp3) {
         sidereon_spp_solution_free(sol);
         return fail("validation options init", 1);
     }
-    if (sidereon_validate_receiver_solution(sol, &svo) != SIDEREON_STATUS_OK) {
+    /* The engine accepts the solution (W4_R2_SOLUTION_VALID); the binding
+     * reports an accepted solution as SIDEREON_STATUS_OK (src/spp.rs). */
+    if ((sidereon_validate_receiver_solution(sol, &svo) == SIDEREON_STATUS_OK) !=
+        W4_R2_SOLUTION_VALID) {
         sidereon_spp_solution_free(sol);
         return fail("validate_receiver_solution", 1);
     }
@@ -727,6 +744,242 @@ static int exercise_cycle_slips(void) {
         written != 2 || required != 2) {
         return fail("detect_cycle_slips", 1);
     }
+
+    opts.min_arc_gap_s = 1.0;
+    SidereonExactEpoch *first_epoch = NULL;
+    SidereonExactEpoch *second_epoch = NULL;
+    if (sidereon_exact_epoch_new(0, 0, &first_epoch) != SIDEREON_STATUS_OK ||
+        sidereon_exact_epoch_new(2, 0, &second_epoch) != SIDEREON_STATUS_OK) {
+        sidereon_exact_epoch_free(first_epoch);
+        sidereon_exact_epoch_free(second_epoch);
+        return fail("carrier exact-gap epoch construction", 1);
+    }
+    SidereonArcEpochV2 exact_arc[2] = {0};
+    for (size_t i = 0; i < 2; i++) {
+        exact_arc[i].legacy = arc[i];
+        exact_arc[i].legacy.gap_time_s = 0.0;
+        exact_arc[i].has_gap_epoch = true;
+        exact_arc[i].gap_epoch = i == 0 ? first_epoch : second_epoch;
+    }
+    SidereonSlipResult exact_results[2] = {0};
+    if (sidereon_detect_cycle_slips_v2(exact_arc, 2, &opts, exact_results, 2, &written,
+                                       &required) != SIDEREON_STATUS_OK ||
+        written != 2 || required != 2 ||
+        (exact_results[1].reason_mask & SIDEREON_SLIP_REASON_DATA_GAP) == 0) {
+        sidereon_exact_epoch_free(first_epoch);
+        sidereon_exact_epoch_free(second_epoch);
+        return fail("detect_cycle_slips_v2 exact gap", 1);
+    }
+    SidereonSmoothCodeResult smooth_results[2] = {0};
+    if (sidereon_smooth_code_v2(exact_arc, 2, &opts, 100, smooth_results, 2, &written,
+                                &required) != SIDEREON_STATUS_OK ||
+        written != 2 || required != 2) {
+        sidereon_exact_epoch_free(first_epoch);
+        sidereon_exact_epoch_free(second_epoch);
+        return fail("smooth_code_v2 exact gap", 1);
+    }
+    SidereonIonoFreeSmoothResult iono_free_results[2] = {0};
+    if (sidereon_smooth_iono_free_code_v2(exact_arc, 2, &opts, 100, iono_free_results, 2,
+                                         &written, &required) != SIDEREON_STATUS_OK ||
+        written != 2 || required != 2) {
+        sidereon_exact_epoch_free(first_epoch);
+        sidereon_exact_epoch_free(second_epoch);
+        return fail("smooth_iono_free_code_v2 exact gap", 1);
+    }
+    exact_arc[1].gap_epoch = NULL;
+    written = 9;
+    required = 9;
+    if (sidereon_detect_cycle_slips_v2(exact_arc, 2, &opts, exact_results, 2, &written,
+                                       &required) != SIDEREON_STATUS_NULL_POINTER ||
+        written != 0 || required != 0) {
+        sidereon_exact_epoch_free(first_epoch);
+        sidereon_exact_epoch_free(second_epoch);
+        return fail("detect_cycle_slips_v2 rejects missing flagged epoch", 1);
+    }
+    for (size_t i = 0; i < 2; i++) {
+        exact_arc[i].has_gap_epoch = false;
+        exact_arc[i].gap_epoch = NULL;
+    }
+    if (sidereon_detect_cycle_slips_v2(exact_arc, 2, &opts, exact_results, 2, &written,
+                                       &required) != SIDEREON_STATUS_OK ||
+        written != 2 || required != 2 ||
+        (exact_results[1].reason_mask & SIDEREON_SLIP_REASON_DATA_GAP) != 0) {
+        sidereon_exact_epoch_free(first_epoch);
+        sidereon_exact_epoch_free(second_epoch);
+        return fail("detect_cycle_slips_v2 accepts absent null gap epochs", 1);
+    }
+    if (sidereon_smooth_code_v2(exact_arc, 2, &opts, 100, smooth_results, 2, &written,
+                                &required) != SIDEREON_STATUS_OK ||
+        written != 2 || required != 2 ||
+        sidereon_smooth_iono_free_code_v2(exact_arc, 2, &opts, 100, iono_free_results, 2,
+                                         &written, &required) != SIDEREON_STATUS_OK ||
+        written != 2 || required != 2) {
+        sidereon_exact_epoch_free(first_epoch);
+        sidereon_exact_epoch_free(second_epoch);
+        return fail("carrier V2 accepts absent null gap epochs", 1);
+    }
+    sidereon_exact_epoch_free(first_epoch);
+    sidereon_exact_epoch_free(second_epoch);
+    return 0;
+}
+
+static int exercise_bias_typed_error(void) {
+    const uint8_t invalid[] = "bad";
+    SidereonBiasSet *set = NULL;
+    if (sidereon_bias_sinex_parse(invalid, sizeof(invalid) - 1, &set) !=
+        SIDEREON_STATUS_INVALID_ARGUMENT) {
+        return fail("bias parse typed error setup", 1);
+    }
+    SidereonBiasErrorInfo error;
+    if (sidereon_last_bias_error(&error) != SIDEREON_STATUS_OK ||
+        error.kind != SIDEREON_BIAS_ERROR_KIND_INVALID_INPUT) {
+        return fail("bias typed error kind", 1);
+    }
+    size_t written = 0;
+    size_t required = 0;
+    if (sidereon_last_bias_error_text(SIDEREON_BIAS_ERROR_TEXT_FIELD, 0, NULL, 0, &written,
+                                      &required) != SIDEREON_STATUS_OK ||
+        written != 0 || required != 6) {
+        return fail("bias typed error field sizing", 1);
+    }
+    uint8_t field[8] = {0};
+    if (sidereon_last_bias_error_text(SIDEREON_BIAS_ERROR_TEXT_FIELD, 0, field, sizeof(field),
+                                      &written, &required) != SIDEREON_STATUS_OK ||
+        written != 6 || memcmp(field, "header", 6) != 0 ||
+        sidereon_last_bias_error(&error) != SIDEREON_STATUS_OK ||
+        error.kind != SIDEREON_BIAS_ERROR_KIND_INVALID_INPUT) {
+        return fail("bias typed error retained after accessor reads", 1);
+    }
+    written = 8;
+    required = 8;
+    if (sidereon_last_bias_error_text(SIDEREON_BIAS_ERROR_TEXT_DEPARTURE_NOTICE, UINT32_MAX, NULL,
+                                      0, &written, &required) != SIDEREON_STATUS_INVALID_ARGUMENT ||
+        written != 0 || required != 0 || sidereon_last_bias_error(&error) != SIDEREON_STATUS_OK ||
+        error.kind != SIDEREON_BIAS_ERROR_KIND_INVALID_INPUT) {
+        return fail("bias error rejects invalid departure text selector", 1);
+    }
+    if (sidereon_bias_sinex_parse(NULL, 1, &set) != SIDEREON_STATUS_NULL_POINTER ||
+        sidereon_last_bias_error(&error) != SIDEREON_STATUS_OK ||
+        error.kind != SIDEREON_BIAS_ERROR_KIND_NONE) {
+        return fail("bias typed error cleared by ordinary operation", 1);
+    }
+    return 0;
+}
+
+typedef SidereonStatus (*BiasWriter)(const SidereonBiasSet *, uint8_t *, size_t, size_t *, size_t *);
+
+static int bias_writer_matches(BiasWriter writer, const SidereonBiasSet *set,
+                               const uint8_t *expected, size_t expected_len,
+                               const char *name) {
+    size_t written = 0;
+    size_t required = 0;
+    if (writer(set, NULL, 0, &written, &required) != SIDEREON_STATUS_OK || written != 0 ||
+        required != expected_len) {
+        return fail(name, 1);
+    }
+    uint8_t *buffer = malloc(required == 0 ? 1 : required);
+    if (buffer == NULL) {
+        return fail(name, 1);
+    }
+    const SidereonStatus status = writer(set, buffer, required, &written, &required);
+    const int matches = status == SIDEREON_STATUS_OK && written == expected_len &&
+                        memcmp(buffer, expected, expected_len) == 0;
+    free(buffer);
+    return matches ? 0 : fail(name, 1);
+}
+
+static int exercise_bias_writers(void) {
+    static const uint8_t sinex_text[] =
+        "%=BIA 1.00 TST 2020:001:00000 TST 2020:001:00000 2020:011:00000 A 00000000\n"
+        "+FILE/REFERENCE\n DESCRIPTION        TEST\n-FILE/REFERENCE\n"
+        "+BIAS/DESCRIPTION\n BIAS_MODE                               ABSOLUTE\n"
+        " TIME_SYSTEM                             G\n-BIAS/DESCRIPTION\n"
+        "+BIAS/SOLUTION\n-BIAS/SOLUTION\n%=ENDBIA\n";
+    static const uint8_t sinex_raw[] =
+        "%=BIA 1.00 TST 2020:001:00000 TST 2020:001:00000 2020:011:00000 A 00000000\n"
+        "+FILE/REFERENCE\n DESCRIPTION        TEST\n* raw \xff\n-FILE/REFERENCE\n"
+        "+BIAS/DESCRIPTION\n BIAS_MODE                               ABSOLUTE\n"
+        " TIME_SYSTEM                             G\n-BIAS/DESCRIPTION\n"
+        "+BIAS/SOLUTION\n-BIAS/SOLUTION\n%=ENDBIA\n";
+    static const uint8_t dcb_text[] =
+        "# DCB P1-C1 2026-06 G\n"
+        " PRN / STATION NAME        VALUE (ns)  RMS (ns)\n"
+        "***   ****************    *****.***   *****.***\n"
+        "G01                           0.626       0.000\n";
+    static const uint8_t dcb_raw[] =
+        "# DCB P1-C1 2026-06 G\n* raw \xff\n"
+        " PRN / STATION NAME        VALUE (ns)  RMS (ns)\n"
+        "***   ****************    *****.***   *****.***\n"
+        "G01                           0.626       0.000\n";
+    SidereonBiasSet *set = NULL;
+    if (sidereon_bias_sinex_parse(sinex_text, sizeof(sinex_text) - 1, &set) !=
+        SIDEREON_STATUS_OK) {
+        return fail("parse Bias-SINEX writer fixture", 1);
+    }
+    int result = bias_writer_matches(sidereon_bias_sinex_to_text, set, sinex_text,
+                                     sizeof(sinex_text) - 1, "Bias-SINEX text writer");
+    result |= bias_writer_matches(sidereon_bias_sinex_to_bytes, set, sinex_text,
+                                  sizeof(sinex_text) - 1, "Bias-SINEX bytes writer");
+    sidereon_bias_set_free(set);
+    if (result != 0) {
+        return result;
+    }
+
+    set = NULL;
+    if (sidereon_bias_sinex_parse(sinex_raw, sizeof(sinex_raw) - 1, &set) !=
+        SIDEREON_STATUS_OK) {
+        return fail("parse non-UTF8 Bias-SINEX writer fixture", 1);
+    }
+    size_t written = 8;
+    size_t required = 8;
+    if (sidereon_bias_sinex_to_text(set, NULL, 0, &written, &required) !=
+            SIDEREON_STATUS_INVALID_ARGUMENT ||
+        written != 0 || required != 0) {
+        sidereon_bias_set_free(set);
+        return fail("Bias-SINEX text writer refuses non-UTF8", 1);
+    }
+    SidereonBiasErrorInfo bias_error;
+    if (sidereon_last_bias_error(&bias_error) != SIDEREON_STATUS_OK ||
+        bias_error.kind != SIDEREON_BIAS_ERROR_KIND_INVALID_UTF8_LINE || bias_error.line == 0 ||
+        bias_writer_matches(sidereon_bias_sinex_to_bytes, set, sinex_raw,
+                            sizeof(sinex_raw) - 1, "Bias-SINEX bytes preserve non-UTF8") != 0) {
+        sidereon_bias_set_free(set);
+        return fail("Bias-SINEX typed refusal and exact bytes", 1);
+    }
+    sidereon_bias_set_free(set);
+
+    set = NULL;
+    if (sidereon_code_dcb_parse(dcb_text, sizeof(dcb_text) - 1, NULL, &set) !=
+        SIDEREON_STATUS_OK) {
+        return fail("parse CODE DCB writer fixture", 1);
+    }
+    result = bias_writer_matches(sidereon_code_dcb_to_text, set, dcb_text,
+                                 sizeof(dcb_text) - 1, "CODE DCB text writer");
+    result |= bias_writer_matches(sidereon_code_dcb_to_bytes, set, dcb_text,
+                                  sizeof(dcb_text) - 1, "CODE DCB bytes writer");
+    sidereon_bias_set_free(set);
+    if (result != 0) {
+        return result;
+    }
+
+    set = NULL;
+    if (sidereon_code_dcb_parse(dcb_raw, sizeof(dcb_raw) - 1, NULL, &set) !=
+        SIDEREON_STATUS_OK) {
+        return fail("parse non-UTF8 CODE DCB writer fixture", 1);
+    }
+    written = 8;
+    required = 8;
+    if (sidereon_code_dcb_to_text(set, NULL, 0, &written, &required) !=
+            SIDEREON_STATUS_INVALID_ARGUMENT ||
+        written != 0 || required != 0 ||
+        sidereon_last_bias_error(&bias_error) != SIDEREON_STATUS_OK ||
+        bias_error.kind != SIDEREON_BIAS_ERROR_KIND_INVALID_UTF8_LINE || bias_error.line == 0 ||
+        bias_writer_matches(sidereon_code_dcb_to_bytes, set, dcb_raw,
+                            sizeof(dcb_raw) - 1, "CODE DCB bytes preserve non-UTF8") != 0) {
+        sidereon_bias_set_free(set);
+        return fail("CODE DCB typed refusal and exact bytes", 1);
+    }
+    sidereon_bias_set_free(set);
     return 0;
 }
 
@@ -825,15 +1078,16 @@ static int exercise_ppp_corrections(const SidereonSp3 *sp3) {
 /* ----------------------------------- TCA -------------------------------- */
 
 /* Two well-separated ISS-era TLEs; the smoke confirms the finder/screen/Pc
- * marshalling runs and yields finite candidates over a short window. */
+ * marshalling runs and yields finite candidates over a short window. Column 69
+ * of each line carries its modulo-10 checksum, which TLE reading checks. */
 static const char *const TLE_A1 =
-    "1 25544U 98067A   20177.50000000  .00001264  00000-0  29621-4 0  9993";
+    "1 25544U 98067A   20177.50000000  .00001264  00000-0  29621-4 0  9999";
 static const char *const TLE_A2 =
-    "2 25544  51.6443 142.0099 0001234  90.0000 270.0000 15.49500000228000";
+    "2 25544  51.6443 142.0099 0001234  90.0000 270.0000 15.49500000228004";
 static const char *const TLE_B1 =
-    "1 43205U 18015A   20177.50000000  .00000500  00000-0  20000-4 0  9990";
+    "1 43205U 18015A   20177.50000000  .00000500  00000-0  20000-4 0  9992";
 static const char *const TLE_B2 =
-    "2 43205  51.6400 145.0000 0002000  80.0000 280.0000 15.50000000220000";
+    "2 43205  51.6400 145.0000 0002000  80.0000 280.0000 15.50000000220007";
 
 static int exercise_tca(void) {
     SidereonTcaFinderOptions fopts;
@@ -854,6 +1108,9 @@ static int exercise_tca(void) {
     if (st != SIDEREON_STATUS_OK) {
         return fail("find_tca_candidates_from_tles sizing", 1);
     }
+    if (required != W4_R2_CANDIDATE_COUNT) {
+        return fail("find_tca_candidates_from_tles count", 1);
+    }
     if (required > 0) {
         SidereonTcaCandidate *cands = malloc(required * sizeof(SidereonTcaCandidate));
         if (!cands) {
@@ -863,7 +1120,8 @@ static int exercise_tca(void) {
                                                    ws_frac, we_whole, we_frac, &fopts, cands,
                                                    required, &written, &required) !=
                 SIDEREON_STATUS_OK ||
-            written != required || !(cands[0].miss_distance_km >= 0.0)) {
+            written != required ||
+            f64_to_bits(cands[0].miss_distance_km) != W4_R2_CANDIDATE0_MISS_DISTANCE_BITS) {
             free(cands);
             return fail("find_tca_candidates_from_tles", 1);
         }
@@ -876,7 +1134,7 @@ static int exercise_tca(void) {
         pcopts.use_default_covariance = true;
         SidereonTcaConjunction conj;
         if (sidereon_tca_collision_probability(&cands[0], &pcopts, &conj) != SIDEREON_STATUS_OK ||
-            !isfinite(conj.collision_probability.pc)) {
+            f64_to_bits(conj.collision_probability.pc) != W4_R2_CANDIDATE0_PC_BITS) {
             free(cands);
             return fail("tca_collision_probability", 1);
         }
@@ -893,7 +1151,8 @@ static int exercise_tca(void) {
     required = 0;
     if (sidereon_find_tca_conjunctions_from_tles(TLE_A1, TLE_A2, TLE_B1, TLE_B2, ws_whole, ws_frac,
                                                  we_whole, we_frac, &fopts, &pcopts, NULL, 0,
-                                                 &written, &required) != SIDEREON_STATUS_OK) {
+                                                 &written, &required) != SIDEREON_STATUS_OK ||
+        required != W4_R2_CONJUNCTION_COUNT) {
         return fail("find_tca_conjunctions_from_tles sizing", 1);
     }
 
@@ -906,13 +1165,15 @@ static int exercise_tca(void) {
     if (sidereon_screen_tca_candidates_from_tle_catalog(TLE_A1, TLE_A2, secondaries, 1, ws_whole,
                                                         ws_frac, we_whole, we_frac, 1000.0, &fopts,
                                                         NULL, 0, &written, &required) !=
-        SIDEREON_STATUS_OK) {
+            SIDEREON_STATUS_OK ||
+        required != W4_R2_SCREEN_CANDIDATE_COUNT) {
         return fail("screen_tca_candidates_from_tle_catalog", 1);
     }
     if (sidereon_screen_tca_conjunctions_from_tle_catalog(TLE_A1, TLE_A2, secondaries, 1, ws_whole,
                                                           ws_frac, we_whole, we_frac, 1000.0,
                                                           &fopts, &pcopts, NULL, 0, &written,
-                                                          &required) != SIDEREON_STATUS_OK) {
+                                                          &required) != SIDEREON_STATUS_OK ||
+        required != W4_R2_SCREEN_CONJUNCTION_COUNT) {
         return fail("screen_tca_conjunctions_from_tle_catalog", 1);
     }
 
@@ -940,7 +1201,10 @@ static int exercise_tca(void) {
     SidereonStatus pst = sidereon_find_tca_conjunctions_with_propagated_covariance_from_tles(
         TLE_A1, TLE_A2, TLE_B1, TLE_B2, ws_whole, ws_frac, we_whole, we_frac, &fopts, &popts, NULL,
         0, &written, &required);
-    if (pst == SIDEREON_STATUS_PANIC) {
+    /* The engine's outcome for these options is W4_R2_PROPAGATED_OK; the
+     * binding maps success to SIDEREON_STATUS_OK (src/tca.rs). */
+    if ((pst == SIDEREON_STATUS_OK) != W4_R2_PROPAGATED_OK ||
+        (pst == SIDEREON_STATUS_OK && required != W4_R2_PROPAGATED_CONJUNCTION_COUNT)) {
         return fail("find_tca_conjunctions_with_propagated_covariance_from_tles", 1);
     }
     return 0;
@@ -975,6 +1239,8 @@ int main(int argc, char **argv) {
     rc |= exercise_signal();
     rc |= exercise_quality(sp3);
     rc |= exercise_cycle_slips();
+    rc |= exercise_bias_typed_error();
+    rc |= exercise_bias_writers();
     rc |= exercise_ppp_corrections(sp3);
     rc |= exercise_tca();
 

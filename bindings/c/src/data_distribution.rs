@@ -9,9 +9,9 @@ use std::ptr;
 use std::time::Duration;
 
 use sidereon_core::data::{
-    self as core_data, AnalysisCenter, ArchiveCompression, DistributionSource, ProductCampaign,
-    ProductDate, ProductDateTime, ProductFormat, ProductIdentity, ProductPublisher, ProductType,
-    SolutionClass, Sp3ContentStartConvention,
+    self as core_data, AnalysisCenter, ArchiveCompression, DataCatalogError, DistributionSource,
+    ExactProductSetError, ProductCampaign, ProductDate, ProductDateTime, ProductFormat,
+    ProductIdentity, ProductPublisher, ProductType, SolutionClass, Sp3ContentStartConvention,
 };
 use sidereon_core::exact_cache::{
     CommittedExactCacheEntry, ExactCacheError, ExactCacheGuard, ExactCacheOpen, ExactCacheOwner,
@@ -23,6 +23,10 @@ use super::{
     require_mut, require_out, require_ref, require_slice, set_last_error, write_boxed_handle,
     SidereonStatus,
 };
+use crate::engine_error::{
+    engine_error_operation_boundary, engine_f64, record_engine_error, SidereonEngineErrorFamily,
+};
+use serde_json::Value;
 
 pub const PRODUCT_TOKEN_C_BYTES: usize = 16;
 pub const ANALYSIS_CENTER_C_BYTES: usize = 32;
@@ -252,12 +256,354 @@ pub enum SidereonExactCacheComponent {
     Provenance = 2,
 }
 
-fn map_error(fn_name: &str, error: impl core::fmt::Display) -> SidereonStatus {
+fn catalog_node(kind: &str, fields: Value) -> Value {
+    serde_json::json!({
+        "kind": kind,
+        "fields": fields,
+    })
+}
+
+fn cache_node(kind: &str, fields: Value) -> Value {
+    serde_json::json!({
+        "kind": kind,
+        "fields": fields,
+    })
+}
+
+pub(crate) fn product_identity_value(identity: &ProductIdentity) -> Value {
+    serde_json::json!({
+        "family": identity.family.code(),
+        "analysis_center": identity.analysis_center.code(),
+        "publisher": identity.publisher.code(),
+        "solution": identity.solution.code(),
+        "solution_class": identity.solution.code(),
+        "campaign": identity.campaign.code(),
+        "version": identity.version,
+        "filename_version": identity.version,
+        "date": format!(
+            "{:04}-{:02}-{:02}",
+            identity.date.year, identity.date.month, identity.date.day
+        ),
+        "year": identity.date.year,
+        "month": identity.date.month,
+        "day": identity.date.day,
+        "issue": identity.issue,
+        "span": identity.span,
+        "sample": identity.sample,
+        "official_filename": identity.official_filename,
+        "format": identity.format.code(),
+        "format_version": identity.format_version,
+        "prediction_horizon_days": identity.prediction_horizon_days,
+    })
+}
+
+pub(crate) fn data_catalog_error_value(error: &DataCatalogError) -> Value {
+    match error {
+        DataCatalogError::UnknownCenter(center) => {
+            catalog_node("unknown_center", serde_json::json!({ "center": center }))
+        }
+        DataCatalogError::UnknownProductType(product_type) => catalog_node(
+            "unknown_product_type",
+            serde_json::json!({ "product_type": product_type }),
+        ),
+        DataCatalogError::UnsupportedProduct {
+            center,
+            product_type,
+        } => catalog_node(
+            "unsupported_product",
+            serde_json::json!({
+                "center": center.code(),
+                "product_type": product_type.code(),
+            }),
+        ),
+        DataCatalogError::UnsupportedDistribution {
+            source,
+            product_type,
+        } => catalog_node(
+            "unsupported_distribution",
+            serde_json::json!({
+                "source": source.code(),
+                "product_type": product_type.code(),
+            }),
+        ),
+        DataCatalogError::UnsupportedProductEra {
+            center,
+            product_type,
+            date,
+        } => catalog_node(
+            "unsupported_product_era",
+            serde_json::json!({
+                "center": center.code(),
+                "product_type": product_type.code(),
+                "year": date.year,
+                "month": date.month,
+                "day": date.day,
+                "date": format!("{:04}-{:02}-{:02}", date.year, date.month, date.day),
+            }),
+        ),
+        DataCatalogError::UnsupportedDistributionEra {
+            source,
+            center,
+            product_type,
+            date,
+        } => catalog_node(
+            "unsupported_distribution_era",
+            serde_json::json!({
+                "source": source.code(),
+                "center": center.code(),
+                "product_type": product_type.code(),
+                "year": date.year,
+                "month": date.month,
+                "day": date.day,
+                "date": format!("{:04}-{:02}-{:02}", date.year, date.month, date.day),
+            }),
+        ),
+        DataCatalogError::NoDistributionSources => {
+            catalog_node("no_distribution_sources", serde_json::json!({}))
+        }
+        DataCatalogError::InvalidOfficialFilename(filename) => catalog_node(
+            "invalid_official_filename",
+            serde_json::json!({ "filename": filename }),
+        ),
+        DataCatalogError::InconsistentProductIdentity { field } => catalog_node(
+            "inconsistent_product_identity",
+            serde_json::json!({ "field": field }),
+        ),
+        DataCatalogError::NoOpenMirror {
+            center,
+            product_type,
+        } => catalog_node(
+            "no_open_mirror",
+            serde_json::json!({
+                "center": center,
+                "product_type": product_type,
+            }),
+        ),
+        DataCatalogError::InvalidDate { year, month, day } => catalog_node(
+            "invalid_date",
+            serde_json::json!({
+                "year": year,
+                "month": month,
+                "day": day,
+            }),
+        ),
+        DataCatalogError::DateOutOfRange => {
+            catalog_node("date_out_of_range", serde_json::json!({}))
+        }
+        DataCatalogError::DateBeforeGpsEpoch(date) => catalog_node(
+            "date_before_gps_epoch",
+            serde_json::json!({
+                "year": date.year,
+                "month": date.month,
+                "day": date.day,
+                "date": format!("{:04}-{:02}-{:02}", date.year, date.month, date.day),
+            }),
+        ),
+        DataCatalogError::InvalidGpsDayOfWeek(day_of_week) => catalog_node(
+            "invalid_gps_day_of_week",
+            serde_json::json!({ "day_of_week": day_of_week }),
+        ),
+        DataCatalogError::InvalidSample(sample) => {
+            catalog_node("invalid_sample", serde_json::json!({ "sample": sample }))
+        }
+        DataCatalogError::UnsupportedSample {
+            center,
+            product_type,
+            sample,
+        } => catalog_node(
+            "unsupported_sample",
+            serde_json::json!({
+                "center": center.code(),
+                "product_type": product_type.code(),
+                "sample": sample,
+            }),
+        ),
+        DataCatalogError::InvalidSpan(span) => {
+            catalog_node("invalid_span", serde_json::json!({ "span": span }))
+        }
+        DataCatalogError::InvalidIssue(issue) => {
+            catalog_node("invalid_issue", serde_json::json!({ "issue": issue }))
+        }
+        DataCatalogError::MissingIssue { center } => catalog_node(
+            "missing_issue",
+            serde_json::json!({ "center": center.code() }),
+        ),
+        DataCatalogError::UnexpectedIssue { center } => catalog_node(
+            "unexpected_issue",
+            serde_json::json!({ "center": center.code() }),
+        ),
+        DataCatalogError::UnsupportedIssue { center, issue } => catalog_node(
+            "unsupported_issue",
+            serde_json::json!({
+                "center": center.code(),
+                "issue": issue,
+            }),
+        ),
+        DataCatalogError::InvalidDateTime {
+            hour,
+            minute,
+            second,
+        } => catalog_node(
+            "invalid_date_time",
+            serde_json::json!({
+                "hour": hour,
+                "minute": minute,
+                "second": second,
+            }),
+        ),
+        DataCatalogError::NoUltraIssue => catalog_node("no_ultra_issue", serde_json::json!({})),
+        DataCatalogError::NoAvailableUltraIssue => {
+            catalog_node("no_available_ultra_issue", serde_json::json!({}))
+        }
+        DataCatalogError::UnsupportedNominalSchedule {
+            center,
+            product_type,
+        } => catalog_node(
+            "unsupported_nominal_schedule",
+            serde_json::json!({
+                "center": center.code(),
+                "product_type": product_type.code(),
+            }),
+        ),
+        DataCatalogError::UnrecognizedArchiveListing { reason } => catalog_node(
+            "unrecognized_archive_listing",
+            serde_json::json!({ "reason": reason }),
+        ),
+        DataCatalogError::InvalidStation(station) => {
+            catalog_node("invalid_station", serde_json::json!({ "station": station }))
+        }
+        DataCatalogError::InvalidCoordinate {
+            lat_deg_bits,
+            lon_deg_bits,
+        } => catalog_node(
+            "invalid_coordinate",
+            serde_json::json!({
+                "lat_deg_bits": lat_deg_bits,
+                "lon_deg_bits": lon_deg_bits,
+                "lat_deg": engine_f64(f64::from_bits(*lat_deg_bits)),
+                "lon_deg": engine_f64(f64::from_bits(*lon_deg_bits)),
+                "latitude_deg": engine_f64(f64::from_bits(*lat_deg_bits)),
+                "longitude_deg": engine_f64(f64::from_bits(*lon_deg_bits)),
+            }),
+        ),
+        DataCatalogError::InvalidTileIndex {
+            lat_index,
+            lon_index,
+        } => catalog_node(
+            "invalid_tile_index",
+            serde_json::json!({
+                "lat_index": lat_index,
+                "lon_index": lon_index,
+            }),
+        ),
+        DataCatalogError::InvalidTileId(tile_id) => {
+            catalog_node("invalid_tile_id", serde_json::json!({ "tile_id": tile_id }))
+        }
+    }
+}
+
+pub(crate) fn exact_product_set_error_value(error: &ExactProductSetError) -> Value {
+    match error {
+        ExactProductSetError::EmptyExpected => {
+            catalog_node("empty_expected", serde_json::json!({}))
+        }
+        ExactProductSetError::InvalidExpected { index, source } => catalog_node(
+            "invalid_expected",
+            serde_json::json!({
+                "index": index,
+                "source": data_catalog_error_value(source),
+            }),
+        ),
+        ExactProductSetError::InvalidAvailable { index, source } => catalog_node(
+            "invalid_available",
+            serde_json::json!({
+                "index": index,
+                "source": data_catalog_error_value(source),
+            }),
+        ),
+        ExactProductSetError::Mismatch {
+            missing,
+            unexpected,
+            duplicate_expected,
+            duplicate_available,
+        } => catalog_node(
+            "mismatch",
+            serde_json::json!({
+                "missing": missing.iter().map(product_identity_value).collect::<Vec<_>>(),
+                "unexpected": unexpected.iter().map(product_identity_value).collect::<Vec<_>>(),
+                "duplicate_expected": duplicate_expected.iter().map(product_identity_value).collect::<Vec<_>>(),
+                "duplicate_available": duplicate_available.iter().map(product_identity_value).collect::<Vec<_>>(),
+            }),
+        ),
+    }
+}
+
+pub(crate) fn exact_cache_error_value(error: &ExactCacheError) -> Value {
+    match error {
+        ExactCacheError::Identity(source) => cache_node(
+            "identity",
+            serde_json::json!({
+                "source": data_catalog_error_value(source),
+            }),
+        ),
+        ExactCacheError::InvalidEntryId => cache_node("invalid_entry_id", serde_json::json!({})),
+        ExactCacheError::InvalidCommit(reason) => cache_node(
+            "invalid_commit",
+            serde_json::json!({
+                "reason": reason,
+            }),
+        ),
+        ExactCacheError::Io { operation, source } => cache_node(
+            "io",
+            serde_json::json!({
+                "operation": operation,
+                "raw_os_error": source.raw_os_error(),
+                "kind": format!("{:?}", source.kind()),
+                "message": source.to_string(),
+            }),
+        ),
+        ExactCacheError::LockTimeout => cache_node("lock_timeout", serde_json::json!({})),
+        ExactCacheError::SingleFlightTimeout => {
+            cache_node("single_flight_timeout", serde_json::json!({}))
+        }
+        ExactCacheError::SingleFlightOwnershipLost => {
+            cache_node("single_flight_ownership_lost", serde_json::json!({}))
+        }
+        ExactCacheError::InvalidSingleFlightOptions => {
+            cache_node("invalid_single_flight_options", serde_json::json!({}))
+        }
+        ExactCacheError::UnsupportedPlatform => {
+            cache_node("unsupported_platform", serde_json::json!({}))
+        }
+    }
+}
+
+fn map_catalog_error(fn_name: &str, error: DataCatalogError) -> SidereonStatus {
+    record_engine_error(
+        SidereonEngineErrorFamily::Catalog,
+        fn_name,
+        data_catalog_error_value(&error),
+    );
+    set_last_error(format!("{fn_name}: {error}"));
+    SidereonStatus::InvalidArgument
+}
+
+fn map_exact_product_set_error(fn_name: &str, error: ExactProductSetError) -> SidereonStatus {
+    record_engine_error(
+        SidereonEngineErrorFamily::Catalog,
+        fn_name,
+        exact_product_set_error_value(&error),
+    );
     set_last_error(format!("{fn_name}: {error}"));
     SidereonStatus::InvalidArgument
 }
 
 fn map_cache_error(fn_name: &str, error: ExactCacheError) -> SidereonStatus {
+    record_engine_error(
+        SidereonEngineErrorFamily::ExactCache,
+        fn_name,
+        exact_cache_error_value(&error),
+    );
     let status = if matches!(
         error,
         ExactCacheError::LockTimeout | ExactCacheError::SingleFlightTimeout
@@ -268,6 +614,11 @@ fn map_cache_error(fn_name: &str, error: ExactCacheError) -> SidereonStatus {
     };
     set_last_error(format!("{fn_name}: {error}"));
     status
+}
+
+fn map_generic_error(fn_name: &str, error: impl core::fmt::Display) -> SidereonStatus {
+    set_last_error(format!("{fn_name}: {error}"));
+    SidereonStatus::InvalidArgument
 }
 
 fn default_single_flight_options() -> SidereonExactCacheSingleFlightOptions {
@@ -637,13 +988,13 @@ pub(super) fn identity_from_c(
             &identity.analysis_center,
         )?
         .parse()
-        .map_err(|error| map_error(fn_name, error))?,
+        .map_err(|error| map_catalog_error(fn_name, error))?,
         publisher: publisher_from_c(fn_name, "identity.publisher", identity.publisher)?,
         solution: solution_from_c(fn_name, "identity.solution_class", identity.solution_class)?,
         campaign: campaign_from_c(fn_name, "identity.campaign", identity.campaign)?,
         version: identity.filename_version,
         date: ProductDate::new(identity.year, identity.month, identity.day)
-            .map_err(|error| map_error(fn_name, error))?,
+            .map_err(|error| map_catalog_error(fn_name, error))?,
         issue: if has_issue { Some(issue) } else { None },
         span: fixed_text_from_c(fn_name, "identity.span", &identity.span)?,
         sample: fixed_text_from_c(fn_name, "identity.sample", &identity.sample)?,
@@ -667,7 +1018,7 @@ pub(super) fn identity_from_c(
     };
     product
         .validate()
-        .map_err(|error| map_error(fn_name, error))?;
+        .map_err(|error| map_catalog_error(fn_name, error))?;
     Ok(product)
 }
 
@@ -700,7 +1051,7 @@ unsafe fn product_spec(
 ) -> Result<core_data::ProductSpec, SidereonStatus> {
     let center = center_from_c(fn_name, "center", input.center)?;
     let date = ProductDate::new(input.year, input.month, input.day)
-        .map_err(|error| map_error(fn_name, error))?;
+        .map_err(|error| map_catalog_error(fn_name, error))?;
     let sample = if input.sample.is_null() {
         None
     } else {
@@ -713,7 +1064,7 @@ unsafe fn product_spec(
     };
     let family = family_from_c(fn_name, "family", input.family)?;
     core_data::product(center, family, date, sample.as_deref(), issue.as_deref())
-        .map_err(|error| map_error(fn_name, error))
+        .map_err(|error| map_catalog_error(fn_name, error))
 }
 
 /// Return the next catalog issue nominally due at or after a UTC instant as a
@@ -747,7 +1098,7 @@ pub unsafe extern "C" fn sidereon_data_next_issue_due_json(
     out_required: *mut usize,
 ) -> SidereonStatus {
     const FN_NAME: &str = "sidereon_data_next_issue_due_json";
-    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+    engine_error_operation_boundary(FN_NAME, SidereonStatus::Panic, || {
         if let Err(status) = init_copy_counts(FN_NAME, out_written, out_required) {
             return status;
         }
@@ -761,15 +1112,15 @@ pub unsafe extern "C" fn sidereon_data_next_issue_due_json(
         };
         let date = match ProductDate::new(year, month, day) {
             Ok(date) => date,
-            Err(error) => return map_error(FN_NAME, error),
+            Err(error) => return map_catalog_error(FN_NAME, error),
         };
         let now = match ProductDateTime::new(date, hour, minute, second) {
             Ok(now) => now,
-            Err(error) => return map_error(FN_NAME, error),
+            Err(error) => return map_catalog_error(FN_NAME, error),
         };
         let issue = match core_data::next_issue_due(center, family, now) {
             Ok(issue) => issue,
-            Err(error) => return map_error(FN_NAME, error),
+            Err(error) => return map_catalog_error(FN_NAME, error),
         };
         let value = serde_json::json!({
             "identity": product_identity_json(&issue.identity),
@@ -781,7 +1132,7 @@ pub unsafe extern "C" fn sidereon_data_next_issue_due_json(
         });
         let json = match serde_json::to_vec(&value) {
             Ok(json) => json,
-            Err(error) => return map_error(FN_NAME, error),
+            Err(error) => return map_generic_error(FN_NAME, error),
         };
         match copy_prefix_to_c(
             FN_NAME,
@@ -832,7 +1183,7 @@ pub unsafe extern "C" fn sidereon_data_publication_listing_urls_json(
     out_required: *mut usize,
 ) -> SidereonStatus {
     const FN_NAME: &str = "sidereon_data_publication_listing_urls_json";
-    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+    engine_error_operation_boundary(FN_NAME, SidereonStatus::Panic, || {
         if let Err(status) = init_copy_counts(FN_NAME, out_written, out_required) {
             return status;
         }
@@ -846,15 +1197,15 @@ pub unsafe extern "C" fn sidereon_data_publication_listing_urls_json(
         };
         let date = match ProductDate::new(year, month, day) {
             Ok(date) => date,
-            Err(error) => return map_error(FN_NAME, error),
+            Err(error) => return map_catalog_error(FN_NAME, error),
         };
         let urls = match core_data::publication_listing_urls(center, family, date) {
             Ok(urls) => urls,
-            Err(error) => return map_error(FN_NAME, error),
+            Err(error) => return map_catalog_error(FN_NAME, error),
         };
         let json = match serde_json::to_string(&urls) {
             Ok(json) => json,
-            Err(error) => return map_error(FN_NAME, error),
+            Err(error) => return map_generic_error(FN_NAME, error),
         };
         match copy_prefix_to_c(
             FN_NAME,
@@ -897,7 +1248,7 @@ pub unsafe extern "C" fn sidereon_data_newest_published_product_json(
     out_required: *mut usize,
 ) -> SidereonStatus {
     const FN_NAME: &str = "sidereon_data_newest_published_product_json";
-    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+    engine_error_operation_boundary(FN_NAME, SidereonStatus::Panic, || {
         if let Err(status) = init_copy_counts(FN_NAME, out_written, out_required) {
             return status;
         }
@@ -918,11 +1269,11 @@ pub unsafe extern "C" fn sidereon_data_newest_published_product_json(
             };
         let objects = match core_data::parse_archive_listing(&body) {
             Ok(objects) => objects,
-            Err(error) => return map_error(FN_NAME, error),
+            Err(error) => return map_catalog_error(FN_NAME, error),
         };
         let newest = match core_data::newest_published_product(center, family, &objects) {
             Ok(newest) => newest,
-            Err(error) => return map_error(FN_NAME, error),
+            Err(error) => return map_catalog_error(FN_NAME, error),
         };
         let json = match newest {
             None => "null".to_string(),
@@ -938,7 +1289,7 @@ pub unsafe extern "C" fn sidereon_data_newest_published_product_json(
                 });
                 match serde_json::to_string(&value) {
                     Ok(json) => json,
-                    Err(error) => return map_error(FN_NAME, error),
+                    Err(error) => return map_generic_error(FN_NAME, error),
                 }
             }
         };
@@ -987,7 +1338,7 @@ pub unsafe extern "C" fn sidereon_data_predicted_ionex_line_candidates_json(
     out_required: *mut usize,
 ) -> SidereonStatus {
     const FN_NAME: &str = "sidereon_data_predicted_ionex_line_candidates_json";
-    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+    engine_error_operation_boundary(FN_NAME, SidereonStatus::Panic, || {
         if let Err(status) = init_copy_counts(FN_NAME, out_written, out_required) {
             return status;
         }
@@ -1001,21 +1352,21 @@ pub unsafe extern "C" fn sidereon_data_predicted_ionex_line_candidates_json(
         };
         let date = match ProductDate::new(year, month, day) {
             Ok(date) => date,
-            Err(error) => return map_error(FN_NAME, error),
+            Err(error) => return map_catalog_error(FN_NAME, error),
         };
         let candidates = match core_data::predicted_ionex_line_candidates(date, sample.as_deref()) {
             Ok(candidates) => candidates,
-            Err(error) => return map_error(FN_NAME, error),
+            Err(error) => return map_catalog_error(FN_NAME, error),
         };
         let mut rows = Vec::with_capacity(candidates.len());
         for candidate in candidates {
             let filename = match candidate.canonical_filename() {
                 Ok(filename) => filename,
-                Err(error) => return map_error(FN_NAME, error),
+                Err(error) => return map_catalog_error(FN_NAME, error),
             };
             let url = match candidate.archive_url() {
                 Ok(url) => url,
-                Err(error) => return map_error(FN_NAME, error),
+                Err(error) => return map_catalog_error(FN_NAME, error),
             };
             rows.push(serde_json::json!({
                 "center": candidate.center.code(),
@@ -1031,7 +1382,7 @@ pub unsafe extern "C" fn sidereon_data_predicted_ionex_line_candidates_json(
         }
         let json = match serde_json::to_string(&rows) {
             Ok(json) => json,
-            Err(error) => return map_error(FN_NAME, error),
+            Err(error) => return map_generic_error(FN_NAME, error),
         };
         match copy_prefix_to_c(
             FN_NAME,
@@ -1055,7 +1406,7 @@ pub unsafe extern "C" fn sidereon_data_product_solution_class(
     out_solution_class: *mut SidereonSolutionClass,
 ) -> SidereonStatus {
     const FN_NAME: &str = "sidereon_data_product_solution_class";
-    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+    engine_error_operation_boundary(FN_NAME, SidereonStatus::Panic, || {
         let out = match require_out(out_solution_class, FN_NAME, "out_solution_class") {
             Ok(out) => out,
             Err(status) => return status,
@@ -1074,7 +1425,7 @@ pub unsafe extern "C" fn sidereon_data_product_solution_class(
                 *out = solution_from_core(solution);
                 SidereonStatus::Ok
             }
-            Err(error) => map_error(FN_NAME, error),
+            Err(error) => map_catalog_error(FN_NAME, error),
         }
     })
 }
@@ -1107,7 +1458,7 @@ pub unsafe extern "C" fn sidereon_data_default_sample_for_date(
     out_required: *mut usize,
 ) -> SidereonStatus {
     const FN_NAME: &str = "sidereon_data_default_sample_for_date";
-    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+    engine_error_operation_boundary(FN_NAME, SidereonStatus::Panic, || {
         if let Err(status) = init_copy_counts(FN_NAME, out_written, out_required) {
             return status;
         }
@@ -1121,11 +1472,11 @@ pub unsafe extern "C" fn sidereon_data_default_sample_for_date(
         };
         let date = match ProductDate::new(year, month, day) {
             Ok(date) => date,
-            Err(error) => return map_error(FN_NAME, error),
+            Err(error) => return map_catalog_error(FN_NAME, error),
         };
         let sample = match core_data::default_sample_for_date(center, family, date) {
             Ok(sample) => sample,
-            Err(error) => return map_error(FN_NAME, error),
+            Err(error) => return map_catalog_error(FN_NAME, error),
         };
         match copy_prefix_to_c(
             FN_NAME,
@@ -1174,7 +1525,7 @@ pub unsafe extern "C" fn sidereon_data_supported_samples(
     out_required: *mut usize,
 ) -> SidereonStatus {
     const FN_NAME: &str = "sidereon_data_supported_samples";
-    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+    engine_error_operation_boundary(FN_NAME, SidereonStatus::Panic, || {
         if let Err(status) = init_copy_counts(FN_NAME, out_written, out_required) {
             return status;
         }
@@ -1188,7 +1539,7 @@ pub unsafe extern "C" fn sidereon_data_supported_samples(
         };
         let date = match ProductDate::new(year, month, day) {
             Ok(date) => date,
-            Err(error) => return map_error(FN_NAME, error),
+            Err(error) => return map_catalog_error(FN_NAME, error),
         };
         let issue = if issue.is_null() {
             None
@@ -1200,7 +1551,7 @@ pub unsafe extern "C" fn sidereon_data_supported_samples(
         };
         let samples = match core_data::supported_samples(center, family, date, issue.as_deref()) {
             Ok(samples) => samples,
-            Err(error) => return map_error(FN_NAME, error),
+            Err(error) => return map_catalog_error(FN_NAME, error),
         };
         let samples = match samples
             .iter()
@@ -1250,7 +1601,7 @@ pub unsafe extern "C" fn sidereon_data_sp3_content_start_convention(
     out_content_start_offset_s: *mut i64,
 ) -> SidereonStatus {
     const FN_NAME: &str = "sidereon_data_sp3_content_start_convention";
-    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+    engine_error_operation_boundary(FN_NAME, SidereonStatus::Panic, || {
         let out_convention = match require_out(out_convention, FN_NAME, "out_convention") {
             Ok(out) => out,
             Err(status) => return status,
@@ -1272,7 +1623,7 @@ pub unsafe extern "C" fn sidereon_data_sp3_content_start_convention(
         };
         let date = match ProductDate::new(year, month, day) {
             Ok(date) => date,
-            Err(error) => return map_error(FN_NAME, error),
+            Err(error) => return map_catalog_error(FN_NAME, error),
         };
         let issue = if issue.is_null() {
             None
@@ -1295,7 +1646,7 @@ pub unsafe extern "C" fn sidereon_data_sp3_content_start_convention(
                 *out_offset = convention.content_start_offset_s();
                 SidereonStatus::Ok
             }
-            Err(error) => map_error(FN_NAME, error),
+            Err(error) => map_catalog_error(FN_NAME, error),
         }
     })
 }
@@ -1323,7 +1674,7 @@ pub unsafe extern "C" fn sidereon_data_product_identity(
     out_identity: *mut SidereonProductIdentity,
 ) -> SidereonStatus {
     const FN_NAME: &str = "sidereon_data_product_identity";
-    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+    engine_error_operation_boundary(FN_NAME, SidereonStatus::Panic, || {
         let out = match require_out(out_identity, FN_NAME, "out_identity") {
             Ok(out) => out,
             Err(status) => return status,
@@ -1345,7 +1696,7 @@ pub unsafe extern "C" fn sidereon_data_product_identity(
         };
         let identity = match product.identity() {
             Ok(identity) => identity,
-            Err(error) => return map_error(FN_NAME, error),
+            Err(error) => return map_catalog_error(FN_NAME, error),
         };
         match identity_to_c(FN_NAME, &identity) {
             Ok(identity) => {
@@ -1373,7 +1724,7 @@ pub unsafe extern "C" fn sidereon_data_product_identity_cache_key(
     out_required: *mut usize,
 ) -> SidereonStatus {
     const FN_NAME: &str = "sidereon_data_product_identity_cache_key";
-    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+    engine_error_operation_boundary(FN_NAME, SidereonStatus::Panic, || {
         if let Err(status) = init_copy_counts(FN_NAME, out_written, out_required) {
             return status;
         }
@@ -1385,7 +1736,7 @@ pub unsafe extern "C" fn sidereon_data_product_identity_cache_key(
         };
         let key = match identity.key() {
             Ok(key) => key,
-            Err(error) => return map_error(FN_NAME, error),
+            Err(error) => return map_catalog_error(FN_NAME, error),
         };
         match copy_prefix_to_c(
             FN_NAME,
@@ -1420,7 +1771,7 @@ pub unsafe extern "C" fn sidereon_data_validate_exact_product_set(
     available_count: usize,
 ) -> SidereonStatus {
     const FN_NAME: &str = "sidereon_data_validate_exact_product_set";
-    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+    engine_error_operation_boundary(FN_NAME, SidereonStatus::Panic, || {
         let expected = match require_slice(expected, expected_count, FN_NAME, "expected") {
             Ok(values) => values,
             Err(status) => return status,
@@ -1447,7 +1798,7 @@ pub unsafe extern "C" fn sidereon_data_validate_exact_product_set(
         };
         match core_data::validate_exact_product_set(&expected, &available) {
             Ok(()) => SidereonStatus::Ok,
-            Err(error) => map_error(FN_NAME, error),
+            Err(error) => map_exact_product_set_error(FN_NAME, error),
         }
     })
 }
@@ -1474,7 +1825,7 @@ pub unsafe extern "C" fn sidereon_data_distribution_location(
     out_location: *mut SidereonDistributionLocation,
 ) -> SidereonStatus {
     const FN_NAME: &str = "sidereon_data_distribution_location";
-    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+    engine_error_operation_boundary(FN_NAME, SidereonStatus::Panic, || {
         let out = match require_out(out_location, FN_NAME, "out_location") {
             Ok(out) => out,
             Err(status) => return status,
@@ -1500,7 +1851,7 @@ pub unsafe extern "C" fn sidereon_data_distribution_location(
         };
         let location = match product.distribution_location(source) {
             Ok(location) => location,
-            Err(error) => return map_error(FN_NAME, error),
+            Err(error) => return map_catalog_error(FN_NAME, error),
         };
         let original_url = location.original_url.as_deref().unwrap_or("");
         let converted = (|| {
@@ -1581,7 +1932,7 @@ pub unsafe extern "C" fn sidereon_exact_cache_open_single_flight(
     out_owner: *mut *mut SidereonExactCacheOwner,
 ) -> SidereonStatus {
     const FN_NAME: &str = "sidereon_exact_cache_open_single_flight";
-    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+    engine_error_operation_boundary(FN_NAME, SidereonStatus::Panic, || {
         if !out_result.is_null() {
             *out_result = SidereonExactCacheOpenResult::Hit;
         }
@@ -1649,7 +2000,7 @@ pub unsafe extern "C" fn sidereon_exact_cache_owner_heartbeat(
     owner: *const SidereonExactCacheOwner,
 ) -> SidereonStatus {
     const FN_NAME: &str = "sidereon_exact_cache_owner_heartbeat";
-    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+    engine_error_operation_boundary(FN_NAME, SidereonStatus::Panic, || {
         let owner = match require_ref(owner, FN_NAME, "owner") {
             Ok(owner) => owner,
             Err(status) => return status,
@@ -1689,7 +2040,7 @@ pub unsafe extern "C" fn sidereon_exact_cache_owner_publish(
     out_entry: *mut *mut SidereonExactCacheEntry,
 ) -> SidereonStatus {
     const FN_NAME: &str = "sidereon_exact_cache_owner_publish";
-    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+    engine_error_operation_boundary(FN_NAME, SidereonStatus::Panic, || {
         let out = match require_out(out_entry, FN_NAME, "out_entry") {
             Ok(out) => out,
             Err(status) => return status,
@@ -1753,7 +2104,7 @@ pub unsafe extern "C" fn sidereon_exact_cache_open(
     out_cache: *mut *mut SidereonExactCache,
 ) -> SidereonStatus {
     const FN_NAME: &str = "sidereon_exact_cache_open";
-    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+    engine_error_operation_boundary(FN_NAME, SidereonStatus::Panic, || {
         let out = match require_out(out_cache, FN_NAME, "out_cache") {
             Ok(out) => out,
             Err(status) => return status,
@@ -1806,7 +2157,7 @@ pub unsafe extern "C" fn sidereon_exact_cache_read(
     out_entry: *mut *mut SidereonExactCacheEntry,
 ) -> SidereonStatus {
     const FN_NAME: &str = "sidereon_exact_cache_read";
-    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+    engine_error_operation_boundary(FN_NAME, SidereonStatus::Panic, || {
         let cache = match require_ref(cache, FN_NAME, "cache") {
             Ok(cache) => cache,
             Err(status) => return status,
@@ -1858,7 +2209,7 @@ pub unsafe extern "C" fn sidereon_exact_cache_read_unlocked(
     out_entry: *mut *mut SidereonExactCacheEntry,
 ) -> SidereonStatus {
     const FN_NAME: &str = "sidereon_exact_cache_read_unlocked";
-    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+    engine_error_operation_boundary(FN_NAME, SidereonStatus::Panic, || {
         let hit = match require_out(out_hit, FN_NAME, "out_hit") {
             Ok(hit) => hit,
             Err(status) => return status,
@@ -1920,7 +2271,7 @@ pub unsafe extern "C" fn sidereon_exact_cache_publish(
     out_entry: *mut *mut SidereonExactCacheEntry,
 ) -> SidereonStatus {
     const FN_NAME: &str = "sidereon_exact_cache_publish";
-    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+    engine_error_operation_boundary(FN_NAME, SidereonStatus::Panic, || {
         let cache = match require_ref(cache, FN_NAME, "cache") {
             Ok(cache) => cache,
             Err(status) => return status,
@@ -1964,7 +2315,7 @@ pub unsafe extern "C" fn sidereon_exact_cache_cleanup(
     cache: *const SidereonExactCache,
 ) -> SidereonStatus {
     const FN_NAME: &str = "sidereon_exact_cache_cleanup";
-    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+    engine_error_operation_boundary(FN_NAME, SidereonStatus::Panic, || {
         let cache = match require_ref(cache, FN_NAME, "cache") {
             Ok(cache) => cache,
             Err(status) => return status,
@@ -2175,6 +2526,45 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
+    use crate::engine_error::{
+        clear_engine_error, sidereon_last_engine_error_info, sidereon_last_engine_error_payload,
+        SidereonEngineErrorFamily, SidereonEngineErrorInfo,
+    };
+
+    fn get_last_engine_error_two_pass() -> (SidereonEngineErrorInfo, String) {
+        unsafe {
+            let mut info = SidereonEngineErrorInfo {
+                family: SidereonEngineErrorFamily::None,
+                payload_len: 0,
+            };
+            let status = sidereon_last_engine_error_info(&mut info);
+            assert_eq!(status, SidereonStatus::Ok);
+
+            let mut written = 0usize;
+            let mut required = 0usize;
+            let status =
+                sidereon_last_engine_error_payload(ptr::null_mut(), 0, &mut written, &mut required);
+            assert_eq!(status, SidereonStatus::Ok);
+            assert_eq!(written, 0);
+            assert_eq!(required, info.payload_len);
+
+            if required == 0 {
+                return (info, String::new());
+            }
+
+            let mut buf = vec![0u8; required];
+            let status = sidereon_last_engine_error_payload(
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut written,
+                &mut required,
+            );
+            assert_eq!(status, SidereonStatus::Ok);
+            assert_eq!(written, required);
+            let payload = String::from_utf8(buf).expect("valid utf-8 payload");
+            (info, payload)
+        }
+    }
 
     fn exact_cache_test_identity() -> SidereonProductIdentity {
         let center = CString::new("cod").unwrap();
@@ -2211,9 +2601,49 @@ mod tests {
         (root, stable_c)
     }
 
+    fn identity_fields(identity: &SidereonProductIdentity) -> (u32, u32, u32, String, String) {
+        let text = |bytes: &[c_char]| {
+            unsafe { CStr::from_ptr(bytes.as_ptr()) }
+                .to_str()
+                .unwrap()
+                .to_owned()
+        };
+        (
+            identity.publisher,
+            identity.solution_class,
+            identity.campaign,
+            text(&identity.analysis_center),
+            text(&identity.official_filename),
+        )
+    }
+
     #[test]
     fn exact_identity_and_cddis_path_match_the_core() {
         let center = CString::new("cod").unwrap();
+        // sidereon-core's own identity, cache key and CDDIS location for the
+        // same request.
+        let core_product = unsafe {
+            product_spec(
+                "test",
+                ProductInputs {
+                    center: center.as_ptr(),
+                    family: SidereonProductFamily::Sp3 as u32,
+                    year: 2026,
+                    month: 7,
+                    day: 12,
+                    sample: ptr::null(),
+                    issue: ptr::null(),
+                },
+            )
+        }
+        .expect("product");
+        let core_identity = core_product.identity().expect("core identity");
+        let expected_identity = identity_to_c("test", &core_identity).expect("identity");
+        let core_key = core_identity.key().expect("core key");
+        let core_location = core_product
+            .distribution_location(DistributionSource::NasaCddis)
+            .expect("core location");
+
         let mut identity = MaybeUninit::<SidereonProductIdentity>::uninit();
         let status = unsafe {
             sidereon_data_product_identity(
@@ -2229,23 +2659,9 @@ mod tests {
         };
         assert_eq!(status, SidereonStatus::Ok);
         let identity = unsafe { identity.assume_init() };
-        assert_eq!(identity.publisher, SidereonProductPublisher::Code as u32);
-        assert_eq!(identity.solution_class, SidereonSolutionClass::Final as u32);
         assert_eq!(
-            unsafe { CStr::from_ptr(identity.analysis_center.as_ptr()) }
-                .to_str()
-                .unwrap(),
-            "cod"
-        );
-        assert_eq!(
-            identity.campaign,
-            SidereonProductCampaign::MultiGnssExperiment as u32
-        );
-        assert_eq!(
-            unsafe { CStr::from_ptr(identity.official_filename.as_ptr()) }
-                .to_str()
-                .unwrap(),
-            "COD0MGXFIN_20261930000_01D_05M_ORB.SP3"
+            identity_fields(&identity),
+            identity_fields(&expected_identity)
         );
         let mut key_required = 0;
         let mut key_written = 0;
@@ -2274,7 +2690,7 @@ mod tests {
             },
             SidereonStatus::Ok
         );
-        assert_eq!(&key[..key_written], b"cod-final-a91258c21fa4860c34ce");
+        assert_eq!(&key[..key_written], core_key.as_bytes());
 
         let mut location = MaybeUninit::<SidereonDistributionLocation>::uninit();
         let status = unsafe {
@@ -2292,13 +2708,15 @@ mod tests {
         };
         assert_eq!(status, SidereonStatus::Ok);
         let location = unsafe { location.assume_init() };
-        assert_eq!(location.compression, SidereonArchiveCompression::Gzip);
+        assert_eq!(
+            location.compression,
+            compression_from_core(core_location.compression)
+        );
         assert_eq!(
             unsafe { CStr::from_ptr(location.original_url.as_ptr()) }
                 .to_str()
                 .unwrap(),
-            "https://cddis.nasa.gov/archive/gnss/products/2427/\
-COD0MGXFIN_20261930000_01D_05M_ORB.SP3.gz"
+            core_location.original_url.as_deref().expect("CDDIS URL")
         );
     }
 
@@ -2426,10 +2844,10 @@ COD0MGXFIN_20261930000_01D_05M_ORB.SP3.gz"
             },
             SidereonStatus::Ok
         );
-        assert_eq!(written, 32);
-        assert!(id
-            .iter()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte)));
+        // The id sidereon-core's exact cache assigned the published entry.
+        let core_id = unsafe { &(*published).entry.entry_id };
+        assert_eq!(&id[..written], core_id.as_bytes());
+        assert_eq!(required, core_id.len());
 
         let mut hit = false;
         let mut read = ptr::null_mut();
@@ -2778,6 +3196,25 @@ COD0MGXFIN_20261930000_01D_05M_ORB.SP3.gz"
     #[test]
     fn cddis_rejects_unsupported_family_without_substitution() {
         let center = CString::new("igs").unwrap();
+        // sidereon-core has no CDDIS location for this product.
+        let core_product = unsafe {
+            product_spec(
+                "test",
+                ProductInputs {
+                    center: center.as_ptr(),
+                    family: SidereonProductFamily::RinexNavigation as u32,
+                    year: 2020,
+                    month: 6,
+                    day: 25,
+                    sample: ptr::null(),
+                    issue: ptr::null(),
+                },
+            )
+        }
+        .expect("product");
+        assert!(core_product
+            .distribution_location(DistributionSource::NasaCddis)
+            .is_err());
         let mut location = MaybeUninit::<SidereonDistributionLocation>::uninit();
         let status = unsafe {
             sidereon_data_distribution_location(
@@ -2797,33 +3234,30 @@ COD0MGXFIN_20261930000_01D_05M_ORB.SP3.gz"
 
     #[test]
     fn predicted_ionex_direct_locations_use_the_aiub_prd_archive() {
-        for (center, year, month, day, expected) in [
-            (
-                "cod_prd1",
-                2026,
-                7,
-                15,
-                "https://www.aiub.unibe.ch/download/CODE/IONO/PRD/\
-COD0OPSP0D_20261960000_01D_01H_GIM.INX.gz",
-            ),
-            (
-                "cod_prd2",
-                2026,
-                7,
-                16,
-                "https://www.aiub.unibe.ch/download/CODE/IONO/PRD/\
-COD0OPSP1D_20261970000_01D_01H_GIM.INX.gz",
-            ),
-            (
-                "cod_prd2",
-                2027,
-                1,
-                1,
-                "https://www.aiub.unibe.ch/download/CODE/IONO/PRD/\
-COD0OPSP1D_20270010000_01D_01H_GIM.INX.gz",
-            ),
+        for (center, year, month, day) in [
+            ("cod_prd1", 2026, 7, 15),
+            ("cod_prd2", 2026, 7, 16),
+            ("cod_prd2", 2027, 1, 1),
         ] {
             let center = CString::new(center).unwrap();
+            // sidereon-core's own direct location for the same request.
+            let core_location = unsafe {
+                product_spec(
+                    "test",
+                    ProductInputs {
+                        center: center.as_ptr(),
+                        family: SidereonProductFamily::Ionex as u32,
+                        year,
+                        month,
+                        day,
+                        sample: ptr::null(),
+                        issue: ptr::null(),
+                    },
+                )
+            }
+            .expect("product")
+            .distribution_location(DistributionSource::Direct)
+            .expect("core location");
             let mut location = MaybeUninit::<SidereonDistributionLocation>::uninit();
             let status = unsafe {
                 sidereon_data_distribution_location(
@@ -2840,12 +3274,15 @@ COD0OPSP1D_20270010000_01D_01H_GIM.INX.gz",
             };
             assert_eq!(status, SidereonStatus::Ok);
             let location = unsafe { location.assume_init() };
-            assert_eq!(location.compression, SidereonArchiveCompression::Gzip);
+            assert_eq!(
+                location.compression,
+                compression_from_core(core_location.compression)
+            );
             assert_eq!(
                 unsafe { CStr::from_ptr(location.original_url.as_ptr()) }
                     .to_str()
                     .unwrap(),
-                expected
+                core_location.original_url.as_deref().expect("direct URL")
             );
         }
     }
@@ -2853,6 +3290,16 @@ COD0OPSP1D_20270010000_01D_01H_GIM.INX.gz",
     #[test]
     fn c_next_issue_due_maps_identity_due_time_and_split_coverage() {
         let center = CString::new("igs_ult").unwrap();
+        // sidereon-core's own next issue for the same center and instant.
+        let core_center =
+            unsafe { center_from_c("test", "center", center.as_ptr()) }.expect("center");
+        let core_issue = core_data::next_issue_due(
+            core_center,
+            ProductType::Sp3,
+            ProductDateTime::new(ProductDate::new(2026, 8, 4).expect("date"), 2, 59, 59)
+                .expect("instant"),
+        )
+        .expect("core next issue");
         let mut written = usize::MAX;
         let mut required = usize::MAX;
         assert_eq!(
@@ -2900,30 +3347,34 @@ COD0OPSP1D_20270010000_01D_01H_GIM.INX.gz",
         assert_eq!(written, required);
         let value: serde_json::Value =
             serde_json::from_slice(&bytes[..written]).expect("nominal issue JSON");
-        assert_eq!(value["identity"]["family"], "sp3");
-        assert_eq!(value["identity"]["analysis_center"], "igs_ult");
-        assert_eq!(value["identity"]["date"], "2026-08-03");
-        assert_eq!(value["identity"]["issue"], "0000");
-        assert_eq!(value["due_at"], "2026-08-04T03:00:00Z");
+        assert_eq!(
+            value["identity"],
+            product_identity_json(&core_issue.identity)
+        );
+        assert_eq!(value["due_at"], core_issue.due_at.to_string());
         assert_eq!(
             value["covers"]["observed"],
-            serde_json::json!({
-                "from": "2026-08-03T00:00:00Z",
-                "until": "2026-08-04T00:00:00Z",
-            })
+            nominal_coverage_interval_json(core_issue.covers.observed)
         );
         assert_eq!(
             value["covers"]["predicted"],
-            serde_json::json!({
-                "from": "2026-08-04T00:00:00Z",
-                "until": "2026-08-05T00:00:00Z",
-            })
+            nominal_coverage_interval_json(core_issue.covers.predicted)
         );
     }
 
     #[test]
     fn c_next_issue_due_rejects_unsupported_schedule() {
         let center = CString::new("wum_nrt").unwrap();
+        // sidereon-core has no issue schedule for this center.
+        let core_center =
+            unsafe { center_from_c("test", "center", center.as_ptr()) }.expect("center");
+        assert!(core_data::next_issue_due(
+            core_center,
+            ProductType::Sp3,
+            ProductDateTime::new(ProductDate::new(2026, 8, 4).expect("date"), 0, 0, 0)
+                .expect("instant"),
+        )
+        .is_err());
         let mut written = usize::MAX;
         let mut required = usize::MAX;
         assert_eq!(
@@ -2946,5 +3397,983 @@ COD0OPSP1D_20270010000_01D_01H_GIM.INX.gz",
             SidereonStatus::InvalidArgument
         );
         assert_eq!((written, required), (0, 0));
+    }
+
+    #[test]
+    fn test_data_catalog_error_all_variants_mapped() {
+        let cases: Vec<(DataCatalogError, &'static str)> = vec![
+            (
+                DataCatalogError::UnknownCenter("unknown_c".to_string()),
+                "unknown_center",
+            ),
+            (
+                DataCatalogError::UnknownProductType("unknown_pt".to_string()),
+                "unknown_product_type",
+            ),
+            (
+                DataCatalogError::UnsupportedProduct {
+                    center: AnalysisCenter::Cod,
+                    product_type: ProductType::Sp3,
+                },
+                "unsupported_product",
+            ),
+            (
+                DataCatalogError::UnsupportedDistribution {
+                    source: DistributionSource::Direct,
+                    product_type: ProductType::Sp3,
+                },
+                "unsupported_distribution",
+            ),
+            (
+                DataCatalogError::UnsupportedProductEra {
+                    center: AnalysisCenter::Cod,
+                    product_type: ProductType::Sp3,
+                    date: ProductDate {
+                        year: 2020,
+                        month: 1,
+                        day: 2,
+                    },
+                },
+                "unsupported_product_era",
+            ),
+            (
+                DataCatalogError::UnsupportedDistributionEra {
+                    source: DistributionSource::Direct,
+                    center: AnalysisCenter::Cod,
+                    product_type: ProductType::Sp3,
+                    date: ProductDate {
+                        year: 2020,
+                        month: 1,
+                        day: 2,
+                    },
+                },
+                "unsupported_distribution_era",
+            ),
+            (
+                DataCatalogError::NoDistributionSources,
+                "no_distribution_sources",
+            ),
+            (
+                DataCatalogError::InvalidOfficialFilename("bad..name".to_string()),
+                "invalid_official_filename",
+            ),
+            (
+                DataCatalogError::InconsistentProductIdentity {
+                    field: "official_filename",
+                },
+                "inconsistent_product_identity",
+            ),
+            (
+                DataCatalogError::NoOpenMirror {
+                    center: "cod".to_string(),
+                    product_type: "sp3".to_string(),
+                },
+                "no_open_mirror",
+            ),
+            (
+                DataCatalogError::InvalidDate {
+                    year: 2026,
+                    month: 13,
+                    day: 40,
+                },
+                "invalid_date",
+            ),
+            (DataCatalogError::DateOutOfRange, "date_out_of_range"),
+            (
+                DataCatalogError::DateBeforeGpsEpoch(ProductDate {
+                    year: 1970,
+                    month: 1,
+                    day: 1,
+                }),
+                "date_before_gps_epoch",
+            ),
+            (
+                DataCatalogError::InvalidGpsDayOfWeek(7),
+                "invalid_gps_day_of_week",
+            ),
+            (
+                DataCatalogError::InvalidSample("99X".to_string()),
+                "invalid_sample",
+            ),
+            (
+                DataCatalogError::UnsupportedSample {
+                    center: AnalysisCenter::Cod,
+                    product_type: ProductType::Sp3,
+                    sample: "99X".to_string(),
+                },
+                "unsupported_sample",
+            ),
+            (
+                DataCatalogError::InvalidSpan("99D".to_string()),
+                "invalid_span",
+            ),
+            (
+                DataCatalogError::InvalidIssue("9999".to_string()),
+                "invalid_issue",
+            ),
+            (
+                DataCatalogError::MissingIssue {
+                    center: AnalysisCenter::IgsUlt,
+                },
+                "missing_issue",
+            ),
+            (
+                DataCatalogError::UnexpectedIssue {
+                    center: AnalysisCenter::Cod,
+                },
+                "unexpected_issue",
+            ),
+            (
+                DataCatalogError::UnsupportedIssue {
+                    center: AnalysisCenter::IgsUlt,
+                    issue: "0130".to_string(),
+                },
+                "unsupported_issue",
+            ),
+            (
+                DataCatalogError::InvalidDateTime {
+                    hour: 25,
+                    minute: 61,
+                    second: 62,
+                },
+                "invalid_date_time",
+            ),
+            (DataCatalogError::NoUltraIssue, "no_ultra_issue"),
+            (
+                DataCatalogError::NoAvailableUltraIssue,
+                "no_available_ultra_issue",
+            ),
+            (
+                DataCatalogError::UnsupportedNominalSchedule {
+                    center: AnalysisCenter::WumNrt,
+                    product_type: ProductType::Sp3,
+                },
+                "unsupported_nominal_schedule",
+            ),
+            (
+                DataCatalogError::UnrecognizedArchiveListing {
+                    reason: "bad grammar".to_string(),
+                },
+                "unrecognized_archive_listing",
+            ),
+            (
+                DataCatalogError::InvalidStation("BADSTATION".to_string()),
+                "invalid_station",
+            ),
+            (
+                DataCatalogError::InvalidCoordinate {
+                    lat_deg_bits: 4636737291354636288,
+                    lon_deg_bits: 4636737291354636288,
+                },
+                "invalid_coordinate",
+            ),
+            (
+                DataCatalogError::InvalidTileIndex {
+                    lat_index: -95,
+                    lon_index: 185,
+                },
+                "invalid_tile_index",
+            ),
+            (
+                DataCatalogError::InvalidTileId("invalid_tile".to_string()),
+                "invalid_tile_id",
+            ),
+        ];
+
+        assert_eq!(cases.len(), 30);
+        for (err, expected_kind) in cases {
+            let node = data_catalog_error_value(&err);
+            assert_eq!(node["kind"], expected_kind);
+        }
+
+        let bad_date = DataCatalogError::InvalidDate {
+            year: 2026,
+            month: 13,
+            day: 40,
+        };
+        let bad_date_node = data_catalog_error_value(&bad_date);
+        assert_eq!(bad_date_node["kind"], "invalid_date");
+        assert_eq!(bad_date_node["fields"]["year"], 2026);
+        assert_eq!(bad_date_node["fields"]["month"], 13);
+        assert_eq!(bad_date_node["fields"]["day"], 40);
+
+        let lat_bits = (-0.0f64).to_bits();
+        let lon_bits = 0x7ff8_0000_0000_1234u64;
+        let bad_coord = DataCatalogError::InvalidCoordinate {
+            lat_deg_bits: lat_bits,
+            lon_deg_bits: lon_bits,
+        };
+        let coord_node = data_catalog_error_value(&bad_coord);
+        assert_eq!(coord_node["kind"], "invalid_coordinate");
+        assert_eq!(coord_node["fields"]["lat_deg_bits"], lat_bits);
+        assert_eq!(coord_node["fields"]["lon_deg_bits"], lon_bits);
+        assert_eq!(coord_node["fields"]["lat_deg"]["decimal"], "-0");
+        assert_eq!(
+            coord_node["fields"]["lat_deg"]["bits_hex"],
+            format!("{:016x}", lat_bits)
+        );
+        assert_eq!(coord_node["fields"]["lon_deg"]["decimal"], "NaN");
+        assert_eq!(
+            coord_node["fields"]["lon_deg"]["bits_hex"],
+            format!("{:016x}", lon_bits)
+        );
+        assert_eq!(
+            coord_node["fields"]["latitude_deg"]["bits_hex"],
+            format!("{:016x}", lat_bits)
+        );
+        assert_eq!(
+            coord_node["fields"]["longitude_deg"]["bits_hex"],
+            format!("{:016x}", lon_bits)
+        );
+        assert_ne!(
+            coord_node["fields"]["lat_deg"]["bits_hex"],
+            coord_node["fields"]["lon_deg"]["bits_hex"]
+        );
+    }
+
+    #[test]
+    fn test_exact_product_set_error_all_variants_mapped() {
+        let center_a = CString::new("cod").unwrap();
+        let core_product_a = unsafe {
+            product_spec(
+                "test",
+                ProductInputs {
+                    center: center_a.as_ptr(),
+                    family: SidereonProductFamily::Sp3 as u32,
+                    year: 2026,
+                    month: 7,
+                    day: 12,
+                    sample: ptr::null(),
+                    issue: ptr::null(),
+                },
+            )
+        }
+        .expect("product a");
+        let mut core_id_a = core_product_a.identity().expect("core identity a");
+        core_id_a.format_version = Some("d".to_string());
+
+        let center_b = CString::new("esa").unwrap();
+        let core_product_b = unsafe {
+            product_spec(
+                "test",
+                ProductInputs {
+                    center: center_b.as_ptr(),
+                    family: SidereonProductFamily::RinexClock as u32,
+                    year: 2026,
+                    month: 7,
+                    day: 12,
+                    sample: ptr::null(),
+                    issue: ptr::null(),
+                },
+            )
+        }
+        .expect("product b");
+        let core_id_b = core_product_b.identity().expect("core identity b");
+
+        let cases: Vec<(ExactProductSetError, &'static str)> = vec![
+            (ExactProductSetError::EmptyExpected, "empty_expected"),
+            (
+                ExactProductSetError::InvalidExpected {
+                    index: 1,
+                    source: DataCatalogError::DateOutOfRange,
+                },
+                "invalid_expected",
+            ),
+            (
+                ExactProductSetError::InvalidAvailable {
+                    index: 2,
+                    source: DataCatalogError::NoDistributionSources,
+                },
+                "invalid_available",
+            ),
+            (
+                ExactProductSetError::Mismatch {
+                    missing: vec![core_id_a.clone(), core_id_b.clone()],
+                    unexpected: vec![core_id_b.clone(), core_id_a.clone()],
+                    duplicate_expected: vec![core_id_a.clone()],
+                    duplicate_available: vec![core_id_b.clone()],
+                },
+                "mismatch",
+            ),
+        ];
+
+        assert_eq!(cases.len(), 4);
+        for (err, expected_kind) in &cases {
+            let node = exact_product_set_error_value(err);
+            assert_eq!(node["kind"], *expected_kind);
+        }
+
+        // EmptyExpected fields
+        let empty_node = exact_product_set_error_value(&ExactProductSetError::EmptyExpected);
+        assert_eq!(empty_node["kind"], "empty_expected");
+        assert_eq!(empty_node["fields"], serde_json::json!({}));
+
+        // Nested InvalidExpected assertions
+        let inv_exp_err = ExactProductSetError::InvalidExpected {
+            index: 1,
+            source: DataCatalogError::DateOutOfRange,
+        };
+        let inv_exp_node = exact_product_set_error_value(&inv_exp_err);
+        assert_eq!(inv_exp_node["kind"], "invalid_expected");
+        assert_eq!(inv_exp_node["fields"]["index"], 1);
+        assert_eq!(
+            inv_exp_node["fields"]["source"]["kind"],
+            "date_out_of_range"
+        );
+
+        // Nested InvalidAvailable assertions
+        let inv_avail_err = ExactProductSetError::InvalidAvailable {
+            index: 2,
+            source: DataCatalogError::NoDistributionSources,
+        };
+        let inv_avail_node = exact_product_set_error_value(&inv_avail_err);
+        assert_eq!(inv_avail_node["kind"], "invalid_available");
+        assert_eq!(inv_avail_node["fields"]["index"], 2);
+        assert_eq!(
+            inv_avail_node["fields"]["source"]["kind"],
+            "no_distribution_sources"
+        );
+
+        // Mismatch assertions covering all 4 vectors, order, and all ProductIdentity fields
+        let mismatch_err = ExactProductSetError::Mismatch {
+            missing: vec![core_id_a.clone(), core_id_b.clone()],
+            unexpected: vec![core_id_b.clone(), core_id_a.clone()],
+            duplicate_expected: vec![core_id_a.clone()],
+            duplicate_available: vec![core_id_b.clone()],
+        };
+        let node = exact_product_set_error_value(&mismatch_err);
+        assert_eq!(node["kind"], "mismatch");
+        let fields = &node["fields"];
+
+        let assert_id_a = |item: &Value| {
+            assert_eq!(item["family"], "sp3");
+            assert_eq!(item["analysis_center"], "cod");
+            assert_eq!(item["publisher"], "COD");
+            assert_eq!(item["solution"], "final");
+            assert_eq!(item["solution_class"], "final");
+            assert_eq!(item["campaign"], "MGX");
+            assert_eq!(item["version"], 0);
+            assert_eq!(item["filename_version"], 0);
+            assert_eq!(item["date"], "2026-07-12");
+            assert_eq!(item["year"], 2026);
+            assert_eq!(item["month"], 7);
+            assert_eq!(item["day"], 12);
+            assert_eq!(item["issue"], "0000");
+            assert_eq!(item["span"], "01D");
+            assert_eq!(item["sample"], "05M");
+            assert_eq!(
+                item["official_filename"],
+                "COD0MGXFIN_20261930000_01D_05M_ORB.SP3"
+            );
+            assert_eq!(item["format"], "SP3");
+            assert_eq!(item["format_version"], "d");
+            assert_eq!(item["prediction_horizon_days"], Value::Null);
+        };
+
+        let assert_id_b = |item: &Value| {
+            assert_eq!(item["family"], "clk");
+            assert_eq!(item["analysis_center"], "esa");
+            assert_eq!(item["publisher"], "ESA");
+            assert_eq!(item["solution"], "final");
+            assert_eq!(item["solution_class"], "final");
+            assert_eq!(item["campaign"], "MGN");
+            assert_eq!(item["version"], 0);
+            assert_eq!(item["filename_version"], 0);
+            assert_eq!(item["date"], "2026-07-12");
+            assert_eq!(item["year"], 2026);
+            assert_eq!(item["month"], 7);
+            assert_eq!(item["day"], 12);
+            assert_eq!(item["issue"], "0000");
+            assert_eq!(item["span"], "01D");
+            assert_eq!(item["sample"], "30S");
+            assert_eq!(
+                item["official_filename"],
+                "ESA0MGNFIN_20261930000_01D_30S_CLK.CLK"
+            );
+            assert_eq!(item["format"], "RINEX_CLK");
+            assert_eq!(item["format_version"], Value::Null);
+            assert_eq!(item["prediction_horizon_days"], Value::Null);
+        };
+
+        // Assert 4 vectors with distinct lengths and opposite orders
+        assert_eq!(fields["missing"].as_array().unwrap().len(), 2);
+        assert_id_a(&fields["missing"][0]);
+        assert_id_b(&fields["missing"][1]);
+
+        assert_eq!(fields["unexpected"].as_array().unwrap().len(), 2);
+        assert_id_b(&fields["unexpected"][0]);
+        assert_id_a(&fields["unexpected"][1]);
+
+        assert_eq!(fields["duplicate_expected"].as_array().unwrap().len(), 1);
+        assert_id_a(&fields["duplicate_expected"][0]);
+
+        assert_eq!(fields["duplicate_available"].as_array().unwrap().len(), 1);
+        assert_id_b(&fields["duplicate_available"][0]);
+    }
+
+    #[test]
+    fn test_exact_cache_error_all_variants_mapped() {
+        let cases: Vec<(ExactCacheError, &'static str)> = vec![
+            (
+                ExactCacheError::Identity(DataCatalogError::InvalidDate {
+                    year: 2026,
+                    month: 13,
+                    day: 1,
+                }),
+                "identity",
+            ),
+            (ExactCacheError::InvalidEntryId, "invalid_entry_id"),
+            (
+                ExactCacheError::InvalidCommit("mismatched digest"),
+                "invalid_commit",
+            ),
+            (
+                ExactCacheError::Io {
+                    operation: "open_read",
+                    source: std::io::Error::from_raw_os_error(2),
+                },
+                "io",
+            ),
+            (ExactCacheError::LockTimeout, "lock_timeout"),
+            (
+                ExactCacheError::SingleFlightTimeout,
+                "single_flight_timeout",
+            ),
+            (
+                ExactCacheError::SingleFlightOwnershipLost,
+                "single_flight_ownership_lost",
+            ),
+            (
+                ExactCacheError::InvalidSingleFlightOptions,
+                "invalid_single_flight_options",
+            ),
+            (ExactCacheError::UnsupportedPlatform, "unsupported_platform"),
+        ];
+
+        assert_eq!(cases.len(), 9);
+        for (err, expected_kind) in cases {
+            let node = exact_cache_error_value(&err);
+            assert_eq!(node["kind"], expected_kind);
+        }
+
+        let io_err = ExactCacheError::Io {
+            operation: "test_op",
+            source: std::io::Error::from_raw_os_error(2),
+        };
+        let io_node = exact_cache_error_value(&io_err);
+        assert_eq!(io_node["kind"], "io");
+        assert_eq!(io_node["fields"]["operation"], "test_op");
+        assert_eq!(io_node["fields"]["raw_os_error"], 2);
+        assert!(io_node["fields"]["kind"].is_string());
+        assert!(io_node["fields"]["message"].is_string());
+    }
+
+    #[test]
+    fn test_public_refusal_and_success_catalog_group() {
+        clear_engine_error();
+        let center = CString::new("cod").unwrap();
+        let mut out = MaybeUninit::<SidereonProductIdentity>::uninit();
+
+        let status = unsafe {
+            sidereon_data_product_identity(
+                center.as_ptr(),
+                SidereonProductFamily::Sp3 as u32,
+                2026,
+                13,
+                12,
+                ptr::null(),
+                ptr::null(),
+                out.as_mut_ptr(),
+            )
+        };
+        assert_eq!(status, SidereonStatus::InvalidArgument);
+        let (info, payload_str) = get_last_engine_error_two_pass();
+        assert_eq!(info.family, SidereonEngineErrorFamily::Catalog);
+        assert!(info.payload_len > 0);
+        let payload: Value = serde_json::from_str(&payload_str).expect("valid JSON payload");
+        assert_eq!(payload["schema_version"], 1);
+        assert_eq!(payload["family"], "catalog");
+        assert_eq!(payload["operation"], "sidereon_data_product_identity");
+        assert_eq!(payload["error"]["kind"], "invalid_date");
+        assert_eq!(payload["error"]["fields"]["year"], 2026);
+        assert_eq!(payload["error"]["fields"]["month"], 13);
+        assert_eq!(payload["error"]["fields"]["day"], 12);
+
+        let status = unsafe {
+            sidereon_data_product_identity(
+                center.as_ptr(),
+                SidereonProductFamily::Sp3 as u32,
+                2026,
+                7,
+                12,
+                ptr::null(),
+                ptr::null(),
+                out.as_mut_ptr(),
+            )
+        };
+        assert_eq!(status, SidereonStatus::Ok);
+        let (info, payload_str) = get_last_engine_error_two_pass();
+        assert_eq!(info.family, SidereonEngineErrorFamily::None);
+        assert_eq!(info.payload_len, 0);
+        assert!(payload_str.is_empty());
+    }
+
+    #[test]
+    fn test_public_refusal_and_success_set_group() {
+        clear_engine_error();
+        let identity = exact_cache_test_identity();
+
+        let status =
+            unsafe { sidereon_data_validate_exact_product_set(ptr::null(), 0, &identity, 1) };
+        assert_eq!(status, SidereonStatus::InvalidArgument);
+        let (info, payload_str) = get_last_engine_error_two_pass();
+        assert_eq!(info.family, SidereonEngineErrorFamily::Catalog);
+        assert!(info.payload_len > 0);
+        let payload: Value = serde_json::from_str(&payload_str).expect("valid JSON payload");
+        assert_eq!(payload["schema_version"], 1);
+        assert_eq!(payload["family"], "catalog");
+        assert_eq!(
+            payload["operation"],
+            "sidereon_data_validate_exact_product_set"
+        );
+        assert_eq!(payload["error"]["kind"], "empty_expected");
+
+        let status =
+            unsafe { sidereon_data_validate_exact_product_set(&identity, 1, &identity, 1) };
+        assert_eq!(status, SidereonStatus::Ok);
+        let (info, payload_str) = get_last_engine_error_two_pass();
+        assert_eq!(info.family, SidereonEngineErrorFamily::None);
+        assert_eq!(info.payload_len, 0);
+        assert!(payload_str.is_empty());
+    }
+
+    #[test]
+    fn test_public_refusal_and_success_cache_group() {
+        clear_engine_error();
+        let identity = exact_cache_test_identity();
+        let (root, stable_c) = exact_cache_test_paths("refusal-success-cache");
+
+        let mut cache = ptr::null_mut();
+        let status = unsafe {
+            sidereon_exact_cache_open(
+                stable_c.as_ptr(),
+                &identity,
+                SidereonDistributionSource::InMemory as u32,
+                1_000,
+                &mut cache,
+            )
+        };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert!(!cache.is_null());
+
+        let mut blocked = ptr::null_mut();
+        let status = unsafe {
+            sidereon_exact_cache_open(
+                stable_c.as_ptr(),
+                &identity,
+                SidereonDistributionSource::InMemory as u32,
+                0,
+                &mut blocked,
+            )
+        };
+        assert_eq!(status, SidereonStatus::Timeout);
+        assert!(blocked.is_null());
+
+        let (info, payload_str) = get_last_engine_error_two_pass();
+        assert_eq!(info.family, SidereonEngineErrorFamily::ExactCache);
+        assert!(info.payload_len > 0);
+        let payload: Value = serde_json::from_str(&payload_str).expect("valid JSON payload");
+        assert_eq!(payload["schema_version"], 1);
+        assert_eq!(payload["family"], "exact_cache");
+        assert_eq!(payload["operation"], "sidereon_exact_cache_open");
+        assert_eq!(payload["error"]["kind"], "lock_timeout");
+
+        let mut hit = false;
+        let mut read_entry = ptr::null_mut();
+        let status = unsafe { sidereon_exact_cache_read(cache, &mut hit, &mut read_entry) };
+        assert_eq!(status, SidereonStatus::Ok);
+        let (info, payload_str) = get_last_engine_error_two_pass();
+        assert_eq!(info.family, SidereonEngineErrorFamily::None);
+        assert_eq!(info.payload_len, 0);
+        assert!(payload_str.is_empty());
+
+        unsafe {
+            if !read_entry.is_null() {
+                sidereon_exact_cache_entry_free(read_entry);
+            }
+            sidereon_exact_cache_free(cache);
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn test_seeded_success_clearing() {
+        clear_engine_error();
+        let center = CString::new("cod").unwrap();
+        let mut out = MaybeUninit::<SidereonProductIdentity>::uninit();
+
+        let status = unsafe {
+            sidereon_data_product_identity(
+                center.as_ptr(),
+                SidereonProductFamily::Sp3 as u32,
+                2026,
+                13,
+                12,
+                ptr::null(),
+                ptr::null(),
+                out.as_mut_ptr(),
+            )
+        };
+        assert_eq!(status, SidereonStatus::InvalidArgument);
+        let (info, _) = get_last_engine_error_two_pass();
+        assert_eq!(info.family, SidereonEngineErrorFamily::Catalog);
+
+        let status = unsafe {
+            sidereon_data_product_identity(
+                center.as_ptr(),
+                SidereonProductFamily::Sp3 as u32,
+                2026,
+                7,
+                12,
+                ptr::null(),
+                ptr::null(),
+                out.as_mut_ptr(),
+            )
+        };
+        assert_eq!(status, SidereonStatus::Ok);
+        let (info, payload_str) = get_last_engine_error_two_pass();
+        assert_eq!(info.family, SidereonEngineErrorFamily::None);
+        assert_eq!(info.payload_len, 0);
+        assert!(payload_str.is_empty());
+
+        let status = unsafe {
+            sidereon_data_product_identity(
+                center.as_ptr(),
+                SidereonProductFamily::Sp3 as u32,
+                2026,
+                13,
+                12,
+                ptr::null(),
+                ptr::null(),
+                out.as_mut_ptr(),
+            )
+        };
+        assert_eq!(status, SidereonStatus::InvalidArgument);
+        let (info, _) = get_last_engine_error_two_pass();
+        assert_eq!(info.family, SidereonEngineErrorFamily::Catalog);
+
+        let identity = unsafe { out.assume_init() };
+        let status =
+            unsafe { sidereon_data_validate_exact_product_set(&identity, 1, &identity, 1) };
+        assert_eq!(status, SidereonStatus::Ok);
+        let (info, payload_str) = get_last_engine_error_two_pass();
+        assert_eq!(info.family, SidereonEngineErrorFamily::None);
+        assert_eq!(info.payload_len, 0);
+        assert!(payload_str.is_empty());
+    }
+
+    #[test]
+    fn test_seeded_early_argument_clearing() {
+        clear_engine_error();
+        let center = CString::new("cod").unwrap();
+        let identity = exact_cache_test_identity();
+
+        let trigger_refusal = || {
+            let mut refusal_out = MaybeUninit::<SidereonProductIdentity>::uninit();
+            let status = unsafe {
+                sidereon_data_product_identity(
+                    center.as_ptr(),
+                    SidereonProductFamily::Sp3 as u32,
+                    2026,
+                    13,
+                    12,
+                    ptr::null(),
+                    ptr::null(),
+                    refusal_out.as_mut_ptr(),
+                )
+            };
+            assert_eq!(status, SidereonStatus::InvalidArgument);
+            let (info, _) = get_last_engine_error_two_pass();
+            assert_eq!(info.family, SidereonEngineErrorFamily::Catalog);
+            assert!(info.payload_len > 0);
+        };
+
+        // 1. Catalog producer early arg failure: null center
+        trigger_refusal();
+        let mut out = MaybeUninit::<SidereonProductIdentity>::uninit();
+        let status = unsafe {
+            sidereon_data_product_identity(
+                ptr::null(),
+                SidereonProductFamily::Sp3 as u32,
+                2026,
+                7,
+                12,
+                ptr::null(),
+                ptr::null(),
+                out.as_mut_ptr(),
+            )
+        };
+        assert_eq!(status, SidereonStatus::NullPointer);
+        let (info, payload_str) = get_last_engine_error_two_pass();
+        assert_eq!(info.family, SidereonEngineErrorFamily::None);
+        assert_eq!(info.payload_len, 0);
+        assert!(payload_str.is_empty());
+
+        // 2. Catalog producer early arg failure: null out_identity
+        trigger_refusal();
+        let status = unsafe {
+            sidereon_data_product_identity(
+                center.as_ptr(),
+                SidereonProductFamily::Sp3 as u32,
+                2026,
+                7,
+                12,
+                ptr::null(),
+                ptr::null(),
+                ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, SidereonStatus::NullPointer);
+        let (info, payload_str) = get_last_engine_error_two_pass();
+        assert_eq!(info.family, SidereonEngineErrorFamily::None);
+        assert_eq!(info.payload_len, 0);
+        assert!(payload_str.is_empty());
+
+        // 3. Set producer early arg failure: null expected with count > 0
+        trigger_refusal();
+        let (seeded_info, _) = get_last_engine_error_two_pass();
+        assert_eq!(seeded_info.family, SidereonEngineErrorFamily::Catalog);
+        assert!(seeded_info.payload_len > 0);
+        let status =
+            unsafe { sidereon_data_validate_exact_product_set(ptr::null(), 1, &identity, 1) };
+        assert_eq!(status, SidereonStatus::NullPointer);
+        let (info, payload_str) = get_last_engine_error_two_pass();
+        assert_eq!(info.family, SidereonEngineErrorFamily::None);
+        assert_eq!(info.payload_len, 0);
+        assert!(payload_str.is_empty());
+
+        // 4. Cache producer early arg failure: null root_path
+        trigger_refusal();
+        let (seeded_info, _) = get_last_engine_error_two_pass();
+        assert_eq!(seeded_info.family, SidereonEngineErrorFamily::Catalog);
+        assert!(seeded_info.payload_len > 0);
+        let mut cache = ptr::null_mut();
+        let status = unsafe {
+            sidereon_exact_cache_open(
+                ptr::null(),
+                &identity,
+                SidereonDistributionSource::InMemory as u32,
+                1_000,
+                &mut cache,
+            )
+        };
+        assert_eq!(status, SidereonStatus::NullPointer);
+        let (info, payload_str) = get_last_engine_error_two_pass();
+        assert_eq!(info.family, SidereonEngineErrorFamily::None);
+        assert_eq!(info.payload_len, 0);
+        assert!(payload_str.is_empty());
+
+        // 5. Two-pass JSON producer early arg failure: null center
+        trigger_refusal();
+        let (seeded_info, _) = get_last_engine_error_two_pass();
+        assert_eq!(seeded_info.family, SidereonEngineErrorFamily::Catalog);
+        assert!(seeded_info.payload_len > 0);
+        let mut written = 0;
+        let mut required = 0;
+        let status = unsafe {
+            sidereon_data_next_issue_due_json(
+                ptr::null(),
+                SidereonProductFamily::Sp3 as u32,
+                2026,
+                8,
+                4,
+                0,
+                0,
+                0,
+                ptr::null_mut(),
+                0,
+                &mut written,
+                &mut required,
+            )
+        };
+        assert_eq!(status, SidereonStatus::NullPointer);
+        let (info, payload_str) = get_last_engine_error_two_pass();
+        assert_eq!(info.family, SidereonEngineErrorFamily::None);
+        assert_eq!(info.payload_len, 0);
+        assert!(payload_str.is_empty());
+    }
+
+    #[test]
+    fn test_live_cache_entry_reader_and_free_retains_full_payload() {
+        clear_engine_error();
+        let identity = exact_cache_test_identity();
+        let (root, stable_c) = exact_cache_test_paths("retain-full-payload");
+        let product = b"payload retention product bytes";
+        let archive = b"payload retention archive bytes";
+        let provenance = b"{\"provenance\":\"retention\"}";
+
+        let mut cache = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_exact_cache_open(
+                    stable_c.as_ptr(),
+                    &identity,
+                    SidereonDistributionSource::InMemory as u32,
+                    1_000,
+                    &mut cache,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert!(!cache.is_null());
+
+        let mut published = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_exact_cache_publish(
+                    cache,
+                    product.as_ptr(),
+                    product.len(),
+                    archive.as_ptr(),
+                    archive.len(),
+                    provenance.as_ptr(),
+                    provenance.len(),
+                    &mut published,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert!(!published.is_null());
+
+        let center = CString::new("cod").unwrap();
+        let mut out_id = MaybeUninit::<SidereonProductIdentity>::uninit();
+        let status = unsafe {
+            sidereon_data_product_identity(
+                center.as_ptr(),
+                SidereonProductFamily::Sp3 as u32,
+                2026,
+                13,
+                12,
+                ptr::null(),
+                ptr::null(),
+                out_id.as_mut_ptr(),
+            )
+        };
+        assert_eq!(status, SidereonStatus::InvalidArgument);
+        let (expected_info, expected_payload) = get_last_engine_error_two_pass();
+        assert_eq!(expected_info.family, SidereonEngineErrorFamily::Catalog);
+        assert!(expected_info.payload_len > 0);
+        assert!(!expected_payload.is_empty());
+
+        // 1. sidereon_exact_cache_entry_copy_bytes retains error
+        let mut written = 0;
+        let mut required = 0;
+        assert_eq!(
+            unsafe {
+                sidereon_exact_cache_entry_copy_bytes(
+                    published,
+                    SidereonExactCacheComponent::Product as u32,
+                    ptr::null_mut(),
+                    0,
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        let (info1, payload1) = get_last_engine_error_two_pass();
+        assert_eq!(info1.family, expected_info.family);
+        assert_eq!(info1.payload_len, expected_info.payload_len);
+        assert_eq!(payload1, expected_payload);
+
+        let mut buf = vec![0u8; required];
+        assert_eq!(
+            unsafe {
+                sidereon_exact_cache_entry_copy_bytes(
+                    published,
+                    SidereonExactCacheComponent::Product as u32,
+                    buf.as_mut_ptr(),
+                    buf.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(&buf[..written], product);
+        let (info2, payload2) = get_last_engine_error_two_pass();
+        assert_eq!(info2.family, expected_info.family);
+        assert_eq!(info2.payload_len, expected_info.payload_len);
+        assert_eq!(payload2, expected_payload);
+
+        // 2. sidereon_exact_cache_entry_copy_path retains error
+        written = 0;
+        required = 0;
+        assert_eq!(
+            unsafe {
+                sidereon_exact_cache_entry_copy_path(
+                    published,
+                    SidereonExactCacheComponent::Product as u32,
+                    ptr::null_mut(),
+                    0,
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        let (info3, payload3) = get_last_engine_error_two_pass();
+        assert_eq!(info3.family, expected_info.family);
+        assert_eq!(info3.payload_len, expected_info.payload_len);
+        assert_eq!(payload3, expected_payload);
+
+        // 3. sidereon_exact_cache_entry_copy_id retains error
+        let mut id_buf = [0u8; 32];
+        written = 0;
+        required = 0;
+        assert_eq!(
+            unsafe {
+                sidereon_exact_cache_entry_copy_id(
+                    published,
+                    id_buf.as_mut_ptr(),
+                    id_buf.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        let (info4, payload4) = get_last_engine_error_two_pass();
+        assert_eq!(info4.family, expected_info.family);
+        assert_eq!(info4.payload_len, expected_info.payload_len);
+        assert_eq!(payload4, expected_payload);
+
+        // 4. sidereon_exact_cache_single_flight_options_init retains error
+        let mut options = MaybeUninit::<SidereonExactCacheSingleFlightOptions>::uninit();
+        assert_eq!(
+            unsafe { sidereon_exact_cache_single_flight_options_init(options.as_mut_ptr()) },
+            SidereonStatus::Ok
+        );
+        let (info5, payload5) = get_last_engine_error_two_pass();
+        assert_eq!(info5.family, expected_info.family);
+        assert_eq!(info5.payload_len, expected_info.payload_len);
+        assert_eq!(payload5, expected_payload);
+
+        // 5. sidereon_exact_cache_entry_free retains error
+        unsafe { sidereon_exact_cache_entry_free(published) };
+        let (info6, payload6) = get_last_engine_error_two_pass();
+        assert_eq!(info6.family, expected_info.family);
+        assert_eq!(info6.payload_len, expected_info.payload_len);
+        assert_eq!(payload6, expected_payload);
+
+        // 6. sidereon_exact_cache_free retains error
+        unsafe { sidereon_exact_cache_free(cache) };
+        let (info7, payload7) = get_last_engine_error_two_pass();
+        assert_eq!(info7.family, expected_info.family);
+        assert_eq!(info7.payload_len, expected_info.payload_len);
+        assert_eq!(payload7, expected_payload);
+
+        let _ = fs::remove_dir_all(root);
+        clear_engine_error();
     }
 }

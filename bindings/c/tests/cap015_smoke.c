@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "sidereon.h"
+#include "w5_cap015_pins.h"
 
 static int fail(const char *what) {
     char message[512];
@@ -43,6 +44,11 @@ static uint64_t f64_bits(double value) {
     return bits;
 }
 
+/* Exact agreement with a pinned engine value (tests/valgen, bin w5_cap015). */
+static bool same_bits(double actual, uint64_t expected) {
+    return f64_bits(actual) == expected;
+}
+
 static void set_sat_token(SidereonSatelliteToken *token, const char *text) {
     memset(token->bytes, 0, sizeof(token->bytes));
     memcpy(token->bytes, text, strlen(text));
@@ -64,6 +70,15 @@ static int test_error_metrics(void) {
     if (err != SIDEREON_ERROR_METRICS_ERROR_KIND_NONE) {
         return fail("error metrics unexpected error detail");
     }
+    if (!same_bits(metrics.cep_m.radius_m, W5_CAP015_ISO_CEP_M_BITS) ||
+        !same_bits(metrics.r95_m.radius_m, W5_CAP015_ISO_R95_M_BITS) ||
+        !same_bits(metrics.sep_m.radius_m, W5_CAP015_ISO_SEP_M_BITS) ||
+        !same_bits(metrics.drms_m, W5_CAP015_ISO_DRMS_M_BITS) ||
+        metrics.r95_m.approx_valid != W5_CAP015_ISO_R95_APPROX_VALID) {
+        return fail("isotropic metrics differ from the engine's");
+    }
+    /* Closed-form checks of the isotropic case: CEP = 1.177410 sigma,
+     * R95 = sqrt(-2 ln 0.05) sigma, DRMS = sqrt(2) sigma. */
     const double expected_cep = 1.177410 * sigma;
     if (!close_rel(metrics.cep_m.radius_m, expected_cep, 1.0e-6)) {
         fprintf(stderr, "FAIL: isotropic CEP %.17g expected %.17g\n", metrics.cep_m.radius_m,
@@ -84,7 +99,10 @@ static int test_error_metrics(void) {
                    "error metrics ellipse from ENU") != 0) {
         return 1;
     }
-    if (!close_rel(ellipse.semi_major_m, sigma, 1.0e-12) ||
+    if (!same_bits(ellipse.semi_major_m, W5_CAP015_ISO_ELLIPSE_SEMI_MAJOR_M_BITS) ||
+        !same_bits(ellipse.semi_minor_m, W5_CAP015_ISO_ELLIPSE_SEMI_MINOR_M_BITS) ||
+        !same_bits(ellipse.orientation_rad, W5_CAP015_ISO_ELLIPSE_ORIENTATION_RAD_BITS) ||
+        !close_rel(ellipse.semi_major_m, sigma, 1.0e-12) ||
         !close_rel(ellipse.semi_minor_m, sigma, 1.0e-12) ||
         !close_abs(ellipse.orientation_rad, 0.0, 1.0e-12)) {
         return fail("isotropic ellipse");
@@ -96,7 +114,9 @@ static int test_error_metrics(void) {
                    "error metrics horizontal radius") != 0) {
         return 1;
     }
-    if (!close_rel(radius.radius_m, metrics.r95_m.radius_m, 1.0e-12) ||
+    if (!same_bits(radius.radius_m, W5_CAP015_ISO_HORIZONTAL_R95_M_BITS) ||
+        radius.approx_valid != W5_CAP015_ISO_HORIZONTAL_R95_APPROX_VALID ||
+        !close_rel(radius.radius_m, metrics.r95_m.radius_m, 1.0e-12) ||
         radius.approx_valid != metrics.r95_m.approx_valid) {
         return fail("horizontal radius helper");
     }
@@ -105,7 +125,8 @@ static int test_error_metrics(void) {
                    "error metrics spherical radius") != 0) {
         return 1;
     }
-    if (!close_rel(radius.radius_m, metrics.sep_m.radius_m, 1.0e-12)) {
+    if (!same_bits(radius.radius_m, W5_CAP015_ISO_SPHERICAL_R50_M_BITS) ||
+        !close_rel(radius.radius_m, metrics.sep_m.radius_m, 1.0e-12)) {
         return fail("spherical radius helper");
     }
     double vertical_radius = 0.0;
@@ -115,7 +136,10 @@ static int test_error_metrics(void) {
                    "error metrics vertical radius") != 0) {
         return 1;
     }
-    if (!close_rel(vertical_radius, 0.6744897501960817 * sigma, 1.0e-12)) {
+    /* 0.6744897501960817 is the standard-normal 75th percentile, the
+     * closed form of the 50 percent vertical radius. */
+    if (!same_bits(vertical_radius, W5_CAP015_ISO_VERTICAL_R50_M_BITS) ||
+        !close_rel(vertical_radius, 0.6744897501960817 * sigma, 1.0e-12)) {
         return fail("vertical radius helper");
     }
 
@@ -138,7 +162,9 @@ static int test_error_metrics(void) {
                    "error metrics position covariance") != 0) {
         return 1;
     }
-    if (!close_rel(position_metrics.cep_m.radius_m, metrics.cep_m.radius_m, 1.0e-12) ||
+    if (!same_bits(position_metrics.cep_m.radius_m, W5_CAP015_POSITION_COV_CEP_M_BITS) ||
+        !same_bits(position_metrics.drms_m, W5_CAP015_POSITION_COV_DRMS_M_BITS) ||
+        !close_rel(position_metrics.cep_m.radius_m, metrics.cep_m.radius_m, 1.0e-12) ||
         !close_rel(position_metrics.drms_m, metrics.drms_m, 1.0e-12)) {
         return fail("position covariance metrics");
     }
@@ -157,7 +183,10 @@ static int test_error_metrics(void) {
     const double delta = sqrt((9.0 - 4.0) * (9.0 - 4.0) + 4.0 * 2.0 * 2.0);
     const double major_lambda = 0.5 * (trace + delta);
     const double minor_lambda = 0.5 * (trace - delta);
-    if (!close_rel(ellipse.semi_major_m, sqrt(major_lambda), 1.0e-12) ||
+    if (!same_bits(ellipse.semi_major_m, W5_CAP015_ELONGATED_SEMI_MAJOR_M_BITS) ||
+        !same_bits(ellipse.semi_minor_m, W5_CAP015_ELONGATED_SEMI_MINOR_M_BITS) ||
+        !same_bits(ellipse.orientation_rad, W5_CAP015_ELONGATED_ORIENTATION_RAD_BITS) ||
+        !close_rel(ellipse.semi_major_m, sqrt(major_lambda), 1.0e-12) ||
         !close_rel(ellipse.semi_minor_m, sqrt(minor_lambda), 1.0e-12) ||
         !close_abs(ellipse.orientation_rad, 0.5 * atan2(4.0, 5.0), 1.0e-12)) {
         return fail("elongated ellipse oracle");
@@ -191,7 +220,13 @@ static int test_error_metrics(void) {
                    "error metrics rotated ECEF") != 0) {
         return 1;
     }
-    if (!close_rel(from_ecef.cep_m.radius_m, from_enu.cep_m.radius_m, 1.0e-12) ||
+    if (!same_bits(from_enu.cep_m.radius_m, W5_CAP015_ROTATED_ENU_CEP_M_BITS) ||
+        !same_bits(from_enu.r95_m.radius_m, W5_CAP015_ROTATED_ENU_R95_M_BITS) ||
+        !same_bits(from_enu.drms_m, W5_CAP015_ROTATED_ENU_DRMS_M_BITS) ||
+        !same_bits(from_ecef.cep_m.radius_m, W5_CAP015_ROTATED_ECEF_CEP_M_BITS) ||
+        !same_bits(from_ecef.r95_m.radius_m, W5_CAP015_ROTATED_ECEF_R95_M_BITS) ||
+        !same_bits(from_ecef.drms_m, W5_CAP015_ROTATED_ECEF_DRMS_M_BITS) ||
+        !close_rel(from_ecef.cep_m.radius_m, from_enu.cep_m.radius_m, 1.0e-12) ||
         !close_rel(from_ecef.r95_m.radius_m, from_enu.r95_m.radius_m, 1.0e-12) ||
         !close_rel(from_ecef.drms_m, from_enu.drms_m, 1.0e-12)) {
         return fail("rotated ECEF agreement");
@@ -211,7 +246,10 @@ static int test_error_metrics(void) {
                    "error metrics kinematic") != 0) {
         return 1;
     }
-    if (!close_rel(from_kinematic.cep_m.radius_m, from_enu.cep_m.radius_m, 1.0e-12) ||
+    if (!same_bits(from_kinematic.cep_m.radius_m, W5_CAP015_KINEMATIC_CEP_M_BITS) ||
+        !same_bits(from_kinematic.r95_m.radius_m, W5_CAP015_KINEMATIC_R95_M_BITS) ||
+        !same_bits(from_kinematic.drms_m, W5_CAP015_KINEMATIC_DRMS_M_BITS) ||
+        !close_rel(from_kinematic.cep_m.radius_m, from_enu.cep_m.radius_m, 1.0e-12) ||
         !close_rel(from_kinematic.r95_m.radius_m, from_enu.r95_m.radius_m, 1.0e-12) ||
         !close_rel(from_kinematic.drms_m, from_enu.drms_m, 1.0e-12)) {
         return fail("kinematic metrics agreement");
@@ -223,9 +261,13 @@ static int test_error_metrics(void) {
         0.0, 0.0, 1.0,
     };
     err = SIDEREON_ERROR_METRICS_ERROR_KIND_NONE;
-    if (sidereon_error_metrics_from_enu_covariance_m2(non_psd, &metrics, &err) !=
+    /* The engine refuses the covariance (pinned outcome and error variant);
+     * the binding reports a refusal as INVALID_ARGUMENT
+     * (src/error_metrics.rs, map_error_metrics_error). */
+    if (W5_CAP015_NON_PSD_OK ||
+        sidereon_error_metrics_from_enu_covariance_m2(non_psd, &metrics, &err) !=
             SIDEREON_STATUS_INVALID_ARGUMENT ||
-        err != SIDEREON_ERROR_METRICS_ERROR_KIND_NOT_POSITIVE_SEMIDEFINITE) {
+        err != W5_CAP015_NON_PSD_KIND) {
         return fail("non-PSD covariance typed error");
     }
     return 0;
@@ -237,7 +279,7 @@ static int test_sidereal(void) {
                    "sidereal repeat period") != 0) {
         return 1;
     }
-    if (!close_abs(period, 86164.0905, 1.0e-9)) {
+    if (!same_bits(period, W5_CAP015_SIDEREAL_GPS_PERIOD_S_BITS)) {
         return fail("sidereal repeat period value");
     }
 
@@ -266,7 +308,10 @@ static int test_sidereal(void) {
         return 1;
     }
     sidereon_sidereal_filter_output_free(output);
-    if (written != 2 || required != 2 || !under[0] || !under[1]) {
+    if (written != W5_CAP015_SIDEREAL_UNDER_COVERED_COUNT ||
+        required != W5_CAP015_SIDEREAL_UNDER_COVERED_COUNT ||
+        under[0] != W5_CAP015_SIDEREAL_UNDER_COVERED[0] ||
+        under[1] != W5_CAP015_SIDEREAL_UNDER_COVERED[1]) {
         return fail("sidereal under-covered passthrough");
     }
     return 0;
@@ -300,7 +345,8 @@ static int test_midas(void) {
         return 1;
     }
     for (int axis = 0; axis < 3; axis++) {
-        if (!close_abs(velocity.rate_enu_m_per_yr[axis], rate[axis], 1.0e-12)) {
+        if (!same_bits(velocity.rate_enu_m_per_yr[axis], W5_CAP015_MIDAS_RATE_ENU_M_PER_YR_BITS[axis]) ||
+            !close_abs(velocity.rate_enu_m_per_yr[axis], rate[axis], 1.0e-12)) {
             return fail("MIDAS synthetic velocity");
         }
     }
@@ -317,7 +363,9 @@ static int test_clock_power_law(void) {
                    "WhiteFM slopes") != 0) {
         return 1;
     }
-    if (adev_slope != -0.5 || mdev_slope != -0.5 || variance_exp != -1) {
+    if (!same_bits(adev_slope, W5_CAP015_WHITE_FM_ADEV_SLOPE_BITS) ||
+        !same_bits(mdev_slope, W5_CAP015_WHITE_FM_MDEV_SLOPE_BITS) ||
+        variance_exp != W5_CAP015_WHITE_FM_VARIANCE_TAU_EXPONENT) {
         return fail("WhiteFM slope exact");
     }
 
@@ -345,9 +393,10 @@ static int test_clock_power_law(void) {
         return 1;
     }
     sidereon_clock_power_law_noise_fit_free(fit);
-    if (written != 1 || required != 1 ||
-        octave.dominance_kind != SIDEREON_POWER_LAW_OCTAVE_DOMINANCE_KIND_FLAGGED ||
-        octave.flag != SIDEREON_POWER_LAW_OCTAVE_FLAG_UNDER_SAMPLED) {
+    if (written != W5_CAP015_POWER_LAW_OCTAVE_COUNT ||
+        required != W5_CAP015_POWER_LAW_OCTAVE_COUNT ||
+        octave.dominance_kind != W5_CAP015_POWER_LAW_OCTAVE_DOMINANCE_KIND ||
+        octave.flag != W5_CAP015_POWER_LAW_OCTAVE_FLAG) {
         return fail("power-law under-sampled flag");
     }
     return 0;
@@ -515,9 +564,9 @@ static int test_sparse_orbit_fit(void) {
         sidereon_orbit_fit_report_free(report);
         return 1;
     }
-    if (written != 1 || required != 1 ||
-        fit.covariance.kind != SIDEREON_ORBIT_FIT_COVARIANCE_KIND_UNBOUNDED ||
-        fit.geometry_quality.tier != SIDEREON_OBSERVABILITY_TIER_ZERO_REDUNDANCY) {
+    if (written != W5_CAP015_SPARSE_FIT_COUNT || required != W5_CAP015_SPARSE_FIT_COUNT ||
+        fit.covariance.kind != W5_CAP015_SPARSE_FIT_COVARIANCE_KIND ||
+        fit.geometry_quality.tier != W5_CAP015_SPARSE_FIT_TIER) {
         sidereon_orbit_fit_report_free(report);
         return fail("sparse orbit unbounded covariance");
     }
@@ -531,7 +580,9 @@ static int test_sparse_orbit_fit(void) {
         return 1;
     }
     sidereon_orbit_fit_report_free(report);
-    if (written != 1 || required != 1 || ledger.stats.n != 2 || !ledger.stats.low_sample_count) {
+    if (written != W5_CAP015_SPARSE_LEDGER_COUNT || required != W5_CAP015_SPARSE_LEDGER_COUNT ||
+        ledger.stats.n != W5_CAP015_SPARSE_LEDGER_N ||
+        ledger.stats.low_sample_count != W5_CAP015_SPARSE_LEDGER_LOW_SAMPLE_COUNT) {
         return fail("sparse orbit low-sample ledger");
     }
     return 0;
@@ -543,9 +594,10 @@ static int test_baarda_constants(void) {
                    "w-test noncentrality") != 0) {
         return 1;
     }
-    if (!close_rel(constants.delta0, 4.132147965064809, 1.0e-14)) {
-        fprintf(stderr, "FAIL: delta0 %.17g expected %.17g\n", constants.delta0,
-                4.132147965064809);
+    if (!same_bits(constants.delta0, W5_CAP015_WTEST_DELTA0_BITS) ||
+        !same_bits(constants.lambda0, W5_CAP015_WTEST_LAMBDA0_BITS)) {
+        fprintf(stderr, "FAIL: delta0 %.17g lambda0 %.17g differ from the engine's\n",
+                constants.delta0, constants.lambda0);
         return 1;
     }
     if (constants.lambda0 != constants.delta0 * constants.delta0) {
@@ -588,7 +640,10 @@ static int test_reliability_design(void) {
         return 1;
     }
     sidereon_reliability_report_free(report);
-    if (written != 3 || required != 3 || summary.dof != 1 || summary.n_uncheckable != 1) {
+    if (written != W5_CAP015_RELIABILITY_OBS_COUNT ||
+        required != W5_CAP015_RELIABILITY_OBS_COUNT || summary.dof != W5_CAP015_RELIABILITY_DOF ||
+        summary.n_uncheckable != W5_CAP015_RELIABILITY_N_UNCHECKABLE ||
+        !same_bits(summary.sum_redundancy, W5_CAP015_RELIABILITY_SUM_REDUNDANCY_BITS)) {
         return fail("reliability counts");
     }
     double sum = obs[0].redundancy + obs[1].redundancy + obs[2].redundancy;
@@ -596,12 +651,14 @@ static int test_reliability_design(void) {
         !close_abs(summary.sum_redundancy, (double)summary.dof, 2.0e-14)) {
         return fail("reliability redundancy sum");
     }
-    if (!obs[0].uncheckable || obs[0].has_mdb_m || obs[0].has_external_enu_m ||
-        obs[0].has_bias_to_noise) {
-        return fail("reliability uncheckable row");
-    }
-    if (obs[1].uncheckable || !obs[1].has_mdb_m || !obs[1].has_bias_to_noise) {
-        return fail("reliability checkable row");
+    for (size_t i = 0; i < 3; i++) {
+        if (!same_bits(obs[i].redundancy, W5_CAP015_RELIABILITY_REDUNDANCY_BITS[i]) ||
+            obs[i].uncheckable != W5_CAP015_RELIABILITY_UNCHECKABLE[i] ||
+            obs[i].has_mdb_m != W5_CAP015_RELIABILITY_HAS_MDB[i] ||
+            obs[i].has_external_enu_m != W5_CAP015_RELIABILITY_HAS_EXTERNAL_ENU[i] ||
+            obs[i].has_bias_to_noise != W5_CAP015_RELIABILITY_HAS_BIAS_TO_NOISE[i]) {
+            return fail("reliability row");
+        }
     }
     return 0;
 }
@@ -614,10 +671,10 @@ static int test_sbas_protection_levels(void) {
         require_ok(sidereon_sbas_k_multipliers_en_route_npa(&enroute), "SBAS enroute K") != 0) {
         return 1;
     }
-    if (f64_bits(precision.k_h) != f64_bits(6.0) ||
-        f64_bits(precision.k_v) != f64_bits(5.33) ||
-        f64_bits(enroute.k_h) != f64_bits(6.18) ||
-        f64_bits(enroute.k_v) != f64_bits(5.33)) {
+    if (!same_bits(precision.k_h, W5_CAP015_SBAS_PRECISION_K_H_BITS) ||
+        !same_bits(precision.k_v, W5_CAP015_SBAS_PRECISION_K_V_BITS) ||
+        !same_bits(enroute.k_h, W5_CAP015_SBAS_ENROUTE_K_H_BITS) ||
+        !same_bits(enroute.k_v, W5_CAP015_SBAS_ENROUTE_K_V_BITS)) {
         return fail("SBAS K constants");
     }
 
@@ -669,8 +726,8 @@ static int test_sbas_protection_levels(void) {
     if (err != SIDEREON_SBAS_PL_ERROR_NONE) {
         return fail("SBAS PL error detail");
     }
-    if (!close_rel(pl.hpl_m, 9.064491010405014, 1.0e-12) ||
-        !close_rel(pl.vpl_m, 13.664070819648263, 1.0e-12)) {
+    if (!same_bits(pl.hpl_m, W5_CAP015_SBAS_HPL_M_BITS) ||
+        !same_bits(pl.vpl_m, W5_CAP015_SBAS_VPL_M_BITS)) {
         fprintf(stderr, "FAIL: SBAS PL hpl=%.17g vpl=%.17g\n", pl.hpl_m, pl.vpl_m);
         return 1;
     }

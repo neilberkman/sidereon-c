@@ -28,6 +28,9 @@
 #include <string.h>
 
 #include "sidereon.h"
+/* sidereon-core's samples, predictions and refusals for these inputs, from
+ * tests/valgen (w6_precise_samples). */
+#include "w6_precise_samples_pins.h"
 
 static int fail(const char *what, int code) {
     char message[512];
@@ -128,6 +131,23 @@ static bool prediction_bit_identical(const SidereonRangePrediction *a,
     return true;
 }
 
+/* The prediction for request i equals the pinned engine values bit for bit. */
+static bool prediction_is(const SidereonRangePrediction *p, int i, const uint64_t *range,
+                          const uint64_t *transmit, const bool *has_clock, const uint64_t *clock,
+                          const uint64_t *sat_pos) {
+    if (f64_to_bits(p->geometric_range_m) != range[i] ||
+        f64_to_bits(p->transmit_time_j2000_s) != transmit[i] ||
+        p->has_sat_clock_s != has_clock[i] || f64_to_bits(p->sat_clock_s) != clock[i]) {
+        return false;
+    }
+    for (int k = 0; k < 3; k++) {
+        if (f64_to_bits(p->sat_pos_ecef_m[k]) != sat_pos[i * 3 + k]) {
+            return false;
+        }
+    }
+    return true;
+}
+
 #define REQUEST_COUNT 3
 
 int main(int argc, char **argv) {
@@ -164,8 +184,8 @@ int main(int argc, char **argv) {
         rc = fail("precise samples: count query", 1);
         goto cleanup;
     }
-    if (required < 8) {
-        rc = fail("precise samples: too few samples extracted", 1);
+    if (required != W6_PS_SAMPLE_COUNT) {
+        rc = fail("precise samples: sample count", 1);
         goto cleanup;
     }
     samples = calloc(required, sizeof(*samples));
@@ -194,6 +214,11 @@ int main(int argc, char **argv) {
     size_t mid = required / 2;
     const char *sat_id = samples[mid].sat.bytes;
     double t0 = samples[mid].epoch_j2000_s;
+    if (strncmp(sat_id, W6_PS_MID_SAT, sizeof(samples[mid].sat.bytes)) != 0 ||
+        f64_to_bits(t0) != W6_PS_MID_EPOCH_BITS) {
+        rc = fail("precise samples: interior sample", 1);
+        goto cleanup;
+    }
     double t_rx[REQUEST_COUNT] = {t0 - 300.0, t0, t0 + 300.0};
     double receiver[3] = {4027894.0, 307046.0, 4919474.0};
 
@@ -219,8 +244,15 @@ int main(int argc, char **argv) {
         goto cleanup;
     }
     for (int i = 0; i < REQUEST_COUNT; i++) {
-        if (!(from_sp3[i].geometric_range_m > 0.0)) {
-            rc = fail("predict_ranges: non-positive range", 1);
+        if (!prediction_is(&from_sp3[i], i, W6_PS_SP3_RANGE_BITS, W6_PS_SP3_TRANSMIT_BITS,
+                           W6_PS_SP3_HAS_CLOCK, W6_PS_SP3_CLOCK_BITS, W6_PS_SP3_SAT_POS_BITS)) {
+            rc = fail("predict_ranges: SP3 source value", 1);
+            goto cleanup;
+        }
+        if (!prediction_is(&from_samples[i], i, W6_PS_SAMPLES_RANGE_BITS,
+                           W6_PS_SAMPLES_TRANSMIT_BITS, W6_PS_SAMPLES_HAS_CLOCK,
+                           W6_PS_SAMPLES_CLOCK_BITS, W6_PS_SAMPLES_SAT_POS_BITS)) {
+            rc = fail("predict_ranges: samples source value", 1);
             goto cleanup;
         }
         /* The sample-backed source and the SP3-parsed source must agree on both
@@ -247,7 +279,12 @@ int main(int argc, char **argv) {
         }
     }
 
-    /* (4a) Validation error: no samples returns InvalidArgument, no handle. */
+    /* (4a) Validation error: sidereon-core refuses an empty set, which the
+     * binding reports as InvalidArgument with no handle. */
+    if (!W6_PS_EMPTY_REFUSED || !W6_PS_LONE_REFUSED) {
+        rc = fail("validation: sidereon-core accepts an empty or single-sample set", 1);
+        goto cleanup;
+    }
     SidereonPreciseEphemerisSamples *empty_handle = (SidereonPreciseEphemerisSamples *)0x1;
     if (sidereon_precise_ephemeris_samples_from_samples(NULL, 0, &empty_handle) !=
             SIDEREON_STATUS_INVALID_ARGUMENT ||

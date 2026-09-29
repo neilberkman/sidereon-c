@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "sidereon.h"
+#include "w5_ssr_message_pins.h"
 
 static int failures = 0;
 
@@ -106,20 +107,31 @@ static int clock_equal(const SidereonRtcmSsrClockRecord *a,
            a->c2 == b->c2;
 }
 
-static void check_info_common(const SidereonRtcmSsrInfo *info, uint16_t message_number,
-                              SidereonRtcmSsrKind kind, size_t orbit_count, size_t clock_count,
-                              size_t ura_count, size_t code_bias_count,
-                              size_t phase_bias_count, const char *what) {
-    check(info->message_number == message_number && info->system == SIDEREON_GNSS_SYSTEM_GPS &&
-              info->kind == kind && info->header.epoch_time_s == 345600 &&
-              info->header.update_interval == 2 && info->header.multiple_message &&
-              info->header.iod_ssr == 9 && info->header.provider_id == 123 &&
-              info->header.solution_id == 4 && info->header.satellite_count == 1 &&
-              info->orbit_count == orbit_count && info->clock_count == clock_count &&
-              info->ura_count == ura_count && info->code_bias_count == code_bias_count &&
-              info->phase_bias_count == phase_bias_count,
-          what);
-}
+/* Every expected info field is sidereon-core's decode of the same bytes
+ * (tests/valgen, bin w5_ssr_message; prefix names the message). */
+#define CHECK_INFO(info, P, what)                                                          \
+    check((info)->message_number == P##_MESSAGE_NUMBER && (info)->system == P##_SYSTEM &&   \
+              (info)->kind == P##_KIND && (info)->header.epoch_time_s == P##_EPOCH_TIME_S && \
+              (info)->header.update_interval == P##_UPDATE_INTERVAL &&                     \
+              (info)->header.multiple_message == P##_MULTIPLE_MESSAGE &&                   \
+              (info)->header.iod_ssr == P##_IOD_SSR &&                                     \
+              (info)->header.provider_id == P##_PROVIDER_ID &&                             \
+              (info)->header.solution_id == P##_SOLUTION_ID &&                             \
+              (info)->header.satellite_count == P##_SATELLITE_COUNT &&                     \
+              (info)->header.has_satellite_reference_datum ==                              \
+                  P##_HAS_SATELLITE_REFERENCE_DATUM &&                                     \
+              (info)->header.satellite_reference_datum == P##_SATELLITE_REFERENCE_DATUM &&  \
+              (info)->header.has_dispersive_bias_consistency ==                            \
+                  P##_HAS_DISPERSIVE_BIAS_CONSISTENCY &&                                   \
+              (info)->header.dispersive_bias_consistency ==                                \
+                  P##_DISPERSIVE_BIAS_CONSISTENCY &&                                       \
+              (info)->header.has_mw_consistency == P##_HAS_MW_CONSISTENCY &&               \
+              (info)->header.mw_consistency == P##_MW_CONSISTENCY &&                       \
+              (info)->orbit_count == P##_ORBIT_COUNT &&                                    \
+              (info)->clock_count == P##_CLOCK_COUNT && (info)->ura_count == P##_URA_COUNT && \
+              (info)->code_bias_count == P##_CODE_BIAS_COUNT &&                            \
+              (info)->phase_bias_count == P##_PHASE_BIAS_COUNT,                            \
+          what)
 
 static void check_copy_counts(size_t written, size_t required, size_t want, const char *what) {
     check(written == 0 && required == want, what);
@@ -220,7 +232,9 @@ static void compare_combined(const uint8_t *frame, size_t frame_len) {
     check_status(sidereon_rtcm_decode_frame(frame, frame_len, body, sizeof(body), &body_written,
                                             &body_required, &decoded_frame_len),
                  SIDEREON_STATUS_OK, "combined frame body decode");
-    check(body_written > 0 && body_required == body_written && decoded_frame_len == frame_len,
+    check(body_written == W5_SSR_MESSAGE_COMBINED_BODY_LEN && body_required == body_written &&
+              decoded_frame_len == W5_SSR_MESSAGE_COMBINED_FRAME_LEN &&
+              decoded_frame_len == frame_len,
           "combined frame body counts");
 
     SidereonRtcmMessages *messages = NULL;
@@ -239,17 +253,16 @@ static void compare_combined(const uint8_t *frame, size_t frame_len) {
     size_t message_count = 0;
     check_status(sidereon_rtcm_messages_count(messages, &message_count), SIDEREON_STATUS_OK,
                  "combined message count");
-    check(message_count == 1, "combined message count value");
+    check(message_count == W5_SSR_MESSAGE_COMBINED_MESSAGE_COUNT,
+          "combined message count value");
     SidereonRtcmSsrInfo framed_info;
     SidereonRtcmSsrInfo bare_info;
     check_status(sidereon_rtcm_message_ssr_info(messages, 0, &framed_info), SIDEREON_STATUS_OK,
                  "combined framed info");
     check_status(sidereon_ssr_message_info(bare, &bare_info), SIDEREON_STATUS_OK,
                  "combined bare info");
-    check(info_equal(&framed_info, &bare_info) && framed_info.message_number == 1060 &&
-              framed_info.kind == SIDEREON_RTCM_SSR_KIND_COMBINED_ORBIT_CLOCK &&
-              framed_info.orbit_count > 0 && framed_info.clock_count > 0,
-          "combined info exact equality");
+    check(info_equal(&framed_info, &bare_info), "combined info exact equality");
+    CHECK_INFO(&bare_info, W5_SSR_MESSAGE_COMBINED, "combined expected info");
 
     TEST_ARRAY_2(sidereon_rtcm_message_ssr_orbits, messages, 0,
                  SidereonRtcmSsrOrbitRecord, framed_info.orbit_count, "combined framed orbits");
@@ -338,21 +351,19 @@ static void compare_code(const uint8_t *body, size_t body_len) {
     check_status(sidereon_ssr_message_info(bare, &bare_info), SIDEREON_STATUS_OK,
                  "code-bias bare info");
     check(info_equal(&framed_info, &bare_info), "code-bias info exact equality");
-    check_info_common(&bare_info, 1059, SIDEREON_RTCM_SSR_KIND_CODE_BIAS, 0, 0, 0, 1, 0,
-                      "code-bias expected info");
-    check(!bare_info.header.has_satellite_reference_datum &&
-              !bare_info.header.has_dispersive_bias_consistency &&
-              !bare_info.header.has_mw_consistency,
-          "code-bias optional header flags");
+    CHECK_INFO(&bare_info, W5_SSR_MESSAGE_CODE, "code-bias expected info");
 
     TEST_ARRAY_2(sidereon_rtcm_message_ssr_code_biases, messages, 0,
-                 SidereonRtcmSsrCodeBiasRecord, 1, "code-bias framed records");
-    TEST_ARRAY_1(sidereon_ssr_message_code_biases, bare, SidereonRtcmSsrCodeBiasRecord, 1,
-                 "code-bias bare records");
+                 SidereonRtcmSsrCodeBiasRecord, W5_SSR_MESSAGE_CODE_CODE_BIAS_COUNT,
+                 "code-bias framed records");
+    TEST_ARRAY_1(sidereon_ssr_message_code_biases, bare, SidereonRtcmSsrCodeBiasRecord,
+                 W5_SSR_MESSAGE_CODE_CODE_BIAS_COUNT, "code-bias bare records");
     TEST_NESTED_2(sidereon_rtcm_message_ssr_code_bias_signals, messages, 0, 0,
-                  SidereonRtcmSsrCodeBiasSignal, 2, "code-bias framed signals");
+                  SidereonRtcmSsrCodeBiasSignal, W5_SSR_MESSAGE_CODE_RECORD_SIGNAL_COUNT,
+                  "code-bias framed signals");
     TEST_NESTED_1(sidereon_ssr_message_code_bias_signals, bare, 0,
-                  SidereonRtcmSsrCodeBiasSignal, 2, "code-bias bare signals");
+                  SidereonRtcmSsrCodeBiasSignal, W5_SSR_MESSAGE_CODE_RECORD_SIGNAL_COUNT,
+                  "code-bias bare signals");
 
     SidereonRtcmSsrCodeBiasRecord framed_record;
     SidereonRtcmSsrCodeBiasRecord bare_record;
@@ -365,7 +376,8 @@ static void compare_code(const uint8_t *body, size_t body_len) {
                  SIDEREON_STATUS_OK, "code-bias bare record copy");
     check(framed_record.satellite_id == bare_record.satellite_id &&
               framed_record.signal_count == bare_record.signal_count &&
-              bare_record.satellite_id == 3 && bare_record.signal_count == 2,
+              bare_record.satellite_id == W5_SSR_MESSAGE_CODE_RECORD_SATELLITE_ID &&
+              bare_record.signal_count == W5_SSR_MESSAGE_CODE_RECORD_SIGNAL_COUNT,
           "code-bias record fields exact equality");
 
     SidereonRtcmSsrCodeBiasSignal framed_signals[2];
@@ -380,8 +392,10 @@ static void compare_code(const uint8_t *body, size_t body_len) {
               framed_signals[0].bias == bare_signals[0].bias &&
               framed_signals[1].signal_id == bare_signals[1].signal_id &&
               framed_signals[1].bias == bare_signals[1].bias &&
-              bare_signals[0].signal_id == 1 && bare_signals[0].bias == -1234 &&
-              bare_signals[1].signal_id == 9 && bare_signals[1].bias == 2345,
+              bare_signals[0].signal_id == W5_SSR_MESSAGE_CODE_SIGNAL_IDS[0] &&
+              bare_signals[0].bias == W5_SSR_MESSAGE_CODE_SIGNAL_BIASES[0] &&
+              bare_signals[1].signal_id == W5_SSR_MESSAGE_CODE_SIGNAL_IDS[1] &&
+              bare_signals[1].bias == W5_SSR_MESSAGE_CODE_SIGNAL_BIASES[1],
           "code-bias raw signed fields exact equality");
 
     written = 41;
@@ -397,6 +411,15 @@ static void compare_code(const uint8_t *body, size_t body_len) {
 
     sidereon_rtcm_messages_free(messages);
     sidereon_ssr_message_free(bare);
+}
+
+static int phase_signal_matches(const SidereonRtcmSsrPhaseBiasSignal *signal, size_t i) {
+    return signal->signal_id == W5_SSR_MESSAGE_PHASE_SIGNAL_IDS[i] &&
+           signal->integer_indicator == W5_SSR_MESSAGE_PHASE_SIGNAL_INTEGER_INDICATORS[i] &&
+           signal->wide_lane_integer_indicator ==
+               W5_SSR_MESSAGE_PHASE_SIGNAL_WIDE_LANE_INTEGER_INDICATORS[i] &&
+           signal->discontinuity_counter == W5_SSR_MESSAGE_PHASE_SIGNAL_DISCONTINUITY_COUNTERS[i] &&
+           signal->bias == W5_SSR_MESSAGE_PHASE_SIGNAL_BIASES[i];
 }
 
 static void compare_phase(const uint8_t *body, size_t body_len) {
@@ -423,21 +446,19 @@ static void compare_phase(const uint8_t *body, size_t body_len) {
     check_status(sidereon_ssr_message_info(bare, &bare_info), SIDEREON_STATUS_OK,
                  "phase-bias bare info");
     check(info_equal(&framed_info, &bare_info), "phase-bias info exact equality");
-    check_info_common(&bare_info, 1265, SIDEREON_RTCM_SSR_KIND_PHASE_BIAS, 0, 0, 0, 0, 1,
-                      "phase-bias expected info");
-    check(bare_info.header.has_dispersive_bias_consistency &&
-              bare_info.header.dispersive_bias_consistency &&
-              bare_info.header.has_mw_consistency && !bare_info.header.mw_consistency,
-          "phase-bias optional header flags");
+    CHECK_INFO(&bare_info, W5_SSR_MESSAGE_PHASE, "phase-bias expected info");
 
     TEST_ARRAY_2(sidereon_rtcm_message_ssr_phase_biases, messages, 0,
-                 SidereonRtcmSsrPhaseBiasRecord, 1, "phase-bias framed records");
-    TEST_ARRAY_1(sidereon_ssr_message_phase_biases, bare, SidereonRtcmSsrPhaseBiasRecord, 1,
-                 "phase-bias bare records");
+                 SidereonRtcmSsrPhaseBiasRecord, W5_SSR_MESSAGE_PHASE_PHASE_BIAS_COUNT,
+                 "phase-bias framed records");
+    TEST_ARRAY_1(sidereon_ssr_message_phase_biases, bare, SidereonRtcmSsrPhaseBiasRecord,
+                 W5_SSR_MESSAGE_PHASE_PHASE_BIAS_COUNT, "phase-bias bare records");
     TEST_NESTED_2(sidereon_rtcm_message_ssr_phase_bias_signals, messages, 0, 0,
-                  SidereonRtcmSsrPhaseBiasSignal, 2, "phase-bias framed signals");
+                  SidereonRtcmSsrPhaseBiasSignal, W5_SSR_MESSAGE_PHASE_RECORD_SIGNAL_COUNT,
+                  "phase-bias framed signals");
     TEST_NESTED_1(sidereon_ssr_message_phase_bias_signals, bare, 0,
-                  SidereonRtcmSsrPhaseBiasSignal, 2, "phase-bias bare signals");
+                  SidereonRtcmSsrPhaseBiasSignal, W5_SSR_MESSAGE_PHASE_RECORD_SIGNAL_COUNT,
+                  "phase-bias bare signals");
 
     SidereonRtcmSsrPhaseBiasRecord framed_record;
     SidereonRtcmSsrPhaseBiasRecord bare_record;
@@ -452,8 +473,10 @@ static void compare_phase(const uint8_t *body, size_t body_len) {
               framed_record.yaw_angle == bare_record.yaw_angle &&
               framed_record.yaw_rate == bare_record.yaw_rate &&
               framed_record.signal_count == bare_record.signal_count &&
-              bare_record.satellite_id == 3 && bare_record.yaw_angle == 127 &&
-              bare_record.yaw_rate == -12 && bare_record.signal_count == 2,
+              bare_record.satellite_id == W5_SSR_MESSAGE_PHASE_RECORD_SATELLITE_ID &&
+              bare_record.yaw_angle == W5_SSR_MESSAGE_PHASE_RECORD_YAW_ANGLE &&
+              bare_record.yaw_rate == W5_SSR_MESSAGE_PHASE_RECORD_YAW_RATE &&
+              bare_record.signal_count == W5_SSR_MESSAGE_PHASE_RECORD_SIGNAL_COUNT,
           "phase-bias record raw fields exact equality");
 
     SidereonRtcmSsrPhaseBiasSignal framed_signals[2];
@@ -476,12 +499,7 @@ static void compare_phase(const uint8_t *body, size_t body_len) {
                   bare_signals[1].wide_lane_integer_indicator &&
               framed_signals[1].discontinuity_counter == bare_signals[1].discontinuity_counter &&
               framed_signals[1].bias == bare_signals[1].bias &&
-              bare_signals[0].signal_id == 1 && bare_signals[0].integer_indicator == 1 &&
-              bare_signals[0].wide_lane_integer_indicator == 2 &&
-              bare_signals[0].discontinuity_counter == 3 && bare_signals[0].bias == -123456 &&
-              bare_signals[1].signal_id == 9 && bare_signals[1].integer_indicator == 0 &&
-              bare_signals[1].wide_lane_integer_indicator == 1 &&
-              bare_signals[1].discontinuity_counter == 4 && bare_signals[1].bias == 234567,
+              phase_signal_matches(&bare_signals[0], 0) && phase_signal_matches(&bare_signals[1], 1),
           "phase-bias raw signed and indicator fields exact equality");
 
     written = 41;
@@ -523,17 +541,12 @@ static void compare_ura(const uint8_t *body, size_t body_len) {
     check_status(sidereon_ssr_message_info(bare, &bare_info), SIDEREON_STATUS_OK,
                  "URA bare info");
     check(info_equal(&framed_info, &bare_info), "URA info exact equality");
-    check_info_common(&bare_info, 1061, SIDEREON_RTCM_SSR_KIND_URA, 0, 0, 1, 0, 0,
-                      "URA expected info");
-    check(!bare_info.header.has_satellite_reference_datum &&
-              !bare_info.header.has_dispersive_bias_consistency &&
-              !bare_info.header.has_mw_consistency,
-          "URA optional header flags");
+    CHECK_INFO(&bare_info, W5_SSR_MESSAGE_URA, "URA expected info");
 
-    TEST_ARRAY_2(sidereon_rtcm_message_ssr_ura, messages, 0, SidereonRtcmSsrUraRecord, 1,
-                 "URA framed records");
-    TEST_ARRAY_1(sidereon_ssr_message_ura, bare, SidereonRtcmSsrUraRecord, 1,
-                 "URA bare records");
+    TEST_ARRAY_2(sidereon_rtcm_message_ssr_ura, messages, 0, SidereonRtcmSsrUraRecord,
+                 W5_SSR_MESSAGE_URA_URA_COUNT, "URA framed records");
+    TEST_ARRAY_1(sidereon_ssr_message_ura, bare, SidereonRtcmSsrUraRecord,
+                 W5_SSR_MESSAGE_URA_URA_COUNT, "URA bare records");
     SidereonRtcmSsrUraRecord framed_record;
     SidereonRtcmSsrUraRecord bare_record;
     size_t written = 0;
@@ -543,8 +556,9 @@ static void compare_ura(const uint8_t *body, size_t body_len) {
     check_status(sidereon_ssr_message_ura(bare, &bare_record, 1, &written, &required),
                  SIDEREON_STATUS_OK, "URA bare record copy");
     check(framed_record.satellite_id == bare_record.satellite_id &&
-              framed_record.ura_index == bare_record.ura_index && bare_record.satellite_id == 3 &&
-              bare_record.ura_index == 41,
+              framed_record.ura_index == bare_record.ura_index &&
+              bare_record.satellite_id == W5_SSR_MESSAGE_URA_RECORD_SATELLITE_ID &&
+              bare_record.ura_index == W5_SSR_MESSAGE_URA_RECORD_INDEX,
           "URA fields exact equality");
     sidereon_rtcm_messages_free(messages);
     sidereon_ssr_message_free(bare);
@@ -553,6 +567,12 @@ static void compare_ura(const uint8_t *body, size_t body_len) {
 static void test_failures(const uint8_t *valid_body, size_t valid_body_len) {
     uint8_t invalid_body[1] = {0};
     SidereonSsrMessage *message = (SidereonSsrMessage *)(uintptr_t)1;
+    /* The engine refuses the one-byte body as a parse error (pinned outcome);
+     * the binding maps a parse error to SP3_PARSE (src/ssr.rs,
+     * map_ssr_message_decode_error). */
+    check(!W5_SSR_MESSAGE_INVALID_BODY_OK &&
+              strcmp(W5_SSR_MESSAGE_INVALID_BODY_ERROR_VARIANT, "Parse") == 0,
+          "engine refuses the one-byte SSR body as a parse error");
     check_status(sidereon_ssr_message_decode(invalid_body, sizeof(invalid_body), &message),
                  SIDEREON_STATUS_SP3_PARSE, "invalid bare SSR decode");
     check(message == NULL, "invalid bare SSR clears output");
@@ -594,8 +614,10 @@ int main(void) {
     size_t code_body_len = hex_to_bytes(code_body_hex, code_body, sizeof(code_body));
     size_t phase_body_len = hex_to_bytes(phase_body_hex, phase_body, sizeof(phase_body));
     size_t ura_body_len = hex_to_bytes(ura_body_hex, ura_body, sizeof(ura_body));
-    check(combined_frame_len > 0 && code_body_len == 15 && phase_body_len == 21 &&
-              ura_body_len == 10,
+    check(combined_frame_len == strlen(combined_frame_hex) / 2 &&
+              code_body_len == strlen(code_body_hex) / 2 &&
+              phase_body_len == strlen(phase_body_hex) / 2 &&
+              ura_body_len == strlen(ura_body_hex) / 2 && code_body_len > 0,
           "SSR fixture hex decode");
 
     compare_combined(combined_frame, combined_frame_len);
