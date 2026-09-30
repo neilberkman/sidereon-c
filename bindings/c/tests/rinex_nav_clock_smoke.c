@@ -261,6 +261,7 @@ static void check_clock_table_a18(void) {
     SidereonClockNotice notices[W3NC_A18_NOTICE_COUNT];
     size_t written = 0;
     size_t required = 0;
+    SidereonStatus text_status;
     require_true(sidereon_rinex_clock_notices(clock, notices, W3NC_A18_NOTICE_COUNT, &written,
                                               &required) == SIDEREON_STATUS_OK &&
                      written == W3NC_A18_NOTICE_COUNT,
@@ -320,9 +321,9 @@ static void check_clock_table_a18(void) {
                      dr->has_continuation_reading == W3NC_A18_RECORD2_HAS_CONTINUATION_READING,
                  "A18 DR record changed");
     char name[32];
-    require_true(copied_text_is(sidereon_clock_records_name(records, 2, (uint8_t *)name,
-                                                            sizeof(name), &written, &required),
-                                name, written, W3NC_A18_RECORD2_NAME),
+    text_status = sidereon_clock_records_name(records, 2, (uint8_t *)name, sizeof(name),
+                                              &written, &required);
+    require_true(copied_text_is(text_status, name, written, W3NC_A18_RECORD2_NAME),
                  "A18 record name changed");
     sidereon_clock_records_free(records);
 
@@ -345,10 +346,10 @@ static void check_clock_table_a18(void) {
                      leap.label_column == W3NC_A18_HEADER4_LABEL_COLUMN,
                  "A18 LEAP SECONDS GNSS changed");
     char label[64];
-    require_true(copied_text_is(sidereon_clock_header_records_text(
-                                    header, 4, SIDEREON_CLOCK_HEADER_TEXT_LABEL,
-                                    (uint8_t *)label, sizeof(label), &written, &required),
-                                label, written, W3NC_A18_HEADER4_LABEL),
+    text_status = sidereon_clock_header_records_text(
+        header, 4, SIDEREON_CLOCK_HEADER_TEXT_LABEL, (uint8_t *)label, sizeof(label), &written,
+        &required);
+    require_true(copied_text_is(text_status, label, written, W3NC_A18_HEADER4_LABEL),
                  "A18 header label changed");
     SidereonClockHeaderRecord types;
     require_true(sidereon_clock_header_records_get(header, 5, &types) == SIDEREON_STATUS_OK &&
@@ -358,10 +359,9 @@ static void check_clock_table_a18(void) {
                      types.text_part_count == W3NC_A18_HEADER5_TEXT_PART_COUNT,
                  "A18 TYPES OF DATA changed");
     char part[16];
-    require_true(copied_text_is(sidereon_clock_header_records_field_text(
-                                    header, 5, 1, (uint8_t *)part, sizeof(part), &written,
-                                    &required),
-                                part, written, W3NC_A18_HEADER5_PART1),
+    text_status = sidereon_clock_header_records_field_text(
+        header, 5, 1, (uint8_t *)part, sizeof(part), &written, &required);
+    require_true(copied_text_is(text_status, part, written, W3NC_A18_HEADER5_PART1),
                  "A18 TYPES OF DATA part changed");
     sidereon_clock_header_records_free(header);
 
@@ -387,6 +387,7 @@ static void check_clock_surplus_and_edits(void) {
     SidereonClockNotice notice;
     size_t written = 0;
     size_t required = 0;
+    SidereonStatus text_status;
     require_true(sidereon_rinex_clock_notices(clock, &notice, 1, &written, &required) ==
                          SIDEREON_STATUS_OK &&
                      written == W3NC_SURPLUS_NOTICE_COUNT &&
@@ -440,12 +441,13 @@ static void check_clock_surplus_and_edits(void) {
                          SIDEREON_STATUS_OK &&
                      !outcome.is_ok && outcome.error.kind == W3NC_SURPLUS_DROP_ERROR_KIND &&
                      outcome.error.has_field && outcome.error.has_reason &&
-                     !outcome.error.has_line &&
-                     copied_text_is(sidereon_rinex_clock_result_error_text(
-                                        result, SIDEREON_RINEX_CLOCK_ERROR_TEXT_FIELD,
-                                        (uint8_t *)field, sizeof(field), &written, &required),
-                                    field, written, W3NC_SURPLUS_DROP_ERROR_FIELD),
+                     !outcome.error.has_line,
                  "surplus-dropping refusal not typed");
+    text_status = sidereon_rinex_clock_result_error_text(
+        result, SIDEREON_RINEX_CLOCK_ERROR_TEXT_FIELD, (uint8_t *)field, sizeof(field), &written,
+        &required);
+    require_true(copied_text_is(text_status, field, written, W3NC_SURPLUS_DROP_ERROR_FIELD),
+                 "surplus-dropping error text changed");
     sidereon_rinex_clock_result_free(result);
     require_true(clock_writes(clock, clock_200_surplus), "refused edit changed the product");
 
@@ -471,12 +473,12 @@ static void check_clock_surplus_and_edits(void) {
                      present && removed.record_type == W3NC_SURPLUS_REMOVED_TYPE &&
                      removed.value_count == W3NC_SURPLUS_REMOVED_VALUE_COUNT &&
                      f64_bits(removed.values[0]) == W3NC_SURPLUS_REMOVED_VALUE0 &&
-                     f64_bits(removed.values[1]) == W3NC_SURPLUS_REMOVED_VALUE1 &&
-                     copied_text_is(sidereon_rinex_clock_result_record_name(
-                                        result, (uint8_t *)removed_name, sizeof(removed_name),
-                                        &written, &required),
-                                    removed_name, written, W3NC_SURPLUS_REMOVED_NAME),
+                     f64_bits(removed.values[1]) == W3NC_SURPLUS_REMOVED_VALUE1,
                  "removed record changed");
+    text_status = sidereon_rinex_clock_result_record_name(
+        result, (uint8_t *)removed_name, sizeof(removed_name), &written, &required);
+    require_true(copied_text_is(text_status, removed_name, written, W3NC_SURPLUS_REMOVED_NAME),
+                 "removed record name changed");
     sidereon_rinex_clock_result_free(result);
 
     /* The edited product writes, and reads back with every value. */
@@ -505,10 +507,9 @@ static void check_clock_surplus_and_edits(void) {
                      reread_rows[1].value_count == W3NC_SURPLUS_REREAD1_VALUE_COUNT &&
                      f64_bits(reread_rows[1].values[0]) == W3NC_SURPLUS_REREAD1_VALUE0,
                  "edited product did not read back");
-    require_true(copied_text_is(sidereon_clock_records_name(records, 1, (uint8_t *)removed_name,
-                                                            sizeof(removed_name), &written,
-                                                            &required),
-                                removed_name, written, W3NC_SURPLUS_REREAD1_NAME),
+    text_status = sidereon_clock_records_name(records, 1, (uint8_t *)removed_name,
+                                              sizeof(removed_name), &written, &required);
+    require_true(copied_text_is(text_status, removed_name, written, W3NC_SURPLUS_REREAD1_NAME),
                  "inserted record name changed");
     sidereon_clock_records_free(records);
     sidereon_rinex_clock_free(reread);
@@ -596,17 +597,19 @@ static void check_clock_built_products(void) {
     SidereonRinexClockOutcome outcome;
     size_t written = 0;
     size_t required = 0;
+    SidereonStatus text_status;
     char field[32];
     require_true(sidereon_rinex_clock_to_text_result(gps, NULL, &result) == SIDEREON_STATUS_OK &&
                      sidereon_rinex_clock_result_get_outcome(result, &outcome) ==
                          SIDEREON_STATUS_OK &&
                      !outcome.is_ok &&
-                     outcome.error.kind == W3NC_OFF_GRID_STRICT_ERROR_KIND &&
-                     copied_text_is(sidereon_rinex_clock_result_error_text(
-                                        result, SIDEREON_RINEX_CLOCK_ERROR_TEXT_FIELD,
-                                        (uint8_t *)field, sizeof(field), &written, &required),
-                                    field, written, W3NC_OFF_GRID_STRICT_ERROR_FIELD),
+                     outcome.error.kind == W3NC_OFF_GRID_STRICT_ERROR_KIND,
                  "off-grid epoch not refused by the strict writer");
+    text_status = sidereon_rinex_clock_result_error_text(
+        result, SIDEREON_RINEX_CLOCK_ERROR_TEXT_FIELD, (uint8_t *)field, sizeof(field), &written,
+        &required);
+    require_true(copied_text_is(text_status, field, written, W3NC_OFF_GRID_STRICT_ERROR_FIELD),
+                 "strict writer error text changed");
     require_true(sidereon_rinex_clock_result_get_text(result, NULL, 0, &written, &required) ==
                          SIDEREON_STATUS_INVALID_ARGUMENT &&
                      written == 0 && required == 0,
@@ -635,16 +638,17 @@ static void check_clock_built_products(void) {
                      f64_bits(departure.epoch.jd_fraction) == f64_bits(off_grid.jd_fraction),
                  "departure changed");
     char departure_text[64];
-    require_true(copied_text_is(sidereon_rinex_clock_result_departure_text(
-                                    result, 0, SIDEREON_CLOCK_DEPARTURE_TEXT_WRITTEN,
-                                    (uint8_t *)departure_text, sizeof(departure_text), &written,
-                                    &required),
-                                departure_text, written, W3NC_OFF_GRID_DEPARTURE0_WRITTEN) &&
-                     copied_text_is(sidereon_rinex_clock_result_departure_text(
-                                        result, 0, SIDEREON_CLOCK_DEPARTURE_TEXT_NAME,
-                                        (uint8_t *)departure_text, sizeof(departure_text),
-                                        &written, &required),
-                                    departure_text, written, W3NC_OFF_GRID_DEPARTURE0_NAME),
+    text_status = sidereon_rinex_clock_result_departure_text(
+        result, 0, SIDEREON_CLOCK_DEPARTURE_TEXT_WRITTEN, (uint8_t *)departure_text,
+        sizeof(departure_text), &written, &required);
+    bool departure_written_ok =
+        copied_text_is(text_status, departure_text, written, W3NC_OFF_GRID_DEPARTURE0_WRITTEN);
+    text_status = sidereon_rinex_clock_result_departure_text(
+        result, 0, SIDEREON_CLOCK_DEPARTURE_TEXT_NAME, (uint8_t *)departure_text,
+        sizeof(departure_text), &written, &required);
+    require_true(departure_written_ok &&
+                     copied_text_is(text_status, departure_text, written,
+                                    W3NC_OFF_GRID_DEPARTURE0_NAME),
                  "departure text changed");
     require_true(sidereon_rinex_clock_result_get_text(result, NULL, 0, &written, &required) ==
                          SIDEREON_STATUS_OK &&

@@ -162,15 +162,15 @@ static void check_antex(const char *fixture_path) {
         char label[16];
         size_t written = 0;
         size_t required = 0;
-        check(text_is(sidereon_antenna_frequency_label(receiver, 5, (uint8_t *)label,
-                                                       sizeof(label), &written, &required),
-                      label, written, W6_FC_RECEIVER_FREQUENCY5),
+        SidereonStatus text_status = sidereon_antenna_frequency_label(
+            receiver, 5, (uint8_t *)label, sizeof(label), &written, &required);
+        check(text_is(text_status, label, written, W6_FC_RECEIVER_FREQUENCY5),
               "ANTEX frequency order kept");
         char method[32];
-        check(text_is(sidereon_antenna_calibration_text(
-                          receiver, 0, SIDEREON_ANTEX_CALIBRATION_TEXT_METHOD, (uint8_t *)method,
-                          sizeof(method), &written, &required),
-                      method, written, W6_FC_RECEIVER_METHOD),
+        text_status = sidereon_antenna_calibration_text(
+            receiver, 0, SIDEREON_ANTEX_CALIBRATION_TEXT_METHOD, (uint8_t *)method,
+            sizeof(method), &written, &required);
+        check(text_is(text_status, method, written, W6_FC_RECEIVER_METHOD),
               "ANTEX method record kept");
         sidereon_antenna_free(receiver);
     }
@@ -266,10 +266,10 @@ static void check_antex(const char *fixture_path) {
             char frequency[16];
             size_t written = 0;
             size_t required = 0;
-            check(text_is(sidereon_last_antex_error_text(SIDEREON_ANTEX_ERROR_TEXT_FREQUENCY,
-                                                         (uint8_t *)frequency,
-                                                         sizeof(frequency), &written, &required),
-                          frequency, written, W6_FC_AMBIGUOUS_FREQUENCY),
+            SidereonStatus text_status = sidereon_last_antex_error_text(
+                SIDEREON_ANTEX_ERROR_TEXT_FREQUENCY, (uint8_t *)frequency, sizeof(frequency),
+                &written, &required);
+            check(text_is(text_status, frequency, written, W6_FC_AMBIGUOUS_FREQUENCY),
                   "ANTEX ambiguous frequency label");
             sidereon_antenna_free(antenna);
         }
@@ -295,20 +295,20 @@ static void check_antex(const char *fixture_path) {
         char part[64];
         size_t written = 0;
         size_t required = 0;
-        check(text_is(sidereon_antex_result_error_text(result, SIDEREON_ANTEX_ERROR_TEXT_RECORD,
-                                                       (uint8_t *)part, sizeof(part), &written,
-                                                       &required),
-                      part, written, W6_FC_BAD_DAZI_RECORD),
+        SidereonStatus text_status = sidereon_antex_result_error_text(
+            result, SIDEREON_ANTEX_ERROR_TEXT_RECORD, (uint8_t *)part, sizeof(part), &written,
+            &required);
+        check(text_is(text_status, part, written, W6_FC_BAD_DAZI_RECORD),
               "ANTEX bad DAZI record");
-        check(text_is(sidereon_antex_result_error_text(result, SIDEREON_ANTEX_ERROR_TEXT_VALUE,
-                                                       (uint8_t *)part, sizeof(part), &written,
-                                                       &required),
-                      part, written, W6_FC_BAD_DAZI_VALUE),
+        text_status = sidereon_antex_result_error_text(
+            result, SIDEREON_ANTEX_ERROR_TEXT_VALUE, (uint8_t *)part, sizeof(part), &written,
+            &required);
+        check(text_is(text_status, part, written, W6_FC_BAD_DAZI_VALUE),
               "ANTEX bad DAZI value");
-        check(text_is(sidereon_antex_result_error_text(
-                          result, SIDEREON_ANTEX_ERROR_TEXT_ANTENNA_ID, (uint8_t *)part,
-                          sizeof(part), &written, &required),
-                      part, written, W6_FC_BAD_DAZI_ANTENNA_ID),
+        text_status = sidereon_antex_result_error_text(
+            result, SIDEREON_ANTEX_ERROR_TEXT_ANTENNA_ID, (uint8_t *)part, sizeof(part), &written,
+            &required);
+        check(text_is(text_status, part, written, W6_FC_BAD_DAZI_ANTENNA_ID),
               "ANTEX bad DAZI antenna");
         sidereon_antex_result_free(result);
     }
@@ -361,9 +361,9 @@ static void check_blq(void) {
               comment.row == W6_FC_BLQ_COMMENT2_ROW,
           "BLQ station comment placed");
     char station[16];
-    check(text_is(sidereon_blq_blocks_station(blocks, 0, (uint8_t *)station, sizeof(station),
-                                              &written, &required),
-                  station, written, W6_FC_BLQ_STATION),
+    SidereonStatus text_status = sidereon_blq_blocks_station(
+        blocks, 0, (uint8_t *)station, sizeof(station), &written, &required);
+    check(text_is(text_status, station, written, W6_FC_BLQ_STATION),
           "BLQ station");
     SidereonOceanLoadingBlq coefficients;
     bool coefficients_same =
