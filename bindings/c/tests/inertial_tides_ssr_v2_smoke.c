@@ -31,9 +31,49 @@ static void test_inertial_abi(void) {
     SidereonInertialConstants constants;
     check_status(sidereon_inertial_constants(&constants), SIDEREON_STATUS_OK,
                  "inertial constants declaration and output type");
-    check(constants.normal_gravity_equator_mps2 > 9.7 &&
-              constants.normal_gravity_equator_mps2 < 9.9,
-          "inertial constants fields");
+    check(constants.default_imu_sim_seed == UINT64_C(0x4d595df4d0f33173),
+          "default IMU seed matches the pinned deterministic seed");
+    const double gamma_equator_ref = 9.7803253359;
+    const double gamma_pole_ref = 9.8321849378;
+    const double wgs84_flattening_ref = 0.00335281066474;
+    const double somigliana_k_ref =
+        (1.0 - wgs84_flattening_ref) * gamma_pole_ref / gamma_equator_ref - 1.0;
+    const double somigliana_k_tolerance =
+        1.0e-14 * (gamma_pole_ref / gamma_equator_ref) +
+        8.0 * 2.2204460492503131e-16;
+    check(isfinite(constants.normal_gravity_equator_mps2) &&
+              fabs(constants.normal_gravity_equator_mps2 - gamma_equator_ref) <= 5e-11 &&
+              isfinite(constants.normal_gravity_pole_mps2) &&
+              fabs(constants.normal_gravity_pole_mps2 - gamma_pole_ref) <= 5e-11 &&
+              isfinite(constants.somigliana_k) &&
+              fabs(constants.somigliana_k - somigliana_k_ref) <= somigliana_k_tolerance,
+          "normal-gravity constants match NIMA WGS 84 references and derivation");
+
+    uint64_t attoseconds_per_second = 0;
+    check_status(sidereon_exact_epoch_attoseconds_per_second(&attoseconds_per_second),
+                 SIDEREON_STATUS_OK, "exact epoch attosecond scale getter");
+    check(attoseconds_per_second == UINT64_C(1000000000000000000),
+          "one second is exactly 10^18 attoseconds");
+    SidereonExactEpoch *j2000 = NULL;
+    check_status(sidereon_exact_epoch_j2000(&j2000), SIDEREON_STATUS_OK,
+                 "J2000 epoch constant getter");
+    if (j2000 != NULL) {
+        int64_t j2000_seconds = INT64_MIN;
+        uint64_t j2000_attoseconds = UINT64_MAX;
+        int64_t j2000_residue = INT64_MIN;
+        uint16_t j2000_residue_places = UINT16_MAX;
+        check_status(sidereon_exact_epoch_components(j2000, &j2000_seconds,
+                                                     &j2000_attoseconds,
+                                                     &j2000_residue,
+                                                     &j2000_residue_places),
+                     SIDEREON_STATUS_OK, "J2000 epoch exact components");
+        check(j2000_seconds == 0 && j2000_attoseconds == 0 &&
+                  j2000_residue == 0 && j2000_residue_places == 0,
+              "J2000 is the zero point of the exact J2000-second axis");
+        sidereon_exact_epoch_free(j2000);
+    } else {
+        check(false, "J2000 epoch handle is non-null");
+    }
 
     SidereonInertialNavState initial = {0};
     initial.position_ecef_m[0] = 6378137.0;

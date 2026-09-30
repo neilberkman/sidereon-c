@@ -216,6 +216,37 @@ static void test_anomaly_and_equinoctial(void) {
           "solve kepler");
     check_bits(solved.anomaly_rad, W4_PB_KEPLER_ANOMALY_BITS, "solve kepler value");
 
+    /* Independent Newton solution of M=E-e*sin(E), then the textbook
+       eccentric-to-true relation. These checks do not use the binding's
+       Kepler solver or one binding conversion as the other's oracle. */
+    double reference_e = mean;
+    for (int i = 0; i < 32; i++) {
+        reference_e -= (reference_e - ecc * sin(reference_e) - mean) /
+                       (1.0 - ecc * cos(reference_e));
+    }
+    const double reference_true = atan2(
+        sqrt(1.0 - ecc * ecc) * sin(reference_e), cos(reference_e) - ecc);
+    double direct_true = 0.0;
+    double direct_mean = 0.0;
+    /* The C solver's residual bound is 1e-12 + 1e-14*|M|. Here
+       |d nu/dM| = sqrt(1-e^2)/(1-e*cos(E))^2 < 2; the extra ULP allowance
+       covers independent trigonometric evaluation. The reverse path is
+       closed form, so it uses only the ULP allowance below. */
+    const double solver_tolerance =
+        2.0 * (1.0e-12 + 1.0e-14 * fabs(mean)) +
+        32.0 * 2.2204460492503131e-16;
+    const double closed_form_tolerance = 32.0 * 2.2204460492503131e-16;
+    check(sidereon_mean_to_true_anomaly(mean, ecc, &direct_true) == SIDEREON_STATUS_OK &&
+              isfinite(direct_true) &&
+              fabs(direct_true - reference_true) <= solver_tolerance,
+          "mean to true anomaly matches independent Kepler reference");
+    check(sidereon_true_to_mean_anomaly(reference_true, ecc, &direct_mean) ==
+                  SIDEREON_STATUS_OK &&
+              isfinite(direct_mean) &&
+              fabs(direct_mean - (reference_e - ecc * sin(reference_e))) <=
+                  closed_form_tolerance,
+          "true to mean anomaly matches independent Kepler reference");
+
     SidereonClassicalElements coe = sample_coe();
     SidereonClassicalElements propagated;
     check(sidereon_propagate_kepler(&coe, mu, 0.0, &propagated) == SIDEREON_STATUS_OK,
