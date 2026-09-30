@@ -464,6 +464,7 @@ name = "sidereon-c"
 version = "3.0.0"
 dependencies = [
  "nalgebra",
+ "serde",
  "serde_json",
  "sidereon",
  "sidereon-core",

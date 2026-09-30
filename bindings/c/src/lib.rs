@@ -781,6 +781,7 @@ mod observables;
 mod observation;
 mod oem;
 mod omm;
+mod omm_array;
 mod opm;
 mod orbit;
 mod orbit_fit;

@@ -219,3 +219,26 @@ cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
 "${target_dir}/inertial_tides_ssr_v2_smoke_ci" \
     "${here}/fixtures/nav/ESBC00DNK_R_20201770000_01D_MN.rnx" \
     "${here}/fixtures/ssr/BRDC00WRD_S_20261820000_G30_G31.rnx"
+
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
+    -I"${binding_root}/include" \
+    "${here}/omm_value_smoke.c" \
+    -L"${lib_dir}" \
+    -lsidereon \
+    -Wl,-rpath,"${lib_dir}" \
+    -lm \
+    -o "${target_dir}/omm_value_smoke_ci"
+"${target_dir}/omm_value_smoke_ci" "${here}/fixtures/omm/24876.kvn"
+
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
+    -I"${binding_root}/include" \
+    "${here}/omm_array_smoke.c" \
+    -L"${lib_dir}" \
+    -lsidereon \
+    -Wl,-rpath,"${lib_dir}" \
+    -lm \
+    -o "${target_dir}/omm_array_smoke_ci"
+"${target_dir}/omm_array_smoke_ci" \
+    "${here}/fixtures/omm/25544.json" \
+    "${here}/fixtures/omm/24876.xml" \
+    "${here}/fixtures/omm/24876.kvn"

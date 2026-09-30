@@ -516,6 +516,627 @@ pub struct SidereonOmm {
     pub(crate) inner: sidereon_core::astro::omm::Omm,
 }
 
+/// Detached numeric result of bridging an OMM into SGP4 elements.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct SidereonOmmElementSet {
+    /// Split Julian-date whole component.
+    pub epoch_whole: f64,
+    /// Split Julian-date fractional component.
+    pub epoch_fraction: f64,
+    /// SGP4 B-star drag term after OMM bridge policy.
+    pub bstar: f64,
+    /// Whether mean_motion_dot is present.
+    pub mean_motion_dot_present: bool,
+    /// First mean-motion derivative when present, otherwise zero.
+    pub mean_motion_dot: f64,
+    /// Whether mean_motion_double_dot is present.
+    pub mean_motion_double_dot_present: bool,
+    /// Second mean-motion derivative when present, otherwise zero.
+    pub mean_motion_double_dot: f64,
+    /// Dimensionless eccentricity.
+    pub eccentricity: f64,
+    /// Argument of perigee in degrees.
+    pub argument_of_perigee_deg: f64,
+    /// Inclination in degrees.
+    pub inclination_deg: f64,
+    /// Mean anomaly in degrees.
+    pub mean_anomaly_deg: f64,
+    /// Mean motion in revolutions per day.
+    pub mean_motion_rev_per_day: f64,
+    /// Right ascension of ascending node in degrees.
+    pub right_ascension_deg: f64,
+    /// Whether catalog_number is present.
+    pub catalog_number_present: bool,
+    /// NORAD catalog number when present, otherwise zero.
+    pub catalog_number: u32,
+    /// Whether omm_epoch_days is present.
+    pub omm_epoch_days_present: bool,
+    /// python-sgp4 OMM initialization epoch when present, otherwise zero.
+    pub omm_epoch_days: f64,
+}
+
+/// Copy the complete parsed OMM value, including non-wire in-memory SGP4
+/// side channels, as detached JSON. Unlike the CCSDS serializers this snapshot
+/// retains comments by block, exact_sgp4_epoch, and the derived-field policy.
+///
+/// Safety: omm is a live handle; out points to len writable bytes or NULL when
+/// len is zero; out_written and out_required point to writable size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_omm_snapshot_json(
+    omm: *const SidereonOmm,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    crate::engine_error::engine_error_operation_boundary(
+        "sidereon_omm_snapshot_json",
+        SidereonStatus::Panic,
+        || {
+            omm_encode(
+                "sidereon_omm_snapshot_json",
+                omm,
+                out,
+                len,
+                out_written,
+                out_required,
+                |value| {
+                    if !omm_numeric_fields_finite(value) {
+                        return Err(sidereon_core::astro::omm::OmmError::Field(
+                            "snapshot contains a non-finite numeric field".to_owned(),
+                        ));
+                    }
+                    let mut snapshot = serde_json::to_value(value).map_err(|error| {
+                        sidereon_core::astro::omm::OmmError::Field(format!(
+                            "snapshot serialization failed: {error}"
+                        ))
+                    })?;
+                    let object = snapshot.as_object_mut().ok_or_else(|| {
+                        sidereon_core::astro::omm::OmmError::Field(
+                            "snapshot serialization did not produce an object".to_owned(),
+                        )
+                    })?;
+                    for (key, default) in [
+                        ("ccsds_omm_vers", serde_json::Value::Null),
+                        ("classification", serde_json::Value::Null),
+                        ("creation_date", serde_json::Value::Null),
+                        ("originator", serde_json::Value::Null),
+                        ("message_id", serde_json::Value::Null),
+                        ("object_name", serde_json::Value::Null),
+                        ("object_id", serde_json::Value::Null),
+                        ("center_name", serde_json::Value::Null),
+                        ("ref_frame", serde_json::Value::Null),
+                        ("ref_frame_epoch", serde_json::Value::Null),
+                        ("time_system", serde_json::Value::Null),
+                        ("mean_element_theory", serde_json::Value::Null),
+                        ("mean_motion", serde_json::Value::Null),
+                        ("semi_major_axis_km", serde_json::Value::Null),
+                        ("gm_km3_s2", serde_json::Value::Null),
+                        ("spacecraft", serde_json::Value::Null),
+                        ("ephemeris_type", serde_json::Value::Null),
+                        ("classification_type", serde_json::Value::Null),
+                        ("norad_cat_id", serde_json::Value::Null),
+                        ("element_set_no", serde_json::Value::Null),
+                        ("rev_at_epoch", serde_json::Value::Null),
+                        ("bstar", serde_json::Value::Null),
+                        ("bterm_m2_kg", serde_json::Value::Null),
+                        ("mean_motion_dot", serde_json::Value::Null),
+                        ("mean_motion_ddot", serde_json::Value::Null),
+                        ("agom_m2_kg", serde_json::Value::Null),
+                        ("covariance", serde_json::Value::Null),
+                        ("user_defined", serde_json::json!([])),
+                        (
+                            "comments",
+                            serde_json::json!({
+                                "header": [], "metadata": [], "mean_elements": [],
+                                "tle_parameters": [], "user_defined": []
+                            }),
+                        ),
+                    ] {
+                        object.entry(key.to_owned()).or_insert(default);
+                    }
+                    if let Some(spacecraft) =
+                        object.get_mut("spacecraft").and_then(|v| v.as_object_mut())
+                    {
+                        spacecraft
+                            .entry("comments")
+                            .or_insert(serde_json::json!([]));
+                    }
+                    if let Some(covariance) =
+                        object.get_mut("covariance").and_then(|v| v.as_object_mut())
+                    {
+                        covariance
+                            .entry("comments")
+                            .or_insert(serde_json::json!([]));
+                    }
+                    if let Some(epoch) = object.get_mut("epoch").and_then(|v| v.as_object_mut()) {
+                        epoch.entry("femtosecond").or_insert(serde_json::json!(0));
+                    }
+                    if let Some(comments) =
+                        object.get_mut("comments").and_then(|v| v.as_object_mut())
+                    {
+                        for key in [
+                            "header",
+                            "metadata",
+                            "mean_elements",
+                            "tle_parameters",
+                            "user_defined",
+                        ] {
+                            comments.entry(key).or_insert(serde_json::json!([]));
+                        }
+                    }
+                    object.insert(
+                        "exact_sgp4_epoch".to_owned(),
+                        value.exact_sgp4_epoch.map_or(
+                            serde_json::Value::Null,
+                            |epoch| serde_json::json!({ "whole": epoch.0, "fraction": epoch.1 }),
+                        ),
+                    );
+                    object.insert(
+                        "quantize_tle_derived_fields".to_owned(),
+                        serde_json::Value::Bool(value.quantize_tle_derived_fields),
+                    );
+                    serde_json::to_string(&snapshot).map_err(|error| {
+                        sidereon_core::astro::omm::OmmError::Field(format!(
+                            "snapshot serialization failed: {error}"
+                        ))
+                    })
+                },
+            )
+        },
+    )
+}
+
+fn omm_numeric_fields_finite(value: &sidereon_core::astro::omm::Omm) -> bool {
+    let finite = |v: Option<f64>| v.is_none_or(f64::is_finite);
+    [
+        value.eccentricity,
+        value.inclination_deg,
+        value.ra_of_asc_node_deg,
+        value.arg_of_pericenter_deg,
+        value.mean_anomaly_deg,
+    ]
+    .into_iter()
+    .all(f64::is_finite)
+        && [
+            value.mean_motion,
+            value.semi_major_axis_km,
+            value.gm_km3_s2,
+            value.bstar,
+            value.bterm_m2_kg,
+            value.mean_motion_dot,
+            value.mean_motion_ddot,
+            value.agom_m2_kg,
+        ]
+        .into_iter()
+        .all(finite)
+        && finite(value.spacecraft.as_ref().and_then(|s| s.mass_kg))
+        && finite(value.spacecraft.as_ref().and_then(|s| s.solar_rad_area_m2))
+        && finite(value.spacecraft.as_ref().and_then(|s| s.solar_rad_coeff))
+        && finite(value.spacecraft.as_ref().and_then(|s| s.drag_area_m2))
+        && finite(value.spacecraft.as_ref().and_then(|s| s.drag_coeff))
+        && value
+            .covariance
+            .as_ref()
+            .is_none_or(|c| c.lower_triangle.iter().all(|v| v.is_finite()))
+        && value
+            .exact_sgp4_epoch
+            .is_none_or(|e| e.0.is_finite() && e.1.is_finite())
+}
+
+struct StrictOmmJsonValue;
+
+impl<'de> serde::de::DeserializeSeed<'de> for StrictOmmJsonValue {
+    type Value = serde_json::Value;
+
+    fn deserialize<D: serde::Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_any(StrictOmmJsonVisitor)
+    }
+}
+
+struct StrictOmmJsonVisitor;
+
+impl<'de> serde::de::Visitor<'de> for StrictOmmJsonVisitor {
+    type Value = serde_json::Value;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a JSON value with unique object keys")
+    }
+
+    fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::Null)
+    }
+    fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::Null)
+    }
+    fn visit_bool<E: serde::de::Error>(self, value: bool) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::Bool(value))
+    }
+    fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::Number(value.into()))
+    }
+    fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::Number(value.into()))
+    }
+    fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<Self::Value, E> {
+        serde_json::Number::from_f64(value)
+            .map(serde_json::Value::Number)
+            .ok_or_else(|| E::custom("non-finite JSON number"))
+    }
+    fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::String(value.to_owned()))
+    }
+    fn visit_string<E: serde::de::Error>(self, value: String) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::String(value))
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(
+        self,
+        mut sequence: A,
+    ) -> Result<Self::Value, A::Error> {
+        let mut values = Vec::new();
+        while let Some(value) = sequence.next_element_seed(StrictOmmJsonValue)? {
+            values.push(value);
+        }
+        Ok(serde_json::Value::Array(values))
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(
+        self,
+        mut entries: A,
+    ) -> Result<Self::Value, A::Error> {
+        let mut values = serde_json::Map::new();
+        while let Some(key) = entries.next_key::<String>()? {
+            let value = entries.next_value_seed(StrictOmmJsonValue)?;
+            if let Some(first) = values.get(&key) {
+                return Err(serde::de::Error::custom(format!(
+                    "duplicate JSON key {key:?}: first={}, second={value}",
+                    first
+                )));
+            }
+            values.insert(key, value);
+        }
+        Ok(serde_json::Value::Object(values))
+    }
+}
+
+/// Construct an OMM from the exact detached snapshot schema emitted by
+/// sidereon_omm_snapshot_json. Unknown or missing keys are refused.
+///
+/// Safety: data points to len readable UTF-8 bytes; out_omm points to writable
+/// storage for a SidereonOmm pointer.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_omm_from_snapshot_json(
+    data: *const u8,
+    len: usize,
+    out_omm: *mut *mut SidereonOmm,
+) -> SidereonStatus {
+    crate::engine_error::engine_error_operation_boundary(
+        "sidereon_omm_from_snapshot_json",
+        SidereonStatus::Panic,
+        || {
+            let out_omm = c_try!(require_out(
+                out_omm,
+                "sidereon_omm_from_snapshot_json",
+                "out_omm"
+            ));
+            let out_range = c_try!(checked_output_range(
+                "sidereon_omm_from_snapshot_json",
+                out_omm,
+                1,
+                "out_omm"
+            ));
+            if len != 0 && !data.is_null() {
+                let data_range = c_try!(checked_output_range(
+                    "sidereon_omm_from_snapshot_json",
+                    data.cast_mut(),
+                    len,
+                    "data"
+                ));
+                c_try!(reject_overlapping_outputs(
+                    "sidereon_omm_from_snapshot_json",
+                    data_range,
+                    out_range,
+                    "data",
+                    "out_omm"
+                ));
+            }
+            let bytes_result = require_slice(data, len, "sidereon_omm_from_snapshot_json", "data");
+            *out_omm = ptr::null_mut();
+            let bytes = c_try!(bytes_result).to_vec();
+            let parsed = (|| -> Result<_, sidereon_core::astro::omm::OmmError> {
+                let mut deserializer = serde_json::Deserializer::from_slice(&bytes);
+                let mut value: serde_json::Value =
+                    serde::de::DeserializeSeed::deserialize(StrictOmmJsonValue, &mut deserializer)
+                        .map_err(|e| {
+                            sidereon_core::astro::omm::OmmError::Field(format!(
+                                "invalid snapshot JSON: {e}"
+                            ))
+                        })?;
+                deserializer.end().map_err(|e| {
+                    sidereon_core::astro::omm::OmmError::Field(format!(
+                        "invalid trailing snapshot JSON: {e}"
+                    ))
+                })?;
+                let object = value.as_object_mut().ok_or_else(|| {
+                    sidereon_core::astro::omm::OmmError::Field("snapshot must be an object".into())
+                })?;
+                const REQUIRED: &[&str] = &[
+                    "ccsds_omm_vers",
+                    "classification",
+                    "creation_date",
+                    "originator",
+                    "message_id",
+                    "object_name",
+                    "object_id",
+                    "center_name",
+                    "ref_frame",
+                    "ref_frame_epoch",
+                    "time_system",
+                    "mean_element_theory",
+                    "epoch",
+                    "mean_motion",
+                    "semi_major_axis_km",
+                    "eccentricity",
+                    "inclination_deg",
+                    "ra_of_asc_node_deg",
+                    "arg_of_pericenter_deg",
+                    "mean_anomaly_deg",
+                    "gm_km3_s2",
+                    "spacecraft",
+                    "ephemeris_type",
+                    "classification_type",
+                    "norad_cat_id",
+                    "element_set_no",
+                    "rev_at_epoch",
+                    "bstar",
+                    "bterm_m2_kg",
+                    "mean_motion_dot",
+                    "mean_motion_ddot",
+                    "agom_m2_kg",
+                    "covariance",
+                    "user_defined",
+                    "comments",
+                    "exact_sgp4_epoch",
+                    "quantize_tle_derived_fields",
+                ];
+                if object.len() != REQUIRED.len()
+                    || object.keys().any(|key| !REQUIRED.contains(&key.as_str()))
+                    || REQUIRED.iter().any(|key| !object.contains_key(*key))
+                {
+                    return Err(sidereon_core::astro::omm::OmmError::Field(
+                        "snapshot keys do not match the complete OMM schema".into(),
+                    ));
+                }
+                let validate = |field: &str, value: &serde_json::Value, keys: &[&str]| {
+                    let object = value.as_object().ok_or_else(|| {
+                        sidereon_core::astro::omm::OmmError::Field(format!(
+                            "{field} must be an object"
+                        ))
+                    })?;
+                    if object.len() != keys.len()
+                        || object.keys().any(|key| !keys.contains(&key.as_str()))
+                        || keys.iter().any(|key| !object.contains_key(*key))
+                    {
+                        return Err(sidereon_core::astro::omm::OmmError::Field(format!(
+                            "{field} keys do not match its schema"
+                        )));
+                    }
+                    Ok::<(), sidereon_core::astro::omm::OmmError>(())
+                };
+                validate(
+                    "epoch",
+                    &object["epoch"],
+                    &[
+                        "year",
+                        "month",
+                        "day",
+                        "hour",
+                        "minute",
+                        "second",
+                        "microsecond",
+                        "femtosecond",
+                    ],
+                )?;
+                validate(
+                    "comments",
+                    &object["comments"],
+                    &[
+                        "header",
+                        "metadata",
+                        "mean_elements",
+                        "tle_parameters",
+                        "user_defined",
+                    ],
+                )?;
+                let user_defined = object["user_defined"].as_array().ok_or_else(|| {
+                    sidereon_core::astro::omm::OmmError::Field(
+                        "user_defined must be an array".into(),
+                    )
+                })?;
+                for (index, row) in user_defined.iter().enumerate() {
+                    validate(
+                        &format!("user_defined[{index}]"),
+                        row,
+                        &["parameter", "value"],
+                    )?;
+                }
+                for field in ["spacecraft", "covariance"] {
+                    if let Some(nested) = object[field].as_object() {
+                        let keys: &[&str] = if field == "spacecraft" {
+                            &[
+                                "comments",
+                                "mass_kg",
+                                "solar_rad_area_m2",
+                                "solar_rad_coeff",
+                                "drag_area_m2",
+                                "drag_coeff",
+                            ]
+                        } else {
+                            &["comments", "cov_ref_frame", "lower_triangle"]
+                        };
+                        validate(field, &serde_json::Value::Object(nested.clone()), keys)?;
+                    } else if !object[field].is_null() {
+                        return Err(sidereon_core::astro::omm::OmmError::Field(format!(
+                            "{field} must be null or an object"
+                        )));
+                    }
+                }
+                let exact = object.get("exact_sgp4_epoch").unwrap();
+                if let Some(epoch) = exact.as_object() {
+                    validate(
+                        "exact_sgp4_epoch",
+                        &serde_json::Value::Object(epoch.clone()),
+                        &["whole", "fraction"],
+                    )?;
+                } else if !exact.is_null() {
+                    return Err(sidereon_core::astro::omm::OmmError::Field(
+                        "exact_sgp4_epoch must be null or a split epoch".into(),
+                    ));
+                }
+                let epoch_json = object.get("exact_sgp4_epoch").cloned().unwrap();
+                let quantize = object
+                    .get("quantize_tle_derived_fields")
+                    .and_then(serde_json::Value::as_bool)
+                    .ok_or_else(|| {
+                        sidereon_core::astro::omm::OmmError::Field(
+                            "quantize_tle_derived_fields must be boolean".into(),
+                        )
+                    })?;
+                object.remove("exact_sgp4_epoch");
+                object.remove("quantize_tle_derived_fields");
+                let mut omm: sidereon_core::astro::omm::Omm = serde_json::from_value(value)
+                    .map_err(|e| {
+                        sidereon_core::astro::omm::OmmError::Field(format!(
+                            "invalid OMM snapshot: {e}"
+                        ))
+                    })?;
+                if let Some(epoch) = epoch_json.as_object() {
+                    let whole = epoch
+                        .get("whole")
+                        .and_then(serde_json::Value::as_f64)
+                        .ok_or_else(|| {
+                            sidereon_core::astro::omm::OmmError::Field(
+                                "exact epoch whole must be numeric".into(),
+                            )
+                        })?;
+                    let fraction = epoch
+                        .get("fraction")
+                        .and_then(serde_json::Value::as_f64)
+                        .ok_or_else(|| {
+                            sidereon_core::astro::omm::OmmError::Field(
+                                "exact epoch fraction must be numeric".into(),
+                            )
+                        })?;
+                    if !whole.is_finite() || !fraction.is_finite() {
+                        return Err(sidereon_core::astro::omm::OmmError::Field(
+                            "exact epoch must be finite".into(),
+                        ));
+                    }
+                    omm.exact_sgp4_epoch =
+                        Some(sidereon_core::astro::sgp4::JulianDate(whole, fraction));
+                }
+                omm.quantize_tle_derived_fields = quantize;
+                if !omm_numeric_fields_finite(&omm) {
+                    return Err(sidereon_core::astro::omm::OmmError::Field(
+                        "snapshot contains a non-finite numeric field".into(),
+                    ));
+                }
+                let mut validation = omm.clone();
+                validation.comments = Default::default();
+                if let Some(spacecraft) = validation.spacecraft.as_mut() {
+                    spacecraft.comments.clear();
+                }
+                if let Some(covariance) = validation.covariance.as_mut() {
+                    covariance.comments.clear();
+                }
+                sidereon_core::astro::omm::encode_json_discarding_comments(&validation)?;
+                Ok(omm)
+            })();
+            match parsed {
+                Ok(inner) => {
+                    write_boxed_handle(out_omm, SidereonOmm { inner });
+                    SidereonStatus::Ok
+                }
+                Err(error) => {
+                    crate::engine_error::record_engine_error(
+                        crate::engine_error::SidereonEngineErrorFamily::Omm,
+                        "sidereon_omm_from_snapshot_json",
+                        crate::engine_error::omm_error_value(&error),
+                    );
+                    set_last_error(format!("sidereon_omm_from_snapshot_json: {error}"));
+                    SidereonStatus::InvalidArgument
+                }
+            }
+        },
+    )
+}
+
+/// Convert an OMM to its exact core SGP4 ElementSet, retaining optional values
+/// with explicit presence flags. On bridge refusal the typed OMM error is
+/// available through the engine-error payload API.
+///
+/// Safety: omm is a live handle and out points to writable
+/// SidereonOmmElementSet storage disjoint from omm.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_omm_to_element_set(
+    omm: *const SidereonOmm,
+    out: *mut SidereonOmmElementSet,
+) -> SidereonStatus {
+    crate::engine_error::engine_error_operation_boundary(
+        "sidereon_omm_to_element_set",
+        SidereonStatus::Panic,
+        || {
+            c_try!(reject_output_overlaps_handle(
+                "sidereon_omm_to_element_set",
+                out,
+                "out",
+                omm,
+                "omm",
+            ));
+            let out = c_try!(require_out(out, "sidereon_omm_to_element_set", "out"));
+            *out = SidereonOmmElementSet::default();
+            let omm = c_try!(require_ref(omm, "sidereon_omm_to_element_set", "omm"));
+            let elements = match omm.inner.to_element_set() {
+                Ok(elements) => elements,
+                Err(error) => {
+                    crate::engine_error::record_engine_error(
+                        crate::engine_error::SidereonEngineErrorFamily::Omm,
+                        "sidereon_omm_to_element_set",
+                        crate::engine_error::omm_error_value(&error),
+                    );
+                    set_last_error(format!("sidereon_omm_to_element_set: {error}"));
+                    return SidereonStatus::InvalidArgument;
+                }
+            };
+            *out = SidereonOmmElementSet {
+                epoch_whole: elements.epoch.0,
+                epoch_fraction: elements.epoch.1,
+                bstar: elements.bstar,
+                mean_motion_dot_present: elements.mean_motion_dot.is_some(),
+                mean_motion_dot: elements.mean_motion_dot.unwrap_or_default(),
+                mean_motion_double_dot_present: elements.mean_motion_double_dot.is_some(),
+                mean_motion_double_dot: elements.mean_motion_double_dot.unwrap_or_default(),
+                eccentricity: elements.eccentricity,
+                argument_of_perigee_deg: elements.argument_of_perigee_deg,
+                inclination_deg: elements.inclination_deg,
+                mean_anomaly_deg: elements.mean_anomaly_deg,
+                mean_motion_rev_per_day: elements.mean_motion_rev_per_day,
+                right_ascension_deg: elements.right_ascension_deg,
+                catalog_number_present: elements.catalog_number.is_some(),
+                catalog_number: elements.catalog_number.unwrap_or_default(),
+                omm_epoch_days_present: elements.omm_epoch_days.is_some(),
+                omm_epoch_days: elements.omm_epoch_days.unwrap_or_default(),
+            };
+            SidereonStatus::Ok
+        },
+    )
+}
+
 /// Parse an OMM from KVN text. On success writes a newly owned handle to
 /// *out_omm. Delegates to sidereon_core::astro::omm::parse_kvn.
 ///

@@ -176,6 +176,255 @@ pub struct SidereonTle {
     pub(crate) checksum_warnings: Vec<ChecksumWarning>,
 }
 
+/// A propagation-ready SGP4 satellite initialized directly from an OMM.
+pub struct SidereonSgp4Satellite {
+    pub(crate) inner: Satellite,
+}
+
+/// Read the initialized element epoch without collapsing its split fraction.
+///
+/// Safety: satellite is a live handle; both outputs point to writable f64 storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sgp4_satellite_epoch_jd(
+    satellite: *const SidereonSgp4Satellite,
+    out_whole: *mut f64,
+    out_fraction: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_sgp4_satellite_epoch_jd",
+        SidereonStatus::Panic,
+        || {
+            let whole = c_try!(require_out(
+                out_whole,
+                "sidereon_sgp4_satellite_epoch_jd",
+                "out_whole"
+            ));
+            let fraction = c_try!(require_out(
+                out_fraction,
+                "sidereon_sgp4_satellite_epoch_jd",
+                "out_fraction"
+            ));
+            c_try!(reject_output_overlaps_handle(
+                "sidereon_sgp4_satellite_epoch_jd",
+                whole,
+                "out_whole",
+                satellite,
+                "satellite"
+            ));
+            c_try!(reject_output_overlaps_handle(
+                "sidereon_sgp4_satellite_epoch_jd",
+                fraction,
+                "out_fraction",
+                satellite,
+                "satellite"
+            ));
+            let whole_range =
+                checked_output_range("sidereon_sgp4_satellite_epoch_jd", whole, 1, "out_whole");
+            let fraction_range = checked_output_range(
+                "sidereon_sgp4_satellite_epoch_jd",
+                fraction,
+                1,
+                "out_fraction",
+            );
+            c_try!(reject_overlapping_outputs(
+                "sidereon_sgp4_satellite_epoch_jd",
+                c_try!(whole_range),
+                c_try!(fraction_range),
+                "out_whole",
+                "out_fraction"
+            ));
+            *whole = 0.0;
+            *fraction = 0.0;
+            let satellite = c_try!(require_ref(
+                satellite,
+                "sidereon_sgp4_satellite_epoch_jd",
+                "satellite"
+            ));
+            let epoch = satellite.inner.epoch_jd();
+            *whole = epoch.0;
+            *fraction = epoch.1;
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Initialize an owned SGP4 satellite from an OMM's full core bridge.
+///
+/// Safety: omm must be a live OMM handle; out_satellite points to writable handle storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sgp4_satellite_from_omm(
+    omm: *const crate::omm::SidereonOmm,
+    out_satellite: *mut *mut SidereonSgp4Satellite,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_sgp4_satellite_from_omm",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_satellite,
+                "sidereon_sgp4_satellite_from_omm",
+                "out_satellite"
+            ));
+            c_try!(reject_output_overlaps_handle(
+                "sidereon_sgp4_satellite_from_omm",
+                out,
+                "out_satellite",
+                omm,
+                "omm"
+            ));
+            *out = ptr::null_mut();
+            let omm = c_try!(require_ref(omm, "sidereon_sgp4_satellite_from_omm", "omm"));
+            match Satellite::from_omm(&omm.inner) {
+                Ok(inner) => {
+                    write_boxed_handle(out, SidereonSgp4Satellite { inner });
+                    SidereonStatus::Ok
+                }
+                Err(error) => map_sgp4_error("sidereon_sgp4_satellite_from_omm", error),
+            }
+        },
+    )
+}
+
+/// Read the initialized OMM satellite epoch as seconds from J2000.
+///
+/// Safety: satellite is a live handle; out_epoch_j2000_s points to writable f64 storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sgp4_satellite_epoch_j2000_s(
+    satellite: *const SidereonSgp4Satellite,
+    out_epoch_j2000_s: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_sgp4_satellite_epoch_j2000_s",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_epoch_j2000_s,
+                "sidereon_sgp4_satellite_epoch_j2000_s",
+                "out_epoch_j2000_s"
+            ));
+            c_try!(reject_output_overlaps_handle(
+                "sidereon_sgp4_satellite_epoch_j2000_s",
+                out,
+                "out_epoch_j2000_s",
+                satellite,
+                "satellite"
+            ));
+            *out = 0.0;
+            let satellite = c_try!(require_ref(
+                satellite,
+                "sidereon_sgp4_satellite_epoch_j2000_s",
+                "satellite"
+            ));
+            let epoch = satellite.inner.epoch_jd();
+            *out = j2000_seconds_from_split(epoch.0, epoch.1);
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Propagate at minutes since the OMM element epoch into a detached TEME state.
+///
+/// Safety: satellite is live; out_state points to writable SidereonTemeState storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sgp4_satellite_propagate_minutes(
+    satellite: *const SidereonSgp4Satellite,
+    minutes_since_epoch: f64,
+    out_state: *mut SidereonTemeState,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_sgp4_satellite_propagate_minutes",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_state,
+                "sidereon_sgp4_satellite_propagate_minutes",
+                "out_state"
+            ));
+            c_try!(reject_output_overlaps_handle(
+                "sidereon_sgp4_satellite_propagate_minutes",
+                out,
+                "out_state",
+                satellite,
+                "satellite"
+            ));
+            *out = SidereonTemeState {
+                position_km: [0.0; 3],
+                velocity_km_s: [0.0; 3],
+            };
+            let satellite = c_try!(require_ref(
+                satellite,
+                "sidereon_sgp4_satellite_propagate_minutes",
+                "satellite"
+            ));
+            match satellite
+                .inner
+                .propagate(MinutesSinceEpoch(minutes_since_epoch))
+            {
+                Ok(prediction) => {
+                    *out = prediction_to_c(&prediction);
+                    SidereonStatus::Ok
+                }
+                Err(error) => map_sgp4_error("sidereon_sgp4_satellite_propagate_minutes", error),
+            }
+        },
+    )
+}
+
+/// Propagate at an exact split Julian date into a detached TEME state.
+///
+/// Safety: satellite is live; out_state points to writable SidereonTemeState storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sgp4_satellite_propagate_jd(
+    satellite: *const SidereonSgp4Satellite,
+    epoch_whole: f64,
+    epoch_fraction: f64,
+    out_state: *mut SidereonTemeState,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_sgp4_satellite_propagate_jd",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_state,
+                "sidereon_sgp4_satellite_propagate_jd",
+                "out_state"
+            ));
+            c_try!(reject_output_overlaps_handle(
+                "sidereon_sgp4_satellite_propagate_jd",
+                out,
+                "out_state",
+                satellite,
+                "satellite"
+            ));
+            *out = SidereonTemeState {
+                position_km: [0.0; 3],
+                velocity_km_s: [0.0; 3],
+            };
+            let satellite = c_try!(require_ref(
+                satellite,
+                "sidereon_sgp4_satellite_propagate_jd",
+                "satellite"
+            ));
+            let epoch = sidereon_core::astro::sgp4::JulianDate::new(epoch_whole, epoch_fraction);
+            match satellite.inner.propagate_jd(epoch) {
+                Ok(prediction) => {
+                    *out = prediction_to_c(&prediction);
+                    SidereonStatus::Ok
+                }
+                Err(error) => map_sgp4_error("sidereon_sgp4_satellite_propagate_jd", error),
+            }
+        },
+    )
+}
+
+/// Release an OMM-initialized SGP4 satellite.
+///
+/// Safety: satellite is a live handle returned by sidereon_sgp4_satellite_from_omm or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sgp4_satellite_free(satellite: *mut SidereonSgp4Satellite) {
+    free_boxed(satellite);
+}
+
 /// Stateful SGP4 decay latch. Opaque to C. Create with
 /// sidereon_sgp4_decay_latch_new and release with
 /// sidereon_sgp4_decay_latch_free.

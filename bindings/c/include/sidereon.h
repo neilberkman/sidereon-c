@@ -7204,6 +7204,12 @@ typedef struct SidereonOem SidereonOem;
 typedef struct SidereonOmm SidereonOmm;
 
 /**
+ * Detached result of parsing multiple OMM records. Successful records and
+ * skipped records retain their independent input order.
+ */
+typedef struct SidereonOmmArray SidereonOmmArray;
+
+/**
  * A lenient OMM catalog: the records that resolved to the requested system plus
  * the OMM entries that did not. Opaque to C. Create with
  * sidereon_omm_catalog_build_lenient and release with sidereon_omm_catalog_free.
@@ -7547,6 +7553,11 @@ typedef struct SidereonScenarioSimulation SidereonScenarioSimulation;
  * sidereon_sgp4_decay_latch_free.
  */
 typedef struct SidereonSgp4DecayLatch SidereonSgp4DecayLatch;
+
+/**
+ * A propagation-ready SGP4 satellite initialized directly from an OMM.
+ */
+typedef struct SidereonSgp4Satellite SidereonSgp4Satellite;
 
 typedef struct SidereonSgp4TleFit SidereonSgp4TleFit;
 
@@ -16781,6 +16792,103 @@ typedef struct SidereonSkippedOmm {
 } SidereonSkippedOmm;
 
 /**
+ * Civil OMM epoch, including sub-microsecond precision.
+ */
+typedef struct SidereonOmmEpoch {
+    /**
+     * Signed civil year.
+     */
+    int32_t year;
+    /**
+     * Civil month, day, hour, minute, and second.
+     */
+    uint32_t month;
+    uint32_t day;
+    uint32_t hour;
+    uint32_t minute;
+    uint32_t second;
+    /**
+     * Fractional second split into whole microseconds and femtosecond remainder.
+     */
+    uint32_t microsecond;
+    uint32_t femtosecond;
+} SidereonOmmEpoch;
+
+/**
+ * Detached numeric result of bridging an OMM into SGP4 elements.
+ */
+typedef struct SidereonOmmElementSet {
+    /**
+     * Split Julian-date whole component.
+     */
+    double epoch_whole;
+    /**
+     * Split Julian-date fractional component.
+     */
+    double epoch_fraction;
+    /**
+     * SGP4 B-star drag term after OMM bridge policy.
+     */
+    double bstar;
+    /**
+     * Whether mean_motion_dot is present.
+     */
+    bool mean_motion_dot_present;
+    /**
+     * First mean-motion derivative when present, otherwise zero.
+     */
+    double mean_motion_dot;
+    /**
+     * Whether mean_motion_double_dot is present.
+     */
+    bool mean_motion_double_dot_present;
+    /**
+     * Second mean-motion derivative when present, otherwise zero.
+     */
+    double mean_motion_double_dot;
+    /**
+     * Dimensionless eccentricity.
+     */
+    double eccentricity;
+    /**
+     * Argument of perigee in degrees.
+     */
+    double argument_of_perigee_deg;
+    /**
+     * Inclination in degrees.
+     */
+    double inclination_deg;
+    /**
+     * Mean anomaly in degrees.
+     */
+    double mean_anomaly_deg;
+    /**
+     * Mean motion in revolutions per day.
+     */
+    double mean_motion_rev_per_day;
+    /**
+     * Right ascension of ascending node in degrees.
+     */
+    double right_ascension_deg;
+    /**
+     * Whether catalog_number is present.
+     */
+    bool catalog_number_present;
+    /**
+     * NORAD catalog number when present, otherwise zero.
+     */
+    uint32_t catalog_number;
+    /**
+     * Whether omm_epoch_days is present.
+     */
+    bool omm_epoch_days_present;
+    /**
+     * python-sgp4 OMM initialization epoch when present, otherwise zero.
+     */
+    double omm_epoch_days;
+} SidereonOmmElementSet;
+
+/**
  * Arc span covered by a residual ledger.
  */
 typedef struct SidereonOrbitArcSpan {
@@ -23060,6 +23168,20 @@ typedef struct SidereonSgp4ErrorInfo {
 } SidereonSgp4ErrorInfo;
 
 /**
+ * One TEME Cartesian state from SGP4.
+ */
+typedef struct SidereonTemeState {
+    /**
+     * TEME position in kilometers.
+     */
+    double position_km[3];
+    /**
+     * TEME velocity in kilometers per second.
+     */
+    double velocity_km_s[3];
+} SidereonTemeState;
+
+/**
  * Fixed-size null-terminated TLE line storage. Values returned by Sidereon are
  * always null-terminated.
  */
@@ -27203,20 +27325,6 @@ typedef struct SidereonTecSamplesOutcome {
      */
     struct SidereonTecSamplesError error;
 } SidereonTecSamplesOutcome;
-
-/**
- * One TEME Cartesian state from SGP4.
- */
-typedef struct SidereonTemeState {
-    /**
-     * TEME position in kilometers.
-     */
-    double position_km[3];
-    /**
-     * TEME velocity in kilometers per second.
-     */
-    double velocity_km_s[3];
-} SidereonTemeState;
 
 /**
  * A line whose column 69 did not confirm its checksum.
@@ -37928,6 +38036,112 @@ enum SidereonStatus sidereon_oem_to_xml(const struct SidereonOem *oem,
                                         size_t *out_required);
 
 /**
+ * Return the number of successfully parsed or appended records.
+ *
+ * Safety: array is a live collection handle; out points to writable size_t storage.
+ */
+enum SidereonStatus sidereon_omm_array_count(const struct SidereonOmmArray *array, size_t *out);
+
+/**
+ * Release an owned OMM collection.
+ */
+void sidereon_omm_array_free(struct SidereonOmmArray *array);
+
+/**
+ * Create an empty owned OMM collection for caller-assembled writer input.
+ *
+ * Safety: out points to writable handle storage.
+ */
+enum SidereonStatus sidereon_omm_array_new(struct SidereonOmmArray **out);
+
+/**
+ * Append a clone of one OMM to an owned collection.
+ *
+ * Safety: array and omm are live handles returned by the OMM API.
+ */
+enum SidereonStatus sidereon_omm_array_push(struct SidereonOmmArray *array,
+                                            const struct SidereonOmm *omm);
+
+/**
+ * Copy one successful record into a new independently owned OMM handle.
+ *
+ * Safety: array is live; out points to writable handle storage.
+ */
+enum SidereonStatus sidereon_omm_array_record(const struct SidereonOmmArray *array,
+                                              size_t index,
+                                              struct SidereonOmm **out);
+
+/**
+ * Copy one skipped record's original index and recursively typed OMM error JSON.
+ *
+ * Safety: array is live; out_index/out_written/out_required point to writable size_t storage;
+ * out points to len writable bytes or is null when len is zero.
+ */
+enum SidereonStatus sidereon_omm_array_skipped(const struct SidereonOmmArray *array,
+                                               size_t index,
+                                               size_t *out_index,
+                                               uint8_t *out,
+                                               size_t len,
+                                               size_t *out_written,
+                                               size_t *out_required);
+
+/**
+ * Return the number of records that were skipped by a parser.
+ *
+ * Safety: array is a live collection handle; out points to writable size_t storage.
+ */
+enum SidereonStatus sidereon_omm_array_skipped_count(const struct SidereonOmmArray *array,
+                                                     size_t *out);
+
+/**
+ * Write every record as GP CSV; refuse comments that CSV cannot preserve.
+ *
+ * Safety: array is live; out points to len writable bytes or is null when len is zero;
+ * out_written and out_required point to writable size_t storage.
+ */
+enum SidereonStatus sidereon_omm_array_to_csv(const struct SidereonOmmArray *array,
+                                              uint8_t *out,
+                                              size_t len,
+                                              size_t *out_written,
+                                              size_t *out_required);
+
+/**
+ * Write every record as GP CSV, discarding only comments CSV cannot carry.
+ *
+ * Safety: array is live; out points to len writable bytes or is null when len is zero;
+ * out_written and out_required point to writable size_t storage.
+ */
+enum SidereonStatus sidereon_omm_array_to_csv_discarding_comments(const struct SidereonOmmArray *array,
+                                                                  uint8_t *out,
+                                                                  size_t len,
+                                                                  size_t *out_written,
+                                                                  size_t *out_required);
+
+/**
+ * Write every collection record as a JSON array; refuse comments that JSON cannot preserve.
+ *
+ * Safety: array is live; out points to len writable bytes or is null when len is zero;
+ * out_written and out_required point to writable size_t storage.
+ */
+enum SidereonStatus sidereon_omm_array_to_json(const struct SidereonOmmArray *array,
+                                               uint8_t *out,
+                                               size_t len,
+                                               size_t *out_written,
+                                               size_t *out_required);
+
+/**
+ * Write every record as a JSON array, discarding only comments JSON cannot carry.
+ *
+ * Safety: array is live; out points to len writable bytes or is null when len is zero;
+ * out_written and out_required point to writable size_t storage.
+ */
+enum SidereonStatus sidereon_omm_array_to_json_discarding_comments(const struct SidereonOmmArray *array,
+                                                                   uint8_t *out,
+                                                                   size_t len,
+                                                                   size_t *out_written,
+                                                                   size_t *out_required);
+
+/**
  * Build a lenient identity catalog for one constellation from a CelesTrak
  * OMM/JSON array. system is one of SidereonGnssSystem and selects which
  * constellation's identity adapter resolves the OMM OBJECT_NAMEs. Every entry
@@ -38060,6 +38274,53 @@ enum SidereonStatus sidereon_omm_catalog_skipped_object_name(const struct Sidere
 void sidereon_omm_free(struct SidereonOmm *omm);
 
 /**
+ * Construct an OMM from the exact detached snapshot schema emitted by
+ * sidereon_omm_snapshot_json. Unknown or missing keys are refused.
+ *
+ * Safety: data points to len readable UTF-8 bytes; out_omm points to writable
+ * storage for a SidereonOmm pointer.
+ */
+enum SidereonStatus sidereon_omm_from_snapshot_json(const uint8_t *data,
+                                                    size_t len,
+                                                    struct SidereonOmm **out_omm);
+
+/**
+ * Parse one OMM using the core format autodetector.
+ *
+ * Safety: data points to len readable bytes; out_omm points to writable handle storage.
+ */
+enum SidereonStatus sidereon_omm_parse(const uint8_t *data,
+                                       size_t len,
+                                       struct SidereonOmm **out_omm);
+
+/**
+ * Parse one OMM from GP CSV.
+ *
+ * Safety: data points to len readable bytes; out_omm points to writable handle storage.
+ */
+enum SidereonStatus sidereon_omm_parse_csv(const uint8_t *data,
+                                           size_t len,
+                                           struct SidereonOmm **out_omm);
+
+/**
+ * Parse a GP CSV table, retaining malformed row details.
+ *
+ * Safety: data points to len readable bytes; out_array points to writable handle storage.
+ */
+enum SidereonStatus sidereon_omm_parse_csv_array(const uint8_t *data,
+                                                 size_t len,
+                                                 struct SidereonOmmArray **out_array);
+
+/**
+ * Parse a civil OMM epoch without requiring a full message.
+ *
+ * Safety: text points to len readable bytes; out points to writable epoch storage.
+ */
+enum SidereonStatus sidereon_omm_parse_epoch(const uint8_t *text,
+                                             size_t len,
+                                             struct SidereonOmmEpoch *out);
+
+/**
  * Parse an OMM from JSON text (a single OMM object). On success writes a newly
  * owned handle to *out_omm. Delegates to sidereon_core::astro::omm::parse_json.
  *
@@ -38068,6 +38329,15 @@ void sidereon_omm_free(struct SidereonOmm *omm);
 enum SidereonStatus sidereon_omm_parse_json(const uint8_t *data,
                                             size_t len,
                                             struct SidereonOmm **out_omm);
+
+/**
+ * Parse a GP JSON array (or one object), retaining malformed element details.
+ *
+ * Safety: data points to len readable bytes; out_array points to writable handle storage.
+ */
+enum SidereonStatus sidereon_omm_parse_json_array(const uint8_t *data,
+                                                  size_t len,
+                                                  struct SidereonOmmArray **out_array);
 
 /**
  * Parse an OMM from KVN text. On success writes a newly owned handle to
@@ -38088,6 +38358,40 @@ enum SidereonStatus sidereon_omm_parse_kvn(const uint8_t *data,
 enum SidereonStatus sidereon_omm_parse_xml(const uint8_t *data,
                                            size_t len,
                                            struct SidereonOmm **out_omm);
+
+/**
+ * Parse every OMM message in an XML document, retaining per-message refusals.
+ *
+ * Safety: data points to len readable bytes; out_array points to writable handle storage.
+ */
+enum SidereonStatus sidereon_omm_parse_xml_all(const uint8_t *data,
+                                               size_t len,
+                                               struct SidereonOmmArray **out_array);
+
+/**
+ * Copy the complete parsed OMM value, including non-wire in-memory SGP4
+ * side channels, as detached JSON. Unlike the CCSDS serializers this snapshot
+ * retains comments by block, exact_sgp4_epoch, and the derived-field policy.
+ *
+ * Safety: omm is a live handle; out points to len writable bytes or NULL when
+ * len is zero; out_written and out_required point to writable size_t values.
+ */
+enum SidereonStatus sidereon_omm_snapshot_json(const struct SidereonOmm *omm,
+                                               uint8_t *out,
+                                               size_t len,
+                                               size_t *out_written,
+                                               size_t *out_required);
+
+/**
+ * Convert an OMM to its exact core SGP4 ElementSet, retaining optional values
+ * with explicit presence flags. On bridge refusal the typed OMM error is
+ * available through the engine-error payload API.
+ *
+ * Safety: omm is a live handle and out points to writable
+ * SidereonOmmElementSet storage disjoint from omm.
+ */
+enum SidereonStatus sidereon_omm_to_element_set(const struct SidereonOmm *omm,
+                                                struct SidereonOmmElementSet *out);
 
 /**
  * Serialize an OMM to JSON text (not null-terminated). Round-trips with
@@ -45058,6 +45362,57 @@ enum SidereonStatus sidereon_sgp4_fit_tle(const struct SidereonSgp4FitSample *sa
                                           struct SidereonSgp4TleFit **out_fit);
 
 enum SidereonStatus sidereon_sgp4_last_error_info(struct SidereonSgp4ErrorInfo *out_info);
+
+/**
+ * Read the initialized OMM satellite epoch as seconds from J2000.
+ *
+ * Safety: satellite is a live handle; out_epoch_j2000_s points to writable f64 storage.
+ */
+enum SidereonStatus sidereon_sgp4_satellite_epoch_j2000_s(const struct SidereonSgp4Satellite *satellite,
+                                                          double *out_epoch_j2000_s);
+
+/**
+ * Read the initialized element epoch without collapsing its split fraction.
+ *
+ * Safety: satellite is a live handle; both outputs point to writable f64 storage.
+ */
+enum SidereonStatus sidereon_sgp4_satellite_epoch_jd(const struct SidereonSgp4Satellite *satellite,
+                                                     double *out_whole,
+                                                     double *out_fraction);
+
+/**
+ * Release an OMM-initialized SGP4 satellite.
+ *
+ * Safety: satellite is a live handle returned by sidereon_sgp4_satellite_from_omm or NULL.
+ */
+void sidereon_sgp4_satellite_free(struct SidereonSgp4Satellite *satellite);
+
+/**
+ * Initialize an owned SGP4 satellite from an OMM's full core bridge.
+ *
+ * Safety: omm must be a live OMM handle; out_satellite points to writable handle storage.
+ */
+enum SidereonStatus sidereon_sgp4_satellite_from_omm(const struct SidereonOmm *omm,
+                                                     struct SidereonSgp4Satellite **out_satellite);
+
+/**
+ * Propagate at an exact split Julian date into a detached TEME state.
+ *
+ * Safety: satellite is live; out_state points to writable SidereonTemeState storage.
+ */
+enum SidereonStatus sidereon_sgp4_satellite_propagate_jd(const struct SidereonSgp4Satellite *satellite,
+                                                         double epoch_whole,
+                                                         double epoch_fraction,
+                                                         struct SidereonTemeState *out_state);
+
+/**
+ * Propagate at minutes since the OMM element epoch into a detached TEME state.
+ *
+ * Safety: satellite is live; out_state points to writable SidereonTemeState storage.
+ */
+enum SidereonStatus sidereon_sgp4_satellite_propagate_minutes(const struct SidereonSgp4Satellite *satellite,
+                                                              double minutes_since_epoch,
+                                                              struct SidereonTemeState *out_state);
 
 void sidereon_sgp4_tle_fit_free(struct SidereonSgp4TleFit *fit);
 
