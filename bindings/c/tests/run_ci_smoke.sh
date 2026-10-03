@@ -25,7 +25,17 @@ if ! cmp -s include/sidereon.h "${generated_header}"; then
     exit 1
 fi
 
-cc -std=c11 -Wall -Wextra -Werror \
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
+    -I"${binding_root}/include" \
+    "${here}/rinex_obs_complete_smoke.c" \
+    -L"${lib_dir}" \
+    -lsidereon \
+    -Wl,-rpath,"${lib_dir}" \
+    -lm \
+    -o "${target_dir}/rinex_obs_complete_smoke_ci"
+"${target_dir}/rinex_obs_complete_smoke_ci"
+
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -I"${binding_root}/include" \
     "${here}/sbas_prn_smoke.c" \
     -L"${lib_dir}" \
@@ -35,7 +45,7 @@ cc -std=c11 -Wall -Wextra -Werror \
     -o "${target_dir}/sbas_prn_smoke_ci"
 "${target_dir}/sbas_prn_smoke_ci"
 
-cc -std=c11 -Wall -Wextra -Werror \
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -I"${binding_root}/include" \
     "${here}/version_smoke.c" \
     -L"${lib_dir}" \
@@ -45,7 +55,17 @@ cc -std=c11 -Wall -Wextra -Werror \
     -o "${target_dir}/version_smoke_ci"
 "${target_dir}/version_smoke_ci"
 
-cc -std=c11 -Wall -Wextra -Werror \
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
+    -I"${binding_root}/include" \
+    "${here}/raw_out_initialization_smoke.c" \
+    -L"${lib_dir}" \
+    -lsidereon \
+    -Wl,-rpath,"${lib_dir}" \
+    -lm \
+    -o "${target_dir}/raw_out_initialization_smoke_ci"
+"${target_dir}/raw_out_initialization_smoke_ci"
+
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -I"${binding_root}/include" \
     "${here}/ssr_message_smoke.c" \
     -L"${lib_dir}" \
@@ -55,7 +75,7 @@ cc -std=c11 -Wall -Wextra -Werror \
     -o "${target_dir}/ssr_message_smoke_ci"
 "${target_dir}/ssr_message_smoke_ci"
 
-cc -std=c11 -Wall -Wextra -Werror \
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -I"${binding_root}/include" \
     "${here}/source_localization_1_1_smoke.c" \
     -L"${lib_dir}" \
@@ -65,7 +85,7 @@ cc -std=c11 -Wall -Wextra -Werror \
     -o "${target_dir}/source_localization_1_1_smoke_ci"
 "${target_dir}/source_localization_1_1_smoke_ci"
 
-cc -std=c11 -Wall -Wextra -Werror \
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -I"${binding_root}/include" \
     "${here}/attested_open_surface_smoke.c" \
     -L"${lib_dir}" \
@@ -75,7 +95,7 @@ cc -std=c11 -Wall -Wextra -Werror \
     -o "${target_dir}/attested_open_surface_smoke_ci"
 "${target_dir}/attested_open_surface_smoke_ci"
 
-cc -std=c11 -Wall -Wextra -Werror \
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -I"${binding_root}/include" \
     "${here}/exact_cache_single_flight_surface_smoke.c" \
     -L"${lib_dir}" \
@@ -85,7 +105,7 @@ cc -std=c11 -Wall -Wextra -Werror \
     -o "${target_dir}/exact_cache_single_flight_surface_smoke_ci"
 "${target_dir}/exact_cache_single_flight_surface_smoke_ci"
 
-cc -std=c11 -Wall -Wextra -Werror \
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -I"${binding_root}/include" \
     "${here}/data_distribution_smoke.c" \
     -L"${lib_dir}" \
@@ -95,7 +115,7 @@ cc -std=c11 -Wall -Wextra -Werror \
     -o "${target_dir}/data_distribution_smoke_ci"
 "${target_dir}/data_distribution_smoke_ci"
 
-cc -std=c11 -Wall -Wextra -Werror \
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -I"${binding_root}/include" \
     "${here}/publication_resilience_smoke.c" \
     -L"${lib_dir}" \
@@ -105,7 +125,7 @@ cc -std=c11 -Wall -Wextra -Werror \
     -o "${target_dir}/publication_resilience_smoke_ci"
 "${target_dir}/publication_resilience_smoke_ci"
 
-cc -std=c11 -Wall -Wextra -Werror \
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -I"${binding_root}/include" \
     -I"${target_dir}" \
     "${here}/sp3_exact_smoke.c" \
@@ -118,7 +138,7 @@ cc -std=c11 -Wall -Wextra -Werror \
     "${here}/fixtures/sp3/GRG0MGXFIN_20201760000_01D_15M_ORB.SP3" \
     "${here}/fixtures/sp3/IGS0OPSFIN_20261200945_02H30M_15M_ORB.SP3"
 
-cc -std=c11 -Wall -Wextra -Werror \
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -I"${binding_root}/include" \
     "${here}/rinex_qc_interval_smoke.c" \
     -L"${lib_dir}" \
@@ -129,7 +149,7 @@ cc -std=c11 -Wall -Wextra -Werror \
 "${target_dir}/rinex_qc_interval_smoke_ci" \
     "${here}/fixtures/obs/ESBC00DNK_R_20201770000_01D_30S_MO_trim.rnx"
 
-cc -std=c11 -Wall -Wextra -Werror \
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -I"${binding_root}/include" \
     "${here}/window_continuity_smoke.c" \
     -L"${lib_dir}" \
@@ -140,7 +160,7 @@ cc -std=c11 -Wall -Wextra -Werror \
 "${target_dir}/window_continuity_smoke_ci" \
     "${here}/fixtures/sp3/COD0MGXFIN_20201770000_01D_05M_ORB.SP3"
 
-cc -std=c11 -Wall -Wextra -Werror \
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -I"${binding_root}/include" \
     "${here}/sp3_interpolation_smoke.c" \
     -L"${lib_dir}" \
@@ -151,7 +171,7 @@ cc -std=c11 -Wall -Wextra -Werror \
 "${target_dir}/sp3_interpolation_smoke_ci" \
     "${here}/fixtures/sp3/GAP_G01_20201760000_15M.sp3"
 
-cc -std=c11 -Wall -Wextra -Werror \
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -I"${binding_root}/include" \
     "${here}/fixed_policy_smoke.c" \
     -L"${lib_dir}" \
@@ -161,7 +181,7 @@ cc -std=c11 -Wall -Wextra -Werror \
     -o "${target_dir}/fixed_policy_smoke_ci"
 "${target_dir}/fixed_policy_smoke_ci"
 
-cc -std=c11 -Wall -Wextra -Werror \
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -I"${binding_root}/include" \
     "${here}/rinex_nav_clock_smoke.c" \
     -L"${lib_dir}" \
@@ -173,7 +193,7 @@ cc -std=c11 -Wall -Wextra -Werror \
     "${here}/fixtures/nav/ESBC00DNK_R_20201770000_01D_MN.rnx" \
     "${here}/fixtures/clk/synthetic_rinex_clock.clk"
 
-cc -std=c11 -Wall -Wextra -Werror \
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -I"${binding_root}/include" \
     "${here}/rinex_rtk_dted_smoke.c" \
     -L"${lib_dir}" \
@@ -186,3 +206,49 @@ cc -std=c11 -Wall -Wextra -Werror \
     "${here}/fixtures/obs/WTZR00DEU_R_20201770000_01D_30S_MO_120epoch.rnx" \
     "${here}/fixtures/obs/WTZZ00DEU_R_20201770000_01D_30S_MO_120epoch.rnx" \
     "${here}/fixtures/dted/tiles"
+
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
+    -I"${binding_root}/include" \
+    "${here}/format_contracts_smoke.c" \
+    -L"${lib_dir}" \
+    -lsidereon \
+    -Wl,-rpath,"${lib_dir}" \
+    -lm \
+    -o "${target_dir}/format_contracts_smoke_ci"
+"${target_dir}/format_contracts_smoke_ci" \
+    "${here}/fixtures/antex/igs20_wettzell_trim.atx"
+
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
+    -I"${binding_root}/include" \
+    "${here}/inertial_tides_ssr_v2_smoke.c" \
+    -L"${lib_dir}" \
+    -lsidereon \
+    -Wl,-rpath,"${lib_dir}" \
+    -lm \
+    -o "${target_dir}/inertial_tides_ssr_v2_smoke_ci"
+"${target_dir}/inertial_tides_ssr_v2_smoke_ci" \
+    "${here}/fixtures/nav/ESBC00DNK_R_20201770000_01D_MN.rnx" \
+    "${here}/fixtures/ssr/BRDC00WRD_S_20261820000_G30_G31.rnx"
+
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
+    -I"${binding_root}/include" \
+    "${here}/omm_value_smoke.c" \
+    -L"${lib_dir}" \
+    -lsidereon \
+    -Wl,-rpath,"${lib_dir}" \
+    -lm \
+    -o "${target_dir}/omm_value_smoke_ci"
+"${target_dir}/omm_value_smoke_ci" "${here}/fixtures/omm/24876.kvn"
+
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
+    -I"${binding_root}/include" \
+    "${here}/omm_array_smoke.c" \
+    -L"${lib_dir}" \
+    -lsidereon \
+    -Wl,-rpath,"${lib_dir}" \
+    -lm \
+    -o "${target_dir}/omm_array_smoke_ci"
+"${target_dir}/omm_array_smoke_ci" \
+    "${here}/fixtures/omm/25544.json" \
+    "${here}/fixtures/omm/24876.xml" \
+    "${here}/fixtures/omm/24876.kvn"

@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "sidereon.h"
+#include "w5_wave2_pins.h"
 
 static int fail(const char *what) {
     char message[512];
@@ -26,6 +27,17 @@ static int require_ok(SidereonStatus status, const char *what) {
         return fail(what);
     }
     return 0;
+}
+
+static uint64_t f64_bits(double value) {
+    uint64_t bits = 0;
+    memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+/* Exact agreement with a pinned engine value (tests/valgen, bin w5_wave2). */
+static bool same_bits(double actual, uint64_t expected) {
+    return f64_bits(actual) == expected;
 }
 
 static bool close_abs(double actual, double expected, double tol) {
@@ -97,6 +109,14 @@ static int test_geodesic(const char *path) {
                    "geodesic inverse") != 0) {
         return 1;
     }
+    if (!same_bits(inv.distance_m, W5_WAVE2_GEODESIC_INVERSE_DISTANCE_M_BITS) ||
+        !same_bits(inv.initial_azimuth_deg, W5_WAVE2_GEODESIC_INVERSE_INITIAL_AZIMUTH_DEG_BITS) ||
+        !same_bits(inv.final_azimuth_deg, W5_WAVE2_GEODESIC_INVERSE_FINAL_AZIMUTH_DEG_BITS)) {
+        return fail("geodesic inverse differs from the engine's result");
+    }
+    /* The GeographicLib reference values are the row's own fields
+     * (fixtures/geodesic/geodtest_one.dat line 1); the engine agrees with them
+     * within GeographicLib's stated accuracy. */
     if (!close_abs(inv.distance_m, s12, 1.0e-8) ||
         fabs(angle_diff_deg(inv.initial_azimuth_deg, azi1)) > 5.0e-13 ||
         fabs(angle_diff_deg(inv.final_azimuth_deg, azi2)) > 5.0e-13) {
@@ -109,6 +129,11 @@ static int test_geodesic(const char *path) {
     if (require_ok(sidereon_geodesic_direct(lat1, lon1, azi1, s12, &direct),
                    "geodesic direct") != 0) {
         return 1;
+    }
+    if (!same_bits(direct.latitude_deg, W5_WAVE2_GEODESIC_DIRECT_LATITUDE_DEG_BITS) ||
+        !same_bits(direct.longitude_deg, W5_WAVE2_GEODESIC_DIRECT_LONGITUDE_DEG_BITS) ||
+        !same_bits(direct.final_azimuth_deg, W5_WAVE2_GEODESIC_DIRECT_FINAL_AZIMUTH_DEG_BITS)) {
+        return fail("geodesic direct differs from the engine's result");
     }
     if (!close_abs(direct.latitude_deg, lat2, 2.0e-13) ||
         fabs(angle_diff_deg(direct.longitude_deg, lon2)) > 2.0e-13 ||
@@ -136,7 +161,8 @@ static int test_frame_catalog(void) {
                    "frame catalog entry") != 0) {
         return 1;
     }
-    if (transform.reference_epoch_year != 2015.0 || transform.provenance[0] == 0) {
+    if (!same_bits(transform.reference_epoch_year, W5_WAVE2_FRAME_ENTRY_REFERENCE_EPOCH_YEAR_BITS) ||
+        (transform.provenance[0] != 0) != W5_WAVE2_FRAME_ENTRY_HAS_PROVENANCE) {
         return fail("frame catalog entry metadata");
     }
 
@@ -152,15 +178,14 @@ static int test_frame_catalog(void) {
                    "frame catalog transform") != 0) {
         return 1;
     }
-    const double expected_pos[3] = {4027893.9585, 307045.5550, 4919474.9619};
-    const double expected_vel[3] = {-0.00011, 0.00011, 0.00024};
     for (size_t i = 0; i < 3; i++) {
-        if (!close_abs(out.position.position_m[i], expected_pos[i], 1.0e-4) ||
-            !close_abs(out.velocity.velocity_m_per_year[i], expected_vel[i], 1.0e-5)) {
+        if (!same_bits(out.position.position_m[i], W5_WAVE2_FRAME_TRANSFORM_POSITION_M_BITS[i]) ||
+            !same_bits(out.velocity.velocity_m_per_year[i],
+                       W5_WAVE2_FRAME_TRANSFORM_VELOCITY_M_PER_YEAR_BITS[i])) {
             return fail("frame catalog transform value");
         }
     }
-    if (!out.has_velocity) {
+    if (out.has_velocity != W5_WAVE2_FRAME_TRANSFORM_HAS_VELOCITY) {
         return fail("frame catalog velocity presence");
     }
     return 0;
@@ -194,7 +219,11 @@ static int test_egm2008(const char *path) {
         return 1;
     }
     sidereon_geoid_grid_free(grid);
-    if (!close_abs(undulation, -32.163558372373, 1.0e-9)) {
+    /* -32.163558372373 m is PROJ's value at this point, the reference
+     * sidereon-core's geoid tests hold the EGM2008 reader to
+     * (src/geoid.rs, PROJ_EGM2008_FIXTURES); the pin is the engine's own. */
+    if (!same_bits(undulation, W5_WAVE2_EGM2008_UNDULATION_M_BITS) ||
+        !close_abs(undulation, -32.163558372373, 1.0e-9)) {
         fprintf(stderr, "FAIL: EGM2008 undulation %.17g\n", undulation);
         return 1;
     }
@@ -230,7 +259,7 @@ static int test_force_model_phase_b(void) {
     if (failed != 0) {
         return 1;
     }
-    if (count != 2) {
+    if (count != sizeof(times) / sizeof(times[0])) {
         return fail("phase B epoch count value");
     }
     return 0;
@@ -255,7 +284,7 @@ static int test_tdm(const char *path) {
         sidereon_tdm_free(tdm);
         return 1;
     }
-    if (segments != 2 || records != 20) {
+    if (segments != W5_WAVE2_TDM_SEGMENT_COUNT || records != W5_WAVE2_TDM_RECORD_COUNT) {
         sidereon_tdm_free(tdm);
         return fail("TDM counts");
     }
@@ -266,7 +295,7 @@ static int test_tdm(const char *path) {
         sidereon_tdm_free(tdm);
         return 1;
     }
-    if (required != 20) {
+    if (required != records) {
         sidereon_tdm_free(tdm);
         return fail("TDM record required count");
     }
@@ -281,9 +310,11 @@ static int test_tdm(const char *path) {
         sidereon_tdm_free(tdm);
         return 1;
     }
-    if (written != 20 || required != 20 ||
+    /* TRANSMIT_PHASE_CT_1 is the keyword of the first data line
+     * (fixtures/tdm/annex_e_18.kvn line 19). */
+    if (written != records || required != records ||
         strcmp(tdm_records[0].keyword, "TRANSMIT_PHASE_CT_1") != 0 ||
-        tdm_records[0].observable != SIDEREON_TDM_OBSERVABLE_OTHER) {
+        tdm_records[0].observable != W5_WAVE2_TDM_FIRST_OBSERVABLE) {
         free(tdm_records);
         sidereon_tdm_free(tdm);
         return fail("TDM first record");
@@ -322,7 +353,7 @@ static int test_tdm(const char *path) {
     if (failed != 0) {
         return 1;
     }
-    if (records2 != 20) {
+    if (records2 != records) {
         return fail("TDM roundtrip count");
     }
     return 0;
@@ -361,12 +392,11 @@ static int test_ecef_fit(const char *path) {
         sidereon_sp3_free(sp3);
         return 1;
     }
-    if (written != 1 || required != 1) {
+    if (written != W5_WAVE2_ECEF_FIT_COUNT || required != W5_WAVE2_ECEF_FIT_COUNT) {
         sidereon_sp3_free(sp3);
         return fail("ECEF fit report count");
     }
-    if (fit.covariance.kind != SIDEREON_ORBIT_FIT_COVARIANCE_KIND_ESTIMATED &&
-        fit.covariance.kind != SIDEREON_ORBIT_FIT_COVARIANCE_KIND_UNBOUNDED) {
+    if (fit.covariance.kind != W5_WAVE2_ECEF_FIT_COVARIANCE_KIND) {
         sidereon_sp3_free(sp3);
         return fail("ECEF fit covariance tag");
     }
@@ -408,19 +438,21 @@ static int test_decay_latch(void) {
         return 1;
     }
     SidereonTemeState state;
-    if (require_ok(sidereon_tle_propagate_with_decay_latch(tle, 1450.0, latch, &state),
-                   "empty latch later raw state") != 0) {
+    /* Every outcome below is the engine's for the same calls
+     * (Satellite::propagate_with_decay_latch, tests/valgen bin w5_wave2). */
+    if ((sidereon_tle_propagate_with_decay_latch(tle, 1450.0, latch, &state) ==
+         SIDEREON_STATUS_OK) != W5_WAVE2_DECAY_EMPTY_1450_OK) {
         sidereon_sgp4_decay_latch_free(latch);
         sidereon_tle_free(tle);
-        return 1;
+        return fail("empty latch later raw state");
     }
     if (require_ok(sidereon_sgp4_decay_latch_clear(latch), "decay latch clear") != 0) {
         sidereon_sgp4_decay_latch_free(latch);
         sidereon_tle_free(tle);
         return 1;
     }
-    if (sidereon_tle_propagate_with_decay_latch(tle, 1440.0, latch, &state) ==
-        SIDEREON_STATUS_OK) {
+    if ((sidereon_tle_propagate_with_decay_latch(tle, 1440.0, latch, &state) ==
+         SIDEREON_STATUS_OK) != W5_WAVE2_DECAY_1440_OK) {
         sidereon_sgp4_decay_latch_free(latch);
         sidereon_tle_free(tle);
         return fail("decay latch first failure");
@@ -434,13 +466,14 @@ static int test_decay_latch(void) {
         sidereon_tle_free(tle);
         return 1;
     }
-    if (!has_epoch || first_epoch != 1440.0) {
+    if (has_epoch != W5_WAVE2_DECAY_HAS_FIRST_FAILING_EPOCH ||
+        !same_bits(first_epoch, W5_WAVE2_DECAY_FIRST_FAILING_EPOCH_MIN_BITS)) {
         sidereon_sgp4_decay_latch_free(latch);
         sidereon_tle_free(tle);
         return fail("decay latch first epoch value");
     }
-    if (sidereon_tle_propagate_with_decay_latch(tle, 1450.0, latch, &state) ==
-        SIDEREON_STATUS_OK) {
+    if ((sidereon_tle_propagate_with_decay_latch(tle, 1450.0, latch, &state) ==
+         SIDEREON_STATUS_OK) != W5_WAVE2_DECAY_AFTER_1450_OK) {
         sidereon_sgp4_decay_latch_free(latch);
         sidereon_tle_free(tle);
         return fail("decay latch later epoch");
@@ -457,9 +490,13 @@ static int test_tropo_and_eclipse(void) {
     SidereonTropoMappingError error;
     SidereonStatus status = sidereon_tropo_mapping_factors_checked(
         pi / 180.0, receiver, SIDEREON_TIME_SCALE_UTC, 2451545.0, 0.5, &mapping, &error);
-    if (status != SIDEREON_STATUS_INVALID_ARGUMENT ||
+    /* The engine refuses the elevation (tropo_mapping, pinned); the binding
+     * reports a refusal as INVALID_ARGUMENT and classifies an elevation
+     * below the minimum as LOW_ELEVATION (src/tropo.rs,
+     * classify_tropo_mapping_error). */
+    if (W5_WAVE2_TROPO_LOW_ELEVATION_OK || status != SIDEREON_STATUS_INVALID_ARGUMENT ||
         error.kind != SIDEREON_TROPO_MAPPING_ERROR_KIND_LOW_ELEVATION ||
-        !close_abs(error.min_elevation_rad, 3.0 * pi / 180.0, 1.0e-16)) {
+        !same_bits(error.min_elevation_rad, W5_WAVE2_TROPO_MIN_ELEVATION_RAD_BITS)) {
         return fail("troposphere low elevation typed error");
     }
 
@@ -478,7 +515,9 @@ static int test_tropo_and_eclipse(void) {
                    "oblate eclipse fraction") != 0) {
         return 1;
     }
-    if (legacy != spherical || !isfinite(oblate)) {
+    if (!same_bits(legacy, W5_WAVE2_ECLIPSE_LEGACY_BITS) ||
+        !same_bits(spherical, W5_WAVE2_ECLIPSE_SPHERICAL_BITS) ||
+        !same_bits(oblate, W5_WAVE2_ECLIPSE_OBLATE_BITS) || legacy != spherical) {
         return fail("eclipse model fractions");
     }
     return 0;
@@ -490,8 +529,8 @@ static int test_reliability_components(void) {
                    "w-test noncentrality") != 0) {
         return 1;
     }
-    if (constants.delta0 != 4.132147965064809 ||
-        constants.lambda0 != 17.074646805189243) {
+    if (!same_bits(constants.delta0, W5_WAVE2_WTEST_DELTA0_BITS) ||
+        !same_bits(constants.lambda0, W5_WAVE2_WTEST_LAMBDA0_BITS)) {
         return fail("w-test core constants");
     }
     return 0;

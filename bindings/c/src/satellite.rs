@@ -1,4 +1,5 @@
 use super::*;
+use crate::engine_error::engine_error_operation_boundary;
 
 /// A built-once fleet of already-initialized SGP4 satellites for repeated batch
 /// operations. Opaque to C. Build it once with
@@ -21,19 +22,21 @@ pub struct SidereonSatelliteConstellation {
 /// Per-satellite topocentric look-angle arcs over a fleet. Opaque to C. Create
 /// with sidereon_satellite_constellation_look_angle_arcs and release with
 /// sidereon_satellite_constellation_look_angles_free. Element i is satellite i's
-/// arc, in fleet order; a satellite that fails to propagate yields an empty arc
-/// so the result stays index-aligned with the constellation.
+/// arc, in fleet order. A failed arc keeps the legacy empty row and is available
+/// as a typed payload through the indexed error accessor.
 pub struct SidereonSatelliteConstellationLookAngles {
     pub(crate) inner: Vec<Vec<LookAngle>>,
+    pub(crate) errors: Vec<Option<serde_json::Value>>,
 }
 
 /// Per-satellite sub-satellite (ground-track) arcs over a fleet. Opaque to C.
 /// Create with sidereon_satellite_constellation_ground_tracks and release with
 /// sidereon_satellite_constellation_ground_tracks_free. Element i is satellite
-/// i's track, in fleet order; a satellite that fails yields an empty track so the
-/// result stays index-aligned with the constellation.
+/// i's track, in fleet order. A failed track keeps the legacy empty row and is
+/// available as a typed payload through the indexed error accessor.
 pub struct SidereonSatelliteConstellationGroundTracks {
     pub(crate) inner: Vec<Vec<Wgs84Geodetic>>,
+    pub(crate) errors: Vec<Option<serde_json::Value>>,
 }
 
 /// Flattened satellite passes over a fleet, each tagged with the fleet-order
@@ -42,6 +45,47 @@ pub struct SidereonSatelliteConstellationGroundTracks {
 /// sidereon_satellite_constellation_passes_free.
 pub struct SidereonSatelliteConstellationPasses {
     pub(crate) inner: Vec<SidereonFleetPass>,
+    pub(crate) errors: Vec<Option<serde_json::Value>>,
+}
+
+unsafe fn copy_constellation_error_payload(
+    errors: &[Option<serde_json::Value>],
+    satellite_index: usize,
+    fn_name: &str,
+    out_payload: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    let Some(error) = errors.get(satellite_index) else {
+        set_last_error(format!(
+            "{fn_name}: satellite_index {satellite_index} out of range"
+        ));
+        return SidereonStatus::InvalidArgument;
+    };
+    let Some(error) = error else {
+        set_last_error(format!(
+            "{fn_name}: satellite succeeded and has no error payload"
+        ));
+        return SidereonStatus::InvalidArgument;
+    };
+    let payload = match serde_json::to_vec(error) {
+        Ok(payload) => payload,
+        Err(error) => {
+            set_last_error(format!("{fn_name}: could not serialize detail: {error}"));
+            return SidereonStatus::Panic;
+        }
+    };
+    c_try!(copy_prefix_to_c(
+        fn_name,
+        "out_payload",
+        &payload,
+        out_payload,
+        len,
+        out_written,
+        out_required
+    ));
+    SidereonStatus::Ok
 }
 
 /// One pass in a sidereon_satellite_constellation_passes result: the pass
@@ -285,7 +329,7 @@ pub unsafe extern "C" fn sidereon_satellite_constellation_visible(
     min_elevation_deg: f64,
     out_visible: *mut *mut SidereonVisibleList,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_satellite_constellation_visible",
         SidereonStatus::Panic,
         || {
@@ -372,11 +416,24 @@ pub unsafe extern "C" fn sidereon_satellite_constellation_look_angle_arcs(
             };
             // A per-satellite failure becomes an empty arc, keeping the result
             // index-aligned with the fleet (the WASM/Elixir contract).
-            let inner = results
-                .into_iter()
-                .map(|arc| arc.unwrap_or_default())
-                .collect();
-            write_boxed_handle(out_arcs, SidereonSatelliteConstellationLookAngles { inner });
+            let mut inner = Vec::with_capacity(results.len());
+            let mut errors = Vec::with_capacity(results.len());
+            for arc in results {
+                match arc {
+                    Ok(arc) => {
+                        inner.push(arc);
+                        errors.push(None);
+                    }
+                    Err(error) => {
+                        inner.push(Vec::new());
+                        errors.push(Some(crate::tle::look_angle_error_value(&error)));
+                    }
+                }
+            }
+            write_boxed_handle(
+                out_arcs,
+                SidereonSatelliteConstellationLookAngles { inner, errors },
+            );
             SidereonStatus::Ok
         },
     )
@@ -540,14 +597,23 @@ pub unsafe extern "C" fn sidereon_satellite_constellation_ground_tracks(
             // Per-satellite loop over the core ground_track kernel; a failure
             // becomes an empty track, keeping the result index-aligned with the
             // fleet (the WASM/Elixir contract).
-            let inner = constellation
-                .satellites
-                .iter()
-                .map(|satellite| ground_track(satellite, &instants).unwrap_or_default())
-                .collect();
+            let mut inner = Vec::with_capacity(constellation.satellites.len());
+            let mut errors = Vec::with_capacity(constellation.satellites.len());
+            for satellite in &constellation.satellites {
+                match ground_track(satellite, &instants) {
+                    Ok(track) => {
+                        inner.push(track);
+                        errors.push(None);
+                    }
+                    Err(error) => {
+                        inner.push(Vec::new());
+                        errors.push(Some(crate::tle::look_angle_error_value(&error)));
+                    }
+                }
+            }
             write_boxed_handle(
                 out_tracks,
-                SidereonSatelliteConstellationGroundTracks { inner },
+                SidereonSatelliteConstellationGroundTracks { inner, errors },
             );
             SidereonStatus::Ok
         },
@@ -725,12 +791,19 @@ pub unsafe extern "C" fn sidereon_satellite_constellation_passes(
             let start = UtcInstant::from_unix_microseconds(start_unix_us);
             let end = UtcInstant::from_unix_microseconds(end_unix_us);
             let mut inner = Vec::new();
+            let mut errors = Vec::with_capacity(constellation.satellites.len());
             for (index, satellite) in constellation.satellites.iter().enumerate() {
                 let passes =
                     match find_passes_for_satellite(satellite, ground_station, start, end, options)
                     {
-                        Ok(passes) => passes,
-                        Err(_) => continue,
+                        Ok(passes) => {
+                            errors.push(None);
+                            passes
+                        }
+                        Err(error) => {
+                            errors.push(Some(crate::pass_error_value(&error)));
+                            continue;
+                        }
                     };
                 for pass in &passes {
                     inner.push(SidereonFleetPass {
@@ -739,7 +812,10 @@ pub unsafe extern "C" fn sidereon_satellite_constellation_passes(
                     });
                 }
             }
-            write_boxed_handle(out_passes, SidereonSatelliteConstellationPasses { inner });
+            write_boxed_handle(
+                out_passes,
+                SidereonSatelliteConstellationPasses { inner, errors },
+            );
             SidereonStatus::Ok
         },
     )
@@ -814,6 +890,97 @@ pub unsafe extern "C" fn sidereon_satellite_constellation_passes_values(
             SidereonStatus::Ok
         },
     )
+}
+
+/// Copy the complete typed error payload for a failed satellite look-angle arc.
+/// Query the required byte count with a NULL output and zero capacity, then retry
+/// with a caller buffer. A successful satellite or invalid index is rejected.
+///
+/// Safety: arcs must be a live handle; when `len` is nonzero, `out_payload` must
+/// point to `len` writable bytes; both count outputs must be writable.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_satellite_constellation_look_angles_error_payload(
+    arcs: *const SidereonSatelliteConstellationLookAngles,
+    satellite_index: usize,
+    out_payload: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_satellite_constellation_look_angles_error_payload";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(FN_NAME, out_written, out_required));
+        let arcs = c_try!(require_ref(arcs, FN_NAME, "arcs"));
+        copy_constellation_error_payload(
+            &arcs.errors,
+            satellite_index,
+            FN_NAME,
+            out_payload,
+            len,
+            out_written,
+            out_required,
+        )
+    })
+}
+
+/// Copy the complete typed SGP4/transform error payload for a failed satellite
+/// ground track, using the caller-buffer contract documented above.
+///
+/// Safety: tracks must be a live handle; when `len` is nonzero, `out_payload`
+/// must point to `len` writable bytes; both count outputs must be writable.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_satellite_constellation_ground_tracks_error_payload(
+    tracks: *const SidereonSatelliteConstellationGroundTracks,
+    satellite_index: usize,
+    out_payload: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_satellite_constellation_ground_tracks_error_payload";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(FN_NAME, out_written, out_required));
+        let tracks = c_try!(require_ref(tracks, FN_NAME, "tracks"));
+        copy_constellation_error_payload(
+            &tracks.errors,
+            satellite_index,
+            FN_NAME,
+            out_payload,
+            len,
+            out_written,
+            out_required,
+        )
+    })
+}
+
+/// Copy the complete typed pass-search error payload for a satellite with a
+/// failed scan, using the caller-buffer contract documented above.
+///
+/// Safety: passes must be a live handle; when `len` is nonzero, `out_payload`
+/// must point to `len` writable bytes; both count outputs must be writable.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_satellite_constellation_passes_error_payload(
+    passes: *const SidereonSatelliteConstellationPasses,
+    satellite_index: usize,
+    out_payload: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_satellite_constellation_passes_error_payload";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(FN_NAME, out_written, out_required));
+        let passes = c_try!(require_ref(passes, FN_NAME, "passes"));
+        copy_constellation_error_payload(
+            &passes.errors,
+            satellite_index,
+            FN_NAME,
+            out_payload,
+            len,
+            out_written,
+            out_required,
+        )
+    })
 }
 
 /// Release a satellite constellation handle. Null is a no-op. A non-null handle

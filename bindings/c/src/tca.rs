@@ -1,4 +1,115 @@
 use super::*;
+use crate::engine_error::{
+    engine_error_operation_boundary, record_engine_error, SidereonEngineErrorFamily,
+};
+
+fn error_node(kind: &str, fields: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "kind": kind,
+        "fields": fields,
+    })
+}
+
+pub(crate) fn conjunction_error_value(
+    error: &sidereon_core::astro::conjunction::ConjunctionError,
+) -> serde_json::Value {
+    use sidereon_core::astro::conjunction::ConjunctionError as E;
+    match error {
+        E::NonFinite { field } => error_node("non_finite", serde_json::json!({ "field": field })),
+        E::NotPositive { field } => {
+            error_node("not_positive", serde_json::json!({ "field": field }))
+        }
+        E::UndefinedFrame => error_node("undefined_frame", serde_json::json!({})),
+    }
+}
+
+pub(crate) fn event_finder_error_value(
+    error: &sidereon_core::astro::events::EventFinderError,
+) -> serde_json::Value {
+    use sidereon_core::astro::events::EventFinderError as E;
+    match error {
+        E::InvalidInput { field, reason } => error_node(
+            "invalid_input",
+            serde_json::json!({
+                "field": field,
+                "reason": reason,
+            }),
+        ),
+        E::Ut1OutsideCoverage(reason) => error_node(
+            "ut1_outside_coverage",
+            serde_json::json!({
+                "reason": crate::engine_error::degrade_reason_name(*reason),
+            }),
+        ),
+    }
+}
+
+pub(crate) fn tca_error_value(error: &core_tca::TcaError) -> serde_json::Value {
+    use core_tca::TcaError as E;
+    match error {
+        E::InvalidInput { field, reason } => error_node(
+            "invalid_input",
+            serde_json::json!({
+                "field": field,
+                "reason": reason,
+            }),
+        ),
+        E::Init { object, source } => error_node(
+            "init",
+            serde_json::json!({
+                "object": match object {
+                    core_tca::TcaObject::Primary => "primary",
+                    core_tca::TcaObject::Secondary => "secondary",
+                },
+                "cause": crate::tle::sgp4_error_value(source),
+            }),
+        ),
+        E::Propagate { object, source } => error_node(
+            "propagate",
+            serde_json::json!({
+                "object": match object {
+                    core_tca::TcaObject::Primary => "primary",
+                    core_tca::TcaObject::Secondary => "secondary",
+                },
+                "cause": crate::tle::sgp4_error_value(source),
+            }),
+        ),
+        E::CovariancePropagation { object, reason } => error_node(
+            "covariance_propagation",
+            serde_json::json!({
+                "object": match object {
+                    core_tca::TcaObject::Primary => "primary",
+                    core_tca::TcaObject::Secondary => "secondary",
+                },
+                "reason": reason,
+            }),
+        ),
+        E::EventFinder(finder) => error_node(
+            "event_finder",
+            serde_json::json!({
+                "cause": event_finder_error_value(finder),
+            }),
+        ),
+        E::Conjunction(conj) => error_node(
+            "conjunction",
+            serde_json::json!({
+                "cause": conjunction_error_value(conj),
+            }),
+        ),
+    }
+}
+
+fn map_conjunction_error(
+    fn_name: &str,
+    err: sidereon_core::astro::conjunction::ConjunctionError,
+) -> SidereonStatus {
+    record_engine_error(
+        SidereonEngineErrorFamily::Conjunction,
+        fn_name,
+        conjunction_error_value(&err),
+    );
+    extra_invalid_arg(fn_name, err)
+}
 
 // --- Conjunction / collision probability (sidereon_core::astro::conjunction) --
 
@@ -77,7 +188,7 @@ pub unsafe extern "C" fn sidereon_encounter_frame(
     v2_km_s: *const f64,
     out: *mut SidereonEncounterFrame,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_encounter_frame", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_encounter_frame", SidereonStatus::Panic, || {
         let out = c_try!(require_out(out, "sidereon_encounter_frame", "out"));
         *out = SidereonEncounterFrame {
             x_hat: [0.0; 3],
@@ -105,7 +216,7 @@ pub unsafe extern "C" fn sidereon_encounter_frame(
                 };
                 SidereonStatus::Ok
             }
-            Err(err) => extra_invalid_arg("sidereon_encounter_frame", err),
+            Err(err) => map_conjunction_error("sidereon_encounter_frame", err),
         }
     })
 }
@@ -123,7 +234,7 @@ pub unsafe extern "C" fn sidereon_collision_probability(
     method: u32,
     out: *mut SidereonCollisionPc,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_collision_probability",
         SidereonStatus::Panic,
         || {
@@ -186,7 +297,7 @@ pub unsafe extern "C" fn sidereon_collision_probability(
                     };
                     SidereonStatus::Ok
                 }
-                Err(err) => extra_invalid_arg("sidereon_collision_probability", err),
+                Err(err) => map_conjunction_error("sidereon_collision_probability", err),
             }
         },
     )
@@ -207,7 +318,7 @@ pub unsafe extern "C" fn sidereon_encounter_plane_covariance(
     cov_km2: *const f64,
     out: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_encounter_plane_covariance",
         SidereonStatus::Panic,
         || {
@@ -216,7 +327,6 @@ pub unsafe extern "C" fn sidereon_encounter_plane_covariance(
                 "sidereon_encounter_plane_covariance",
                 "out"
             ));
-            let out = out as *mut f64;
             for idx in 0..4 {
                 *out.add(idx) = 0.0;
             }
@@ -247,7 +357,7 @@ pub unsafe extern "C" fn sidereon_encounter_plane_covariance(
                     *out.add(3) = m[1][1];
                     SidereonStatus::Ok
                 }
-                Err(err) => extra_invalid_arg("sidereon_encounter_plane_covariance", err),
+                Err(err) => map_conjunction_error("sidereon_encounter_plane_covariance", err),
             }
         },
     )
@@ -432,7 +542,7 @@ pub unsafe extern "C" fn sidereon_find_tca_candidates_from_tles(
     out_written: *mut usize,
     out_required: *mut usize,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_find_tca_candidates_from_tles",
         SidereonStatus::Panic,
         || {
@@ -507,7 +617,7 @@ pub unsafe extern "C" fn sidereon_tca_collision_probability(
     options: *const SidereonTcaPcOptions,
     out: *mut SidereonTcaConjunction,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_tca_collision_probability",
         SidereonStatus::Panic,
         || {
@@ -578,7 +688,7 @@ pub unsafe extern "C" fn sidereon_find_tca_conjunctions_from_tles(
     out_written: *mut usize,
     out_required: *mut usize,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_find_tca_conjunctions_from_tles",
         SidereonStatus::Panic,
         || {
@@ -678,7 +788,7 @@ pub unsafe extern "C" fn sidereon_find_tca_conjunctions_with_propagated_covarian
     out_written: *mut usize,
     out_required: *mut usize,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_find_tca_conjunctions_with_propagated_covariance_from_tles",
         SidereonStatus::Panic,
         || {
@@ -701,11 +811,13 @@ pub unsafe extern "C" fn sidereon_find_tca_conjunctions_with_propagated_covarian
             let primary_covariance0 = c_try!(Covariance6::try_from_matrix(
                 pc_options.primary_covariance0
             )
-            .map_err(|err| extra_invalid_arg(fname, format!("primary_covariance0: {err:?}"))));
+            .map_err(|err| { extra_invalid_arg(fname, format!("primary_covariance0: {err:?}")) }));
             let secondary_covariance0 = c_try!(Covariance6::try_from_matrix(
                 pc_options.secondary_covariance0
             )
-            .map_err(|err| extra_invalid_arg(fname, format!("secondary_covariance0: {err:?}"))));
+            .map_err(|err| {
+                extra_invalid_arg(fname, format!("secondary_covariance0: {err:?}"))
+            }));
             let mut integrator_options = IntegratorOptions::default();
             integrator_options.abs_tol = pc_options.abs_tol;
             integrator_options.rel_tol = pc_options.rel_tol;
@@ -784,7 +896,7 @@ pub unsafe extern "C" fn sidereon_screen_tca_candidates_from_tle_catalog(
     out_written: *mut usize,
     out_required: *mut usize,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_screen_tca_candidates_from_tle_catalog",
         SidereonStatus::Panic,
         || {
@@ -865,7 +977,7 @@ pub unsafe extern "C" fn sidereon_screen_tca_conjunctions_from_tle_catalog(
     out_written: *mut usize,
     out_required: *mut usize,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_screen_tca_conjunctions_from_tle_catalog",
         SidereonStatus::Panic,
         || {
@@ -988,6 +1100,11 @@ impl SidereonTcaConjunction {
 }
 
 fn map_tca_error(fn_name: &str, err: core_tca::TcaError) -> SidereonStatus {
+    record_engine_error(
+        SidereonEngineErrorFamily::Tca,
+        fn_name,
+        tca_error_value(&err),
+    );
     extra_invalid_arg(fn_name, err)
 }
 
@@ -1039,5 +1156,414 @@ fn pc_method_from_c(fn_name: &str, method: u32) -> Result<PcMethod, SidereonStat
             set_last_error(format!("{fn_name}: invalid Pc method"));
             Err(SidereonStatus::InvalidArgument)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine_error::{
+        clear_engine_error, sidereon_last_engine_error_info, sidereon_last_engine_error_payload,
+        SidereonEngineErrorInfo,
+    };
+    use serde_json::json;
+    use sidereon_core::astro::conjunction::ConjunctionError;
+    use sidereon_core::astro::events::EventFinderError;
+    use sidereon_core::astro::sgp4::Error as Sgp4Error;
+    use sidereon_core::astro::tca::{TcaError, TcaObject};
+    use sidereon_core::astro::time::DegradeReason;
+    use std::ffi::CStr;
+    use std::ptr;
+
+    fn get_last_error_string() -> String {
+        unsafe {
+            let len = sidereon_last_error_message(ptr::null_mut(), 0);
+            if len == 0 {
+                return String::new();
+            }
+            let mut buf = vec![0 as c_char; len + 1];
+            sidereon_last_error_message(buf.as_mut_ptr(), buf.len());
+            CStr::from_ptr(buf.as_ptr()).to_string_lossy().into_owned()
+        }
+    }
+
+    fn get_last_engine_error_payload() -> (SidereonEngineErrorInfo, serde_json::Value) {
+        unsafe {
+            let mut info = SidereonEngineErrorInfo {
+                family: SidereonEngineErrorFamily::None,
+                payload_len: 0,
+            };
+            let status = sidereon_last_engine_error_info(&mut info);
+            assert_eq!(status, SidereonStatus::Ok);
+
+            let mut written = 0usize;
+            let mut required = 0usize;
+            let status =
+                sidereon_last_engine_error_payload(ptr::null_mut(), 0, &mut written, &mut required);
+            assert_eq!(status, SidereonStatus::Ok);
+            assert_eq!(written, 0);
+            assert_eq!(required, info.payload_len);
+
+            if required == 0 {
+                return (info, json!(null));
+            }
+
+            let mut buf = vec![0u8; required];
+            let status = sidereon_last_engine_error_payload(
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut written,
+                &mut required,
+            );
+            assert_eq!(status, SidereonStatus::Ok);
+            assert_eq!(written, required);
+            let payload_str = String::from_utf8(buf).expect("valid utf-8 payload");
+            let parsed = serde_json::from_str(&payload_str).expect("parse json");
+            (info, parsed)
+        }
+    }
+
+    #[test]
+    fn test_conjunction_error_mapper_variants() {
+        let cases = vec![
+            (
+                ConjunctionError::NonFinite {
+                    field: "object1.position_km",
+                },
+                json!({
+                    "kind": "non_finite",
+                    "fields": { "field": "object1.position_km" }
+                }),
+            ),
+            (
+                ConjunctionError::NotPositive {
+                    field: "hard_body_radius_km",
+                },
+                json!({
+                    "kind": "not_positive",
+                    "fields": { "field": "hard_body_radius_km" }
+                }),
+            ),
+            (
+                ConjunctionError::UndefinedFrame,
+                json!({
+                    "kind": "undefined_frame",
+                    "fields": {}
+                }),
+            ),
+        ];
+
+        for (err, expected) in cases {
+            assert_eq!(conjunction_error_value(&err), expected);
+        }
+    }
+
+    #[test]
+    fn test_event_finder_error_mapper_variants() {
+        let cases = vec![
+            (
+                EventFinderError::InvalidInput {
+                    field: "step_seconds",
+                    reason: "must be positive",
+                },
+                json!({
+                    "kind": "invalid_input",
+                    "fields": {
+                        "field": "step_seconds",
+                        "reason": "must be positive"
+                    }
+                }),
+            ),
+            (
+                EventFinderError::Ut1OutsideCoverage(DegradeReason::BeforeCoverage),
+                json!({
+                    "kind": "ut1_outside_coverage",
+                    "fields": { "reason": "before_coverage" }
+                }),
+            ),
+            (
+                EventFinderError::Ut1OutsideCoverage(DegradeReason::AfterCoverage),
+                json!({
+                    "kind": "ut1_outside_coverage",
+                    "fields": { "reason": "after_coverage" }
+                }),
+            ),
+        ];
+
+        for (err, expected) in cases {
+            assert_eq!(event_finder_error_value(&err), expected);
+        }
+    }
+
+    #[test]
+    fn test_tca_error_mapper_variants() {
+        let cases = vec![
+            (
+                TcaError::InvalidInput {
+                    field: "window_start",
+                    reason: "not finite",
+                },
+                json!({
+                    "kind": "invalid_input",
+                    "fields": {
+                        "field": "window_start",
+                        "reason": "not finite"
+                    }
+                }),
+            ),
+            (
+                TcaError::Init {
+                    object: TcaObject::Primary,
+                    source: Sgp4Error::InvalidTle("corrupt line 2".to_string()),
+                },
+                json!({
+                    "kind": "init",
+                    "fields": {
+                        "object": "primary",
+                        "cause": {
+                            "kind": "invalid_tle",
+                            "fields": { "message": "corrupt line 2" }
+                        }
+                    }
+                }),
+            ),
+            (
+                TcaError::Propagate {
+                    object: TcaObject::Secondary,
+                    source: Sgp4Error::NonFiniteOutput { field: "velocity" },
+                },
+                json!({
+                    "kind": "propagate",
+                    "fields": {
+                        "object": "secondary",
+                        "cause": {
+                            "kind": "non_finite_output",
+                            "fields": { "field": "velocity" }
+                        }
+                    }
+                }),
+            ),
+            (
+                TcaError::CovariancePropagation {
+                    object: TcaObject::Primary,
+                    reason: "integration divergence".to_string(),
+                },
+                json!({
+                    "kind": "covariance_propagation",
+                    "fields": {
+                        "object": "primary",
+                        "reason": "integration divergence"
+                    }
+                }),
+            ),
+            (
+                TcaError::EventFinder(EventFinderError::InvalidInput {
+                    field: "window",
+                    reason: "empty window",
+                }),
+                json!({
+                    "kind": "event_finder",
+                    "fields": {
+                        "cause": {
+                            "kind": "invalid_input",
+                            "fields": {
+                                "field": "window",
+                                "reason": "empty window"
+                            }
+                        }
+                    }
+                }),
+            ),
+            (
+                TcaError::Conjunction(ConjunctionError::UndefinedFrame),
+                json!({
+                    "kind": "conjunction",
+                    "fields": {
+                        "cause": {
+                            "kind": "undefined_frame",
+                            "fields": {}
+                        }
+                    }
+                }),
+            ),
+        ];
+
+        for (err, expected) in cases {
+            assert_eq!(tca_error_value(&err), expected);
+        }
+    }
+
+    #[test]
+    fn test_encounter_frame_valid_control_and_real_producer_refusal() {
+        clear_engine_error();
+
+        // 1. Valid control
+        let r1 = [7000.0, 0.0, 0.0];
+        let v1 = [0.0, 7.5, 0.0];
+        let r2 = [7000.05, 0.02, 0.0];
+        let v2 = [0.0, -7.5, 0.1];
+        let mut frame = SidereonEncounterFrame {
+            x_hat: [0.0; 3],
+            y_hat: [0.0; 3],
+            z_hat: [0.0; 3],
+            relative_position_km: [0.0; 3],
+            relative_velocity_km_s: [0.0; 3],
+            miss_km: 0.0,
+            relative_speed_km_s: 0.0,
+        };
+
+        let status = unsafe {
+            sidereon_encounter_frame(
+                r1.as_ptr(),
+                v1.as_ptr(),
+                r2.as_ptr(),
+                v2.as_ptr(),
+                &mut frame,
+            )
+        };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert!(frame.relative_speed_km_s > 0.0);
+
+        // TLS cleared on success
+        let (info, payload) = get_last_engine_error_payload();
+        assert_eq!(info.family, SidereonEngineErrorFamily::None);
+        assert_eq!(payload, json!(null));
+
+        // 2. Real refusal: identical velocities -> zero relative velocity -> UndefinedFrame
+        let v2_same = [0.0, 7.5, 0.0];
+        let status = unsafe {
+            sidereon_encounter_frame(
+                r1.as_ptr(),
+                v1.as_ptr(),
+                r2.as_ptr(),
+                v2_same.as_ptr(),
+                &mut frame,
+            )
+        };
+        assert_eq!(status, SidereonStatus::InvalidArgument);
+
+        let (info, payload) = get_last_engine_error_payload();
+        assert_eq!(info.family, SidereonEngineErrorFamily::Conjunction);
+        assert_eq!(payload["schema_version"], 1);
+        assert_eq!(payload["family"], "conjunction");
+        assert_eq!(payload["operation"], "sidereon_encounter_frame");
+        assert_eq!(payload["error"]["kind"], "undefined_frame");
+        assert_eq!(payload["error"]["fields"], json!({}));
+
+        let msg = get_last_error_string();
+        assert!(msg.contains("encounter frame is undefined"));
+
+        // 3. Seeded success reset: running valid control clears previous failure
+        let status = unsafe {
+            sidereon_encounter_frame(
+                r1.as_ptr(),
+                v1.as_ptr(),
+                r2.as_ptr(),
+                v2.as_ptr(),
+                &mut frame,
+            )
+        };
+        assert_eq!(status, SidereonStatus::Ok);
+        let (info, payload) = get_last_engine_error_payload();
+        assert_eq!(info.family, SidereonEngineErrorFamily::None);
+        assert_eq!(payload, json!(null));
+    }
+
+    #[test]
+    fn test_tca_find_candidates_real_refusal_and_early_null_clear() {
+        clear_engine_error();
+
+        let l1 = b"1 25544U 98067A   18184.80969102  .00001614  00000-0  31745-4 0  9993\0";
+        let l2 = b"2 25544  51.6414 295.8524 0003435 262.6267 204.2868 15.54005638121106\0";
+        let l2_bad = b"INVALID LINE 2\0";
+
+        let opts = SidereonTcaFinderOptions {
+            coarse_step_seconds: 60.0,
+            time_tolerance_seconds: 0.1,
+        };
+
+        // 1. Valid control: good pair succeeds and leaves engine error empty
+        let mut out_written = 999usize;
+        let mut out_required = 999usize;
+
+        let status = unsafe {
+            sidereon_find_tca_candidates_from_tles(
+                l1.as_ptr() as *const c_char,
+                l2.as_ptr() as *const c_char,
+                l1.as_ptr() as *const c_char,
+                l2.as_ptr() as *const c_char,
+                2458303.0,
+                0.5,
+                2458304.0,
+                0.5,
+                &opts,
+                ptr::null_mut(),
+                0,
+                &mut out_written,
+                &mut out_required,
+            )
+        };
+        assert_eq!(status, SidereonStatus::Ok);
+        let (info, payload) = get_last_engine_error_payload();
+        assert_eq!(info.family, SidereonEngineErrorFamily::None);
+        assert_eq!(payload, json!(null));
+
+        // 2. Real producer refusal: corrupt only line 2 to isolate Init/primary/invalid_tle
+        let status = unsafe {
+            sidereon_find_tca_candidates_from_tles(
+                l1.as_ptr() as *const c_char,
+                l2_bad.as_ptr() as *const c_char,
+                l1.as_ptr() as *const c_char,
+                l2.as_ptr() as *const c_char,
+                2458303.0,
+                0.5,
+                2458304.0,
+                0.5,
+                &opts,
+                ptr::null_mut(),
+                0,
+                &mut out_written,
+                &mut out_required,
+            )
+        };
+
+        assert_eq!(status, SidereonStatus::InvalidArgument);
+        assert_eq!(out_written, 0);
+        assert_eq!(out_required, 0);
+
+        let (info, payload) = get_last_engine_error_payload();
+        assert_eq!(info.family, SidereonEngineErrorFamily::Tca);
+        assert_eq!(payload["schema_version"], 1);
+        assert_eq!(payload["family"], "tca");
+        assert_eq!(
+            payload["operation"],
+            "sidereon_find_tca_candidates_from_tles"
+        );
+        assert_eq!(payload["error"]["kind"], "init");
+        assert_eq!(payload["error"]["fields"]["object"], "primary");
+        assert_eq!(payload["error"]["fields"]["cause"]["kind"], "invalid_tle");
+
+        // 3. Early NULL call clears retained engine error
+        let status = unsafe {
+            sidereon_find_tca_candidates_from_tles(
+                ptr::null(),
+                l2.as_ptr() as *const c_char,
+                l1.as_ptr() as *const c_char,
+                l2.as_ptr() as *const c_char,
+                2458303.0,
+                0.5,
+                2458304.0,
+                0.5,
+                &opts,
+                ptr::null_mut(),
+                0,
+                &mut out_written,
+                &mut out_required,
+            )
+        };
+        assert_eq!(status, SidereonStatus::NullPointer);
+        let (info, payload) = get_last_engine_error_payload();
+        assert_eq!(info.family, SidereonEngineErrorFamily::None);
+        assert_eq!(payload, json!(null));
     }
 }

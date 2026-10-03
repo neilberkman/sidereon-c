@@ -7,6 +7,7 @@
  * for.
  */
 #include "sidereon.h"
+#include "w6_publication_pins.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,6 +22,16 @@ static const char AIUB_LISTING[] =
     "2026-09-21T10:23:04Z;f4650077ba859b418744d48c117c7785\n"
     "CODE/IONO/PRD/COD0OPSP1D_20262660000_01D_01H_GIM.INX.gz;194061;"
     "2026-09-22T10:00:02Z;89e17e5d8fcbe79f89e6dd9fafbbd624\n";
+
+/* A body that fits no recognized listing surface. */
+static const char ERROR_PAGE_LISTING[] = "<html><h1>503 Service Unavailable</h1></html>";
+
+/* Every expected text below is sidereon-core's own result for these inputs,
+ * formed into the JSON the C route writes (bindings/c/src/data_distribution.rs),
+ * from tests/valgen (w6_publication). */
+static int same_text(const uint8_t *out, size_t written, const char *expected) {
+    return written == strlen(expected) && memcmp(out, expected, written) == 0;
+}
 
 static int fail(const char *what) {
     char detail[512] = {0};
@@ -44,16 +55,10 @@ int main(void) {
     if (written == 0 || written != required || written >= sizeof(out)) {
         return fail("candidate JSON byte contract");
     }
-    out[written] = '\0';
-    if (strstr((const char *)out, "\"center\":\"cod_prd1\"") == NULL ||
-        strstr((const char *)out, "\"center\":\"cod_prd2\"") == NULL ||
-        strstr((const char *)out, "\"date\":\"2026-09-23\"") == NULL ||
-        strstr((const char *)out,
-               "/IONO/PRD/COD0OPSP0D_20262660000_01D_01H_GIM.INX.gz") == NULL ||
-        strstr((const char *)out,
-               "/IONO/PRD/COD0OPSP1D_20262660000_01D_01H_GIM.INX.gz") == NULL) {
+    if (!same_text(out, written, W6_PUBLICATION_CANDIDATES_JSON)) {
         return fail("candidate JSON content");
     }
+    out[written] = '\0';
     if (strstr((const char *)out, "\"date\":\"2026-09-22\"") != NULL ||
         strstr((const char *)out, "\"date\":\"2026-09-24\"") != NULL) {
         return fail("the walk must never substitute a neighboring map date");
@@ -66,9 +71,7 @@ int main(void) {
             sizeof(out), &written, &required) != SIDEREON_STATUS_OK) {
         return fail("newest_published_product_json cod_prd1");
     }
-    out[written] = '\0';
-    if (strstr((const char *)out, "\"date\":\"2026-09-22\"") == NULL ||
-        strstr((const char *)out, "\"observed_at\":\"2026-09-22T10:00:02Z\"") == NULL) {
+    if (!same_text(out, written, W6_PUBLICATION_NEWEST_COD_PRD1_JSON)) {
         return fail("cod_prd1 newest content");
     }
 
@@ -77,18 +80,21 @@ int main(void) {
             sizeof(out), &written, &required) != SIDEREON_STATUS_OK) {
         return fail("newest_published_product_json cod_prd2");
     }
-    out[written] = '\0';
-    if (strstr((const char *)out, "\"date\":\"2026-09-23\"") == NULL ||
-        strstr((const char *)out, "COD0OPSP1D_20262660000_01D_01H_GIM.INX") == NULL) {
+    if (!same_text(out, written, W6_PUBLICATION_NEWEST_COD_PRD2_JSON)) {
         return fail("cod_prd2 newest content");
     }
 
     /* Closed dialect detection: an error page is an error status, never an
      * empty parse. */
+    /* The binding maps every catalog refusal to INVALID_ARGUMENT (map_error in
+     * bindings/c/src/data_distribution.rs). */
+    if (!W6_PUBLICATION_ERROR_PAGE_REFUSED) {
+        fprintf(stderr, "FAIL sidereon-core reads the error page as a listing\n");
+        return 1;
+    }
     if (sidereon_data_newest_published_product_json(
-            "cod_prd1", SIDEREON_PRODUCT_FAMILY_IONEX,
-            "<html><h1>503 Service Unavailable</h1></html>", out, sizeof(out),
-            &written, &required) == SIDEREON_STATUS_OK) {
+            "cod_prd1", SIDEREON_PRODUCT_FAMILY_IONEX, ERROR_PAGE_LISTING, out, sizeof(out),
+            &written, &required) != SIDEREON_STATUS_INVALID_ARGUMENT) {
         fprintf(stderr, "FAIL unrecognized listing must not parse\n");
         return 1;
     }
@@ -99,10 +105,7 @@ int main(void) {
             sizeof(out), &written, &required) != SIDEREON_STATUS_OK) {
         return fail("publication_listing_urls_json");
     }
-    out[written] = '\0';
-    if (strcmp((const char *)out,
-               "[\"https://isdc-data.gfz.de/gnss/products/ultra/w2430/\","
-               "\"https://isdc-data.gfz.de/gnss/products/ultra/w2429/\"]") != 0) {
+    if (!same_text(out, written, W6_PUBLICATION_LISTING_URLS_JSON)) {
         return fail("listing URLs content");
     }
 
@@ -112,7 +115,7 @@ int main(void) {
     if (sidereon_data_product_solution_class(
             "wum_nrt", SIDEREON_PRODUCT_FAMILY_SP3, &solution) !=
             SIDEREON_STATUS_OK ||
-        solution != SIDEREON_SOLUTION_CLASS_NEAR_REAL_TIME) {
+        solution != W6_PUBLICATION_WUM_NRT_SOLUTION_CLASS) {
         return fail("wum_nrt solution class");
     }
 

@@ -17,6 +17,7 @@
 #include <string.h>
 
 #include "sidereon.h"
+#include "w6_newgaps_pins.h"
 
 static int fail(const char *context) {
     size_t needed = sidereon_last_error_message(NULL, 0);
@@ -61,72 +62,73 @@ static uint8_t *read_file(const char *path, size_t *len) {
     return buf;
 }
 
-/* One CelesTrak OMM JSON object with the required mean-element fields. */
-#define OMM_OBJ(name, norad)                                                    \
-    "{\"OBJECT_NAME\":\"" name "\",\"EPOCH\":\"2020-06-25T00:00:00.000000\","   \
-    "\"MEAN_MOTION\":2.0056,\"ECCENTRICITY\":0.0001,\"INCLINATION\":55.0,"      \
-    "\"RA_OF_ASC_NODE\":100.0,\"ARG_OF_PERICENTER\":50.0,\"MEAN_ANOMALY\":10.0,"\
-    "\"NORAD_CAT_ID\":" norad ",\"BSTAR\":0.0,\"MEAN_MOTION_DOT\":0.0,"         \
-    "\"MEAN_MOTION_DDOT\":0.0}"
-
-static const char *const OMM_FEED =
-    "[" OMM_OBJ("GPS BIIF-8  (PRN 03)", "40294") ","
-    OMM_OBJ("GPS BIII-1  (PRN 04)", "43873") ","
-    OMM_OBJ("QZS-2 (QZSS/PRN 194)", "42738") "]";
+/* The OMM feeds and every expected catalog, ILS and agreement value come from
+ * tests/valgen (w6_newgaps): the feeds as it builds them, the values as
+ * sidereon-core computes them. */
+static uint64_t f64_bits(double value) {
+    uint64_t bits = 0;
+    memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
 
 static int exercise_omm_lenient(void) {
     SidereonOmmCatalog *catalog = NULL;
     int rc = 1;
 
     if (sidereon_omm_catalog_build_lenient(SIDEREON_GNSS_SYSTEM_GPS,
-                                           (const uint8_t *)OMM_FEED,
-                                           strlen(OMM_FEED), &catalog) !=
+                                           (const uint8_t *)W6_NEWGAPS_CLEAN_FEED,
+                                           strlen(W6_NEWGAPS_CLEAN_FEED), &catalog) !=
         SIDEREON_STATUS_OK) {
         return fail("sidereon_omm_catalog_build_lenient");
     }
 
     size_t record_count = 123;
     if (sidereon_omm_catalog_record_count(catalog, &record_count) != SIDEREON_STATUS_OK ||
-        record_count != 2) {
+        record_count != W6_NEWGAPS_CLEAN_RECORD_COUNT) {
         rc = fail("sidereon_omm_catalog_record_count");
         goto cleanup;
     }
-    /* Records are sorted by (system, prn): G03 then G04. */
+    /* Records are sorted by (system, prn). */
     SidereonConstellationRecord rec0;
     SidereonConstellationRecord rec1;
     if (sidereon_omm_catalog_record(catalog, 0, &rec0) != SIDEREON_STATUS_OK ||
         sidereon_omm_catalog_record(catalog, 1, &rec1) != SIDEREON_STATUS_OK ||
-        rec0.system != SIDEREON_GNSS_SYSTEM_GPS || rec0.prn != 3 || rec0.norad_id != 40294 ||
-        rec1.system != SIDEREON_GNSS_SYSTEM_GPS || rec1.prn != 4 || rec1.norad_id != 43873) {
+        rec0.system != W6_NEWGAPS_CLEAN_RECORD0_SYSTEM || rec0.prn != W6_NEWGAPS_CLEAN_RECORD0_PRN ||
+        rec0.norad_id != W6_NEWGAPS_CLEAN_RECORD0_NORAD_ID ||
+        rec1.system != W6_NEWGAPS_CLEAN_RECORD1_SYSTEM || rec1.prn != W6_NEWGAPS_CLEAN_RECORD1_PRN ||
+        rec1.norad_id != W6_NEWGAPS_CLEAN_RECORD1_NORAD_ID) {
         rc = fail("sidereon_omm_catalog_record values");
         goto cleanup;
     }
-    if (sidereon_omm_catalog_record(catalog, 2, &rec0) != SIDEREON_STATUS_INVALID_ARGUMENT) {
+    if (sidereon_omm_catalog_record(catalog, W6_NEWGAPS_CLEAN_RECORD_COUNT, &rec0) !=
+        SIDEREON_STATUS_INVALID_ARGUMENT) {
         rc = fail("sidereon_omm_catalog_record out-of-range index");
         goto cleanup;
     }
 
     size_t skipped_count = 123;
     if (sidereon_omm_catalog_skipped_count(catalog, &skipped_count) != SIDEREON_STATUS_OK ||
-        skipped_count != 1) {
+        skipped_count != W6_NEWGAPS_CLEAN_SKIPPED_COUNT) {
         rc = fail("sidereon_omm_catalog_skipped_count");
         goto cleanup;
     }
-    /* The feed parsed cleanly: no malformed JSON elements. */
+    /* Malformed JSON elements of the feed. */
     size_t malformed_count = 123;
     if (sidereon_omm_catalog_malformed_count(catalog, &malformed_count) != SIDEREON_STATUS_OK ||
-        malformed_count != 0) {
+        malformed_count != W6_NEWGAPS_CLEAN_MALFORMED_COUNT) {
         rc = fail("sidereon_omm_catalog_malformed_count clean feed");
         goto cleanup;
     }
     SidereonSkippedOmm skipped;
     if (sidereon_omm_catalog_skipped(catalog, 0, &skipped) != SIDEREON_STATUS_OK ||
-        skipped.norad_id != 42738 || !skipped.object_name_present) {
+        skipped.norad_id_present != W6_NEWGAPS_CLEAN_SKIPPED0_NORAD_PRESENT ||
+        skipped.norad_id != W6_NEWGAPS_CLEAN_SKIPPED0_NORAD_ID ||
+        skipped.object_name_present != W6_NEWGAPS_CLEAN_SKIPPED0_NAME_PRESENT) {
         rc = fail("sidereon_omm_catalog_skipped values");
         goto cleanup;
     }
 
-    const char *expected_name = "QZS-2 (QZSS/PRN 194)";
+    const char *expected_name = W6_NEWGAPS_CLEAN_SKIPPED0_NAME;
     size_t written = 123;
     size_t required = 123;
     if (sidereon_omm_catalog_skipped_object_name(catalog, 0, NULL, 0, &written, &required) !=
@@ -143,7 +145,8 @@ static int exercise_omm_lenient(void) {
         rc = fail("sidereon_omm_catalog_skipped_object_name copy");
         goto cleanup;
     }
-    if (sidereon_omm_catalog_skipped(catalog, 1, &skipped) != SIDEREON_STATUS_INVALID_ARGUMENT) {
+    if (sidereon_omm_catalog_skipped(catalog, W6_NEWGAPS_CLEAN_SKIPPED_COUNT, &skipped) !=
+        SIDEREON_STATUS_INVALID_ARGUMENT) {
         rc = fail("sidereon_omm_catalog_skipped out-of-range index");
         goto cleanup;
     }
@@ -161,17 +164,19 @@ cleanup:
     /* A feed with a non-object element (a bare number) parses leniently: the one
      * GPS object resolves, the malformed element is counted, distinguishable from
      * an empty feed. */
-    static const char *const bad_feed = "[42," OMM_OBJ("GPS BIIF-8  (PRN 03)", "40294") "]";
     SidereonOmmCatalog *bad_catalog = NULL;
-    if (sidereon_omm_catalog_build_lenient(SIDEREON_GNSS_SYSTEM_GPS, (const uint8_t *)bad_feed,
-                                           strlen(bad_feed), &bad_catalog) != SIDEREON_STATUS_OK) {
+    if (sidereon_omm_catalog_build_lenient(SIDEREON_GNSS_SYSTEM_GPS,
+                                           (const uint8_t *)W6_NEWGAPS_MALFORMED_FEED,
+                                           strlen(W6_NEWGAPS_MALFORMED_FEED),
+                                           &bad_catalog) != SIDEREON_STATUS_OK) {
         return fail("sidereon_omm_catalog_build_lenient malformed feed");
     }
     size_t bad_records = 123;
     size_t bad_malformed = 123;
     if (sidereon_omm_catalog_record_count(bad_catalog, &bad_records) != SIDEREON_STATUS_OK ||
         sidereon_omm_catalog_malformed_count(bad_catalog, &bad_malformed) != SIDEREON_STATUS_OK ||
-        bad_records != 1 || bad_malformed != 1) {
+        bad_records != W6_NEWGAPS_MALFORMED_RECORD_COUNT ||
+        bad_malformed != W6_NEWGAPS_MALFORMED_MALFORMED_COUNT) {
         rc = fail("sidereon_omm_catalog_malformed_count malformed feed");
     } else {
         rc = 0;
@@ -181,7 +186,9 @@ cleanup:
 }
 
 static int exercise_lambda(void) {
-    /* RTKLIB lambda() utest1: a weakly-correlated 6-ambiguity case. */
+    /* RTKLIB lambda() utest1: a weakly-correlated 6-ambiguity case. `expected`
+     * and the two scores are RTKLIB's published utest1 results, an external
+     * reference; the exact values checked after them are sidereon-core's own. */
     const double a[6] = {1585184.171,  -6716599.430, 3915742.905,
                          7627233.455,  9565990.879,  989457273.200};
     const double q[36] = {
@@ -205,9 +212,13 @@ static int exercise_lambda(void) {
         fabs(result.second_best_score - 3.70845619249) > 1e-4) {
         return fail("sidereon_lambda_ils_search scores");
     }
-    /* ratio (~1.06) is well below the 3.0 threshold, so the fix is not accepted. */
-    if (result.fixed_status) {
-        return fail("sidereon_lambda_ils_search ratio verdict");
+    if (memcmp(fixed, W6_NEWGAPS_LAMBDA_FIXED, sizeof(fixed)) != 0 ||
+        result.fixed_status != W6_NEWGAPS_LAMBDA_FIXED_STATUS ||
+        f64_bits(result.ratio) != W6_NEWGAPS_LAMBDA_RATIO_BITS ||
+        f64_bits(result.best_score) != W6_NEWGAPS_LAMBDA_BEST_SCORE_BITS ||
+        result.second_best_present != W6_NEWGAPS_LAMBDA_SECOND_BEST_PRESENT ||
+        f64_bits(result.second_best_score) != W6_NEWGAPS_LAMBDA_SECOND_BEST_SCORE_BITS) {
+        return fail("sidereon_lambda_ils_search engine result");
     }
 
     /* Dimension-mismatch covariance is rejected, not a panic. */
@@ -221,7 +232,10 @@ static int exercise_lambda(void) {
     const double outside_integer_domain[1] = {DBL_MAX};
     const double identity_covariance[1] = {1.0};
     int64_t outside_fixed[1] = {0};
-    if (sidereon_lambda_ils_search(outside_integer_domain, 1, identity_covariance, 1, 3.0,
+    /* The binding maps an ILS refusal to INVALID_ARGUMENT (ils_error_to_status in
+     * bindings/c/src/ils.rs). */
+    if (!W6_NEWGAPS_LAMBDA_DBL_MAX_REFUSED ||
+        sidereon_lambda_ils_search(outside_integer_domain, 1, identity_covariance, 1, 3.0,
                                   outside_fixed, &result) != SIDEREON_STATUS_INVALID_ARGUMENT) {
         return fail("sidereon_lambda_ils_search integer output domain");
     }
@@ -229,14 +243,18 @@ static int exercise_lambda(void) {
     /* bounded_ils_search on a trivial diagonal case rounds componentwise. */
     const double bf[2] = {0.1, 0.9};
     const double bcov[4] = {1.0, 0.0, 0.0, 1.0};
-    const int64_t bexpected[2] = {0, 1};
     int64_t bfixed[2] = {0};
     SidereonIlsResult bresult;
     if (sidereon_bounded_ils_search(bf, 2, bcov, 4, 1, 200000, 3.0, bfixed, &bresult) !=
         SIDEREON_STATUS_OK) {
         return fail("sidereon_bounded_ils_search");
     }
-    if (memcmp(bfixed, bexpected, sizeof(bexpected)) != 0) {
+    if (memcmp(bfixed, W6_NEWGAPS_BOUNDED_FIXED, sizeof(bfixed)) != 0 ||
+        bresult.fixed_status != W6_NEWGAPS_BOUNDED_FIXED_STATUS ||
+        f64_bits(bresult.ratio) != W6_NEWGAPS_BOUNDED_RATIO_BITS ||
+        f64_bits(bresult.best_score) != W6_NEWGAPS_BOUNDED_BEST_SCORE_BITS ||
+        bresult.second_best_present != W6_NEWGAPS_BOUNDED_SECOND_BEST_PRESENT ||
+        f64_bits(bresult.second_best_score) != W6_NEWGAPS_BOUNDED_SECOND_BEST_SCORE_BITS) {
         return fail("sidereon_bounded_ils_search fixed vector");
     }
 
@@ -278,19 +296,22 @@ static int exercise_agreement(const char *sp3_path) {
     size_t epoch_count = 0;
     if (sidereon_sp3_merge_report_epoch_agreement_count(report, &epoch_count) !=
             SIDEREON_STATUS_OK ||
-        epoch_count == 0) {
+        epoch_count != W6_NEWGAPS_AGREEMENT_EPOCH_COUNT) {
         rc = fail("sidereon_sp3_merge_report_epoch_agreement_count");
         goto cleanup;
     }
     SidereonSp3EpochAgreement first;
     if (sidereon_sp3_merge_report_epoch_agreement(report, 0, &first) != SIDEREON_STATUS_OK ||
-        !isfinite(first.epoch_j2000_seconds) || first.position_rms_m != 0.0) {
+        !isfinite(first.epoch_j2000_seconds) ||
+        first.position_rms_present != W6_NEWGAPS_AGREEMENT_FIRST_RMS_PRESENT ||
+        f64_bits(first.position_rms_m) != W6_NEWGAPS_AGREEMENT_FIRST_RMS_BITS) {
         rc = fail("sidereon_sp3_merge_report_epoch_agreement");
         goto cleanup;
     }
     SidereonSp3AgreementSummary summary;
     if (sidereon_sp3_merge_report_agreement_summary(report, &summary) != SIDEREON_STATUS_OK ||
-        !summary.position_rms_present || summary.position_rms_m != 0.0) {
+        summary.position_rms_present != W6_NEWGAPS_AGREEMENT_SUMMARY_RMS_PRESENT ||
+        f64_bits(summary.position_rms_m) != W6_NEWGAPS_AGREEMENT_SUMMARY_RMS_BITS) {
         rc = fail("sidereon_sp3_merge_report_agreement_summary");
         goto cleanup;
     }

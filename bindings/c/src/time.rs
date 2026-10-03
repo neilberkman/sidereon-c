@@ -1,5 +1,21 @@
 use super::*;
 
+pub struct SidereonExactEpoch {
+    pub(crate) inner: sidereon_core::astro::time::ExactEpoch,
+}
+
+pub struct SidereonExactEpochQuery {
+    pub(crate) inner: sidereon_core::astro::time::ExactEpochQuery,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonExactOrdering {
+    Less = -1,
+    Equal = 0,
+    Greater = 1,
+}
+
 /// Write the fixed inter-system time-scale offset to_reading - from_reading
 /// (seconds) to *out_offset_s: the value that, added to a from-scale reading,
 /// yields the to-scale reading of the same instant. Both scales are
@@ -358,7 +374,11 @@ pub unsafe extern "C" fn sidereon_gnss_week_tow_new(
                 *out = gnss_week_tow_to_c(value);
                 SidereonStatus::Ok
             }
-            Err(err) => extra_invalid_arg("sidereon_gnss_week_tow_new", err),
+            Err(err) => crate::engine_error::time_model_error(
+                "sidereon_gnss_week_tow_new",
+                err,
+                format!("sidereon_gnss_week_tow_new: {err}"),
+            ),
         }
     })
 }
@@ -395,7 +415,11 @@ pub unsafe extern "C" fn sidereon_gnss_week_tow_normalized(
                     *out = gnss_week_tow_to_c(value);
                     SidereonStatus::Ok
                 }
-                Err(err) => extra_invalid_arg("sidereon_gnss_week_tow_normalized", err),
+                Err(err) => crate::engine_error::time_model_error(
+                    "sidereon_gnss_week_tow_normalized",
+                    err,
+                    format!("sidereon_gnss_week_tow_normalized: {err}"),
+                ),
             }
         },
     )
@@ -434,7 +458,11 @@ pub unsafe extern "C" fn sidereon_gnss_week_tow_unrolled_week(
                     *out_week = week;
                     SidereonStatus::Ok
                 }
-                Err(err) => extra_invalid_arg("sidereon_gnss_week_tow_unrolled_week", err),
+                Err(err) => crate::engine_error::time_model_error(
+                    "sidereon_gnss_week_tow_unrolled_week",
+                    err,
+                    format!("sidereon_gnss_week_tow_unrolled_week: {err}"),
+                ),
             }
         },
     )
@@ -453,6 +481,32 @@ pub unsafe extern "C" fn sidereon_gnss_week_epoch_julian_day_number(
         "sidereon_gnss_week_epoch_julian_day_number",
         SidereonStatus::Panic,
         || {
+            if !out_present.is_null() && !out_jdn.is_null() {
+                let outputs = [
+                    Some((
+                        c_try!(super::checked_output_range(
+                            "sidereon_gnss_week_epoch_julian_day_number",
+                            out_present,
+                            1,
+                            "out_present"
+                        )),
+                        "out_present",
+                    )),
+                    Some((
+                        c_try!(super::checked_output_range(
+                            "sidereon_gnss_week_epoch_julian_day_number",
+                            out_jdn,
+                            1,
+                            "out_jdn"
+                        )),
+                        "out_jdn",
+                    )),
+                ];
+                c_try!(super::reject_overlapping_optional_outputs(
+                    "sidereon_gnss_week_epoch_julian_day_number",
+                    &outputs
+                ));
+            }
             let out_present = c_try!(require_out(
                 out_present,
                 "sidereon_gnss_week_epoch_julian_day_number",
@@ -481,7 +535,14 @@ pub unsafe extern "C" fn sidereon_gnss_week_epoch_julian_day_number(
 
 /// Write the GNSS week for a calendar date, when present.
 ///
-/// Safety: out_present points to a bool; out_week points to a uint32_t.
+/// `*out_present` is false, with `*out_week` 0, for a date before the system's
+/// week epoch, for a scale without GNSS weeks, and for fields that name no
+/// calendar date: a month outside 1..=12 or a day outside that month. The
+/// engine reports all three as one absence, so this call does not tell them
+/// apart.
+///
+/// Safety: out_present points to a bool; out_week points to a uint32_t; their
+/// output ranges must be disjoint.
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_gnss_week_from_calendar(
     system: u32,
@@ -495,6 +556,32 @@ pub unsafe extern "C" fn sidereon_gnss_week_from_calendar(
         "sidereon_gnss_week_from_calendar",
         SidereonStatus::Panic,
         || {
+            if !out_present.is_null() && !out_week.is_null() {
+                let outputs = [
+                    Some((
+                        c_try!(super::checked_output_range(
+                            "sidereon_gnss_week_from_calendar",
+                            out_present,
+                            1,
+                            "out_present"
+                        )),
+                        "out_present",
+                    )),
+                    Some((
+                        c_try!(super::checked_output_range(
+                            "sidereon_gnss_week_from_calendar",
+                            out_week,
+                            1,
+                            "out_week"
+                        )),
+                        "out_week",
+                    )),
+                ];
+                c_try!(super::reject_overlapping_optional_outputs(
+                    "sidereon_gnss_week_from_calendar",
+                    &outputs
+                ));
+            }
             let out_present = c_try!(require_out(
                 out_present,
                 "sidereon_gnss_week_from_calendar",
@@ -521,7 +608,16 @@ pub unsafe extern "C" fn sidereon_gnss_week_from_calendar(
     )
 }
 
-/// Write seconds of week for a calendar date and time.
+/// Write seconds of week for a calendar date and time, counted from Sunday
+/// 00:00 in the date's own system time.
+///
+/// The fields must name a calendar date and clock time: `month` in 1..=12,
+/// `day` in 1 through the length of that month in the Gregorian calendar,
+/// `hour` in 0..=23, `minute` in 0..=59 and `second` in 0..=60, where 60 is a
+/// leap-second label. Any other field is refused with
+/// SIDEREON_STATUS_INVALID_ARGUMENT and a thread-local message naming the
+/// fields. `*out_sow_s` is set to NaN before the fields are read and keeps it on
+/// a refusal, so a refused date never reads as a seconds-of-week value.
 ///
 /// Safety: out_sow_s points to a double.
 #[no_mangle]
@@ -543,8 +639,21 @@ pub unsafe extern "C" fn sidereon_gnss_seconds_of_week_from_calendar(
                 "sidereon_gnss_seconds_of_week_from_calendar",
                 "out_sow_s"
             ));
-            *out_sow_s = seconds_of_week_from_calendar(year, month, day, hour, minute, second);
-            SidereonStatus::Ok
+            *out_sow_s = f64::NAN;
+            match seconds_of_week_from_calendar(year, month, day, hour, minute, second) {
+                Some(sow) => {
+                    *out_sow_s = sow;
+                    SidereonStatus::Ok
+                }
+                None => {
+                    set_last_error(format!(
+                        "sidereon_gnss_seconds_of_week_from_calendar: year {year} month {month} \
+                         day {day} hour {hour} minute {minute} second {second} is not a calendar \
+                         date and time"
+                    ));
+                    SidereonStatus::InvalidArgument
+                }
+            }
         },
     )
 }
@@ -563,6 +672,32 @@ pub unsafe extern "C" fn sidereon_gnss_week_and_seconds_of_week(
         "sidereon_gnss_week_and_seconds_of_week",
         SidereonStatus::Panic,
         || {
+            if !out_week.is_null() && !out_sow_s.is_null() {
+                let outputs = [
+                    Some((
+                        c_try!(super::checked_output_range(
+                            "sidereon_gnss_week_and_seconds_of_week",
+                            out_week,
+                            1,
+                            "out_week"
+                        )),
+                        "out_week",
+                    )),
+                    Some((
+                        c_try!(super::checked_output_range(
+                            "sidereon_gnss_week_and_seconds_of_week",
+                            out_sow_s,
+                            1,
+                            "out_sow_s"
+                        )),
+                        "out_sow_s",
+                    )),
+                ];
+                c_try!(super::reject_overlapping_optional_outputs(
+                    "sidereon_gnss_week_and_seconds_of_week",
+                    &outputs
+                ));
+            }
             let out_week = c_try!(require_out(
                 out_week,
                 "sidereon_gnss_week_and_seconds_of_week",
@@ -827,11 +962,16 @@ pub unsafe extern "C" fn sidereon_j2000_seconds_to_civil(
     )
 }
 
-/// GPS seconds for a civil instant (used to query RINEX clock series). Writes the
-/// value to *out_gps_seconds and *out_available (false if the date is invalid).
+/// GPS seconds for a civil GPS-time instant (used to query RINEX clock series).
+/// Writes the value to *out_gps_seconds and *out_available (false if the date is
+/// invalid). The second is read as the shortest decimal of the double given,
+/// every digit kept, so 59.9999996 names that epoch rather than rounding into the
+/// next minute. GPS time has no leap-second label; for a civil epoch in another
+/// time scale, such as UTC with its 23:59:60, use sidereon_civil_to_clock_epoch.
 /// Delegates to sidereon_core::rinex::clock::civil_to_gps_seconds.
 ///
-/// Safety: out_gps_seconds points to a double; out_available points to a bool.
+/// Safety: out_gps_seconds points to a double; out_available points to a bool;
+/// their output ranges must be disjoint.
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_civil_to_gps_seconds(
     year: i32,
@@ -847,6 +987,32 @@ pub unsafe extern "C" fn sidereon_civil_to_gps_seconds(
         "sidereon_civil_to_gps_seconds",
         SidereonStatus::Panic,
         || {
+            if !out_gps_seconds.is_null() && !out_available.is_null() {
+                let outputs = [
+                    Some((
+                        c_try!(super::checked_output_range(
+                            "sidereon_civil_to_gps_seconds",
+                            out_gps_seconds,
+                            1,
+                            "out_gps_seconds"
+                        )),
+                        "out_gps_seconds",
+                    )),
+                    Some((
+                        c_try!(super::checked_output_range(
+                            "sidereon_civil_to_gps_seconds",
+                            out_available,
+                            1,
+                            "out_available"
+                        )),
+                        "out_available",
+                    )),
+                ];
+                c_try!(super::reject_overlapping_optional_outputs(
+                    "sidereon_civil_to_gps_seconds",
+                    &outputs
+                ));
+            }
             let out_gps_seconds = c_try!(require_out(
                 out_gps_seconds,
                 "sidereon_civil_to_gps_seconds",
@@ -891,6 +1057,44 @@ pub struct SidereonTimeScales {
     pub jd_tt: f64,
     /// Full TDB Julian date.
     pub jd_tdb: f64,
+    /// Whether UT1 lies outside the UT1 table and was taken from the long-term
+    /// delta-T curve. The frame transforms that read UT1 refuse time scales
+    /// marked this way. A SidereonUt1Degradation value; an unknown value is
+    /// refused where the time scales are read.
+    pub ut1_degraded: u32,
+}
+
+/// Which side of the UT1 table an instant lies on when its UT1 came from the
+/// long-term delta-T curve rather than the table. Mirrors
+/// sidereon_core::astro::time::DegradeReason, with None for an instant inside
+/// the table.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonUt1Degradation {
+    /// UT1 comes from the table.
+    None = 0,
+    /// The instant precedes the first covered table entry.
+    BeforeCoverage = 1,
+    /// The instant follows the last covered table entry.
+    AfterCoverage = 2,
+}
+
+impl SidereonUt1Degradation {
+    pub(crate) fn from_core(value: Option<sidereon_core::astro::time::DegradeReason>) -> Self {
+        match value {
+            None => Self::None,
+            Some(sidereon_core::astro::time::DegradeReason::BeforeCoverage) => Self::BeforeCoverage,
+            Some(sidereon_core::astro::time::DegradeReason::AfterCoverage) => Self::AfterCoverage,
+        }
+    }
+
+    pub(crate) fn to_core(self) -> Option<sidereon_core::astro::time::DegradeReason> {
+        match self {
+            Self::None => None,
+            Self::BeforeCoverage => Some(sidereon_core::astro::time::DegradeReason::BeforeCoverage),
+            Self::AfterCoverage => Some(sidereon_core::astro::time::DegradeReason::AfterCoverage),
+        }
+    }
 }
 
 /// Resolve the split-Julian-date time scales for a UTC calendar instant.
@@ -920,6 +1124,7 @@ pub unsafe extern "C" fn sidereon_timescales_from_utc(
                 jd_ut1: 0.0,
                 jd_tt: 0.0,
                 jd_tdb: 0.0,
+                ut1_degraded: SidereonUt1Degradation::None as u32,
             };
             match CoreTimeScales::from_utc(year, month, day, hour, minute, second) {
                 Ok(ts) => {
@@ -973,14 +1178,14 @@ pub unsafe extern "C" fn sidereon_instant_from_utc_civil(
                     return SidereonStatus::Solve;
                 }
             };
-            if let Some(out) = out_jd_whole.as_mut() {
-                *out = jd.jd_whole;
+            if !out_jd_whole.is_null() {
+                out_jd_whole.write(jd.jd_whole);
             }
-            if let Some(out) = out_jd_fraction.as_mut() {
-                *out = jd.fraction;
+            if !out_jd_fraction.is_null() {
+                out_jd_fraction.write(jd.fraction);
             }
-            if let Some(out) = out_j2000_seconds.as_mut() {
-                *out = instant_to_j2000_seconds(&instant).unwrap_or(f64::NAN);
+            if !out_j2000_seconds.is_null() {
+                out_j2000_seconds.write(instant_to_j2000_seconds(&instant).unwrap_or(f64::NAN));
             }
             SidereonStatus::Ok
         },
@@ -1020,8 +1225,8 @@ pub unsafe extern "C" fn sidereon_tai_utc_offset_s(jd_utc: f64, out: *mut f64) -
 }
 
 fn time_offset_error_to_status(fn_name: &str, err: TimeOffsetError) -> SidereonStatus {
-    set_last_error(format!("{fn_name}: {err}"));
-    SidereonStatus::InvalidArgument
+    let legacy_message = format!("{fn_name}: {err}");
+    crate::engine_error::time_offset_error(fn_name, err, legacy_message)
 }
 
 fn gnss_week_tow_to_c(value: GnssWeekTow) -> SidereonGnssWeekTow {
@@ -1039,26 +1244,36 @@ mod tests {
 
     #[test]
     fn calendar_routes_preserve_fractional_and_product_date_semantics() {
+        use sidereon_core::astro::time::civil;
+        use sidereon_core::data::{self as core_data, ProductDate};
+        // Every expected value is sidereon-core's own result for the same
+        // fields.
         let mut second_of_day = 0.0;
         assert_eq!(
             unsafe { sidereon_second_of_day(1, 2, 3.5, &mut second_of_day) },
             SidereonStatus::Ok
         );
-        assert_eq!(second_of_day.to_bits(), (3_723.5_f64).to_bits());
+        assert_eq!(
+            second_of_day.to_bits(),
+            civil::second_of_day(1, 2, 3.5).to_bits()
+        );
 
         let mut day_of_year = 0.0;
         assert_eq!(
             unsafe { sidereon_day_of_year(2024, 1, 1, 0, 0, 0.0, &mut day_of_year) },
             SidereonStatus::Ok
         );
-        assert_eq!(day_of_year.to_bits(), 1.0_f64.to_bits());
+        assert_eq!(
+            day_of_year.to_bits(),
+            civil::day_of_year(2024, 1, 1, 0, 0, 0.0).to_bits()
+        );
         assert_eq!(
             unsafe { sidereon_day_of_year(2024, 2, 29, 12, 0, 0.25, &mut day_of_year) },
             SidereonStatus::Ok
         );
         assert_eq!(
             day_of_year.to_bits(),
-            (60.0_f64 + 43_200.25 / 86_400.0).to_bits()
+            civil::day_of_year(2024, 2, 29, 12, 0, 0.25).to_bits()
         );
 
         let mut product_day = 0;
@@ -1066,7 +1281,13 @@ mod tests {
             unsafe { sidereon_data_day_of_year(2020, 3, 1, &mut product_day) },
             SidereonStatus::Ok
         );
-        assert_eq!(product_day, 61);
+        assert_eq!(
+            product_day,
+            core_data::day_of_year(ProductDate::new(2020, 3, 1).expect("core date"))
+        );
+
+        // sidereon-core refuses 2023-02-29 as a product date.
+        assert!(ProductDate::new(2023, 2, 29).is_err());
 
         assert_eq!(
             unsafe { sidereon_day_of_year(2023, 2, 29, 0, 0, 0.0, &mut day_of_year) },
@@ -1089,11 +1310,27 @@ impl SidereonTimeScales {
             jd_ut1: ts.jd_ut1,
             jd_tt: ts.jd_tt,
             jd_tdb: ts.jd_tdb,
+            ut1_degraded: SidereonUt1Degradation::from_core(ts.ut1_degraded) as u32,
         }
     }
 
-    pub(crate) fn to_core(self) -> CoreTimeScales {
-        CoreTimeScales {
+    /// The engine time scales, refusing a `ut1_degraded` value that names no
+    /// SidereonUt1Degradation.
+    pub(crate) fn to_core(self, fn_name: &str) -> Result<CoreTimeScales, SidereonStatus> {
+        let ut1_degraded = match self.ut1_degraded {
+            x if x == SidereonUt1Degradation::None as u32 => SidereonUt1Degradation::None,
+            x if x == SidereonUt1Degradation::BeforeCoverage as u32 => {
+                SidereonUt1Degradation::BeforeCoverage
+            }
+            x if x == SidereonUt1Degradation::AfterCoverage as u32 => {
+                SidereonUt1Degradation::AfterCoverage
+            }
+            other => {
+                set_last_error(format!("{fn_name}: unknown ts.ut1_degraded {other}"));
+                return Err(SidereonStatus::InvalidArgument);
+            }
+        };
+        Ok(CoreTimeScales {
             jd_whole: self.jd_whole,
             ut1_fraction: self.ut1_fraction,
             tt_fraction: self.tt_fraction,
@@ -1101,6 +1338,815 @@ impl SidereonTimeScales {
             jd_ut1: self.jd_ut1,
             jd_tt: self.jd_tt,
             jd_tdb: self.jd_tdb,
-        }
+            ut1_degraded: ut1_degraded.to_core(),
+        })
+    }
+}
+
+/// Create an exact epoch from whole J2000 seconds and attoseconds.
+///
+/// Safety: `out_epoch` must point to one writable handle pointer.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_exact_epoch_new(
+    seconds: i64,
+    attoseconds: u64,
+    out_epoch: *mut *mut SidereonExactEpoch,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_exact_epoch_new", SidereonStatus::Panic, || {
+        let out_epoch = c_try!(require_out(
+            out_epoch,
+            "sidereon_exact_epoch_new",
+            "out_epoch"
+        ));
+        *out_epoch = ptr::null_mut();
+        let Some(inner) = sidereon_core::astro::time::ExactEpoch::new(seconds, attoseconds) else {
+            set_last_error("sidereon_exact_epoch_new: attoseconds out of range".to_owned());
+            return SidereonStatus::InvalidArgument;
+        };
+        write_boxed_handle(out_epoch, SidereonExactEpoch { inner });
+        SidereonStatus::Ok
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_exact_epoch_j2000(
+    out_epoch: *mut *mut SidereonExactEpoch,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_exact_epoch_j2000", SidereonStatus::Panic, || {
+        let out_epoch = c_try!(require_out(
+            out_epoch,
+            "sidereon_exact_epoch_j2000",
+            "out_epoch"
+        ));
+        *out_epoch = ptr::null_mut();
+        write_boxed_handle(
+            out_epoch,
+            SidereonExactEpoch {
+                inner: sidereon_core::astro::time::ExactEpoch::J2000,
+            },
+        );
+        SidereonStatus::Ok
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_exact_epoch_attoseconds_per_second(
+    out_attoseconds: *mut u64,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_exact_epoch_attoseconds_per_second",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_attoseconds,
+                "sidereon_exact_epoch_attoseconds_per_second",
+                "out_attoseconds"
+            ));
+            *out = sidereon_core::astro::time::ExactEpoch::ATTOSECONDS_PER_SECOND;
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Parse a shortest-decimal J2000 second value as an exact epoch.
+///
+/// Safety: `out_epoch` must point to one writable handle pointer.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_exact_epoch_from_j2000_seconds(
+    seconds: f64,
+    out_epoch: *mut *mut SidereonExactEpoch,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_exact_epoch_from_j2000_seconds",
+        SidereonStatus::Panic,
+        || {
+            let out_epoch = c_try!(require_out(
+                out_epoch,
+                "sidereon_exact_epoch_from_j2000_seconds",
+                "out_epoch"
+            ));
+            *out_epoch = ptr::null_mut();
+            let Some(inner) = sidereon_core::astro::time::ExactEpoch::from_j2000_seconds(seconds)
+            else {
+                set_last_error(
+                    "sidereon_exact_epoch_from_j2000_seconds: invalid or unrepresentable epoch"
+                        .to_owned(),
+                );
+                return SidereonStatus::InvalidArgument;
+            };
+            write_boxed_handle(out_epoch, SidereonExactEpoch { inner });
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Build an exact epoch from a civil date and the shortest-decimal second label.
+///
+/// Safety: `out_epoch` must point to one writable handle pointer.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_exact_epoch_from_civil(
+    year: i32,
+    month: i32,
+    day: i32,
+    hour: i32,
+    minute: i32,
+    second: f64,
+    out_epoch: *mut *mut SidereonExactEpoch,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_exact_epoch_from_civil",
+        SidereonStatus::Panic,
+        || {
+            let out_epoch = c_try!(require_out(
+                out_epoch,
+                "sidereon_exact_epoch_from_civil",
+                "out_epoch"
+            ));
+            *out_epoch = ptr::null_mut();
+            let Some(inner) = sidereon_core::astro::time::ExactEpoch::from_civil(
+                year, month, day, hour, minute, second,
+            ) else {
+                set_last_error(
+                    "sidereon_exact_epoch_from_civil: invalid or unrepresentable epoch".to_owned(),
+                );
+                return SidereonStatus::InvalidArgument;
+            };
+            write_boxed_handle(out_epoch, SidereonExactEpoch { inner });
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Create a query at an exact civil epoch without adding a binary offset.
+///
+/// Safety: `epoch` must be live; `out_query` must point to one writable handle pointer.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_exact_epoch_query(
+    epoch: *const SidereonExactEpoch,
+    out_query: *mut *mut SidereonExactEpochQuery,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_exact_epoch_query", SidereonStatus::Panic, || {
+        let out_query = c_try!(require_out(
+            out_query,
+            "sidereon_exact_epoch_query",
+            "out_query"
+        ));
+        *out_query = ptr::null_mut();
+        let epoch = c_try!(require_ref(epoch, "sidereon_exact_epoch_query", "epoch"));
+        write_boxed_handle(
+            out_query,
+            SidereonExactEpochQuery {
+                inner: epoch.inner.query(),
+            },
+        );
+        SidereonStatus::Ok
+    })
+}
+
+#[no_mangle]
+/// Create an owned exact epoch from a query's exact origin and offset.
+/// Release the result with sidereon_exact_epoch_free.
+///
+/// Safety: query must be a live handle and out_epoch must point to writable
+/// handle-pointer storage.
+pub unsafe extern "C" fn sidereon_exact_epoch_query_epoch(
+    query: *const SidereonExactEpochQuery,
+    out_epoch: *mut *mut SidereonExactEpoch,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_exact_epoch_query_epoch",
+        SidereonStatus::Panic,
+        || {
+            let out_epoch = c_try!(require_out(
+                out_epoch,
+                "sidereon_exact_epoch_query_epoch",
+                "out_epoch"
+            ));
+            *out_epoch = ptr::null_mut();
+            let query = c_try!(require_ref(
+                query,
+                "sidereon_exact_epoch_query_epoch",
+                "query"
+            ));
+            write_boxed_handle(
+                out_epoch,
+                SidereonExactEpoch {
+                    inner: query.inner.epoch(),
+                },
+            );
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Interpret a finite `f64` as its exact binary J2000-second value.
+///
+/// Safety: `out_query` must point to one writable handle pointer.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_exact_epoch_query_from_binary_j2000_seconds(
+    seconds: f64,
+    out_query: *mut *mut SidereonExactEpochQuery,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_exact_epoch_query_from_binary_j2000_seconds",
+        SidereonStatus::Panic,
+        || {
+            let out_query = c_try!(require_out(
+                out_query,
+                "sidereon_exact_epoch_query_from_binary_j2000_seconds",
+                "out_query"
+            ));
+            *out_query = ptr::null_mut();
+            let Some(inner) =
+                sidereon_core::astro::time::ExactEpoch::from_binary_j2000_seconds(seconds)
+            else {
+                set_last_error(
+                    "sidereon_exact_epoch_query_from_binary_j2000_seconds: non-finite seconds"
+                        .to_owned(),
+                );
+                return SidereonStatus::InvalidArgument;
+            };
+            write_boxed_handle(out_query, SidereonExactEpochQuery { inner });
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Add a shortest-decimal second offset while retaining the exact epoch result.
+///
+/// Safety: `epoch` must be live; `out_epoch` must point to one writable handle pointer.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_exact_epoch_checked_add_seconds(
+    epoch: *const SidereonExactEpoch,
+    seconds: f64,
+    out_epoch: *mut *mut SidereonExactEpoch,
+) -> SidereonStatus {
+    exact_epoch_decimal_offset(
+        "sidereon_exact_epoch_checked_add_seconds",
+        epoch,
+        seconds,
+        out_epoch,
+        true,
+    )
+}
+
+/// Subtract a shortest-decimal second offset while retaining the exact epoch result.
+///
+/// Safety: `epoch` must be live; `out_epoch` must point to one writable handle pointer.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_exact_epoch_checked_sub_seconds(
+    epoch: *const SidereonExactEpoch,
+    seconds: f64,
+    out_epoch: *mut *mut SidereonExactEpoch,
+) -> SidereonStatus {
+    exact_epoch_decimal_offset(
+        "sidereon_exact_epoch_checked_sub_seconds",
+        epoch,
+        seconds,
+        out_epoch,
+        false,
+    )
+}
+
+unsafe fn exact_epoch_decimal_offset(
+    fn_name: &str,
+    epoch: *const SidereonExactEpoch,
+    seconds: f64,
+    out_epoch: *mut *mut SidereonExactEpoch,
+    add: bool,
+) -> SidereonStatus {
+    ffi_boundary(fn_name, SidereonStatus::Panic, || {
+        let out_epoch = c_try!(require_out(out_epoch, fn_name, "out_epoch"));
+        *out_epoch = ptr::null_mut();
+        let epoch = c_try!(require_ref(epoch, fn_name, "epoch"));
+        let inner = if add {
+            epoch.inner.checked_add_seconds(seconds)
+        } else {
+            epoch.inner.checked_sub_seconds(seconds)
+        };
+        let Some(inner) = inner else {
+            set_last_error(format!("{fn_name}: offset is invalid or unrepresentable"));
+            return SidereonStatus::InvalidArgument;
+        };
+        write_boxed_handle(out_epoch, SidereonExactEpoch { inner });
+        SidereonStatus::Ok
+    })
+}
+
+/// Add an exact binary `f64` offset to a query.
+///
+/// Safety: `query` must be live; `out_query` must point to one writable handle pointer.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_exact_epoch_query_checked_add_binary_seconds(
+    query: *const SidereonExactEpochQuery,
+    seconds: f64,
+    out_query: *mut *mut SidereonExactEpochQuery,
+) -> SidereonStatus {
+    exact_epoch_query_binary_offset(
+        "sidereon_exact_epoch_query_checked_add_binary_seconds",
+        query,
+        seconds,
+        out_query,
+        true,
+    )
+}
+
+/// Subtract an exact binary `f64` offset from a query.
+///
+/// Safety: `query` must be live; `out_query` must point to one writable handle pointer.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_exact_epoch_query_checked_sub_binary_seconds(
+    query: *const SidereonExactEpochQuery,
+    seconds: f64,
+    out_query: *mut *mut SidereonExactEpochQuery,
+) -> SidereonStatus {
+    exact_epoch_query_binary_offset(
+        "sidereon_exact_epoch_query_checked_sub_binary_seconds",
+        query,
+        seconds,
+        out_query,
+        false,
+    )
+}
+
+unsafe fn exact_epoch_query_binary_offset(
+    fn_name: &str,
+    query: *const SidereonExactEpochQuery,
+    seconds: f64,
+    out_query: *mut *mut SidereonExactEpochQuery,
+    add: bool,
+) -> SidereonStatus {
+    ffi_boundary(fn_name, SidereonStatus::Panic, || {
+        let out_query = c_try!(require_out(out_query, fn_name, "out_query"));
+        *out_query = ptr::null_mut();
+        let query = c_try!(require_ref(query, fn_name, "query"));
+        let inner = if add {
+            query.inner.clone().checked_add_binary_seconds(seconds)
+        } else {
+            query.inner.clone().checked_sub_binary_seconds(seconds)
+        };
+        let Some(inner) = inner else {
+            set_last_error(format!("{fn_name}: binary offset must be finite"));
+            return SidereonStatus::InvalidArgument;
+        };
+        write_boxed_handle(out_query, SidereonExactEpochQuery { inner });
+        SidereonStatus::Ok
+    })
+}
+
+/// Write the exact epoch components and sub-attosecond decimal residue.
+///
+/// Safety: `epoch` must be live; all output pointers must be writable.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_exact_epoch_components(
+    epoch: *const SidereonExactEpoch,
+    out_seconds: *mut i64,
+    out_attoseconds: *mut u64,
+    out_residue_digits: *mut i64,
+    out_residue_places: *mut u16,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_exact_epoch_components",
+        SidereonStatus::Panic,
+        || {
+            let epoch = c_try!(require_ref(
+                epoch,
+                "sidereon_exact_epoch_components",
+                "epoch"
+            ));
+            let out_seconds = c_try!(require_out(
+                out_seconds,
+                "sidereon_exact_epoch_components",
+                "out_seconds"
+            ));
+            let out_attoseconds = c_try!(require_out(
+                out_attoseconds,
+                "sidereon_exact_epoch_components",
+                "out_attoseconds"
+            ));
+            let out_residue_digits = c_try!(require_out(
+                out_residue_digits,
+                "sidereon_exact_epoch_components",
+                "out_residue_digits"
+            ));
+            let out_residue_places = c_try!(require_out(
+                out_residue_places,
+                "sidereon_exact_epoch_components",
+                "out_residue_places"
+            ));
+            let (residue_digits, residue_places) = epoch.inner.sub_attosecond();
+            *out_seconds = epoch.inner.whole_seconds();
+            *out_attoseconds = epoch.inner.attoseconds();
+            *out_residue_digits = residue_digits;
+            *out_residue_places = residue_places;
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+/// Compare exact epoch values without converting them to rounded seconds.
+///
+/// Safety: both epoch handles must be live and out_ordering must be writable.
+pub unsafe extern "C" fn sidereon_exact_epoch_compare(
+    epoch: *const SidereonExactEpoch,
+    other: *const SidereonExactEpoch,
+    out_ordering: *mut SidereonExactOrdering,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_exact_epoch_compare",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_ordering,
+                "sidereon_exact_epoch_compare",
+                "out_ordering"
+            ));
+            *out = SidereonExactOrdering::Equal;
+            let epoch = c_try!(require_ref(epoch, "sidereon_exact_epoch_compare", "epoch"));
+            let other = c_try!(require_ref(other, "sidereon_exact_epoch_compare", "other"));
+            *out = match epoch.inner.cmp(&other.inner) {
+                std::cmp::Ordering::Less => SidereonExactOrdering::Less,
+                std::cmp::Ordering::Equal => SidereonExactOrdering::Equal,
+                std::cmp::Ordering::Greater => SidereonExactOrdering::Greater,
+            };
+            SidereonStatus::Ok
+        },
+    )
+}
+
+#[no_mangle]
+/// Compare exact epoch values for equality without converting them to seconds.
+///
+/// Safety: both epoch handles must be live and out_equal must be writable.
+pub unsafe extern "C" fn sidereon_exact_epoch_equal(
+    epoch: *const SidereonExactEpoch,
+    other: *const SidereonExactEpoch,
+    out_equal: *mut bool,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_exact_epoch_equal", SidereonStatus::Panic, || {
+        let out = c_try!(require_out(
+            out_equal,
+            "sidereon_exact_epoch_equal",
+            "out_equal"
+        ));
+        *out = false;
+        let epoch = c_try!(require_ref(epoch, "sidereon_exact_epoch_equal", "epoch"));
+        let other = c_try!(require_ref(other, "sidereon_exact_epoch_equal", "other"));
+        *out = epoch.inner == other.inner;
+        SidereonStatus::Ok
+    })
+}
+
+#[no_mangle]
+/// Compare query values by their exact mathematical value, independent of
+/// their epoch origin and binary-offset representation.
+///
+/// Safety: both query handles must be live and out_equal must be writable.
+pub unsafe extern "C" fn sidereon_exact_epoch_query_equal(
+    query: *const SidereonExactEpochQuery,
+    other: *const SidereonExactEpochQuery,
+    out_equal: *mut bool,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_exact_epoch_query_equal",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_equal,
+                "sidereon_exact_epoch_query_equal",
+                "out_equal"
+            ));
+            *out = false;
+            let query = c_try!(require_ref(
+                query,
+                "sidereon_exact_epoch_query_equal",
+                "query"
+            ));
+            let other = c_try!(require_ref(
+                other,
+                "sidereon_exact_epoch_query_equal",
+                "other"
+            ));
+            *out = query.inner == other.inner;
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Write an epoch's J2000 seconds rounded once from its exact value.
+///
+/// Safety: `epoch` must be live; `out_seconds` must be writable.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_exact_epoch_j2000_seconds(
+    epoch: *const SidereonExactEpoch,
+    out_seconds: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_exact_epoch_j2000_seconds",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_seconds,
+                "sidereon_exact_epoch_j2000_seconds",
+                "out_seconds"
+            ));
+            *out = 0.0;
+            let epoch = c_try!(require_ref(
+                epoch,
+                "sidereon_exact_epoch_j2000_seconds",
+                "epoch"
+            ));
+            *out = epoch.inner.j2000_seconds();
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Write an exact epoch as the nearest whole/fraction Julian-date pair.
+///
+/// Safety: `epoch` must be live; both outputs must be writable.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_exact_epoch_split_julian_date(
+    epoch: *const SidereonExactEpoch,
+    out_jd_whole: *mut f64,
+    out_fraction: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_exact_epoch_split_julian_date",
+        SidereonStatus::Panic,
+        || {
+            let out_jd_whole = c_try!(require_out(
+                out_jd_whole,
+                "sidereon_exact_epoch_split_julian_date",
+                "out_jd_whole"
+            ));
+            let out_fraction = c_try!(require_out(
+                out_fraction,
+                "sidereon_exact_epoch_split_julian_date",
+                "out_fraction"
+            ));
+            *out_jd_whole = 0.0;
+            *out_fraction = 0.0;
+            let epoch = c_try!(require_ref(
+                epoch,
+                "sidereon_exact_epoch_split_julian_date",
+                "epoch"
+            ));
+            (*out_jd_whole, *out_fraction) = epoch.inner.split_julian_date();
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Write seconds from `earlier` to `epoch`, rounded once from the exact difference.
+///
+/// Safety: both handles must be live; `out_seconds` must be writable.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_exact_epoch_seconds_since(
+    epoch: *const SidereonExactEpoch,
+    earlier: *const SidereonExactEpoch,
+    out_seconds: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_exact_epoch_seconds_since",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_seconds,
+                "sidereon_exact_epoch_seconds_since",
+                "out_seconds"
+            ));
+            *out = 0.0;
+            let epoch = c_try!(require_ref(
+                epoch,
+                "sidereon_exact_epoch_seconds_since",
+                "epoch"
+            ));
+            let earlier = c_try!(require_ref(
+                earlier,
+                "sidereon_exact_epoch_seconds_since",
+                "earlier"
+            ));
+            *out = epoch.inner.seconds_since(earlier.inner);
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Write seconds from an exact epoch query to another exact epoch.
+///
+/// Safety: both handles must be live; `out_seconds` must be writable.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_exact_epoch_query_seconds_since(
+    query: *const SidereonExactEpochQuery,
+    earlier: *const SidereonExactEpoch,
+    out_seconds: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_exact_epoch_query_seconds_since",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_seconds,
+                "sidereon_exact_epoch_query_seconds_since",
+                "out_seconds"
+            ));
+            *out = 0.0;
+            let query = c_try!(require_ref(
+                query,
+                "sidereon_exact_epoch_query_seconds_since",
+                "query"
+            ));
+            let earlier = c_try!(require_ref(
+                earlier,
+                "sidereon_exact_epoch_query_seconds_since",
+                "earlier"
+            ));
+            *out = query.inner.seconds_since(earlier.inner);
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Write seconds between exact queries, rounded once from their exact difference.
+///
+/// Safety: both handles must be live; `out_seconds` must be writable.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_exact_epoch_query_seconds_since_query(
+    query: *const SidereonExactEpochQuery,
+    earlier: *const SidereonExactEpochQuery,
+    out_seconds: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_exact_epoch_query_seconds_since_query",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_seconds,
+                "sidereon_exact_epoch_query_seconds_since_query",
+                "out_seconds"
+            ));
+            *out = 0.0;
+            let query = c_try!(require_ref(
+                query,
+                "sidereon_exact_epoch_query_seconds_since_query",
+                "query"
+            ));
+            let earlier = c_try!(require_ref(
+                earlier,
+                "sidereon_exact_epoch_query_seconds_since_query",
+                "earlier"
+            ));
+            *out = query.inner.seconds_since_query(&earlier.inner);
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Write query seconds since J2000 rounded once from its exact value.
+///
+/// Safety: `query` must be live; `out_seconds` must be writable.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_exact_epoch_query_j2000_seconds(
+    query: *const SidereonExactEpochQuery,
+    out_seconds: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_exact_epoch_query_j2000_seconds",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_seconds,
+                "sidereon_exact_epoch_query_j2000_seconds",
+                "out_seconds"
+            ));
+            *out = 0.0;
+            let query = c_try!(require_ref(
+                query,
+                "sidereon_exact_epoch_query_j2000_seconds",
+                "query"
+            ));
+            *out = query.inner.j2000_seconds();
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Release an exact epoch handle.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_exact_epoch_free(epoch: *mut SidereonExactEpoch) {
+    free_boxed(epoch);
+}
+
+/// Release an exact epoch query handle.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_exact_epoch_query_free(query: *mut SidereonExactEpochQuery) {
+    free_boxed(query);
+}
+
+#[cfg(test)]
+mod exact_epoch_semantics_tests {
+    use super::*;
+    use sidereon_core::astro::time::ExactEpoch;
+
+    #[test]
+    fn exact_epoch_and_query_semantics_are_not_derived_from_rounded_seconds() {
+        let earliest = SidereonExactEpoch {
+            inner: ExactEpoch::J2000,
+        };
+        let next = SidereonExactEpoch {
+            inner: ExactEpoch::from_j2000_seconds(1.0e-30).expect("representable exact epoch"),
+        };
+        let mut ordering = SidereonExactOrdering::Equal;
+        assert_eq!(
+            unsafe { sidereon_exact_epoch_compare(&next, &earliest, &mut ordering) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(ordering, SidereonExactOrdering::Greater);
+
+        let coarse = SidereonExactEpoch {
+            inner: ExactEpoch::new(i64::MAX, 0).expect("valid whole-second epoch"),
+        };
+        let coarse_query = SidereonExactEpochQuery {
+            inner: coarse
+                .inner
+                .query()
+                .checked_add_binary_seconds(0.25)
+                .expect("finite query offset"),
+        };
+        let base_query = SidereonExactEpochQuery {
+            inner: coarse.inner.query(),
+        };
+        let mut rounded_base = 0.0;
+        let mut rounded_offset = 0.0;
+        assert_eq!(
+            unsafe { sidereon_exact_epoch_query_j2000_seconds(&base_query, &mut rounded_base) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(
+            unsafe { sidereon_exact_epoch_query_j2000_seconds(&coarse_query, &mut rounded_offset) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(rounded_base.to_bits(), rounded_offset.to_bits());
+        let mut queries_equal = true;
+        assert_eq!(
+            unsafe {
+                sidereon_exact_epoch_query_equal(&base_query, &coarse_query, &mut queries_equal)
+            },
+            SidereonStatus::Ok
+        );
+        assert!(!queries_equal);
+
+        let integer_epoch = SidereonExactEpoch {
+            inner: ExactEpoch::new(15, 0).expect("valid whole-second epoch"),
+        };
+        let civil_query = SidereonExactEpochQuery {
+            inner: integer_epoch.inner.query(),
+        };
+        let binary_query = SidereonExactEpochQuery {
+            inner: ExactEpoch::from_binary_j2000_seconds(15.0).expect("finite query"),
+        };
+        assert_eq!(
+            unsafe {
+                sidereon_exact_epoch_query_equal(&civil_query, &binary_query, &mut queries_equal)
+            },
+            SidereonStatus::Ok
+        );
+        assert!(queries_equal);
+
+        let mut returned_epoch = ptr::null_mut();
+        assert_eq!(
+            unsafe { sidereon_exact_epoch_query_epoch(&coarse_query, &mut returned_epoch) },
+            SidereonStatus::Ok
+        );
+        let returned_epoch_ref = unsafe { &*returned_epoch };
+        let mut epochs_equal = false;
+        assert_eq!(
+            unsafe { sidereon_exact_epoch_equal(returned_epoch_ref, &coarse, &mut epochs_equal) },
+            SidereonStatus::Ok
+        );
+        assert!(epochs_equal);
+        unsafe { sidereon_exact_epoch_free(returned_epoch) };
+
+        let mut j2000 = ptr::null_mut();
+        assert_eq!(
+            unsafe { sidereon_exact_epoch_j2000(&mut j2000) },
+            SidereonStatus::Ok
+        );
+        let mut epochs_equal = false;
+        assert_eq!(
+            unsafe { sidereon_exact_epoch_equal(&earliest, &*j2000, &mut epochs_equal) },
+            SidereonStatus::Ok
+        );
+        assert!(epochs_equal);
+        unsafe { sidereon_exact_epoch_free(j2000) };
+
+        let mut attoseconds_per_second = 0;
+        assert_eq!(
+            unsafe { sidereon_exact_epoch_attoseconds_per_second(&mut attoseconds_per_second) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(attoseconds_per_second, ExactEpoch::ATTOSECONDS_PER_SECOND);
     }
 }

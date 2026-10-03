@@ -1,4 +1,9 @@
 use super::*;
+use crate::engine_error::{
+    dop_error_value, engine_error_operation_boundary, record_engine_error, trls_error_value,
+    SidereonEngineErrorFamily,
+};
+use serde_json::{json, Value};
 
 /// A receiver solution paired with the ephemeris-source provenance that produced
 /// it. Opaque to C. Create with sidereon_solve_with_fallback and release with
@@ -265,26 +270,28 @@ pub unsafe extern "C" fn sidereon_locate_source(
     options: *const SidereonSourceLocateOptions,
     out_solution: *mut *mut SidereonSourceSolution,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_locate_source", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_locate_source", SidereonStatus::Panic, || {
         let out_solution = c_try!(require_out(
             out_solution,
             "sidereon_locate_source",
             "out_solution"
         ));
+        let inputs = (|| {
+            let parsed_sensors =
+                source_sensors_from_c("sidereon_locate_source", sensors, sensor_count)?;
+            let arrivals = require_slice(
+                arrival_times_s,
+                sensor_count,
+                "sidereon_locate_source",
+                "arrival_times_s",
+            )?
+            .to_vec();
+            let options = source_options_from_c("sidereon_locate_source", options)?;
+            Ok::<_, SidereonStatus>((parsed_sensors, arrivals, options))
+        })();
         *out_solution = ptr::null_mut();
-        let parsed_sensors = c_try!(source_sensors_from_c(
-            "sidereon_locate_source",
-            sensors,
-            sensor_count
-        ));
-        let arrivals = c_try!(require_slice(
-            arrival_times_s,
-            sensor_count,
-            "sidereon_locate_source",
-            "arrival_times_s"
-        ));
-        let options = c_try!(source_options_from_c("sidereon_locate_source", options));
-        match core_locate_source(&parsed_sensors, arrivals, propagation_speed_m_s, &options) {
+        let (parsed_sensors, arrivals, options) = c_try!(inputs);
+        match core_locate_source(&parsed_sensors, &arrivals, propagation_speed_m_s, &options) {
             Ok(inner) => {
                 write_boxed_handle(out_solution, SidereonSourceSolution { inner });
                 SidereonStatus::Ok
@@ -313,32 +320,31 @@ pub unsafe extern "C" fn sidereon_locate_source_with(
     include_influence: bool,
     out_solution: *mut *mut SidereonSourceSolution,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_locate_source_with", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_locate_source_with", SidereonStatus::Panic, || {
         let out_solution = c_try!(require_out(
             out_solution,
             "sidereon_locate_source_with",
             "out_solution"
         ));
+        let inputs = (|| {
+            let parsed_sensors =
+                source_sensors_from_c("sidereon_locate_source_with", sensors, sensor_count)?;
+            let arrivals = require_slice(
+                arrival_times_s,
+                sensor_count,
+                "sidereon_locate_source_with",
+                "arrival_times_s",
+            )?
+            .to_vec();
+            let options = source_options_from_c("sidereon_locate_source_with", options)?;
+            Ok::<_, SidereonStatus>((parsed_sensors, arrivals, options))
+        })();
         *out_solution = ptr::null_mut();
-        let parsed_sensors = c_try!(source_sensors_from_c(
-            "sidereon_locate_source_with",
-            sensors,
-            sensor_count
-        ));
-        let arrivals = c_try!(require_slice(
-            arrival_times_s,
-            sensor_count,
-            "sidereon_locate_source_with",
-            "arrival_times_s"
-        ));
-        let options = c_try!(source_options_from_c(
-            "sidereon_locate_source_with",
-            options
-        ));
+        let (parsed_sensors, arrivals, options) = c_try!(inputs);
         let mut config = CoreSourceLocateConfig::default();
         config.options = options;
         config.include_influence = include_influence;
-        match core_locate_source_with(&parsed_sensors, arrivals, propagation_speed_m_s, &config) {
+        match core_locate_source_with(&parsed_sensors, &arrivals, propagation_speed_m_s, &config) {
             Ok(inner) => {
                 write_boxed_handle(out_solution, SidereonSourceSolution { inner });
                 SidereonStatus::Ok
@@ -362,8 +368,20 @@ unsafe fn source_initial_guess_impl(
     fn_name: &'static str,
     call: SourceInitialGuessCall,
 ) -> SidereonStatus {
-    ffi_boundary(fn_name, SidereonStatus::Panic, || {
+    engine_error_operation_boundary(fn_name, SidereonStatus::Panic, || {
         let out_guess = c_try!(require_out(call.out_guess, fn_name, "out_guess"));
+        let inputs = (|| {
+            let parsed_sensors = source_sensors_from_c(fn_name, call.sensors, call.sensor_count)?;
+            let arrivals = require_slice(
+                call.arrival_times_s,
+                call.sensor_count,
+                fn_name,
+                "arrival_times_s",
+            )?
+            .to_vec();
+            let mode = source_solve_mode_from_c(fn_name, call.mode, call.reference_sensor)?;
+            Ok::<_, SidereonStatus>((parsed_sensors, arrivals, mode))
+        })();
         *out_guess = SidereonSourceInitialGuess {
             dimension: 0,
             position_m: [0.0; 3],
@@ -371,25 +389,10 @@ unsafe fn source_initial_guess_impl(
             origin_time_s: 0.0,
             residual_rms_s: 0.0,
         };
-        let parsed_sensors = c_try!(source_sensors_from_c(
-            fn_name,
-            call.sensors,
-            call.sensor_count
-        ));
-        let arrivals = c_try!(require_slice(
-            call.arrival_times_s,
-            call.sensor_count,
-            fn_name,
-            "arrival_times_s"
-        ));
-        let mode = c_try!(source_solve_mode_from_c(
-            fn_name,
-            call.mode,
-            call.reference_sensor
-        ));
+        let (parsed_sensors, arrivals, mode) = c_try!(inputs);
         match core_closed_form_initial_guess(
             &parsed_sensors,
-            arrivals,
+            &arrivals,
             call.propagation_speed_m_s,
             mode,
         ) {
@@ -473,22 +476,24 @@ pub unsafe extern "C" fn sidereon_source_dop(
     propagation_speed_m_s: f64,
     out_dop: *mut SidereonDop,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_source_dop", SidereonStatus::Panic, || {
-        let out_dop = c_try!(require_out(out_dop, "sidereon_source_dop", "out_dop"));
-        *out_dop = empty_dop();
-        let parsed_sensors = c_try!(source_sensors_from_c(
+    engine_error_operation_boundary("sidereon_source_dop", SidereonStatus::Panic, || {
+        let out_dop = c_try!(require_uninit_out(
+            out_dop,
             "sidereon_source_dop",
-            sensors,
-            sensor_count
+            "out_dop"
         ));
-        let source_position = c_try!(source_position_from_c(
-            "sidereon_source_dop",
-            source_position_m,
-            source_dimension
-        ));
+        let inputs = (|| {
+            let parsed_sensors =
+                source_sensors_from_c("sidereon_source_dop", sensors, sensor_count)?;
+            let source_position =
+                source_position_from_c("sidereon_source_dop", source_position_m, source_dimension)?;
+            Ok::<_, SidereonStatus>((parsed_sensors, source_position))
+        })();
+        out_dop.write(empty_dop());
+        let (parsed_sensors, source_position) = c_try!(inputs);
         match core_source_dop(&parsed_sensors, &source_position, propagation_speed_m_s) {
             Ok(dop) => {
-                *out_dop = dop_to_c(dop);
+                out_dop.write(dop_to_c(dop));
                 SidereonStatus::Ok
             }
             Err(err) => map_source_localization_error("sidereon_source_dop", err),
@@ -510,22 +515,27 @@ pub unsafe extern "C" fn sidereon_source_crlb(
     timing_sigma_s: f64,
     out_crlb: *mut SidereonSourceCrlb,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_source_crlb", SidereonStatus::Panic, || {
-        let out_crlb = c_try!(require_out(out_crlb, "sidereon_source_crlb", "out_crlb"));
-        *out_crlb = SidereonSourceCrlb {
+    engine_error_operation_boundary("sidereon_source_crlb", SidereonStatus::Panic, || {
+        let out_crlb = c_try!(require_uninit_out(
+            out_crlb,
+            "sidereon_source_crlb",
+            "out_crlb"
+        ));
+        let inputs = (|| {
+            let parsed_sensors =
+                source_sensors_from_c("sidereon_source_crlb", sensors, sensor_count)?;
+            let source_position = source_position_from_c(
+                "sidereon_source_crlb",
+                source_position_m,
+                source_dimension,
+            )?;
+            Ok::<_, SidereonStatus>((parsed_sensors, source_position))
+        })();
+        out_crlb.write(SidereonSourceCrlb {
             dop: empty_dop(),
             covariance: source_covariance_empty(),
-        };
-        let parsed_sensors = c_try!(source_sensors_from_c(
-            "sidereon_source_crlb",
-            sensors,
-            sensor_count
-        ));
-        let source_position = c_try!(source_position_from_c(
-            "sidereon_source_crlb",
-            source_position_m,
-            source_dimension
-        ));
+        });
+        let (parsed_sensors, source_position) = c_try!(inputs);
         match core_source_crlb(
             &parsed_sensors,
             &source_position,
@@ -533,10 +543,10 @@ pub unsafe extern "C" fn sidereon_source_crlb(
             timing_sigma_s,
         ) {
             Ok(CoreSourceCrlb { dop, covariance }) => {
-                *out_crlb = SidereonSourceCrlb {
+                out_crlb.write(SidereonSourceCrlb {
                     dop: dop_to_c(dop),
                     covariance: source_covariance_to_c(&covariance),
-                };
+                });
                 SidereonStatus::Ok
             }
             Err(err) => map_source_localization_error("sidereon_source_crlb", err),
@@ -556,15 +566,22 @@ pub unsafe extern "C" fn sidereon_source_solution_summary(
         "sidereon_source_solution_summary",
         SidereonStatus::Panic,
         || {
-            let solution = c_try!(require_ref(
-                solution,
-                "sidereon_source_solution_summary",
-                "solution"
-            ));
             let out_summary = c_try!(require_out(
                 out_summary,
                 "sidereon_source_solution_summary",
                 "out_summary"
+            ));
+            c_try!(reject_output_overlaps_handle(
+                "sidereon_source_solution_summary",
+                out_summary,
+                "out_summary",
+                solution,
+                "solution"
+            ));
+            let solution = c_try!(require_ref(
+                solution,
+                "sidereon_source_solution_summary",
+                "solution"
             ));
             *out_summary = source_summary_to_c(&solution.inner);
             SidereonStatus::Ok
@@ -575,7 +592,7 @@ pub unsafe extern "C" fn sidereon_source_solution_summary(
 /// Copy the source solution covariance when available.
 ///
 /// Safety: solution must be a live handle; out_covariance and out_available
-/// must point to writable values.
+/// must point to writable values. The two output ranges must not overlap.
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_source_solution_covariance(
     solution: *const SidereonSourceSolution,
@@ -586,11 +603,27 @@ pub unsafe extern "C" fn sidereon_source_solution_covariance(
         "sidereon_source_solution_covariance",
         SidereonStatus::Panic,
         || {
-            let solution = c_try!(require_ref(
-                solution,
-                "sidereon_source_solution_covariance",
-                "solution"
-            ));
+            if !out_covariance.is_null() && !out_available.is_null() {
+                let covariance_range = c_try!(super::checked_output_range(
+                    "sidereon_source_solution_covariance",
+                    out_covariance,
+                    1,
+                    "out_covariance"
+                ));
+                let available_range = c_try!(super::checked_output_range(
+                    "sidereon_source_solution_covariance",
+                    out_available,
+                    1,
+                    "out_available"
+                ));
+                c_try!(super::reject_overlapping_outputs(
+                    "sidereon_source_solution_covariance",
+                    covariance_range,
+                    available_range,
+                    "out_covariance",
+                    "out_available"
+                ));
+            }
             let out_covariance = c_try!(require_out(
                 out_covariance,
                 "sidereon_source_solution_covariance",
@@ -600,6 +633,25 @@ pub unsafe extern "C" fn sidereon_source_solution_covariance(
                 out_available,
                 "sidereon_source_solution_covariance",
                 "out_available"
+            ));
+            c_try!(reject_output_overlaps_handle(
+                "sidereon_source_solution_covariance",
+                out_covariance,
+                "out_covariance",
+                solution,
+                "solution"
+            ));
+            c_try!(reject_output_overlaps_handle(
+                "sidereon_source_solution_covariance",
+                out_available,
+                "out_available",
+                solution,
+                "solution"
+            ));
+            let solution = c_try!(require_ref(
+                solution,
+                "sidereon_source_solution_covariance",
+                "solution"
             ));
             *out_available = false;
             *out_covariance = source_covariance_empty();
@@ -628,6 +680,30 @@ pub unsafe extern "C" fn sidereon_source_solution_residuals(
         "sidereon_source_solution_residuals",
         SidereonStatus::Panic,
         || {
+            c_try!(reject_output_overlaps_handle(
+                "sidereon_source_solution_residuals",
+                out_written,
+                "out_written",
+                solution,
+                "solution"
+            ));
+            c_try!(reject_output_overlaps_handle(
+                "sidereon_source_solution_residuals",
+                out_required,
+                "out_required",
+                solution,
+                "solution"
+            ));
+            c_try!(reject_outputs_overlapping_handle(
+                "sidereon_source_solution_residuals",
+                &[
+                    (out.cast(), size_of::<SidereonSourceResidual>(), len, "out"),
+                    (out_written.cast(), size_of::<usize>(), 1, "out_written"),
+                    (out_required.cast(), size_of::<usize>(), 1, "out_required")
+                ],
+                solution,
+                "solution"
+            ));
             c_try!(init_copy_counts(
                 "sidereon_source_solution_residuals",
                 out_written,
@@ -675,6 +751,35 @@ pub unsafe extern "C" fn sidereon_source_solution_influences(
         "sidereon_source_solution_influences",
         SidereonStatus::Panic,
         || {
+            c_try!(reject_output_overlaps_handle(
+                "sidereon_source_solution_influences",
+                out_written,
+                "out_written",
+                solution,
+                "solution"
+            ));
+            c_try!(reject_output_overlaps_handle(
+                "sidereon_source_solution_influences",
+                out_required,
+                "out_required",
+                solution,
+                "solution"
+            ));
+            c_try!(reject_outputs_overlapping_handle(
+                "sidereon_source_solution_influences",
+                &[
+                    (
+                        out.cast(),
+                        size_of::<SidereonSourceSensorInfluence>(),
+                        len,
+                        "out"
+                    ),
+                    (out_written.cast(), size_of::<usize>(), 1, "out_written"),
+                    (out_required.cast(), size_of::<usize>(), 1, "out_required")
+                ],
+                solution,
+                "solution"
+            ));
             c_try!(init_copy_counts(
                 "sidereon_source_solution_influences",
                 out_written,
@@ -854,7 +959,34 @@ unsafe fn source_position_from_c(
     Ok(require_slice(source_position_m, dimension, fn_name, "source_position_m")?.to_vec())
 }
 
-fn map_source_localization_error(
+fn source_localization_node(kind: &str, fields: Value) -> Value {
+    json!({"kind": kind, "fields": fields})
+}
+
+pub(crate) fn source_localization_error_value(error: &CoreSourceLocalizationError) -> Value {
+    use CoreSourceLocalizationError as E;
+    match error {
+        E::InvalidInput { field, reason } => {
+            source_localization_node("invalid_input", json!({"field": field, "reason": reason}))
+        }
+        E::TooFewSensors { sensors, needed } => source_localization_node(
+            "too_few_sensors",
+            json!({"sensors": sensors, "needed": needed}),
+        ),
+        E::InitializerSingular => source_localization_node("initializer_singular", json!({})),
+        E::Geometry(err) => {
+            source_localization_node("geometry", json!({"cause": dop_error_value(err)}))
+        }
+        E::Solver(err) => {
+            source_localization_node("solver", json!({"cause": trls_error_value(err)}))
+        }
+        E::DidNotConverge { status } => {
+            source_localization_node("did_not_converge", json!({"status": status}))
+        }
+    }
+}
+
+fn map_source_localization_error_retaining(
     fn_name: &str,
     err: CoreSourceLocalizationError,
 ) -> SidereonStatus {
@@ -870,6 +1002,18 @@ fn map_source_localization_error(
         | CoreSourceLocalizationError::Solver(_)
         | CoreSourceLocalizationError::DidNotConverge { .. } => SidereonStatus::Solve,
     }
+}
+
+fn map_source_localization_error(
+    fn_name: &str,
+    err: CoreSourceLocalizationError,
+) -> SidereonStatus {
+    record_engine_error(
+        SidereonEngineErrorFamily::SourceLocalization,
+        fn_name,
+        source_localization_error_value(&err),
+    );
+    map_source_localization_error_retaining(fn_name, err)
 }
 
 fn source_initial_guess_to_c(initial: &CoreSourceInitialGuess) -> SidereonSourceInitialGuess {
@@ -920,6 +1064,10 @@ fn source_solve_mode_from_c(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine_error::{
+        clear_engine_error, sidereon_last_engine_error_info, sidereon_last_engine_error_payload,
+        SidereonEngineErrorFamily, SidereonEngineErrorInfo,
+    };
     use std::mem::MaybeUninit;
 
     fn arrivals(
@@ -1067,12 +1215,34 @@ mod tests {
             SidereonStatus::Ok
         );
 
+        // sidereon-core's own solves of the same inputs, with and without
+        // the influence diagnostics.
+        let core_sensors =
+            unsafe { source_sensors_from_c("test", sensors.as_ptr(), sensors.len()) }
+                .expect("sensors");
+        let core_solve = |include_influence: bool| {
+            let mut config = CoreSourceLocateConfig::default();
+            config.options = source_options_from_c("test", &options).expect("options");
+            config.include_influence = include_influence;
+            core_locate_source_with(&core_sensors, &times, speed, &config).expect("core solve")
+        };
+        let core_with = core_solve(true);
+        let core_lean = core_solve(false);
         let legacy_summary = solution_summary(legacy_solution);
         let explicit_summary = solution_summary(explicit_solution);
         let lean_summary = solution_summary(lean_solution);
-        assert_eq!(legacy_summary.influence_count, sensors.len());
-        assert_eq!(explicit_summary.influence_count, sensors.len());
-        assert_eq!(lean_summary.influence_count, 0);
+        assert_eq!(
+            legacy_summary.influence_count,
+            core_with.per_sensor_influence.len()
+        );
+        assert_eq!(
+            explicit_summary.influence_count,
+            core_with.per_sensor_influence.len()
+        );
+        assert_eq!(
+            lean_summary.influence_count,
+            core_lean.per_sensor_influence.len()
+        );
         assert_position_and_origin_bits_equal(&explicit_summary, &legacy_summary);
         assert_position_and_origin_bits_equal(&lean_summary, &legacy_summary);
 
@@ -1090,7 +1260,10 @@ mod tests {
             },
             SidereonStatus::Ok
         );
-        assert_eq!((written, required), (0, 0));
+        assert_eq!(
+            (written, required),
+            (0, core_lean.per_sensor_influence.len())
+        );
 
         unsafe {
             sidereon_source_solution_free(lean_solution);
@@ -1160,9 +1333,32 @@ mod tests {
             SidereonStatus::Ok
         );
         let deprecated = unsafe { deprecated.assume_init() };
+        // sidereon-core's own closed-form seed of the same arrivals.
+        let core_sensors =
+            unsafe { source_sensors_from_c("test", sensors.as_ptr(), sensors.len()) }
+                .expect("sensors");
+        let core_mode =
+            source_solve_mode_from_c("test", SidereonSourceSolveMode::Toa as u32, 0).expect("mode");
+        let expected = source_initial_guess_to_c(
+            &core_closed_form_initial_guess(&core_sensors, &times, 343.0, core_mode)
+                .expect("core closed form"),
+        );
+        assert_eq!(closed_form.dimension, expected.dimension);
+        assert_eq!(closed_form.has_origin_time_s, expected.has_origin_time_s);
+        for (got, want) in closed_form.position_m.iter().zip(expected.position_m) {
+            assert_eq!(got.to_bits(), want.to_bits());
+        }
+        assert_eq!(
+            closed_form.origin_time_s.to_bits(),
+            expected.origin_time_s.to_bits()
+        );
+        assert_eq!(
+            closed_form.residual_rms_s.to_bits(),
+            expected.residual_rms_s.to_bits()
+        );
 
-        assert_eq!(closed_form.dimension, 2);
-        assert!(closed_form.has_origin_time_s);
+        // The seed recovers the source and origin time the arrivals were
+        // formed from.
         assert!((closed_form.position_m[0] - 210.0).abs() < 1.0e-8);
         assert!((closed_form.position_m[1] - 170.0).abs() < 1.0e-8);
         assert!((closed_form.origin_time_s - 2.75).abs() < 1.0e-10);
@@ -1179,5 +1375,498 @@ mod tests {
             closed_form.residual_rms_s.to_bits(),
             deprecated.residual_rms_s.to_bits()
         );
+    }
+
+    #[test]
+    fn table_driven_source_localization_error_mapping() {
+        use sidereon_core::dop::DopError;
+        use trust_region_least_squares::trf::{BackendError, TrfError};
+
+        let cases: Vec<(CoreSourceLocalizationError, &'static str)> = vec![
+            (
+                CoreSourceLocalizationError::InvalidInput {
+                    field: "propagation_speed_m_s",
+                    reason: "must be positive and finite",
+                },
+                "invalid_input",
+            ),
+            (
+                CoreSourceLocalizationError::TooFewSensors {
+                    sensors: 2,
+                    needed: 4,
+                },
+                "too_few_sensors",
+            ),
+            (
+                CoreSourceLocalizationError::InitializerSingular,
+                "initializer_singular",
+            ),
+            (
+                CoreSourceLocalizationError::Geometry(DopError::InvalidInput {
+                    field: "source_position_m",
+                    reason: "coordinates must be finite",
+                }),
+                "geometry",
+            ),
+            (
+                CoreSourceLocalizationError::Geometry(DopError::TooFewSatellites),
+                "geometry",
+            ),
+            (
+                CoreSourceLocalizationError::Geometry(DopError::Singular),
+                "geometry",
+            ),
+            (
+                CoreSourceLocalizationError::Solver(TrfError::EmptyResidual),
+                "solver",
+            ),
+            (
+                CoreSourceLocalizationError::Solver(TrfError::InsufficientRows { m: 1, n: 3 }),
+                "solver",
+            ),
+            (
+                CoreSourceLocalizationError::Solver(TrfError::Backend(BackendError::Failed(
+                    "backend divergence".into(),
+                ))),
+                "solver",
+            ),
+            (
+                CoreSourceLocalizationError::DidNotConverge { status: -1 },
+                "did_not_converge",
+            ),
+        ];
+
+        for (err, expected_kind) in cases {
+            let val = source_localization_error_value(&err);
+            assert_eq!(val["kind"], expected_kind);
+            match &err {
+                CoreSourceLocalizationError::InvalidInput { field, reason } => {
+                    assert_eq!(val["fields"]["field"], *field);
+                    assert_eq!(val["fields"]["reason"], *reason);
+                }
+                CoreSourceLocalizationError::TooFewSensors { sensors, needed } => {
+                    assert_eq!(val["fields"]["sensors"], *sensors);
+                    assert_eq!(val["fields"]["needed"], *needed);
+                }
+                CoreSourceLocalizationError::InitializerSingular => {
+                    assert_eq!(val["fields"], json!({}));
+                }
+                CoreSourceLocalizationError::Geometry(dop_err) => match dop_err {
+                    DopError::InvalidInput { field, reason } => {
+                        assert_eq!(val["fields"]["cause"]["kind"], "invalid_input");
+                        assert_eq!(val["fields"]["cause"]["fields"]["field"], *field);
+                        assert_eq!(val["fields"]["cause"]["fields"]["reason"], *reason);
+                    }
+                    DopError::TooFewSatellites => {
+                        assert_eq!(val["fields"]["cause"]["kind"], "too_few_satellites");
+                    }
+                    DopError::Singular => {
+                        assert_eq!(val["fields"]["cause"]["kind"], "singular");
+                    }
+                },
+                CoreSourceLocalizationError::Solver(trf_err) => match trf_err {
+                    TrfError::EmptyResidual => {
+                        assert_eq!(val["fields"]["cause"]["kind"], "empty_residual");
+                    }
+                    TrfError::InsufficientRows { m, n } => {
+                        assert_eq!(val["fields"]["cause"]["kind"], "insufficient_rows");
+                        assert_eq!(val["fields"]["cause"]["fields"]["m"], *m);
+                        assert_eq!(val["fields"]["cause"]["fields"]["n"], *n);
+                    }
+                    TrfError::Backend(_) => {
+                        assert_eq!(val["fields"]["cause"]["kind"], "backend");
+                    }
+                    _ => {}
+                },
+                CoreSourceLocalizationError::DidNotConverge { status } => {
+                    assert_eq!(val["fields"]["status"], *status);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn source_localization_public_producer_control_and_refusals() {
+        clear_engine_error();
+
+        let sensors = [
+            SidereonSourceSensor {
+                dimension: 3,
+                position_m: [0.0, 0.0, 0.0],
+                has_propagation_speed_m_s: false,
+                propagation_speed_m_s: 0.0,
+            },
+            SidereonSourceSensor {
+                dimension: 3,
+                position_m: [1200.0, 0.0, 0.0],
+                has_propagation_speed_m_s: false,
+                propagation_speed_m_s: 0.0,
+            },
+            SidereonSourceSensor {
+                dimension: 3,
+                position_m: [0.0, 900.0, 0.0],
+                has_propagation_speed_m_s: false,
+                propagation_speed_m_s: 0.0,
+            },
+            SidereonSourceSensor {
+                dimension: 3,
+                position_m: [0.0, 0.0, 700.0],
+                has_propagation_speed_m_s: false,
+                propagation_speed_m_s: 0.0,
+            },
+            SidereonSourceSensor {
+                dimension: 3,
+                position_m: [1100.0, 800.0, 600.0],
+                has_propagation_speed_m_s: false,
+                propagation_speed_m_s: 0.0,
+            },
+        ];
+        let speed = 343.0;
+        let times = arrivals(&sensors, &[320.0, 260.0, 180.0], 12.5, speed);
+        let options = default_options();
+
+        // 1. Valid producer control
+        let mut solution = ptr::null_mut();
+        unsafe {
+            assert_eq!(
+                sidereon_locate_source_with(
+                    sensors.as_ptr(),
+                    sensors.len(),
+                    times.as_ptr(),
+                    speed,
+                    &options,
+                    false,
+                    &mut solution,
+                ),
+                SidereonStatus::Ok
+            );
+            assert!(!solution.is_null());
+
+            let mut info = SidereonEngineErrorInfo {
+                family: SidereonEngineErrorFamily::SourceLocalization,
+                payload_len: 123,
+            };
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+            assert_eq!(info.payload_len, 0);
+
+            sidereon_source_solution_free(solution);
+        }
+
+        // 2. Real public refusal: too few sensors (2 sensors for 3D ToA requires at least 4)
+        unsafe {
+            let mut bad_solution = ptr::null_mut();
+            assert_eq!(
+                sidereon_locate_source_with(
+                    sensors.as_ptr(),
+                    2,
+                    times.as_ptr(),
+                    speed,
+                    &options,
+                    false,
+                    &mut bad_solution,
+                ),
+                SidereonStatus::InvalidArgument
+            );
+            assert!(bad_solution.is_null());
+
+            let mut info = SidereonEngineErrorInfo {
+                family: SidereonEngineErrorFamily::None,
+                payload_len: 0,
+            };
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::SourceLocalization);
+            assert!(info.payload_len > 0);
+
+            let mut written = 0;
+            let mut required = 0;
+            let mut buf = vec![0u8; info.payload_len];
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    buf.as_mut_ptr(),
+                    buf.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, info.payload_len);
+            let payload: Value = serde_json::from_slice(&buf).expect("valid JSON payload");
+            assert_eq!(payload["schema_version"], 1);
+            assert_eq!(payload["family"], "source_localization");
+            assert_eq!(payload["operation"], "sidereon_locate_source_with");
+            assert_eq!(payload["error"]["kind"], "too_few_sensors");
+            assert_eq!(payload["error"]["fields"]["sensors"], 2);
+            assert_eq!(payload["error"]["fields"]["needed"], 4);
+        }
+    }
+
+    #[test]
+    fn source_localization_producer_early_clearing_and_retention() {
+        clear_engine_error();
+
+        let sensors = [
+            SidereonSourceSensor {
+                dimension: 3,
+                position_m: [0.0, 0.0, 0.0],
+                has_propagation_speed_m_s: false,
+                propagation_speed_m_s: 0.0,
+            },
+            SidereonSourceSensor {
+                dimension: 3,
+                position_m: [1200.0, 0.0, 0.0],
+                has_propagation_speed_m_s: false,
+                propagation_speed_m_s: 0.0,
+            },
+            SidereonSourceSensor {
+                dimension: 3,
+                position_m: [0.0, 900.0, 0.0],
+                has_propagation_speed_m_s: false,
+                propagation_speed_m_s: 0.0,
+            },
+            SidereonSourceSensor {
+                dimension: 3,
+                position_m: [0.0, 0.0, 700.0],
+                has_propagation_speed_m_s: false,
+                propagation_speed_m_s: 0.0,
+            },
+            SidereonSourceSensor {
+                dimension: 3,
+                position_m: [1100.0, 800.0, 600.0],
+                has_propagation_speed_m_s: false,
+                propagation_speed_m_s: 0.0,
+            },
+        ];
+        let speed = 343.0;
+        let times = arrivals(&sensors, &[320.0, 260.0, 180.0], 12.5, speed);
+        let options = default_options();
+
+        unsafe {
+            // Seed retained engine error with actual refusal
+            let mut bad_solution = ptr::null_mut();
+            assert_eq!(
+                sidereon_locate_source_with(
+                    sensors.as_ptr(),
+                    2,
+                    times.as_ptr(),
+                    speed,
+                    &options,
+                    false,
+                    &mut bad_solution,
+                ),
+                SidereonStatus::InvalidArgument
+            );
+
+            let mut info = SidereonEngineErrorInfo {
+                family: SidereonEngineErrorFamily::None,
+                payload_len: 0,
+            };
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::SourceLocalization);
+            let expected_len = info.payload_len;
+            assert!(expected_len > 0);
+
+            // Free retains
+            sidereon_source_solution_free(ptr::null_mut());
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::SourceLocalization);
+            assert_eq!(info.payload_len, expected_len);
+
+            // Pass 1: query length retains
+            let mut written = 999;
+            let mut required = 0;
+            assert_eq!(
+                sidereon_last_engine_error_payload(ptr::null_mut(), 0, &mut written, &mut required),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, 0);
+            assert_eq!(required, expected_len);
+
+            // Short buffer query returns InvalidArgument, writes 0, retains
+            let mut short_buf = vec![0u8; expected_len - 1];
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    short_buf.as_mut_ptr(),
+                    short_buf.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::InvalidArgument
+            );
+            assert_eq!(written, 0);
+            assert_eq!(required, expected_len);
+
+            // Pass 2: Exact buffer query succeeds and retains
+            let mut buf = vec![0u8; expected_len];
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    buf.as_mut_ptr(),
+                    buf.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, expected_len);
+            assert_eq!(required, expected_len);
+
+            // Retained after read
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::SourceLocalization);
+
+            // Create a valid solution handle to test live handle retention
+            let mut valid_solution = ptr::null_mut();
+            assert_eq!(
+                sidereon_locate_source_with(
+                    sensors.as_ptr(),
+                    sensors.len(),
+                    times.as_ptr(),
+                    speed,
+                    &options,
+                    true,
+                    &mut valid_solution,
+                ),
+                SidereonStatus::Ok
+            );
+            assert!(!valid_solution.is_null());
+
+            // Successful producer reset verified
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+            assert_eq!(info.payload_len, 0);
+
+            // Now seed a new real refusal while valid_solution is live
+            assert_eq!(
+                sidereon_locate_source_with(
+                    sensors.as_ptr(),
+                    2,
+                    times.as_ptr(),
+                    speed,
+                    &options,
+                    false,
+                    &mut bad_solution,
+                ),
+                SidereonStatus::InvalidArgument
+            );
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::SourceLocalization);
+            let active_len = info.payload_len;
+
+            // Capture payload before calling getters
+            let mut payload_before = vec![0u8; active_len];
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    payload_before.as_mut_ptr(),
+                    payload_before.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+
+            // Call inspectors on live handle: summary, covariance, residuals, influences
+            let mut summary = MaybeUninit::uninit();
+            assert_eq!(
+                sidereon_source_solution_summary(valid_solution, summary.as_mut_ptr()),
+                SidereonStatus::Ok
+            );
+
+            let mut cov = MaybeUninit::uninit();
+            let mut avail = false;
+            assert_eq!(
+                sidereon_source_solution_covariance(valid_solution, cov.as_mut_ptr(), &mut avail),
+                SidereonStatus::Ok
+            );
+            assert!(avail);
+
+            let mut res_written = 0;
+            let mut res_required = 0;
+            assert_eq!(
+                sidereon_source_solution_residuals(
+                    valid_solution,
+                    ptr::null_mut(),
+                    0,
+                    &mut res_written,
+                    &mut res_required,
+                ),
+                SidereonStatus::Ok
+            );
+
+            let mut inf_written = 0;
+            let mut inf_required = 0;
+            assert_eq!(
+                sidereon_source_solution_influences(
+                    valid_solution,
+                    ptr::null_mut(),
+                    0,
+                    &mut inf_written,
+                    &mut inf_required,
+                ),
+                SidereonStatus::Ok
+            );
+
+            // Verify payload is retained after getters
+            let mut payload_after = vec![0u8; active_len];
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    payload_after.as_mut_ptr(),
+                    payload_after.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(payload_before, payload_after);
+
+            // Free valid solution and verify retention
+            sidereon_source_solution_free(valid_solution);
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::SourceLocalization);
+            assert_eq!(info.payload_len, active_len);
+
+            // Producer early null reset
+            assert_eq!(
+                sidereon_locate_source_with(
+                    sensors.as_ptr(),
+                    sensors.len(),
+                    times.as_ptr(),
+                    speed,
+                    &options,
+                    false,
+                    ptr::null_mut(),
+                ),
+                SidereonStatus::NullPointer
+            );
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+            assert_eq!(info.payload_len, 0);
+        }
     }
 }

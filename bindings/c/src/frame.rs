@@ -1,4 +1,5 @@
 use super::*;
+use crate::engine_error::engine_error_operation_boundary;
 
 /// Convert a WGS84 geodetic position (latitude/longitude in radians, ellipsoidal
 /// height in meters) to an ITRF/ECEF position in meters. Pure value in, value
@@ -12,7 +13,7 @@ pub unsafe extern "C" fn sidereon_geodetic_to_ecef(
     geodetic: *const SidereonGeodetic,
     out_ecef: *mut SidereonItrfPosition,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_geodetic_to_ecef", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_geodetic_to_ecef", SidereonStatus::Panic, || {
         let out_ecef = c_try!(require_out(
             out_ecef,
             "sidereon_geodetic_to_ecef",
@@ -60,7 +61,7 @@ pub unsafe extern "C" fn sidereon_ecef_to_geodetic(
     ecef: *const SidereonItrfPosition,
     out_geodetic: *mut SidereonGeodetic,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_ecef_to_geodetic", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_ecef_to_geodetic", SidereonStatus::Panic, || {
         let out_geodetic = c_try!(require_out(
             out_geodetic,
             "sidereon_ecef_to_geodetic",
@@ -90,7 +91,7 @@ pub unsafe extern "C" fn sidereon_frame_gcrs_to_itrs_matrix(
     ts: *const SidereonTimeScales,
     out_matrix: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_frame_gcrs_to_itrs_matrix",
         SidereonStatus::Panic,
         || {
@@ -113,7 +114,7 @@ pub unsafe extern "C" fn sidereon_frame_itrs_to_gcrs_matrix(
     ts: *const SidereonTimeScales,
     out_matrix: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_frame_itrs_to_gcrs_matrix",
         SidereonStatus::Panic,
         || {
@@ -137,7 +138,7 @@ pub unsafe extern "C" fn sidereon_frame_mean_of_date_to_itrs_matrix(
     ts: *const SidereonTimeScales,
     out_matrix: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_frame_mean_of_date_to_itrs_matrix",
         SidereonStatus::Panic,
         || {
@@ -163,7 +164,7 @@ pub unsafe extern "C" fn sidereon_frame_gcrs_to_itrs_matrix_with_polar_motion(
     yp_arcsec: f64,
     out_matrix: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_frame_gcrs_to_itrs_matrix_with_polar_motion",
         SidereonStatus::Panic,
         || {
@@ -191,7 +192,7 @@ pub unsafe extern "C" fn sidereon_frame_itrs_to_gcrs_matrix_with_polar_motion(
     yp_arcsec: f64,
     out_matrix: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_frame_itrs_to_gcrs_matrix_with_polar_motion",
         SidereonStatus::Panic,
         || {
@@ -219,7 +220,7 @@ pub unsafe extern "C" fn sidereon_frame_mean_of_date_to_itrs_matrix_with_polar_m
     yp_arcsec: f64,
     out_matrix: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_frame_mean_of_date_to_itrs_matrix_with_polar_motion",
         SidereonStatus::Panic,
         || {
@@ -245,7 +246,7 @@ pub unsafe extern "C" fn sidereon_frame_polar_motion_matrix(
     yp_arcsec: f64,
     out_matrix: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_frame_polar_motion_matrix",
         SidereonStatus::Panic,
         || {
@@ -254,7 +255,6 @@ pub unsafe extern "C" fn sidereon_frame_polar_motion_matrix(
                 "sidereon_frame_polar_motion_matrix",
                 "out_matrix"
             ));
-            let out_matrix = out_matrix as *mut f64;
             for idx in 0..9 {
                 *out_matrix.add(idx) = 0.0;
             }
@@ -284,10 +284,11 @@ pub unsafe extern "C" fn sidereon_frame_gmst_radians(
     ts: *const SidereonTimeScales,
     out: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_frame_gmst_radians", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_frame_gmst_radians", SidereonStatus::Panic, || {
         let out = c_try!(require_out(out, "sidereon_frame_gmst_radians", "out"));
         *out = 0.0;
-        let ts = c_try!(require_ref(ts, "sidereon_frame_gmst_radians", "ts")).to_core();
+        let ts = c_try!(c_try!(require_ref(ts, "sidereon_frame_gmst_radians", "ts"))
+            .to_core("sidereon_frame_gmst_radians"));
         match ft::greenwich_mean_sidereal_time_radians(&ts) {
             Ok(v) => {
                 *out = v;
@@ -308,10 +309,11 @@ pub unsafe extern "C" fn sidereon_frame_gast_radians(
     ts: *const SidereonTimeScales,
     out: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_frame_gast_radians", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_frame_gast_radians", SidereonStatus::Panic, || {
         let out = c_try!(require_out(out, "sidereon_frame_gast_radians", "out"));
         *out = 0.0;
-        let ts = c_try!(require_ref(ts, "sidereon_frame_gast_radians", "ts")).to_core();
+        let ts = c_try!(c_try!(require_ref(ts, "sidereon_frame_gast_radians", "ts"))
+            .to_core("sidereon_frame_gast_radians"));
         match ft::greenwich_apparent_sidereal_time_radians(&ts) {
             Ok(v) => {
                 *out = v;
@@ -333,12 +335,11 @@ pub unsafe extern "C" fn sidereon_frame_mat3_vec3_mul(
     p: *const f64,
     out: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_frame_mat3_vec3_mul",
         SidereonStatus::Panic,
         || {
             let out = c_try!(require_out(out, "sidereon_frame_mat3_vec3_mul", "out"));
-            let out = out as *mut f64;
             for idx in 0..3 {
                 *out.add(idx) = 0.0;
             }
@@ -360,8 +361,9 @@ pub unsafe extern "C" fn sidereon_frame_mat3_vec3_mul(
 /// sidereon_core::astro::frames::transforms::teme_to_gcrs_compute.
 ///
 /// Safety: position_km and velocity_km_s point to 3 doubles each; ts points to a
-/// SidereonTimeScales; out_position_km and out_velocity_km_s point to 3 doubles
-/// each.
+/// SidereonTimeScales; out_position_km and out_velocity_km_s point to disjoint
+/// 3-double ranges. Either input vector may also be used as its corresponding
+/// output vector; inputs are copied before outputs are initialized.
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_frame_teme_to_gcrs(
     position_km: *const f64,
@@ -371,34 +373,62 @@ pub unsafe extern "C" fn sidereon_frame_teme_to_gcrs(
     out_position_km: *mut f64,
     out_velocity_km_s: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_frame_teme_to_gcrs", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_frame_teme_to_gcrs", SidereonStatus::Panic, || {
+        if !out_position_km.is_null() && !out_velocity_km_s.is_null() {
+            let outputs = [
+                Some((
+                    c_try!(super::checked_output_range(
+                        "sidereon_frame_teme_to_gcrs",
+                        out_position_km,
+                        3,
+                        "out_position_km"
+                    )),
+                    "out_position_km",
+                )),
+                Some((
+                    c_try!(super::checked_output_range(
+                        "sidereon_frame_teme_to_gcrs",
+                        out_velocity_km_s,
+                        3,
+                        "out_velocity_km_s"
+                    )),
+                    "out_velocity_km_s",
+                )),
+            ];
+            c_try!(super::reject_overlapping_optional_outputs(
+                "sidereon_frame_teme_to_gcrs",
+                &outputs
+            ));
+        }
+        // Read every borrowed input before initializing outputs so callers can
+        // safely use an input buffer as an output buffer. Defer errors until
+        // after the output slots have received their legacy zero reset.
+        let inputs_result = (|| {
+            let position = read_vec3("sidereon_frame_teme_to_gcrs", "position_km", position_km)?;
+            let velocity = read_vec3(
+                "sidereon_frame_teme_to_gcrs",
+                "velocity_km_s",
+                velocity_km_s,
+            )?;
+            let ts = require_ref(ts, "sidereon_frame_teme_to_gcrs", "ts")?
+                .to_core("sidereon_frame_teme_to_gcrs")?;
+            Ok((position, velocity, ts))
+        })();
         let out_position_km = c_try!(require_out(
             out_position_km,
             "sidereon_frame_teme_to_gcrs",
             "out_position_km"
         ));
-        let out_position_km = out_position_km as *mut f64;
         let out_velocity_km_s = c_try!(require_out(
             out_velocity_km_s,
             "sidereon_frame_teme_to_gcrs",
             "out_velocity_km_s"
         ));
-        let out_velocity_km_s = out_velocity_km_s as *mut f64;
         for idx in 0..3 {
             *out_position_km.add(idx) = 0.0;
             *out_velocity_km_s.add(idx) = 0.0;
         }
-        let position_km = c_try!(read_vec3(
-            "sidereon_frame_teme_to_gcrs",
-            "position_km",
-            position_km
-        ));
-        let velocity_km_s = c_try!(read_vec3(
-            "sidereon_frame_teme_to_gcrs",
-            "velocity_km_s",
-            velocity_km_s
-        ));
-        let ts = c_try!(require_ref(ts, "sidereon_frame_teme_to_gcrs", "ts")).to_core();
+        let (position_km, velocity_km_s, ts) = c_try!(inputs_result);
         let state = ft::TemeStateKm {
             position_km,
             velocity_km_s,
@@ -426,13 +456,12 @@ pub unsafe extern "C" fn sidereon_frame_gcrs_to_itrs(
     skyfield_compat: bool,
     out_position_km: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_frame_gcrs_to_itrs", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_frame_gcrs_to_itrs", SidereonStatus::Panic, || {
         let out_position_km = c_try!(require_out(
             out_position_km,
             "sidereon_frame_gcrs_to_itrs",
             "out_position_km"
         ));
-        let out_position_km = out_position_km as *mut f64;
         for idx in 0..3 {
             *out_position_km.add(idx) = 0.0;
         }
@@ -441,7 +470,8 @@ pub unsafe extern "C" fn sidereon_frame_gcrs_to_itrs(
             "position_km",
             position_km
         ));
-        let ts = c_try!(require_ref(ts, "sidereon_frame_gcrs_to_itrs", "ts")).to_core();
+        let ts = c_try!(c_try!(require_ref(ts, "sidereon_frame_gcrs_to_itrs", "ts"))
+            .to_core("sidereon_frame_gcrs_to_itrs"));
         match ft::gcrs_to_itrs_compute(p[0], p[1], p[2], &ts, skyfield_compat) {
             Ok((x, y, z)) => {
                 copy_vec3(out_position_km, [x, y, z]);
@@ -467,7 +497,7 @@ pub unsafe extern "C" fn sidereon_frame_gcrs_to_itrs_with_polar_motion(
     yp_arcsec: f64,
     out_position_km: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_frame_gcrs_to_itrs_with_polar_motion",
         SidereonStatus::Panic,
         || {
@@ -476,7 +506,6 @@ pub unsafe extern "C" fn sidereon_frame_gcrs_to_itrs_with_polar_motion(
                 "sidereon_frame_gcrs_to_itrs_with_polar_motion",
                 "out_position_km"
             ));
-            let out_position_km = out_position_km as *mut f64;
             for idx in 0..3 {
                 *out_position_km.add(idx) = 0.0;
             }
@@ -485,12 +514,12 @@ pub unsafe extern "C" fn sidereon_frame_gcrs_to_itrs_with_polar_motion(
                 "position_km",
                 position_km
             ));
-            let ts = c_try!(require_ref(
+            let ts = c_try!(c_try!(require_ref(
                 ts,
                 "sidereon_frame_gcrs_to_itrs_with_polar_motion",
                 "ts"
             ))
-            .to_core();
+            .to_core("sidereon_frame_gcrs_to_itrs_with_polar_motion"));
             let pole = c_try!(polar_motion_from_arcsec(
                 "sidereon_frame_gcrs_to_itrs_with_polar_motion",
                 xp_arcsec,
@@ -527,13 +556,12 @@ pub unsafe extern "C" fn sidereon_frame_itrs_to_gcrs(
     ts: *const SidereonTimeScales,
     out_position_km: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_frame_itrs_to_gcrs", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_frame_itrs_to_gcrs", SidereonStatus::Panic, || {
         let out_position_km = c_try!(require_out(
             out_position_km,
             "sidereon_frame_itrs_to_gcrs",
             "out_position_km"
         ));
-        let out_position_km = out_position_km as *mut f64;
         for idx in 0..3 {
             *out_position_km.add(idx) = 0.0;
         }
@@ -542,7 +570,8 @@ pub unsafe extern "C" fn sidereon_frame_itrs_to_gcrs(
             "position_km",
             position_km
         ));
-        let ts = c_try!(require_ref(ts, "sidereon_frame_itrs_to_gcrs", "ts")).to_core();
+        let ts = c_try!(c_try!(require_ref(ts, "sidereon_frame_itrs_to_gcrs", "ts"))
+            .to_core("sidereon_frame_itrs_to_gcrs"));
         match ft::itrs_to_gcrs_compute(p[0], p[1], p[2], &ts) {
             Ok((x, y, z)) => {
                 copy_vec3(out_position_km, [x, y, z]);
@@ -567,7 +596,7 @@ pub unsafe extern "C" fn sidereon_frame_itrs_to_gcrs_with_polar_motion(
     yp_arcsec: f64,
     out_position_km: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_frame_itrs_to_gcrs_with_polar_motion",
         SidereonStatus::Panic,
         || {
@@ -576,7 +605,6 @@ pub unsafe extern "C" fn sidereon_frame_itrs_to_gcrs_with_polar_motion(
                 "sidereon_frame_itrs_to_gcrs_with_polar_motion",
                 "out_position_km"
             ));
-            let out_position_km = out_position_km as *mut f64;
             for idx in 0..3 {
                 *out_position_km.add(idx) = 0.0;
             }
@@ -585,12 +613,12 @@ pub unsafe extern "C" fn sidereon_frame_itrs_to_gcrs_with_polar_motion(
                 "position_km",
                 position_km
             ));
-            let ts = c_try!(require_ref(
+            let ts = c_try!(c_try!(require_ref(
                 ts,
                 "sidereon_frame_itrs_to_gcrs_with_polar_motion",
                 "ts"
             ))
-            .to_core();
+            .to_core("sidereon_frame_itrs_to_gcrs_with_polar_motion"));
             let pole = c_try!(polar_motion_from_arcsec(
                 "sidereon_frame_itrs_to_gcrs_with_polar_motion",
                 xp_arcsec,
@@ -619,7 +647,7 @@ pub unsafe extern "C" fn sidereon_frame_itrs_to_geodetic(
     position_km: *const f64,
     out_geodetic: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_frame_itrs_to_geodetic",
         SidereonStatus::Panic,
         || {
@@ -628,7 +656,6 @@ pub unsafe extern "C" fn sidereon_frame_itrs_to_geodetic(
                 "sidereon_frame_itrs_to_geodetic",
                 "out_geodetic"
             ));
-            let out_geodetic = out_geodetic as *mut f64;
             for idx in 0..3 {
                 *out_geodetic.add(idx) = 0.0;
             }
@@ -659,7 +686,7 @@ pub unsafe extern "C" fn sidereon_frame_geodetic_to_itrs(
     alt_km: f64,
     out_position_km: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_frame_geodetic_to_itrs",
         SidereonStatus::Panic,
         || {
@@ -668,7 +695,6 @@ pub unsafe extern "C" fn sidereon_frame_geodetic_to_itrs(
                 "sidereon_frame_geodetic_to_itrs",
                 "out_position_km"
             ));
-            let out_position_km = out_position_km as *mut f64;
             for idx in 0..3 {
                 *out_position_km.add(idx) = 0.0;
             }
@@ -693,7 +719,7 @@ pub unsafe extern "C" fn sidereon_frame_geodetic_from_ecef_proj(
     ecef_m: *const f64,
     out_geodetic: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_frame_geodetic_from_ecef_proj",
         SidereonStatus::Panic,
         || {
@@ -702,7 +728,6 @@ pub unsafe extern "C" fn sidereon_frame_geodetic_from_ecef_proj(
                 "sidereon_frame_geodetic_from_ecef_proj",
                 "out_geodetic"
             ));
-            let out_geodetic = out_geodetic as *mut f64;
             for idx in 0..3 {
                 *out_geodetic.add(idx) = 0.0;
             }
@@ -740,7 +765,7 @@ pub unsafe extern "C" fn sidereon_frame_gcrs_to_topocentric(
     skyfield_compat: bool,
     out_topocentric: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_frame_gcrs_to_topocentric",
         SidereonStatus::Panic,
         || {
@@ -749,7 +774,6 @@ pub unsafe extern "C" fn sidereon_frame_gcrs_to_topocentric(
                 "sidereon_frame_gcrs_to_topocentric",
                 "out_topocentric"
             ));
-            let out_topocentric = out_topocentric as *mut f64;
             for idx in 0..3 {
                 *out_topocentric.add(idx) = 0.0;
             }
@@ -758,7 +782,10 @@ pub unsafe extern "C" fn sidereon_frame_gcrs_to_topocentric(
                 "sat_gcrs_km",
                 sat_gcrs_km
             ));
-            let ts = c_try!(require_ref(ts, "sidereon_frame_gcrs_to_topocentric", "ts")).to_core();
+            let ts = c_try!(
+                c_try!(require_ref(ts, "sidereon_frame_gcrs_to_topocentric", "ts"))
+                    .to_core("sidereon_frame_gcrs_to_topocentric")
+            );
             let station = ft::GeodeticStationKm {
                 latitude_deg: station_lat_deg,
                 longitude_deg: station_lon_deg,
@@ -796,11 +823,10 @@ unsafe fn write_frame_matrix(
     compute: impl FnOnce(&CoreTimeScales) -> Result<[[f64; 3]; 3], FrameTransformError>,
 ) -> SidereonStatus {
     let out_matrix = c_try!(require_out(out_matrix, fn_name, "out_matrix"));
-    let out_matrix = out_matrix as *mut f64;
     for idx in 0..9 {
         *out_matrix.add(idx) = 0.0;
     }
-    let ts = c_try!(require_ref(ts, fn_name, "ts")).to_core();
+    let ts = c_try!(c_try!(require_ref(ts, fn_name, "ts")).to_core(fn_name));
     match compute(&ts) {
         Ok(m) => {
             copy_flat9(out_matrix, m);
@@ -819,11 +845,10 @@ unsafe fn write_frame_matrix_polar(
     compute: impl FnOnce(&CoreTimeScales, ft::PolarMotion) -> Result<[[f64; 3]; 3], FrameTransformError>,
 ) -> SidereonStatus {
     let out_matrix = c_try!(require_out(out_matrix, fn_name, "out_matrix"));
-    let out_matrix = out_matrix as *mut f64;
     for idx in 0..9 {
         *out_matrix.add(idx) = 0.0;
     }
-    let ts = c_try!(require_ref(ts, fn_name, "ts")).to_core();
+    let ts = c_try!(c_try!(require_ref(ts, fn_name, "ts")).to_core(fn_name));
     let pole = c_try!(polar_motion_from_arcsec(fn_name, xp_arcsec, yp_arcsec));
     match compute(&ts, pole) {
         Ok(m) => {

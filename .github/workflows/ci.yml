@@ -37,7 +37,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
       # shared-key so a tag-triggered release run reuses push CI's cache.
       - uses: Swatinem/rust-cache@v2
         with:
@@ -58,3 +58,102 @@ jobs:
       # check only.
       - run: cargo test --workspace --verbose
         if: runner.os == 'macOS'
+      - name: Resolve the sidereon-core fixture revision
+        if: runner.os == 'macOS'
+        id: core
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import re
+          import subprocess
+
+          metadata = json.loads(subprocess.run(
+              ["cargo", "metadata", "--format-version", "1", "--locked"],
+              check=True,
+              capture_output=True,
+              text=True,
+          ).stdout)
+          packages = {package["id"]: package for package in metadata["packages"]}
+          roots = [
+              package
+              for package in metadata["packages"]
+              if package["name"] == "sidereon-c"
+              and package["manifest_path"].endswith("/bindings/c/Cargo.toml")
+          ]
+          if len(roots) != 1:
+              raise SystemExit("expected exactly one sidereon-c workspace package")
+          root_node = next(
+              (node for node in metadata["resolve"]["nodes"] if node["id"] == roots[0]["id"]),
+              None,
+          )
+          if root_node is None:
+              raise SystemExit("cargo metadata omitted the sidereon-c dependency node")
+          direct = {}
+          for dependency in root_node["deps"]:
+              package = packages[dependency["pkg"]]
+              if package["name"] in {"sidereon", "sidereon-core"}:
+                  expected_alias = package["name"].replace("-", "_")
+                  if dependency["name"] != expected_alias:
+                      raise SystemExit(
+                          f"unexpected dependency alias for {package['name']}: "
+                          f"{dependency['name']}"
+                      )
+                  direct.setdefault(package["name"], []).append(package)
+          if any(len(direct.get(name, [])) != 1 for name in ("sidereon", "sidereon-core")):
+              raise SystemExit("expected one resolved facade and core dependency each")
+
+          facade, core = (direct[name][0] for name in ("sidereon", "sidereon-core"))
+          if facade["version"] != core["version"]:
+              raise SystemExit("resolved facade/core package versions do not match")
+
+          registry = "registry+https://github.com/rust-lang/crates.io-index"
+          if facade["source"] == registry and core["source"] == registry:
+              fixture_ref = f"v{core['version']}"
+          else:
+              git_source = re.compile(
+                  r"^git\+https://github\.com/neilberkman/sidereon"
+                  r"\?rev=([0-9a-f]{40})#([0-9a-f]{40})$"
+              )
+              if core["version"] != roots[0]["version"]:
+                  raise SystemExit(
+                      "candidate facade/core versions must match sidereon-c version"
+                  )
+              sources = []
+              for package in (facade, core):
+                  source = package["source"]
+                  match = git_source.fullmatch(source or "")
+                  if match is None or match.group(1) != match.group(2):
+                      raise SystemExit(
+                          "facade/core must both resolve from the canonical Git URL "
+                          "at one full 40-character revision"
+                      )
+                  sources.append((source.split("?", 1)[0], match.group(2)))
+              if sources[0] != sources[1]:
+                  raise SystemExit("facade/core resolved from different Git sources")
+              fixture_ref = sources[0][1]
+
+          print(f"fixture_ref={fixture_ref}")
+          PY
+      - name: Check out the sidereon-core fixtures
+        if: runner.os == 'macOS'
+        uses: actions/checkout@v4
+        with:
+          repository: neilberkman/sidereon
+          ref: ${{ steps.core.outputs.fixture_ref }}
+          path: .sidereon-core
+          sparse-checkout: crates/sidereon-core/tests
+      - name: Full C smoke
+        if: runner.os == 'macOS'
+        env:
+          SIDEREON_CORE_FIXTURES: ${{ github.workspace }}/.sidereon-core/crates/sidereon-core/tests/fixtures
+        run: ./bindings/c/tests/run_smoke.sh
+      # Every golden the smoke tests compare against is written by a generator
+      # from the sidereon-core revision bindings/c/tests/CORE_REVISION names.
+      # Running them all must leave the tree unchanged.
+      - name: Regenerated goldens match the committed ones
+        if: runner.os == 'macOS'
+        env:
+          SIDEREON_CORE_SOURCE: ${{ github.workspace }}/.sidereon-core
+        run: |
+          ./bindings/c/tests/run_generators.sh
+          git diff --exit-code -- bindings/c

@@ -1,5 +1,6 @@
 /* Compiled ABI coverage for window-scoped SP3 continuity and nominal issue due times. */
 #include "sidereon.h"
+#include "w6_window_continuity_pins.h"
 
 #include <math.h>
 #include <stdint.h>
@@ -96,28 +97,18 @@ static char *continuity_verdict_json(
     return json;
 }
 
-static size_t count_occurrences(const char *text, const char *needle) {
-    size_t count = 0;
-    size_t needle_len = strlen(needle);
-    for (const char *match = strstr(text, needle); match != NULL;
-         match = strstr(match + needle_len, needle)) {
-        count += 1;
-    }
-    return count;
+/* Every expected text and value below is sidereon-core's own result for the
+ * seam-injected product, formed into the JSON the C route writes
+ * (bindings/c/src/sp3.rs and data_distribution.rs), from tests/valgen
+ * (w6_window_continuity). */
+static int same_json(const char *json, const char *expected) {
+    return json != NULL && strcmp(json, expected) == 0;
 }
 
-static int verdict_has(
-    const char *json, const char *decision, size_t defect_occurrences, int influencing_empty) {
-    char decision_field[40];
-    if (snprintf(
-            decision_field, sizeof(decision_field), "\"decision\":\"%s\"", decision) <= 0) {
-        return 0;
-    }
-    return strstr(json, decision_field) != NULL &&
-        count_occurrences(json, "\"kind\":\"speed_bound\"") == defect_occurrences &&
-        strstr(json, "\"influencing_splices\":[]") != NULL &&
-        strstr(json, "\"all_splices\":[]") != NULL &&
-        (!influencing_empty || strstr(json, "\"influencing_defects\":[]") != NULL);
+static uint64_t f64_bits(double value) {
+    uint64_t bits = 0;
+    memcpy(&bits, &value, sizeof(bits));
+    return bits;
 }
 
 static char *next_issue_json(void) {
@@ -186,31 +177,32 @@ int main(int argc, char **argv) {
     double before_s = NAN;
     double after_s = NAN;
     if (sidereon_sp3_stencil_extent(sp3, &before_s, &after_s) != SIDEREON_STATUS_OK ||
-        before_s != 3300.0 || after_s != 3300.0) {
+        f64_bits(before_s) != W6_WINDOW_STENCIL_BEFORE_S_BITS ||
+        f64_bits(after_s) != W6_WINDOW_STENCIL_AFTER_S_BITS) {
         rc = fail("derive stencil extent");
         goto cleanup;
     }
 
     json = continuity_verdict_json(sp3, epochs[24], epochs[72]);
-    if (json == NULL || !verdict_has(json, "accept", 1, 1)) {
+    if (!same_json(json, W6_WINDOW_VERDICT_INSIDE_DAY_JSON)) {
         rc = fail("inside-one-day continuity mapping");
         goto cleanup;
     }
     free(json);
     json = continuity_verdict_json(sp3, seam - 600.0, seam + 600.0);
-    if (json == NULL || !verdict_has(json, "refuse", 2, 0)) {
+    if (!same_json(json, W6_WINDOW_VERDICT_STRADDLING_JSON)) {
         rc = fail("straddling continuity mapping");
         goto cleanup;
     }
     free(json);
     json = continuity_verdict_json(sp3, seam - 7200.0, seam - after_s);
-    if (json == NULL || !verdict_has(json, "refuse", 2, 0)) {
+    if (!same_json(json, W6_WINDOW_VERDICT_STENCIL_BOUNDARY_JSON)) {
         rc = fail("stencil-boundary continuity mapping");
         goto cleanup;
     }
     free(json);
     json = continuity_verdict_json(sp3, seam - 7200.0, seam - after_s - 0.001);
-    if (json == NULL || !verdict_has(json, "accept", 1, 1)) {
+    if (!same_json(json, W6_WINDOW_VERDICT_OUTSIDE_STENCIL_JSON)) {
         rc = fail("outside-stencil continuity mapping");
         goto cleanup;
     }
@@ -232,33 +224,36 @@ int main(int argc, char **argv) {
     written = 99;
     required = 99;
     if (sidereon_sp3_merge_report_continuity_verdict_json(
-            report, merged, epochs[24], epochs[72], NULL, 0, &written, &required) !=
+            report, epochs[24], epochs[72], NULL, 0, &written, &required) !=
             SIDEREON_STATUS_OK ||
-        written != 0 || required != 4) {
+        written != 0 || required != strlen(W6_WINDOW_MERGE_VERDICT_JSON)) {
         rc = fail("query optional merge continuity verdict");
         goto cleanup;
     }
-    uint8_t null_json[4];
+    uint8_t merge_json[sizeof(W6_WINDOW_MERGE_VERDICT_JSON)];
     if (sidereon_sp3_merge_report_continuity_verdict_json(
-            report, merged, epochs[24], epochs[72], null_json, sizeof(null_json), &written,
-            &required) != SIDEREON_STATUS_OK ||
-        written != 4 || required != 4 || memcmp(null_json, "null", 4) != 0) {
+            report, epochs[24], epochs[72], merge_json, sizeof(merge_json), &written, &required) !=
+            SIDEREON_STATUS_OK ||
+        written != required ||
+        memcmp(merge_json, W6_WINDOW_MERGE_VERDICT_JSON, written) != 0) {
         rc = fail("copy optional merge continuity verdict");
         goto cleanup;
     }
 
     json = next_issue_json();
-    if (json == NULL || strstr(json, "\"analysis_center\":\"igs_ult\"") == NULL ||
-        strstr(json, "\"issue\":\"0000\"") == NULL ||
-        strstr(json, "\"due_at\":\"2026-08-04T03:00:00Z\"") == NULL ||
-        strstr(json, "\"from\":\"2026-08-03T00:00:00Z\"") == NULL ||
-        strstr(json, "\"until\":\"2026-08-05T00:00:00Z\"") == NULL) {
+    if (!same_json(json, W6_WINDOW_NEXT_ISSUE_JSON)) {
         rc = fail("map next nominal issue");
         goto cleanup;
     }
     free(json);
     json = NULL;
 
+    /* sidereon-core refuses the wum_nrt nominal schedule; the binding maps a
+     * catalog refusal to INVALID_ARGUMENT (map_error in data_distribution.rs). */
+    if (!W6_WINDOW_WUM_NRT_NEXT_ISSUE_REFUSED) {
+        rc = fail("sidereon-core gives a wum_nrt nominal issue");
+        goto cleanup;
+    }
     written = 99;
     required = 99;
     if (sidereon_data_next_issue_due_json(

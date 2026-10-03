@@ -1,4 +1,7 @@
 use super::*;
+use crate::engine_error::{
+    engine_error_operation_boundary, record_engine_error, SidereonEngineErrorFamily,
+};
 
 /// Template estimator for sidereal residual filtering.
 #[repr(C)]
@@ -108,7 +111,7 @@ pub unsafe extern "C" fn sidereon_sidereal_orbit_repeat_lag(
     near_epoch_j2000_s: f64,
     out_period_s: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_sidereal_orbit_repeat_lag",
         SidereonStatus::Panic,
         || {
@@ -156,7 +159,7 @@ pub unsafe extern "C" fn sidereon_sidereal_filter(
     options: *const SidereonSiderealFilterOptions,
     out_output: *mut *mut SidereonSiderealFilterOutput,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_sidereal_filter", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_sidereal_filter", SidereonStatus::Panic, || {
         let out_output = c_try!(require_out(
             out_output,
             "sidereon_sidereal_filter",
@@ -339,7 +342,7 @@ pub unsafe extern "C" fn sidereon_sidereal_periodicity_strength(
     out_written: *mut usize,
     out_required: *mut usize,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_sidereal_periodicity_strength",
         SidereonStatus::Panic,
         || {
@@ -371,7 +374,7 @@ pub unsafe extern "C" fn sidereon_sidereal_periodicity_strength(
             let scores = match sidereon_core::sidereal::periodicity_strength(series, &periods) {
                 Ok(scores) => scores,
                 Err(err) => {
-                    return map_sidereal_error("sidereon_sidereal_periodicity_strength", err)
+                    return map_sidereal_error("sidereon_sidereal_periodicity_strength", err);
                 }
             };
             let values: Vec<SidereonSiderealPeriodicityStrength> = scores
@@ -492,15 +495,375 @@ fn duration_from_seconds(
     seconds: f64,
 ) -> Result<sidereon_core::astro::time::Duration, SidereonStatus> {
     sidereon_core::astro::time::Duration::from_seconds(seconds).map_err(|err| {
-        set_last_error(format!("{fn_name}: invalid {arg_name}: {err}"));
-        SidereonStatus::InvalidArgument
+        let legacy_message = format!("{fn_name}: invalid {arg_name}: {err}");
+        crate::engine_error::time_model_error(fn_name, err, legacy_message)
     })
+}
+
+fn sidereal_node(kind: &str, fields: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "kind": kind,
+        "fields": fields,
+    })
+}
+
+fn gnss_system_name(system: sidereon_core::GnssSystem) -> &'static str {
+    use sidereon_core::GnssSystem as S;
+    match system {
+        S::Gps => "gps",
+        S::Glonass => "glonass",
+        S::Galileo => "galileo",
+        S::BeiDou => "beidou",
+        S::Qzss => "qzss",
+        S::Navic => "navic",
+        S::Sbas => "sbas",
+    }
+}
+
+fn gnss_satellite_id_value(sat: &sidereon_core::GnssSatelliteId) -> serde_json::Value {
+    serde_json::json!({
+        "system": gnss_system_name(sat.system),
+        "prn": sat.prn,
+    })
+}
+
+/// Convert a `SiderealFilterError` into a structured JSON error node.
+pub(crate) fn sidereal_error_value(
+    error: &sidereon_core::sidereal::SiderealFilterError,
+) -> serde_json::Value {
+    use sidereon_core::sidereal::SiderealFilterError as E;
+    match error {
+        E::InvalidInput { field, reason } => sidereal_node(
+            "invalid_input",
+            serde_json::json!({
+                "field": *field,
+                "reason": *reason,
+            }),
+        ),
+        E::NoBroadcastRecord { sat } => sidereal_node(
+            "no_broadcast_record",
+            serde_json::json!({
+                "sat": gnss_satellite_id_value(sat),
+            }),
+        ),
+        E::UnsupportedConstellation { system } => sidereal_node(
+            "unsupported_constellation",
+            serde_json::json!({
+                "system": gnss_system_name(*system),
+            }),
+        ),
+    }
 }
 
 fn map_sidereal_error(
     fn_name: &str,
     err: sidereon_core::sidereal::SiderealFilterError,
 ) -> SidereonStatus {
+    record_engine_error(
+        SidereonEngineErrorFamily::Sidereal,
+        fn_name,
+        sidereal_error_value(&err),
+    );
     set_last_error(format!("{fn_name}: {err}"));
     SidereonStatus::InvalidArgument
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine_error::{
+        clear_engine_error, sidereon_last_engine_error_info, sidereon_last_engine_error_payload,
+        SidereonEngineErrorFamily, SidereonEngineErrorInfo,
+    };
+    use crate::SidereonStatus;
+    use serde_json::Value;
+    use std::ptr;
+
+    #[test]
+    fn table_driven_sidereal_error_mapping() {
+        use sidereon_core::sidereal::SiderealFilterError as E;
+        use sidereon_core::{GnssSatelliteId, GnssSystem};
+
+        let systems = [
+            (GnssSystem::Gps, "gps"),
+            (GnssSystem::Glonass, "glonass"),
+            (GnssSystem::Galileo, "galileo"),
+            (GnssSystem::BeiDou, "beidou"),
+            (GnssSystem::Qzss, "qzss"),
+            (GnssSystem::Navic, "navic"),
+            (GnssSystem::Sbas, "sbas"),
+        ];
+
+        // 1. InvalidInput
+        let err = E::InvalidInput {
+            field: "series",
+            reason: "must be finite",
+        };
+        let val = sidereal_error_value(&err);
+        assert_eq!(val["kind"], "invalid_input");
+        assert_eq!(val["fields"]["field"], "series");
+        assert_eq!(val["fields"]["reason"], "must be finite");
+
+        let err = E::InvalidInput {
+            field: "options.min_coverage",
+            reason: "must be positive",
+        };
+        let val = sidereal_error_value(&err);
+        assert_eq!(val["kind"], "invalid_input");
+        assert_eq!(val["fields"]["field"], "options.min_coverage");
+        assert_eq!(val["fields"]["reason"], "must be positive");
+
+        // 2. NoBroadcastRecord with typedSatelliteId
+        for (sys, sys_name) in systems {
+            for prn in [1u8, 24, 32, 99] {
+                let err = E::NoBroadcastRecord {
+                    sat: GnssSatelliteId { system: sys, prn },
+                };
+                let val = sidereal_error_value(&err);
+                assert_eq!(val["kind"], "no_broadcast_record");
+                assert_eq!(val["fields"]["sat"]["system"], sys_name);
+                assert_eq!(val["fields"]["sat"]["prn"], prn);
+            }
+        }
+
+        // 3. UnsupportedConstellation with typed System
+        for (sys, sys_name) in systems {
+            let err = E::UnsupportedConstellation { system: sys };
+            let val = sidereal_error_value(&err);
+            assert_eq!(val["kind"], "unsupported_constellation");
+            assert_eq!(val["fields"]["system"], sys_name);
+        }
+    }
+
+    #[test]
+    fn sidereal_public_producer_control_and_refusals() {
+        clear_engine_error();
+
+        unsafe {
+            // Seed real existing domain refusal immediately before valid success control
+            let bad_series = [0.1, f64::NAN, 0.3];
+            let mut out_output: *mut SidereonSiderealFilterOutput = ptr::null_mut();
+            assert_eq!(
+                sidereon_sidereal_filter(
+                    bad_series.as_ptr(),
+                    bad_series.len(),
+                    86164.0,
+                    ptr::null(),
+                    &mut out_output,
+                ),
+                SidereonStatus::InvalidArgument
+            );
+            assert!(out_output.is_null());
+
+            let mut info = SidereonEngineErrorInfo {
+                family: SidereonEngineErrorFamily::None,
+                payload_len: 0,
+            };
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::Sidereal);
+            assert!(info.payload_len > 0);
+
+            // Valid success control clears TLS error
+            let series = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8];
+            assert_eq!(
+                sidereon_sidereal_filter(
+                    series.as_ptr(),
+                    series.len(),
+                    86164.0,
+                    ptr::null(),
+                    &mut out_output,
+                ),
+                SidereonStatus::Ok
+            );
+            assert!(!out_output.is_null());
+
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+            assert_eq!(info.payload_len, 0);
+
+            // Free output and verify free/reader retention
+            sidereon_sidereal_filter_output_free(out_output);
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+            assert_eq!(info.payload_len, 0);
+        }
+
+        // Real public refusal: non-finite sample in series
+        unsafe {
+            let bad_series = [0.1, f64::NAN, 0.3];
+            let mut out_output: *mut SidereonSiderealFilterOutput = ptr::null_mut();
+            assert_eq!(
+                sidereon_sidereal_filter(
+                    bad_series.as_ptr(),
+                    bad_series.len(),
+                    86164.0,
+                    ptr::null(),
+                    &mut out_output,
+                ),
+                SidereonStatus::InvalidArgument
+            );
+            assert!(out_output.is_null());
+
+            let mut info = SidereonEngineErrorInfo {
+                family: SidereonEngineErrorFamily::None,
+                payload_len: 0,
+            };
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::Sidereal);
+            assert!(info.payload_len > 0);
+
+            let mut written = 0;
+            let mut required = 0;
+            let mut buf = vec![0u8; info.payload_len];
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    buf.as_mut_ptr(),
+                    buf.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, info.payload_len);
+            let payload: Value = serde_json::from_slice(&buf).expect("valid JSON");
+            assert_eq!(payload["schema_version"], 1);
+            assert_eq!(payload["family"], "sidereal");
+            assert_eq!(payload["operation"], "sidereon_sidereal_filter");
+            assert_eq!(payload["error"]["kind"], "invalid_input");
+            assert_eq!(payload["error"]["fields"]["field"], "series");
+            assert_eq!(payload["error"]["fields"]["reason"], "must be finite");
+        }
+    }
+
+    #[test]
+    fn sidereal_producer_early_clearing_and_retention() {
+        clear_engine_error();
+
+        unsafe {
+            // Seed error via real refusal
+            let bad_series = [0.1, f64::NAN, 0.3];
+            let mut out_output: *mut SidereonSiderealFilterOutput = ptr::null_mut();
+            assert_eq!(
+                sidereon_sidereal_filter(
+                    bad_series.as_ptr(),
+                    bad_series.len(),
+                    86164.0,
+                    ptr::null(),
+                    &mut out_output,
+                ),
+                SidereonStatus::InvalidArgument
+            );
+
+            let mut info = SidereonEngineErrorInfo {
+                family: SidereonEngineErrorFamily::None,
+                payload_len: 0,
+            };
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::Sidereal);
+            let expected_len = info.payload_len;
+            assert!(expected_len > 0);
+
+            // Inspection calls retain error: sidereon_sidereal_repeat_period
+            let mut period_s = 0.0;
+            assert_eq!(
+                sidereon_sidereal_repeat_period(0, &mut period_s),
+                SidereonStatus::Ok
+            );
+            assert!(period_s > 0.0);
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::Sidereal);
+            assert_eq!(info.payload_len, expected_len);
+
+            // Destructor retains error: sidereon_sidereal_filter_output_free
+            sidereon_sidereal_filter_output_free(ptr::null_mut());
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::Sidereal);
+            assert_eq!(info.payload_len, expected_len);
+
+            // Two-pass payload retrieval: Pass 1 query length
+            let mut written = 999;
+            let mut required = 0;
+            assert_eq!(
+                sidereon_last_engine_error_payload(ptr::null_mut(), 0, &mut written, &mut required),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, 0);
+            assert_eq!(required, expected_len);
+
+            // Short buffer query returns InvalidArgument and retains
+            let mut short_buf = vec![0u8; expected_len - 1];
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    short_buf.as_mut_ptr(),
+                    short_buf.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::InvalidArgument
+            );
+            assert_eq!(written, 0);
+            assert_eq!(required, expected_len);
+
+            // Pass 2: Exact buffer query succeeds
+            let mut buf = vec![0u8; expected_len];
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    buf.as_mut_ptr(),
+                    buf.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, expected_len);
+            assert_eq!(required, expected_len);
+
+            // Slot still retains
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::Sidereal);
+
+            // Producer early argument failure (null pointer) clears slot before checks!
+            let valid_series = [1.0, 2.0];
+            assert_eq!(
+                sidereon_sidereal_filter(
+                    valid_series.as_ptr(),
+                    valid_series.len(),
+                    86164.0,
+                    ptr::null(),
+                    ptr::null_mut(),
+                ),
+                SidereonStatus::NullPointer
+            );
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+            assert_eq!(info.payload_len, 0);
+        }
+    }
 }

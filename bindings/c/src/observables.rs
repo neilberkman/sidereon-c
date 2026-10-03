@@ -76,6 +76,15 @@ pub struct SidereonEmissionMediaOptions {
     pub met: SidereonMet,
     /// Optional IONEX handle for ionosphere correction. NULL disables IONEX.
     pub ionex: *const SidereonIonex,
+    /// Whether ionex_policy applies to the IONEX correction. False evaluates
+    /// the IONEX product under the engine default policy, the one
+    /// sidereon_ionex_slant_policy_default returns, so a zero-filled options
+    /// struct keeps that default.
+    pub ionex_policy_enabled: bool,
+    /// Coverage, missing-node and mapping policy for the IONEX correction,
+    /// when ionex_policy_enabled is true. An unrecognized tag fails the call
+    /// with SIDEREON_STATUS_INVALID_ARGUMENT.
+    pub ionex_policy: SidereonIonexSlantPolicy,
 }
 
 /// Populate *out_options with the engine's default predictor options (L1
@@ -160,6 +169,8 @@ pub unsafe extern "C" fn sidereon_emission_media_options_init(
                     relative_humidity: met.relative_humidity,
                 },
                 ionex: ptr::null(),
+                ionex_policy_enabled: false,
+                ionex_policy: sidereon_ionex_slant_policy_default(),
             };
             SidereonStatus::Ok
         },
@@ -192,7 +203,7 @@ pub unsafe extern "C" fn sidereon_sp3_emission_media_batch_at_j2000_s(
     out_statuses: *mut SidereonEmissionMediaStatus,
     out_result_statuses: *mut SidereonStatus,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::observables_error_operation_boundary(
         "sidereon_sp3_emission_media_batch_at_j2000_s",
         SidereonStatus::Panic,
         || {
@@ -250,7 +261,7 @@ pub unsafe extern "C" fn sidereon_broadcast_emission_media_batch_at_j2000_s(
     out_statuses: *mut SidereonEmissionMediaStatus,
     out_result_statuses: *mut SidereonStatus,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::observables_error_operation_boundary(
         "sidereon_broadcast_emission_media_batch_at_j2000_s",
         SidereonStatus::Panic,
         || {
@@ -302,6 +313,22 @@ unsafe fn emission_media_batch_common(
     out_statuses: *mut SidereonEmissionMediaStatus,
     out_result_statuses: *mut SidereonStatus,
 ) -> SidereonStatus {
+    // Snapshot and validate every caller-owned input before initializing
+    // outputs. Defer any input error until after output initialization to keep
+    // the established reset-on-error behavior while supporting in-place use.
+    let inputs_result = (|| {
+        let sats = satellites_from_c_tokens(fn_name, satellites, count)?;
+        let epochs = require_slice(
+            emission_epochs_j2000_s,
+            count,
+            fn_name,
+            "emission_epochs_j2000_s",
+        )?
+        .to_vec();
+        let receiver = read_vec3(fn_name, "receiver_ecef_m", receiver_ecef_m)?;
+        let options = emission_media_options_from_c(fn_name, options)?;
+        Ok((sats, epochs, receiver, options))
+    })();
     c_try!(initialize_emission_media_outputs(
         fn_name,
         count,
@@ -316,21 +343,13 @@ unsafe fn emission_media_batch_common(
         out_statuses,
         out_result_statuses,
     ));
-    let sats = c_try!(satellites_from_c_tokens(fn_name, satellites, count));
-    let epochs = c_try!(require_slice(
-        emission_epochs_j2000_s,
-        count,
-        fn_name,
-        "emission_epochs_j2000_s"
-    ));
-    let receiver = c_try!(read_vec3(fn_name, "receiver_ecef_m", receiver_ecef_m));
-    let options = c_try!(emission_media_options_from_c(fn_name, options));
-    let batch =
-        match observables_emission_media_batch_at_j2000_s(source, &sats, epochs, receiver, options)
-        {
-            Ok(batch) => batch,
-            Err(err) => return map_observables_error(fn_name, err),
-        };
+    let (sats, epochs, receiver, options) = c_try!(inputs_result);
+    let batch = match observables_emission_media_batch_at_j2000_s(
+        source, &sats, &epochs, receiver, options,
+    ) {
+        Ok(batch) => batch,
+        Err(err) => return map_observables_error(fn_name, err),
+    };
     write_emission_media_batch(
         fn_name,
         &batch,
@@ -370,7 +389,15 @@ unsafe fn emission_media_options_from_c<'a>(
         None
     } else {
         let ionex = require_ref(options.ionex, fn_name, "options.ionex")?;
-        Some(ObservableIonosphereCorrection::Ionex(&ionex.inner))
+        if options.ionex_policy_enabled {
+            let policy = super::ionex::ionex_slant_policy_from_c(fn_name, options.ionex_policy)?;
+            Some(ObservableIonosphereCorrection::IonexWithPolicy(
+                &ionex.inner,
+                policy,
+            ))
+        } else {
+            Some(ObservableIonosphereCorrection::Ionex(&ionex.inner))
+        }
     };
     let mut media = ObservableMediaOptions::default();
     media.troposphere = troposphere;
@@ -444,6 +471,77 @@ unsafe fn initialize_emission_media_outputs(
     require_out_array(out_statuses, count, fn_name, "out_statuses")?;
     require_out_array(out_result_statuses, count, fn_name, "out_result_statuses")?;
 
+    if count != 0 {
+        let outputs = [
+            Some((
+                checked_output_range(
+                    fn_name,
+                    out_positions_ecef_m,
+                    position_values,
+                    "out_positions_ecef_m",
+                )?,
+                "out_positions_ecef_m",
+            )),
+            Some((
+                checked_output_range(fn_name, out_has_positions, count, "out_has_positions")?,
+                "out_has_positions",
+            )),
+            Some((
+                checked_output_range(fn_name, out_clocks_s, count, "out_clocks_s")?,
+                "out_clocks_s",
+            )),
+            Some((
+                checked_output_range(fn_name, out_has_clocks_s, count, "out_has_clocks_s")?,
+                "out_has_clocks_s",
+            )),
+            Some((
+                checked_output_range(
+                    fn_name,
+                    out_ionosphere_slant_delays_m,
+                    count,
+                    "out_ionosphere_slant_delays_m",
+                )?,
+                "out_ionosphere_slant_delays_m",
+            )),
+            Some((
+                checked_output_range(
+                    fn_name,
+                    out_has_ionosphere_slant_delays_m,
+                    count,
+                    "out_has_ionosphere_slant_delays_m",
+                )?,
+                "out_has_ionosphere_slant_delays_m",
+            )),
+            Some((
+                checked_output_range(
+                    fn_name,
+                    out_troposphere_delays_m,
+                    count,
+                    "out_troposphere_delays_m",
+                )?,
+                "out_troposphere_delays_m",
+            )),
+            Some((
+                checked_output_range(
+                    fn_name,
+                    out_has_troposphere_delays_m,
+                    count,
+                    "out_has_troposphere_delays_m",
+                )?,
+                "out_has_troposphere_delays_m",
+            )),
+            Some((
+                checked_output_range(fn_name, out_statuses, count, "out_statuses")?,
+                "out_statuses",
+            )),
+            Some((
+                checked_output_range(fn_name, out_result_statuses, count, "out_result_statuses")?,
+                "out_result_statuses",
+            )),
+        ];
+        reject_overlapping_optional_outputs(fn_name, &outputs)?;
+    }
+
     for idx in 0..count {
         let base = idx * 3;
         for axis in 0..3 {
@@ -495,6 +593,9 @@ fn emission_media_result_status(
 
 fn observable_error_status(error: &ObservablesError) -> SidereonStatus {
     match error {
+        ObservablesError::Ephemeris(CoreError::Ut1OutsideCoverage(_)) => {
+            SidereonStatus::Ut1OutsideCoverage
+        }
         ObservablesError::InvalidInput { .. }
         | ObservablesError::Media(_)
         | ObservablesError::Ephemeris(CoreError::InvalidInput(_)) => {
@@ -551,12 +652,11 @@ unsafe fn write_emission_media_batch(
         out_statuses
             .add(idx)
             .write(emission_media_status_to_c(status));
-        out_result_statuses
-            .add(idx)
-            .write(emission_media_result_status(
-                status,
-                &batch.element_errors[idx],
-            ));
+        let result_status = emission_media_result_status(status, &batch.element_errors[idx]);
+        if let Some(error) = &batch.element_errors[idx] {
+            crate::engine_error::record_observable_row_error(fn_name, idx, result_status, error);
+        }
+        out_result_statuses.add(idx).write(result_status);
     }
     SidereonStatus::Ok
 }
@@ -565,6 +665,7 @@ unsafe fn write_emission_media_batch(
 mod tests {
     use super::*;
     use std::fs;
+    use std::mem::MaybeUninit;
     use std::path::PathBuf;
 
     fn fixture_sp3() -> Sp3 {
@@ -574,11 +675,20 @@ mod tests {
         Sp3::parse(&bytes).expect("parse SP3")
     }
 
-    fn assert_close(got: f64, want: f64, tol: f64) {
-        assert!(
-            (got - want).abs() <= tol,
-            "got {got:e}, want {want:e}, tol {tol:e}"
-        );
+    fn assert_same_bits(got: f64, want: f64) {
+        assert_eq!(got.to_bits(), want.to_bits(), "got {got:e}, want {want:e}");
+    }
+
+    fn last_error_message() -> String {
+        let needed = unsafe { sidereon_last_error_message(ptr::null_mut(), 0) };
+        let mut buffer = vec![0 as c_char; needed + 1];
+        unsafe {
+            sidereon_last_error_message(buffer.as_mut_ptr(), buffer.len());
+            CStr::from_ptr(buffer.as_ptr())
+                .to_str()
+                .expect("valid error message")
+                .to_owned()
+        }
     }
 
     #[test]
@@ -627,7 +737,14 @@ mod tests {
         assert_eq!(satellites.len(), 3);
         let gap_sat = satellites[0];
         satellites.push(gap_sat);
-        let epochs = [epoch, epoch + 300.0, epoch + 600.0, epoch + 10_000_000.0];
+        satellites.push(GnssSatelliteId::new(GnssSystem::Gps, 99).expect("valid G99 token"));
+        let epochs = [
+            epoch,
+            epoch + 300.0,
+            epoch + 600.0,
+            epoch + 10_000_000.0,
+            epoch,
+        ];
         let expected = observables_emission_media_batch_at_j2000_s(
             &sp3,
             &satellites,
@@ -637,7 +754,7 @@ mod tests {
         )
         .expect("core emission batch");
 
-        let sp3_handle = SidereonSp3 { inner: sp3 };
+        let sp3_handle = Box::into_raw(Box::new(SidereonSp3 { inner: sp3 }));
         let sat_tokens = satellites
             .iter()
             .map(|sat| CString::new(sat.to_string()).expect("sat token"))
@@ -657,6 +774,8 @@ mod tests {
                 relative_humidity: met.relative_humidity,
             },
             ionex: ptr::null(),
+            ionex_policy_enabled: false,
+            ionex_policy: sidereon_ionex_slant_policy_default(),
         };
         let count = satellites.len();
         let mut positions = vec![0.0; count * 3];
@@ -672,7 +791,7 @@ mod tests {
 
         let status = unsafe {
             sidereon_sp3_emission_media_batch_at_j2000_s(
-                &sp3_handle,
+                sp3_handle,
                 sat_ptrs.as_ptr(),
                 epochs.as_ptr(),
                 count,
@@ -704,12 +823,12 @@ mod tests {
             assert_eq!(has_positions[idx], expected.positions_ecef_m[idx].is_some());
             if let Some(position) = expected.positions_ecef_m[idx] {
                 for axis in 0..3 {
-                    assert_close(positions[idx * 3 + axis], position[axis], 1.0e-9);
+                    assert_same_bits(positions[idx * 3 + axis], position[axis]);
                 }
             }
             assert_eq!(has_clocks[idx], expected.clocks_s[idx].is_some());
             if let Some(clock) = expected.clocks_s[idx] {
-                assert_close(clocks[idx], clock, 1.0e-15);
+                assert_same_bits(clocks[idx], clock);
             }
             assert_eq!(
                 has_iono[idx],
@@ -717,8 +836,620 @@ mod tests {
             );
             assert_eq!(has_tropo[idx], expected.troposphere_delays_m[idx].is_some());
             if let Some(delay) = expected.troposphere_delays_m[idx] {
-                assert_close(tropo[idx], delay, 1.0e-12);
+                assert_same_bits(tropo[idx], delay);
             }
         }
+
+        let mut owned_row_errors = ptr::null_mut();
+        assert_eq!(
+            unsafe { sidereon_observable_row_errors_snapshot(&mut owned_row_errors) },
+            SidereonStatus::Ok
+        );
+        assert!(!owned_row_errors.is_null());
+        let mut row_error_count = usize::MAX;
+        assert_eq!(
+            unsafe { sidereon_observable_row_errors_count(owned_row_errors, &mut row_error_count) },
+            SidereonStatus::Ok
+        );
+        let expected_row_errors = expected
+            .element_errors
+            .iter()
+            .filter(|error| error.is_some())
+            .count();
+        assert_eq!(row_error_count, expected_row_errors);
+        let unknown_row_index = expected
+            .element_errors
+            .iter()
+            .position(|error| {
+                matches!(
+                    error,
+                    Some(ObservablesError::Ephemeris(CoreError::UnknownSatellite(sat)))
+                        if sat.to_string() == "G99"
+                )
+            })
+            .expect("G99 has a core unknown-satellite error");
+        let owned_index = expected
+            .element_errors
+            .iter()
+            .take(unknown_row_index)
+            .filter(|error| error.is_some())
+            .count();
+        let mut row_info = MaybeUninit::<SidereonObservableRowErrorInfo>::uninit();
+        assert_eq!(
+            unsafe {
+                sidereon_observable_row_errors_info(
+                    owned_row_errors,
+                    owned_index,
+                    row_info.as_mut_ptr(),
+                )
+            },
+            SidereonStatus::Ok
+        );
+        let row_info = unsafe { row_info.assume_init() };
+        assert_eq!(row_info.row_index, unknown_row_index);
+        assert_eq!(row_info.status, SidereonStatus::Solve);
+
+        let mut required = 0usize;
+        let mut written = 0usize;
+        assert_eq!(
+            unsafe {
+                sidereon_observable_row_errors_payload(
+                    owned_row_errors,
+                    owned_index,
+                    ptr::null_mut(),
+                    0,
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(written, 0);
+        assert_eq!(required, row_info.payload_len);
+        let mut canary = vec![0xA5; required - 1];
+        assert_eq!(
+            unsafe {
+                sidereon_observable_row_errors_payload(
+                    owned_row_errors,
+                    owned_index,
+                    canary.as_mut_ptr(),
+                    canary.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+        assert!(canary.iter().all(|byte| *byte == 0xA5));
+        let mut payload = vec![0u8; required];
+        assert_eq!(
+            unsafe {
+                sidereon_observable_row_errors_payload(
+                    owned_row_errors,
+                    owned_index,
+                    payload.as_mut_ptr(),
+                    payload.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(written, required);
+        let payload: serde_json::Value = serde_json::from_slice(&payload).expect("JSON payload");
+        assert_eq!(payload["schema_version"], 1);
+        assert_eq!(payload["family"], "observables");
+        assert_eq!(
+            payload["operation"],
+            "sidereon_sp3_emission_media_batch_at_j2000_s"
+        );
+        assert_eq!(payload["error"]["kind"], "ephemeris");
+        assert_eq!(
+            payload["error"]["fields"]["cause"]["kind"],
+            "unknown_satellite"
+        );
+        assert_eq!(
+            payload["error"]["fields"]["cause"]["fields"]["satellite_id"],
+            "G99"
+        );
+        let expected_payload = payload.clone();
+
+        assert_eq!(
+            unsafe {
+                sidereon_sp3_emission_media_batch_at_j2000_s(
+                    sp3_handle,
+                    sat_ptrs.as_ptr(),
+                    epochs.as_ptr(),
+                    count,
+                    receiver.as_ptr(),
+                    &c_options,
+                    ptr::null_mut(),
+                    has_positions.as_mut_ptr(),
+                    clocks.as_mut_ptr(),
+                    has_clocks.as_mut_ptr(),
+                    iono.as_mut_ptr(),
+                    has_iono.as_mut_ptr(),
+                    tropo.as_mut_ptr(),
+                    has_tropo.as_mut_ptr(),
+                    statuses.as_mut_ptr(),
+                    result_statuses.as_mut_ptr(),
+                )
+            },
+            SidereonStatus::NullPointer
+        );
+        let mut cleared_engine_info = MaybeUninit::<SidereonEngineErrorInfo>::uninit();
+        assert_eq!(
+            unsafe { sidereon_last_engine_error_info(cleared_engine_info.as_mut_ptr()) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(
+            unsafe { cleared_engine_info.assume_init() }.family,
+            SidereonEngineErrorFamily::None
+        );
+        let mut current_row_errors = ptr::null_mut();
+        assert_eq!(
+            unsafe { sidereon_observable_row_errors_snapshot(&mut current_row_errors) },
+            SidereonStatus::Ok
+        );
+        let mut current_count = usize::MAX;
+        assert_eq!(
+            unsafe { sidereon_observable_row_errors_count(current_row_errors, &mut current_count) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(current_count, 0);
+        unsafe { sidereon_observable_row_errors_free(current_row_errors) };
+
+        let mut scalar_out = MaybeUninit::<SidereonPredictedObservables>::uninit();
+        let g01 = CString::new(satellites[0].to_string()).expect("G01 token");
+        assert_eq!(
+            unsafe {
+                sidereon_sp3_observables(
+                    sp3_handle,
+                    g01.as_ptr(),
+                    receiver.as_ptr(),
+                    epoch,
+                    ptr::null(),
+                    scalar_out.as_mut_ptr(),
+                )
+            },
+            SidereonStatus::Ok
+        );
+        let mut stale_row_error_count = usize::MAX;
+        assert_eq!(
+            unsafe {
+                sidereon_observable_row_errors_count(owned_row_errors, &mut stale_row_error_count)
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(stale_row_error_count, expected_row_errors);
+        current_row_errors = ptr::null_mut();
+        assert_eq!(
+            unsafe { sidereon_observable_row_errors_snapshot(&mut current_row_errors) },
+            SidereonStatus::Ok
+        );
+        current_count = usize::MAX;
+        assert_eq!(
+            unsafe { sidereon_observable_row_errors_count(current_row_errors, &mut current_count) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(current_count, 0);
+        unsafe { sidereon_observable_row_errors_free(current_row_errors) };
+        unsafe { sidereon_sp3_free(sp3_handle) };
+
+        // The owned snapshot remains readable after a subsequent success and
+        // after freeing the source that produced the batch.
+        let mut retained_info = MaybeUninit::<SidereonObservableRowErrorInfo>::uninit();
+        assert_eq!(
+            unsafe {
+                sidereon_observable_row_errors_info(
+                    owned_row_errors,
+                    owned_index,
+                    retained_info.as_mut_ptr(),
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(
+            unsafe { retained_info.assume_init() }.row_index,
+            unknown_row_index
+        );
+        let mut retained_bytes = vec![0u8; required];
+        assert_eq!(
+            unsafe {
+                sidereon_observable_row_errors_payload(
+                    owned_row_errors,
+                    owned_index,
+                    retained_bytes.as_mut_ptr(),
+                    retained_bytes.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        let retained_payload: serde_json::Value =
+            serde_json::from_slice(&retained_bytes).expect("retained JSON payload");
+        assert_eq!(retained_payload, expected_payload);
+
+        let g99 = CString::new("G99").expect("G99 token");
+        let mut error_out = MaybeUninit::<SidereonPredictedObservables>::uninit();
+        let fresh_sp3 = Box::into_raw(Box::new(SidereonSp3 {
+            inner: fixture_sp3(),
+        }));
+
+        let mut sample_written = 0usize;
+        let mut sample_required = 0usize;
+        assert_eq!(
+            unsafe {
+                sidereon_sp3_ephemeris_sample(
+                    fresh_sp3,
+                    sat_ptrs.as_ptr(),
+                    1,
+                    epoch,
+                    epoch,
+                    0.0,
+                    ptr::null_mut(),
+                    0,
+                    &mut sample_written,
+                    &mut sample_required,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+        let mut engine_info = MaybeUninit::<SidereonEngineErrorInfo>::uninit();
+        assert_eq!(
+            unsafe { sidereon_last_engine_error_info(engine_info.as_mut_ptr()) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(
+            unsafe { engine_info.assume_init() }.family,
+            SidereonEngineErrorFamily::Observables
+        );
+        assert_eq!(
+            last_error_message(),
+            "sidereon_sp3_ephemeris_sample: invalid observable input step_s: not positive"
+        );
+        let mut payload_written = 0usize;
+        let mut payload_required = 0usize;
+        assert_eq!(
+            unsafe {
+                sidereon_last_engine_error_payload(
+                    ptr::null_mut(),
+                    0,
+                    &mut payload_written,
+                    &mut payload_required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        let mut sample_error_payload = vec![0u8; payload_required];
+        assert_eq!(
+            unsafe {
+                sidereon_last_engine_error_payload(
+                    sample_error_payload.as_mut_ptr(),
+                    sample_error_payload.len(),
+                    &mut payload_written,
+                    &mut payload_required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        let sample_error_payload: serde_json::Value =
+            serde_json::from_slice(&sample_error_payload).expect("sample error JSON");
+        assert_eq!(
+            sample_error_payload,
+            serde_json::json!({
+                "schema_version": 1,
+                "family": "observables",
+                "operation": "sidereon_sp3_ephemeris_sample",
+                "error": {
+                    "kind": "invalid_input",
+                    "fields": {"field": "step_s", "kind": "not_positive"}
+                }
+            })
+        );
+
+        let mut success_out = MaybeUninit::<SidereonPredictedObservables>::uninit();
+        assert_eq!(
+            unsafe {
+                sidereon_sp3_observables(
+                    fresh_sp3,
+                    g01.as_ptr(),
+                    receiver.as_ptr(),
+                    epoch,
+                    ptr::null(),
+                    success_out.as_mut_ptr(),
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(
+            unsafe { sidereon_last_engine_error_info(engine_info.as_mut_ptr()) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(
+            unsafe { engine_info.assume_init() }.family,
+            SidereonEngineErrorFamily::None
+        );
+
+        assert_eq!(
+            unsafe {
+                sidereon_sp3_observables(
+                    fresh_sp3,
+                    g99.as_ptr(),
+                    receiver.as_ptr(),
+                    epoch,
+                    ptr::null(),
+                    error_out.as_mut_ptr(),
+                )
+            },
+            SidereonStatus::Solve
+        );
+        assert_eq!(
+            last_error_message(),
+            "sidereon_sp3_observables: unknown satellite: G99"
+        );
+        assert_eq!(
+            unsafe { sidereon_last_engine_error_info(engine_info.as_mut_ptr()) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(
+            unsafe { engine_info.assume_init() }.family,
+            SidereonEngineErrorFamily::Observables
+        );
+        assert_eq!(
+            unsafe {
+                sidereon_sp3_observables(
+                    fresh_sp3,
+                    g01.as_ptr(),
+                    receiver.as_ptr(),
+                    epoch,
+                    ptr::null(),
+                    ptr::null_mut(),
+                )
+            },
+            SidereonStatus::NullPointer
+        );
+        assert_eq!(
+            unsafe { sidereon_last_engine_error_info(engine_info.as_mut_ptr()) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(
+            unsafe { engine_info.assume_init() }.family,
+            SidereonEngineErrorFamily::None
+        );
+        unsafe {
+            sidereon_sp3_free(fresh_sp3);
+            sidereon_observable_row_errors_free(owned_row_errors);
+        }
+    }
+
+    #[test]
+    fn observable_state_batch_retains_owned_g99_row_error() {
+        let sp3 = fixture_sp3();
+        let g01 = GnssSatelliteId::new(GnssSystem::Gps, 1).expect("valid G01");
+        let g99 = GnssSatelliteId::new(GnssSystem::Gps, 99).expect("valid G99");
+        let epoch = 646_272_000.0;
+        let expected_state = sp3
+            .observable_state_at_j2000_s(g01, epoch)
+            .expect("fixture contains G01 at the selected epoch");
+        let sp3_handle = Box::into_raw(Box::new(SidereonSp3 { inner: sp3 }));
+        let tokens = [
+            CString::new(g01.to_string()).unwrap(),
+            CString::new(g99.to_string()).unwrap(),
+        ];
+        let satellite_ptrs = [tokens[0].as_ptr(), tokens[1].as_ptr()];
+        let epochs = [epoch, epoch];
+        let mut positions = [0.0; 6];
+        let mut clocks = [0.0; 2];
+        let mut has_clocks = [false; 2];
+        let mut element_statuses = [SidereonObservableStateElementStatus::Error; 2];
+        let mut result_statuses = [SidereonStatus::Panic; 2];
+
+        assert_eq!(
+            unsafe {
+                sidereon_sp3_observable_states_at_j2000_s(
+                    sp3_handle,
+                    satellite_ptrs.as_ptr(),
+                    epochs.as_ptr(),
+                    2,
+                    positions.as_mut_ptr(),
+                    clocks.as_mut_ptr(),
+                    has_clocks.as_mut_ptr(),
+                    element_statuses.as_mut_ptr(),
+                    result_statuses.as_mut_ptr(),
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(
+            element_statuses[0],
+            SidereonObservableStateElementStatus::Valid
+        );
+        assert_eq!(result_statuses[0], SidereonStatus::Ok);
+        for (axis, position) in positions[..3].iter().enumerate() {
+            assert_same_bits(*position, expected_state.position_ecef_m[axis]);
+        }
+        assert_eq!(has_clocks[0], expected_state.clock_s.is_some());
+        if let Some(clock) = expected_state.clock_s {
+            assert_same_bits(clocks[0], clock);
+        }
+        assert_eq!(
+            element_statuses[1],
+            SidereonObservableStateElementStatus::Gap
+        );
+        assert_eq!(result_statuses[1], SidereonStatus::Solve);
+        assert!((3..6).all(|index| positions[index].is_nan()));
+        assert!(!has_clocks[1]);
+
+        let mut row_errors = ptr::null_mut();
+        assert_eq!(
+            unsafe { sidereon_observable_row_errors_snapshot(&mut row_errors) },
+            SidereonStatus::Ok
+        );
+        let mut count = usize::MAX;
+        assert_eq!(
+            unsafe { sidereon_observable_row_errors_count(row_errors, &mut count) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(count, 1);
+        let mut info = MaybeUninit::<SidereonObservableRowErrorInfo>::uninit();
+        assert_eq!(
+            unsafe { sidereon_observable_row_errors_info(row_errors, 0, info.as_mut_ptr()) },
+            SidereonStatus::Ok
+        );
+        let info = unsafe { info.assume_init() };
+        assert_eq!(info.row_index, 1);
+        assert_eq!(info.status, SidereonStatus::Solve);
+
+        let mut written = 0usize;
+        let mut required = 0usize;
+        assert_eq!(
+            unsafe {
+                sidereon_observable_row_errors_payload(
+                    row_errors,
+                    0,
+                    ptr::null_mut(),
+                    0,
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(written, 0);
+        assert_eq!(required, info.payload_len);
+        let mut payload = vec![0u8; required];
+        assert_eq!(
+            unsafe {
+                sidereon_observable_row_errors_payload(
+                    row_errors,
+                    0,
+                    payload.as_mut_ptr(),
+                    payload.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        let payload: serde_json::Value = serde_json::from_slice(&payload).expect("row JSON");
+        assert_eq!(
+            payload,
+            serde_json::json!({
+                "schema_version": 1,
+                "family": "observables",
+                "operation": "sidereon_sp3_observable_states_at_j2000_s",
+                "error": {
+                    "kind": "ephemeris",
+                    "fields": {
+                        "cause": {
+                            "kind": "unknown_satellite",
+                            "fields": {"satellite_id": "G99"}
+                        }
+                    }
+                }
+            })
+        );
+
+        let mut invalid_info = SidereonObservableRowErrorInfo {
+            row_index: 77,
+            status: SidereonStatus::Panic,
+            payload_len: 99,
+        };
+        assert_eq!(
+            unsafe { sidereon_observable_row_errors_info(row_errors, count, &mut invalid_info) },
+            SidereonStatus::InvalidArgument
+        );
+        assert_eq!(invalid_info.row_index, 77);
+        assert_eq!(invalid_info.status, SidereonStatus::Panic);
+        assert_eq!(invalid_info.payload_len, 99);
+        let mut canary = [0xA5u8; 8];
+        written = usize::MAX;
+        required = usize::MAX;
+        assert_eq!(
+            unsafe {
+                sidereon_observable_row_errors_payload(
+                    row_errors,
+                    count,
+                    canary.as_mut_ptr(),
+                    canary.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+        assert_eq!(canary, [0xA5; 8]);
+        assert_eq!(written, 0);
+        assert_eq!(required, 0);
+        let mut count_after_invalid_queries = usize::MAX;
+        assert_eq!(
+            unsafe {
+                sidereon_observable_row_errors_count(row_errors, &mut count_after_invalid_queries)
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(count_after_invalid_queries, 1);
+
+        unsafe {
+            sidereon_sp3_free(sp3_handle);
+            sidereon_observable_row_errors_free(ptr::null_mut());
+            sidereon_observable_row_errors_free(row_errors);
+        }
+    }
+
+    #[test]
+    fn emission_media_options_carry_the_ionex_slant_policy() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/ionex/synthetic_2map_7x7.20i");
+        let bytes = fs::read(path).expect("read IONEX fixture");
+        let ionex = SidereonIonex {
+            inner: Ionex::parse(&bytes).expect("parse IONEX"),
+        };
+        let mut c_options = unsafe {
+            let mut options = std::mem::MaybeUninit::<SidereonEmissionMediaOptions>::uninit();
+            assert_eq!(
+                sidereon_emission_media_options_init(options.as_mut_ptr()),
+                SidereonStatus::Ok
+            );
+            options.assume_init()
+        };
+        // The defaults leave the policy off, so the engine default applies.
+        assert!(!c_options.ionex_policy_enabled);
+        assert_eq!(
+            c_options.ionex_policy,
+            sidereon_ionex_slant_policy_default()
+        );
+        c_options.ionex = &ionex;
+
+        let options = unsafe { emission_media_options_from_c("test", &c_options) }
+            .expect("default IONEX options");
+        assert!(matches!(
+            options.media.ionosphere,
+            Some(ObservableIonosphereCorrection::Ionex(_))
+        ));
+
+        c_options.ionex_policy_enabled = true;
+        c_options.ionex_policy = sidereon_ionex_slant_policy_init(
+            SidereonIonexCoveragePolicy::Hold as u32,
+            SidereonIonexMissingNodePolicy::Renormalize as u32,
+            SidereonIonexMappingPolicy::Declared as u32,
+        );
+        let options = unsafe { emission_media_options_from_c("test", &c_options) }
+            .expect("explicit IONEX policy");
+        match options.media.ionosphere {
+            Some(ObservableIonosphereCorrection::IonexWithPolicy(_, policy)) => {
+                assert_eq!(policy.coverage, IonexCoveragePolicy::Hold);
+                assert_eq!(policy.missing_nodes, IonexMissingNodePolicy::Renormalize);
+                assert_eq!(policy.mapping, IonexMappingPolicy::Declared);
+            }
+            _ => panic!("the enabled policy selects the policy-aware correction"),
+        }
+
+        // A tag the binding does not name fails the options, not a row.
+        c_options.ionex_policy.mapping = 9;
+        let refused = unsafe { emission_media_options_from_c("test", &c_options) };
+        assert!(matches!(refused, Err(SidereonStatus::InvalidArgument)));
     }
 }

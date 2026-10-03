@@ -236,6 +236,13 @@ pub unsafe extern "C" fn sidereon_trls_solution_summary(
                 "sidereon_trls_solution_summary",
                 "out_summary"
             ));
+            c_try!(reject_output_overlaps_handle(
+                "sidereon_trls_solution_summary",
+                out_summary,
+                "out_summary",
+                sol,
+                "solution"
+            ));
             let sol = c_try!(require_ref(
                 sol,
                 "sidereon_trls_solution_summary",
@@ -262,6 +269,30 @@ pub unsafe extern "C" fn sidereon_trls_solution_x(
     out_required: *mut usize,
 ) -> SidereonStatus {
     ffi_boundary("sidereon_trls_solution_x", SidereonStatus::Panic, || {
+        c_try!(reject_outputs_overlapping_handle(
+            "sidereon_trls_solution_x",
+            &[
+                (out.cast(), size_of::<f64>(), len, "out"),
+                (out_written.cast(), size_of::<usize>(), 1, "out_written"),
+                (out_required.cast(), size_of::<usize>(), 1, "out_required")
+            ],
+            sol,
+            "solution"
+        ));
+        c_try!(reject_output_overlaps_handle(
+            "sidereon_trls_solution_x",
+            out_written,
+            "out_written",
+            sol,
+            "solution"
+        ));
+        c_try!(reject_output_overlaps_handle(
+            "sidereon_trls_solution_x",
+            out_required,
+            "out_required",
+            sol,
+            "solution"
+        ));
         c_try!(init_copy_counts(
             "sidereon_trls_solution_x",
             out_written,
@@ -299,6 +330,16 @@ pub unsafe extern "C" fn sidereon_trls_solution_residuals(
         "sidereon_trls_solution_residuals",
         SidereonStatus::Panic,
         || {
+            c_try!(reject_outputs_overlapping_handle(
+                "sidereon_trls_solution_residuals",
+                &[
+                    (out.cast(), size_of::<f64>(), len, "out"),
+                    (out_written.cast(), size_of::<usize>(), 1, "out_written"),
+                    (out_required.cast(), size_of::<usize>(), 1, "out_required")
+                ],
+                sol,
+                "solution"
+            ));
             c_try!(init_copy_counts(
                 "sidereon_trls_solution_residuals",
                 out_written,
@@ -341,6 +382,16 @@ pub unsafe extern "C" fn sidereon_trls_solution_gradient(
         "sidereon_trls_solution_gradient",
         SidereonStatus::Panic,
         || {
+            c_try!(reject_outputs_overlapping_handle(
+                "sidereon_trls_solution_gradient",
+                &[
+                    (out.cast(), size_of::<f64>(), len, "out"),
+                    (out_written.cast(), size_of::<usize>(), 1, "out_written"),
+                    (out_required.cast(), size_of::<usize>(), 1, "out_required")
+                ],
+                sol,
+                "solution"
+            ));
             c_try!(init_copy_counts(
                 "sidereon_trls_solution_gradient",
                 out_written,
@@ -383,6 +434,16 @@ pub unsafe extern "C" fn sidereon_trls_solution_jacobian(
         "sidereon_trls_solution_jacobian",
         SidereonStatus::Panic,
         || {
+            c_try!(reject_outputs_overlapping_handle(
+                "sidereon_trls_solution_jacobian",
+                &[
+                    (out.cast(), size_of::<f64>(), len, "out"),
+                    (out_written.cast(), size_of::<usize>(), 1, "out_written"),
+                    (out_required.cast(), size_of::<usize>(), 1, "out_required")
+                ],
+                sol,
+                "solution"
+            ));
             c_try!(init_copy_counts(
                 "sidereon_trls_solution_jacobian",
                 out_written,
@@ -436,6 +497,13 @@ pub unsafe extern "C" fn sidereon_trls_drop_one_count(
                 "sidereon_trls_drop_one_count",
                 "out_count"
             ));
+            c_try!(reject_output_overlaps_handle(
+                "sidereon_trls_drop_one_count",
+                out_count,
+                "out_count",
+                report,
+                "report"
+            ));
             *out_count = 0;
             let report = c_try!(require_ref(
                 report,
@@ -465,6 +533,13 @@ pub unsafe extern "C" fn sidereon_trls_drop_one_base_summary(
                 out_summary,
                 "sidereon_trls_drop_one_base_summary",
                 "out_summary"
+            ));
+            c_try!(reject_output_overlaps_handle(
+                "sidereon_trls_drop_one_base_summary",
+                out_summary,
+                "out_summary",
+                report,
+                "report"
             ));
             let report = c_try!(require_ref(
                 report,
@@ -496,6 +571,13 @@ pub unsafe extern "C" fn sidereon_trls_drop_one_drop_summary(
                 out_summary,
                 "sidereon_trls_drop_one_drop_summary",
                 "out_summary"
+            ));
+            c_try!(reject_output_overlaps_handle(
+                "sidereon_trls_drop_one_drop_summary",
+                out_summary,
+                "out_summary",
+                report,
+                "report"
             ));
             let report = c_try!(require_ref(
                 report,
@@ -533,6 +615,16 @@ pub unsafe extern "C" fn sidereon_trls_drop_one_drop_x(
         "sidereon_trls_drop_one_drop_x",
         SidereonStatus::Panic,
         || {
+            c_try!(reject_outputs_overlapping_handle(
+                "sidereon_trls_drop_one_drop_x",
+                &[
+                    (out.cast(), size_of::<f64>(), len, "out"),
+                    (out_written.cast(), size_of::<usize>(), 1, "out_written"),
+                    (out_required.cast(), size_of::<usize>(), 1, "out_required")
+                ],
+                report,
+                "report"
+            ));
             c_try!(init_copy_counts(
                 "sidereon_trls_drop_one_drop_x",
                 out_written,
@@ -583,6 +675,16 @@ pub unsafe extern "C" fn sidereon_trls_drop_one_cost_delta(
         "sidereon_trls_drop_one_cost_delta",
         SidereonStatus::Panic,
         || {
+            c_try!(reject_outputs_overlapping_handle(
+                "sidereon_trls_drop_one_cost_delta",
+                &[
+                    (out.cast(), size_of::<f64>(), len, "out"),
+                    (out_written.cast(), size_of::<usize>(), 1, "out_written"),
+                    (out_required.cast(), size_of::<usize>(), 1, "out_required")
+                ],
+                report,
+                "report"
+            ));
             c_try!(init_copy_counts(
                 "sidereon_trls_drop_one_cost_delta",
                 out_written,

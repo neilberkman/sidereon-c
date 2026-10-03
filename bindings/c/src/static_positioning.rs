@@ -34,6 +34,45 @@ pub struct SidereonStaticPositionOptions {
     pub robust: SidereonSppRobustConfig,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonStaticPositionOptionsV2 {
+    pub base: SidereonStaticPositionOptions,
+    pub models: SidereonSppModelOptions,
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_static_position_options_v2_init(
+    out_options: *mut SidereonStaticPositionOptionsV2,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_static_position_options_v2_init",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_options,
+                "sidereon_static_position_options_v2_init",
+                "out_options"
+            ));
+            let core_defaults = CoreStaticSolveOptions::default();
+            let robust = default_robust_config();
+            *out = SidereonStaticPositionOptionsV2 {
+                base: SidereonStaticPositionOptions {
+                    initial_position_m: core_defaults.initial_position_m,
+                    with_geodetic: core_defaults.with_geodetic,
+                    robust_enabled: false,
+                    robust,
+                },
+                models: SidereonSppModelOptions {
+                    qzss_clock: SidereonQzssClock::Gps as u32,
+                    troposphere_model: SidereonTroposphereModel::Rtklib as u32,
+                },
+            };
+            SidereonStatus::Ok
+        },
+    )
+}
+
 /// Static-position solve error category returned through out_error fields.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -48,14 +87,23 @@ pub enum SidereonStaticPositionErrorKind {
     EpochInput = 3,
     /// The same satellite appeared twice in one epoch.
     DuplicateObservation = 4,
-    /// An ionosphere-corrected epoch used a satellite without a carrier model.
-    IonosphereUnsupported = 5,
-    /// Too few accepted measurements remained for the stacked state.
+    /// Too few accepted measurements remained for the stacked state. An
+    /// ionosphere-corrected epoch leaves out a satellite whose carrier does not
+    /// resolve and reports it as a rejected satellite with
+    /// SIDEREON_SPP_REJECTION_REASON_IONOSPHERE_CARRIER_UNRESOLVED, so such an
+    /// epoch fails only when too few measurements remain. Value 5, which named
+    /// the removed whole-solve ionosphere refusal, is not reused.
     TooFewMeasurements = 6,
     /// A satellite lost ephemeris during the solve.
     EphemerisLost = 7,
     /// The stacked design was rank deficient.
     Singular = 8,
+    /// The ephemeris source read UT1 outside the UT1 table and its UT1 policy
+    /// refused it.
+    Ut1OutsideCoverage = 9,
+    /// The per-epoch satellite selection did not settle within the solve's
+    /// pass budget (RTKLIB's `MAXITR`); the error text states the passes run.
+    SelectionUnsettled = 10,
 }
 
 /// One solved epoch-local receiver clock.
@@ -92,11 +140,14 @@ pub struct SidereonStaticPositionResidual {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct SidereonStaticPositionMetadata {
-    /// Number of accepted trust-region iterations in the final inner solve.
+    /// The trust-region iterations of every solve plus one per least-squares
+    /// step.
     pub iterations: usize,
-    /// Whether the final inner solve reached a convergence criterion.
+    /// Whether the whole solve converged. A robust solve that spent its outer
+    /// budget reports false with OUTER_BUDGET_EXHAUSTED, and one that cycled
+    /// false with OUTER_OSCILLATION.
     pub converged: bool,
-    /// Final inner solver termination status.
+    /// How the whole solve ended; a settled solve reports SELECTION_SETTLED.
     pub status: SidereonSppSolveStatus,
     /// Number of robust outer iterations performed.
     pub outer_iterations: usize,
@@ -112,6 +163,10 @@ pub struct SidereonStaticPositionMetadata {
     pub redundancy: i64,
     /// Geometry observability and covariance-validation diagnostics.
     pub geometry_quality: SidereonGeometryQuality,
+    /// UT1 departure a permissive UT1 policy of the ephemeris source accepted
+    /// while forming the solve; SIDEREON_UT1_DEGRADATION_NONE when UT1 came
+    /// from the table or was not read.
+    pub ut1_degraded: SidereonUt1Degradation,
 }
 
 /// Status for a leave-one-out diagnostic solve.
@@ -252,7 +307,7 @@ pub unsafe extern "C" fn sidereon_solve_static_position_sp3(
     out_error: *mut SidereonStaticPositionErrorKind,
     out_solution: *mut *mut SidereonStaticPositionSolution,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_solve_static_position_sp3",
         SidereonStatus::Panic,
         || {
@@ -288,7 +343,7 @@ pub unsafe extern "C" fn sidereon_solve_static_position_broadcast(
     out_error: *mut SidereonStaticPositionErrorKind,
     out_solution: *mut *mut SidereonStaticPositionSolution,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_solve_static_position_broadcast",
         SidereonStatus::Panic,
         || {
@@ -308,6 +363,113 @@ pub unsafe extern "C" fn sidereon_solve_static_position_broadcast(
             )
         },
     )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_solve_static_position_sp3_v2(
+    sp3: *const SidereonSp3,
+    epochs: *const SidereonStaticPositionEpoch,
+    epoch_count: usize,
+    options: *const SidereonStaticPositionOptionsV2,
+    out_error: *mut SidereonStaticPositionErrorKind,
+    out_solution: *mut *mut SidereonStaticPositionSolution,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_solve_static_position_sp3_v2";
+    engine_error_operation_boundary(FN, SidereonStatus::Panic, || {
+        let sp3 = c_try!(require_ref(sp3, FN, "sp3"));
+        solve_static_position_v2_common(
+            FN,
+            &sp3.inner,
+            epochs,
+            epoch_count,
+            options,
+            out_error,
+            out_solution,
+        )
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_solve_static_position_broadcast_v2(
+    broadcast: *const SidereonBroadcastEphemeris,
+    epochs: *const SidereonStaticPositionEpoch,
+    epoch_count: usize,
+    options: *const SidereonStaticPositionOptionsV2,
+    out_error: *mut SidereonStaticPositionErrorKind,
+    out_solution: *mut *mut SidereonStaticPositionSolution,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_solve_static_position_broadcast_v2";
+    engine_error_operation_boundary(FN, SidereonStatus::Panic, || {
+        let broadcast = c_try!(require_ref(broadcast, FN, "broadcast"));
+        solve_static_position_v2_common(
+            FN,
+            &broadcast.inner,
+            epochs,
+            epoch_count,
+            options,
+            out_error,
+            out_solution,
+        )
+    })
+}
+
+unsafe fn solve_static_position_v2_common<E: EphemerisSource>(
+    fn_name: &str,
+    source: &E,
+    epochs: *const SidereonStaticPositionEpoch,
+    epoch_count: usize,
+    options: *const SidereonStaticPositionOptionsV2,
+    out_error: *mut SidereonStaticPositionErrorKind,
+    out_solution: *mut *mut SidereonStaticPositionSolution,
+) -> SidereonStatus {
+    c_try!(init_static_position_error(
+        out_error,
+        SidereonStaticPositionErrorKind::None
+    ));
+    let out_solution = c_try!(static_position_validation(
+        out_error,
+        require_out(out_solution, fn_name, "out_solution")
+    ));
+    *out_solution = ptr::null_mut();
+    let options = match options.as_ref() {
+        Some(value) => *value,
+        None => {
+            set_last_error(format!("{fn_name}: options must not be NULL"));
+            let _ = init_static_position_error(
+                out_error,
+                SidereonStaticPositionErrorKind::InvalidInput,
+            );
+            return SidereonStatus::InvalidArgument;
+        }
+    };
+    let (qzss_clock, troposphere_model) =
+        match crate::spp::spp_model_options_from_c(fn_name, &options.models) {
+            Ok(models) => models,
+            Err(status) => {
+                let _ = init_static_position_error(
+                    out_error,
+                    SidereonStaticPositionErrorKind::InvalidInput,
+                );
+                return status;
+            }
+        };
+    let epochs = c_try!(static_position_validation(
+        out_error,
+        static_epochs_from_c(fn_name, epochs, epoch_count)
+    ));
+    let mut solve_options = c_try!(static_position_validation(
+        out_error,
+        static_options_from_c(fn_name, &options.base)
+    ));
+    solve_options.qzss_clock = qzss_clock;
+    solve_options.troposphere_model = troposphere_model;
+    match core_solve_static(source, &epochs, solve_options) {
+        Ok(inner) => {
+            write_boxed_handle(out_solution, SidereonStaticPositionSolution { inner });
+            SidereonStatus::Ok
+        }
+        Err(err) => map_static_position_error(fn_name, err, out_error),
+    }
 }
 
 /// Copy the static receiver ECEF position [x_m, y_m, z_m] into out_xyz.
@@ -345,7 +507,7 @@ pub unsafe extern "C" fn sidereon_static_position_solution_position(
 /// Copy the optional geodetic receiver position and set *out_present.
 ///
 /// Safety: solution must be a live handle; out_geodetic and out_present must
-/// point to writable storage.
+/// point to disjoint writable storage.
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_static_position_solution_geodetic(
     solution: *const SidereonStaticPositionSolution,
@@ -356,6 +518,32 @@ pub unsafe extern "C" fn sidereon_static_position_solution_geodetic(
         "sidereon_static_position_solution_geodetic",
         SidereonStatus::Panic,
         || {
+            if !out_geodetic.is_null() && !out_present.is_null() {
+                let outputs = [
+                    Some((
+                        c_try!(super::checked_output_range(
+                            "sidereon_static_position_solution_geodetic",
+                            out_geodetic,
+                            1,
+                            "out_geodetic"
+                        )),
+                        "out_geodetic",
+                    )),
+                    Some((
+                        c_try!(super::checked_output_range(
+                            "sidereon_static_position_solution_geodetic",
+                            out_present,
+                            1,
+                            "out_present"
+                        )),
+                        "out_present",
+                    )),
+                ];
+                c_try!(super::reject_overlapping_optional_outputs(
+                    "sidereon_static_position_solution_geodetic",
+                    &outputs
+                ));
+            }
             let out_geodetic = c_try!(require_out(
                 out_geodetic,
                 "sidereon_static_position_solution_geodetic",
@@ -657,6 +845,43 @@ pub unsafe extern "C" fn sidereon_static_position_solution_rejected_sats(
     )
 }
 
+/// Copy static-position rejected satellites with strict-SSR size payloads.
+/// The existing accessor remains ABI-compatible.
+///
+/// # Safety
+/// `solution` must be a live handle and the output pointers must satisfy the
+/// variable-length buffer contract.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_static_position_solution_rejected_sats_v2(
+    solution: *const SidereonStaticPositionSolution,
+    epoch_index: usize,
+    out: *mut SidereonSppRejectedSatV2,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_static_position_solution_rejected_sats_v2";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(FN, out_written, out_required));
+        let solution = c_try!(require_ref(solution, FN, "solution"));
+        let Some(rows) = solution.inner.rejected_sats.get(epoch_index) else {
+            set_last_error(format!("{FN}: epoch_index {epoch_index} out of range"));
+            return SidereonStatus::InvalidArgument;
+        };
+        let values = super::spp::rejected_sats_v2_to_c(rows);
+        c_try!(copy_prefix_to_c(
+            FN,
+            "out",
+            &values,
+            out,
+            len,
+            out_written,
+            out_required
+        ));
+        SidereonStatus::Ok
+    })
+}
+
 /// Copy leave-one-epoch-out diagnostics. Output uses the variable-length contract.
 ///
 /// Safety: solution must be a live handle; out must point to len entries or be
@@ -923,9 +1148,6 @@ fn static_position_error_kind(err: &CoreStaticSolveError) -> SidereonStaticPosit
         CoreStaticSolveError::DuplicateObservation { .. } => {
             SidereonStaticPositionErrorKind::DuplicateObservation
         }
-        CoreStaticSolveError::IonosphereUnsupported { .. } => {
-            SidereonStaticPositionErrorKind::IonosphereUnsupported
-        }
         CoreStaticSolveError::TooFewMeasurements { .. } => {
             SidereonStaticPositionErrorKind::TooFewMeasurements
         }
@@ -933,6 +1155,12 @@ fn static_position_error_kind(err: &CoreStaticSolveError) -> SidereonStaticPosit
             SidereonStaticPositionErrorKind::EphemerisLost
         }
         CoreStaticSolveError::Singular(_) => SidereonStaticPositionErrorKind::Singular,
+        CoreStaticSolveError::SelectionUnsettled { .. } => {
+            SidereonStaticPositionErrorKind::SelectionUnsettled
+        }
+        CoreStaticSolveError::Ut1OutsideCoverage(_) => {
+            SidereonStaticPositionErrorKind::Ut1OutsideCoverage
+        }
     }
 }
 
@@ -944,13 +1172,76 @@ unsafe fn map_static_position_error(
     let kind = static_position_error_kind(&err);
     let _ = init_static_position_error(out_error, kind);
     set_last_error(format!("{fn_name}: {err}"));
+    crate::engine_error::record_engine_error(
+        crate::engine_error::SidereonEngineErrorFamily::StaticPositioning,
+        fn_name,
+        static_position_error_value(&err),
+    );
     match kind {
         SidereonStaticPositionErrorKind::InvalidInput
         | SidereonStaticPositionErrorKind::EpochInput
         | SidereonStaticPositionErrorKind::DuplicateObservation
-        | SidereonStaticPositionErrorKind::IonosphereUnsupported
         | SidereonStaticPositionErrorKind::EmptyEpochs => SidereonStatus::InvalidArgument,
+        SidereonStaticPositionErrorKind::Ut1OutsideCoverage => SidereonStatus::Ut1OutsideCoverage,
         _ => SidereonStatus::Solve,
+    }
+}
+
+fn static_position_error_value(error: &CoreStaticSolveError) -> serde_json::Value {
+    use sidereon_core::static_positioning::StaticSolveError as E;
+    match error {
+        E::EmptyEpochs => serde_json::json!({"kind": "empty_epochs", "fields": {}}),
+        E::InvalidInput { field, kind } => crate::engine_error::spp_error_value(
+            &sidereon_core::positioning::SppError::InvalidInput { field, kind: *kind },
+        ),
+        E::EpochInput {
+            epoch_index,
+            source,
+        } => serde_json::json!({
+            "kind": "epoch_input",
+            "fields": {
+                "epoch_index": epoch_index,
+                "cause": crate::engine_error::spp_error_value(source),
+            },
+        }),
+        E::DuplicateObservation {
+            epoch_index,
+            satellite,
+        } => serde_json::json!({
+            "kind": "duplicate_observation",
+            "fields": {
+                "epoch_index": epoch_index,
+                "satellite_id": satellite.to_string(),
+            },
+        }),
+        E::TooFewMeasurements { used, required } => serde_json::json!({
+            "kind": "too_few_measurements",
+            "fields": {"used": used, "required": required},
+        }),
+        E::EphemerisLost {
+            epoch_index,
+            satellite,
+        } => serde_json::json!({
+            "kind": "ephemeris_lost",
+            "fields": {
+                "epoch_index": epoch_index,
+                "satellite_id": satellite.to_string(),
+            },
+        }),
+        E::Singular(cause) => serde_json::json!({
+            "kind": "singular",
+            "fields": {
+                "cause": crate::engine_error::least_squares_solve_error_value(cause),
+            },
+        }),
+        E::SelectionUnsettled { passes } => serde_json::json!({
+            "kind": "selection_unsettled",
+            "fields": {"passes": passes},
+        }),
+        E::Ut1OutsideCoverage(reason) => serde_json::json!({
+            "kind": "ut1_outside_coverage",
+            "fields": {"reason": crate::engine_error::degrade_reason_name(*reason)},
+        }),
     }
 }
 
@@ -974,6 +1265,9 @@ fn static_solve_status_to_c(status: Status) -> SidereonSppSolveStatus {
         Status::CostTolerance => SidereonSppSolveStatus::CostTolerance,
         Status::StepTolerance => SidereonSppSolveStatus::StepTolerance,
         Status::MaxEvaluations => SidereonSppSolveStatus::MaxEvaluations,
+        Status::SelectionSettled => SidereonSppSolveStatus::SelectionSettled,
+        Status::OuterBudgetExhausted => SidereonSppSolveStatus::OuterBudgetExhausted,
+        Status::OuterOscillation => SidereonSppSolveStatus::OuterOscillation,
     }
 }
 
@@ -989,6 +1283,7 @@ fn empty_static_position_metadata() -> SidereonStaticPositionMetadata {
         n_parameters: 0,
         redundancy: 0,
         geometry_quality: empty_geometry_quality(),
+        ut1_degraded: SidereonUt1Degradation::None,
     }
 }
 
@@ -1007,6 +1302,7 @@ fn static_metadata_to_c(
         n_parameters: metadata.n_parameters,
         redundancy: metadata.redundancy as i64,
         geometry_quality: geometry_quality_to_c(geometry_quality),
+        ut1_degraded: SidereonUt1Degradation::from_core(metadata.ut1_degraded),
     }
 }
 
@@ -1035,6 +1331,12 @@ fn spp_rejection_reason_to_c(reason: CoreSppRejectionReason) -> SidereonSppRejec
         CoreSppRejectionReason::LowElevation => SidereonSppRejectionReason::LowElevation,
         CoreSppRejectionReason::SbasWithdrawn => SidereonSppRejectionReason::SbasWithdrawn,
         CoreSppRejectionReason::SbasIonoUncovered => SidereonSppRejectionReason::SbasIonoUncovered,
+        CoreSppRejectionReason::IonosphereCarrierUnresolved => {
+            SidereonSppRejectionReason::IonosphereCarrierUnresolved
+        }
+        CoreSppRejectionReason::SsrCorrectionExceedsLimit(_) => {
+            SidereonSppRejectionReason::SsrCorrectionExceedsLimit
+        }
     }
 }
 
@@ -1245,6 +1547,7 @@ mod tests {
             sbas_iono: None,
             glonass_channels: BTreeMap::new(),
             met: SurfaceMet::default(),
+            pseudorange_code: sidereon_core::positioning::PseudorangeCode::SingleFrequency,
         }
     }
 
@@ -1319,6 +1622,7 @@ mod tests {
                 temperature_k: SurfaceMet::default().temperature_k,
                 relative_humidity: SurfaceMet::default().relative_humidity,
                 with_geodetic: true,
+                pseudorange_code: pseudorange_code_to_c(epoch.pseudorange_code),
             };
             c_epochs.push(SidereonStaticPositionEpoch {
                 inputs,
@@ -1329,11 +1633,8 @@ mod tests {
         (tokens, observations, c_epochs)
     }
 
-    fn assert_close(got: f64, want: f64, tol: f64) {
-        assert!(
-            (got - want).abs() <= tol,
-            "got {got:e}, want {want:e}, tol {tol:e}"
-        );
+    fn assert_same_bits(got: f64, want: f64) {
+        assert_eq!(got.to_bits(), want.to_bits(), "got {got:e}, want {want:e}");
     }
 
     fn flatten_state(matrix: &[Vec<f64>]) -> Vec<f64> {
@@ -1373,7 +1674,7 @@ mod tests {
         };
         assert_eq!(status, SidereonStatus::Ok);
         for (got, want) in position.iter().zip(expected.position.as_array()) {
-            assert_close(*got, want, 1.0e-8);
+            assert_same_bits(*got, want);
         }
 
         let mut geodetic = empty_geodetic();
@@ -1382,11 +1683,11 @@ mod tests {
             sidereon_static_position_solution_geodetic(solution, &mut geodetic, &mut present)
         };
         assert_eq!(status, SidereonStatus::Ok);
-        assert!(present);
+        assert_eq!(present, expected.geodetic.is_some());
         let expected_geodetic = expected.geodetic.expect("geodetic");
-        assert_close(geodetic.lat_rad, expected_geodetic.lat_rad, 1.0e-14);
-        assert_close(geodetic.lon_rad, expected_geodetic.lon_rad, 1.0e-14);
-        assert_close(geodetic.height_m, expected_geodetic.height_m, 1.0e-8);
+        assert_same_bits(geodetic.lat_rad, expected_geodetic.lat_rad);
+        assert_same_bits(geodetic.lon_rad, expected_geodetic.lon_rad);
+        assert_same_bits(geodetic.height_m, expected_geodetic.height_m);
 
         let mut metadata = empty_static_position_metadata();
         let status = unsafe { sidereon_static_position_solution_metadata(solution, &mut metadata) };
@@ -1417,7 +1718,7 @@ mod tests {
             .iter()
             .zip(flatten_mat3(expected.covariance.position_ecef_m2))
         {
-            assert_close(*got, want, 1.0e-12);
+            assert_same_bits(*got, want);
         }
 
         let expected_state = flatten_state(&expected.covariance.state_m2);
@@ -1448,7 +1749,7 @@ mod tests {
         assert_eq!(status, SidereonStatus::Ok);
         assert_eq!(written, expected_state.len());
         for (got, want) in state.iter().zip(expected_state) {
-            assert_close(*got, want, 1.0e-10);
+            assert_same_bits(*got, want);
         }
 
         let mut clock_required = 0usize;
@@ -1484,7 +1785,7 @@ mod tests {
         for (got, want) in clocks.iter().zip(&expected.per_epoch_clock) {
             assert_eq!(got.epoch_index, want.epoch_index);
             assert_eq!(got.system, gnss_system_to_c(want.system));
-            assert_close(got.clock_s, want.clock_s, 1.0e-15);
+            assert_same_bits(got.clock_s, want.clock_s);
         }
 
         let mut residual_required = 0usize;
@@ -1561,5 +1862,170 @@ mod tests {
         assert_eq!(status, SidereonStatus::InvalidArgument);
         assert_eq!(error, SidereonStaticPositionErrorKind::InvalidInput);
         assert!(solution.is_null());
+    }
+
+    #[test]
+    fn empty_static_solve_records_the_core_error_in_the_public_payload_slot() {
+        crate::engine_error::clear_engine_error();
+        let eph = make_store(1);
+        let valid_options = c_options(options());
+        let mut error = SidereonStaticPositionErrorKind::None;
+        let mut solution = ptr::null_mut();
+        let status = unsafe {
+            solve_static_position_common(
+                "test_static_position_empty_epochs",
+                &eph,
+                ptr::null(),
+                0,
+                &valid_options,
+                &mut error,
+                &mut solution,
+            )
+        };
+        assert_eq!(status, SidereonStatus::InvalidArgument);
+        assert_eq!(error, SidereonStaticPositionErrorKind::EmptyEpochs);
+        assert!(solution.is_null());
+
+        let mut info = MaybeUninit::<crate::SidereonEngineErrorInfo>::uninit();
+        assert_eq!(
+            unsafe { crate::sidereon_last_engine_error_info(info.as_mut_ptr()) },
+            SidereonStatus::Ok
+        );
+        let info = unsafe { info.assume_init() };
+        assert_eq!(
+            info.family,
+            crate::SidereonEngineErrorFamily::StaticPositioning
+        );
+        assert!(info.payload_len > 0);
+
+        let mut written = 0usize;
+        let mut required = 0usize;
+        assert_eq!(
+            unsafe {
+                crate::sidereon_last_engine_error_payload(
+                    ptr::null_mut(),
+                    0,
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(written, 0);
+        assert_eq!(required, info.payload_len);
+        let mut payload = vec![0u8; required];
+        assert_eq!(
+            unsafe {
+                crate::sidereon_last_engine_error_payload(
+                    payload.as_mut_ptr(),
+                    payload.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(written, required);
+        let value: serde_json::Value = serde_json::from_slice(&payload).expect("JSON payload");
+        assert_eq!(value["family"], "static_positioning");
+        assert_eq!(value["operation"], "test_static_position_empty_epochs");
+        assert_eq!(value["error"]["kind"], "empty_epochs");
+        assert_eq!(value["error"]["fields"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn static_position_error_mapper_preserves_every_variant_and_nested_cause() {
+        use sidereon_core::astro::math::least_squares::SolveError as LeastSquaresError;
+        use sidereon_core::positioning::{SppError, SppInputErrorKind};
+
+        let cases = [
+            (
+                CoreStaticSolveError::EmptyEpochs,
+                serde_json::json!({"kind":"empty_epochs", "fields":{}}),
+            ),
+            (
+                CoreStaticSolveError::InvalidInput {
+                    field: "pressure_hpa",
+                    kind: SppInputErrorKind::NotPositive,
+                },
+                serde_json::json!({
+                    "kind":"invalid_input",
+                    "fields":{"field":"pressure_hpa", "kind":"not_positive"}
+                }),
+            ),
+            (
+                CoreStaticSolveError::EpochInput {
+                    epoch_index: 2,
+                    source: SppError::TooFewSatellites {
+                        used: 0,
+                        required: 4,
+                    },
+                },
+                serde_json::json!({
+                    "kind":"epoch_input",
+                    "fields":{
+                        "epoch_index":2,
+                        "cause":{"kind":"too_few_satellites", "fields":{"used":0, "required":4}}
+                    }
+                }),
+            ),
+            (
+                CoreStaticSolveError::DuplicateObservation {
+                    epoch_index: 3,
+                    satellite: gps(7),
+                },
+                serde_json::json!({
+                    "kind":"duplicate_observation",
+                    "fields":{"epoch_index":3, "satellite_id":"G07"}
+                }),
+            ),
+            (
+                CoreStaticSolveError::TooFewMeasurements {
+                    used: 5,
+                    required: 6,
+                },
+                serde_json::json!({
+                    "kind":"too_few_measurements",
+                    "fields":{"used":5, "required":6}
+                }),
+            ),
+            (
+                CoreStaticSolveError::EphemerisLost {
+                    epoch_index: 4,
+                    satellite: gps(9),
+                },
+                serde_json::json!({
+                    "kind":"ephemeris_lost",
+                    "fields":{"epoch_index":4, "satellite_id":"G09"}
+                }),
+            ),
+            (
+                CoreStaticSolveError::Singular(LeastSquaresError::SingularJacobian),
+                serde_json::json!({
+                    "kind":"singular",
+                    "fields":{"cause":{"kind":"singular_jacobian", "fields":{}}}
+                }),
+            ),
+            (
+                CoreStaticSolveError::SelectionUnsettled { passes: 5 },
+                serde_json::json!({
+                    "kind":"selection_unsettled",
+                    "fields":{"passes":5}
+                }),
+            ),
+            (
+                CoreStaticSolveError::Ut1OutsideCoverage(
+                    sidereon_core::astro::time::DegradeReason::AfterCoverage,
+                ),
+                serde_json::json!({
+                    "kind":"ut1_outside_coverage",
+                    "fields":{"reason":"after_coverage"}
+                }),
+            ),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(static_position_error_value(&error), expected);
+        }
     }
 }

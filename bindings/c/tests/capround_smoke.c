@@ -22,6 +22,7 @@
 #include <string.h>
 
 #include "sidereon.h"
+#include "w5_capround_pins.h"
 
 static int failures = 0;
 
@@ -48,6 +49,13 @@ static void put_be_f64(unsigned char *out, double value) {
     uint64_t bits = 0;
     memcpy(&bits, &value, sizeof(bits));
     put_be_u64(out, bits);
+}
+
+/* Exact agreement with a pinned engine value (tests/valgen, bin w5_capround). */
+static int same_bits(double actual, uint64_t expected) {
+    uint64_t bits = 0;
+    memcpy(&bits, &actual, sizeof(bits));
+    return bits == expected;
 }
 
 static void check(int ok, const char *what) {
@@ -99,14 +107,14 @@ static void test_nequick(void) {
     check(sidereon_galileo_nequick_g_native(0.0, 0.0, 0.0, 45.0, 9.0, 30.0,
                                             43200.0, 80.0, 1.57542e9, &delay) ==
               SIDEREON_STATUS_OK &&
-              delay > 0.0 && isfinite(delay),
+              same_bits(delay, W5_CAPROUND_NEQUICK_DEFAULT_DELAY_M_BITS),
           "galileo_nequick_g_native default coeffs");
 
     double delay2 = -1.0;
     check(sidereon_galileo_nequick_g_native(80.0, 0.1, 0.05, 45.0, 9.0, 30.0,
                                             43200.0, 80.0, 1.57542e9, &delay2) ==
               SIDEREON_STATUS_OK &&
-              delay2 > 0.0,
+              same_bits(delay2, W5_CAPROUND_NEQUICK_BROADCAST_DELAY_M_BITS),
           "galileo_nequick_g_native broadcast coeffs");
 }
 
@@ -117,13 +125,19 @@ static void test_elements(void) {
     const double mu = 398600.4418;
 
     SidereonClassicalElements coe;
-    check(sidereon_rv2coe(r, v, mu, &coe) == SIDEREON_STATUS_OK && coe.ecc >= 0.0 &&
-              coe.a > 0.0,
+    check(sidereon_rv2coe(r, v, mu, &coe) == SIDEREON_STATUS_OK &&
+              same_bits(coe.ecc, W5_CAPROUND_COE_ECC_BITS) &&
+              same_bits(coe.a, W5_CAPROUND_COE_A_BITS),
           "rv2coe");
 
     double r2[3] = {0.0, 0.0, 0.0};
     double v2[3] = {0.0, 0.0, 0.0};
     check(sidereon_coe2rv(&coe, mu, r2, v2) == SIDEREON_STATUS_OK, "coe2rv");
+    for (int i = 0; i < 3; i++) {
+        check(same_bits(r2[i], W5_CAPROUND_COE2RV_R_BITS[i]) &&
+                  same_bits(v2[i], W5_CAPROUND_COE2RV_V_BITS[i]),
+              "coe2rv engine state");
+    }
 
     double dr = 0.0, dv = 0.0;
     for (int i = 0; i < 3; i++) {
@@ -138,42 +152,47 @@ static void test_observation(void) {
     double sun[3] = {1.4959787e11, 0.0, 0.0};
     SidereonSurfacePoint sp;
     check(sidereon_sub_solar_point(sun, &sp) == SIDEREON_STATUS_OK &&
-              fabs(sp.latitude_deg) < 1e-9 && fabs(sp.longitude_deg) < 1e-9,
+              same_bits(sp.latitude_deg, W5_CAPROUND_SUB_SOLAR_LATITUDE_DEG_BITS) &&
+              same_bits(sp.longitude_deg, W5_CAPROUND_SUB_SOLAR_LONGITUDE_DEG_BITS),
           "sub_solar_point");
 
     double termlat = 999.0;
     check(sidereon_terminator_latitude_deg(sp.latitude_deg, sp.longitude_deg, 90.0,
                                            &termlat) == SIDEREON_STATUS_OK &&
-              isfinite(termlat),
+              same_bits(termlat, W5_CAPROUND_TERMINATOR_LATITUDE_DEG_BITS),
           "terminator_latitude_deg");
 
     double q = 999.0;
     check(sidereon_parallactic_angle_deg(40.0, 0.0, 20.0, &q) == SIDEREON_STATUS_OK &&
-              fabs(q) < 1e-9,
+              same_bits(q, W5_CAPROUND_PARALLACTIC_ANGLE_DEG_BITS),
           "parallactic_angle_deg on the meridian");
 
     double mag = 999.0;
     check(sidereon_satellite_visual_magnitude(1000.0, 0.0, 5.0, 1000.0, &mag) ==
               SIDEREON_STATUS_OK &&
-              fabs(mag - 5.0) < 1e-9,
+              same_bits(mag, W5_CAPROUND_VISUAL_MAGNITUDE_BITS),
           "satellite_visual_magnitude at reference range, zero phase");
 
     double obs[3] = {1.0, 0.0, 0.0};
     SidereonSurfacePoint sub;
     check(sidereon_sub_observer_point(obs, 0.0, 90.0, 0.0, &sub) == SIDEREON_STATUS_OK &&
-              isfinite(sub.latitude_deg) && isfinite(sub.longitude_deg),
+              same_bits(sub.latitude_deg, W5_CAPROUND_SUB_OBSERVER_LATITUDE_DEG_BITS) &&
+              same_bits(sub.longitude_deg, W5_CAPROUND_SUB_OBSERVER_LONGITUDE_DEG_BITS),
           "sub_observer_point");
 }
 
 static void test_geoid(void) {
     double n = 999.0;
-    check(sidereon_geoid_undulation(0.7, 0.1, &n) == SIDEREON_STATUS_OK && isfinite(n),
+    check(sidereon_geoid_undulation(0.7, 0.1, &n) == SIDEREON_STATUS_OK &&
+              same_bits(n, W5_CAPROUND_GEOID_UNDULATION_M_BITS),
           "geoid_undulation");
 
     double ortho = 0.0, ellip = 0.0;
-    check(sidereon_orthometric_height_m(100.0, 0.7, 0.1, &ortho) == SIDEREON_STATUS_OK,
+    check(sidereon_orthometric_height_m(100.0, 0.7, 0.1, &ortho) == SIDEREON_STATUS_OK &&
+              same_bits(ortho, W5_CAPROUND_ORTHOMETRIC_HEIGHT_M_BITS),
           "orthometric_height_m");
     check(sidereon_ellipsoidal_height_m(ortho, 0.7, 0.1, &ellip) == SIDEREON_STATUS_OK &&
+              same_bits(ellip, W5_CAPROUND_ELLIPSOIDAL_HEIGHT_M_BITS) &&
               fabs(ellip - 100.0) < 1e-9,
           "ellipsoidal_height_m round-trip");
 
@@ -191,12 +210,13 @@ static void test_geoid(void) {
         double mid = -1.0;
         check(sidereon_geoid_grid_undulation_deg(grid, 0.5, 0.5, &mid) ==
                   SIDEREON_STATUS_OK &&
-                  fabs(mid - 15.0) < 1e-9,
+                  same_bits(mid, W5_CAPROUND_TEXT_GRID_MID_DEG_BITS),
               "geoid_grid_undulation_deg midpoint");
         double midr = -1.0;
         check(sidereon_geoid_grid_undulation_rad(grid, 0.5 * M_PI / 180.0,
                                                  0.5 * M_PI / 180.0, &midr) ==
                   SIDEREON_STATUS_OK &&
+                  same_bits(midr, W5_CAPROUND_TEXT_GRID_MID_RAD_BITS) &&
                   fabs(midr - mid) < 1e-9,
               "geoid_grid_undulation_rad matches deg");
         sidereon_geoid_grid_free(grid);
@@ -230,7 +250,8 @@ static void test_geoid(void) {
         put_be_f32(gtx + header_bytes + (cols + 1) * sizeof(float), 4.0f);
 
         SidereonGeoidGrid *proj = NULL;
-        check(sidereon_geoid_grid_from_proj_egm96_gtx(gtx, gtx_len - 1, &proj) ==
+        check(!W5_CAPROUND_GTX_TRUNCATED_OK &&
+                  sidereon_geoid_grid_from_proj_egm96_gtx(gtx, gtx_len - 1, &proj) ==
                       SIDEREON_STATUS_INVALID_ARGUMENT &&
                   proj == NULL,
               "geoid_grid_from_proj_egm96_gtx rejects truncated input");
@@ -247,7 +268,7 @@ static void test_geoid(void) {
                       &err, &separate) == SIDEREON_STATUS_OK &&
                       err.kind == SIDEREON_PROJ_VGRIDSHIFT_ERROR_KIND_NONE &&
                       err.coordinate == SIDEREON_PROJ_VGRIDSHIFT_COORDINATE_NONE &&
-                      fabs(separate - 2.5) < 1e-12,
+                      same_bits(separate, W5_CAPROUND_PROJ_SEPARATE_BITS),
                   "PROJ separate multiply/add interpolation");
 
             double fused = -1.0;
@@ -255,7 +276,7 @@ static void test_geoid(void) {
                       proj, -89.875 * M_PI / 180.0, -179.875 * M_PI / 180.0,
                       SIDEREON_PROJ_VGRIDSHIFT_ARITHMETIC_FUSED_MULTIPLY_ADD, &err,
                       &fused) == SIDEREON_STATUS_OK &&
-                      fabs(fused - 2.5) < 1e-12,
+                      same_bits(fused, W5_CAPROUND_PROJ_FUSED_BITS),
                   "PROJ fused multiply/add interpolation");
 
             double rejected = 123.0;
@@ -263,9 +284,9 @@ static void test_geoid(void) {
                       proj, NAN, 0.0,
                       SIDEREON_PROJ_VGRIDSHIFT_ARITHMETIC_SEPARATE_MULTIPLY_ADD,
                       &err, &rejected) == SIDEREON_STATUS_INVALID_ARGUMENT &&
-                      err.kind ==
-                          SIDEREON_PROJ_VGRIDSHIFT_ERROR_KIND_NON_FINITE_COORDINATE &&
-                      err.coordinate == SIDEREON_PROJ_VGRIDSHIFT_COORDINATE_LATITUDE &&
+                      !W5_CAPROUND_PROJ_NAN_LATITUDE_OK &&
+                      err.kind == W5_CAPROUND_PROJ_NAN_LATITUDE_KIND &&
+                      err.coordinate == W5_CAPROUND_PROJ_NAN_LATITUDE_COORDINATE &&
                       rejected == 0.0,
                   "PROJ typed non-finite latitude error");
 
@@ -273,18 +294,18 @@ static void test_geoid(void) {
                       proj, 0.0, INFINITY,
                       SIDEREON_PROJ_VGRIDSHIFT_ARITHMETIC_SEPARATE_MULTIPLY_ADD,
                       &err, &rejected) == SIDEREON_STATUS_INVALID_ARGUMENT &&
-                      err.kind ==
-                          SIDEREON_PROJ_VGRIDSHIFT_ERROR_KIND_NON_FINITE_COORDINATE &&
-                      err.coordinate == SIDEREON_PROJ_VGRIDSHIFT_COORDINATE_LONGITUDE,
+                      !W5_CAPROUND_PROJ_INFINITE_LONGITUDE_OK &&
+                      err.kind == W5_CAPROUND_PROJ_INFINITE_LONGITUDE_KIND &&
+                      err.coordinate == W5_CAPROUND_PROJ_INFINITE_LONGITUDE_COORDINATE,
                   "PROJ typed non-finite longitude error");
 
             check(sidereon_geoid_grid_undulation_proj_rad(
                       proj, 2.0, 0.0,
                       SIDEREON_PROJ_VGRIDSHIFT_ARITHMETIC_SEPARATE_MULTIPLY_ADD,
                       &err, &rejected) == SIDEREON_STATUS_INVALID_ARGUMENT &&
-                      err.kind ==
-                          SIDEREON_PROJ_VGRIDSHIFT_ERROR_KIND_COORDINATE_OUTSIDE_GRID &&
-                      err.coordinate == SIDEREON_PROJ_VGRIDSHIFT_COORDINATE_LATITUDE,
+                      !W5_CAPROUND_PROJ_OUTSIDE_LATITUDE_OK &&
+                      err.kind == W5_CAPROUND_PROJ_OUTSIDE_LATITUDE_KIND &&
+                      err.coordinate == W5_CAPROUND_PROJ_OUTSIDE_LATITUDE_COORDINATE,
                   "PROJ typed outside-grid latitude error");
 
             check(sidereon_geoid_grid_undulation_proj_rad(proj, 0.0, 0.0, 99, &err,
@@ -303,10 +324,10 @@ static void test_instant(void) {
     check(sidereon_instant_from_utc_civil(2020, 6, 25, 12, 0, 0.0, &jd_whole,
                                           &jd_fraction, &j2000) == SIDEREON_STATUS_OK,
           "instant_from_utc_civil");
-    /* 2020-06-25 is well after J2000 (2000-01-01); the JD should be near 2.459e6. */
-    check(jd_whole + jd_fraction > 2.459e6 && jd_whole + jd_fraction < 2.46e6 &&
-              isfinite(j2000),
-          "instant_from_utc_civil produces a sane Julian date");
+    check(same_bits(jd_whole, W5_CAPROUND_INSTANT_JD_WHOLE_BITS) &&
+              same_bits(jd_fraction, W5_CAPROUND_INSTANT_JD_FRACTION_BITS) &&
+              same_bits(j2000, W5_CAPROUND_INSTANT_J2000_S_BITS),
+          "instant_from_utc_civil matches the engine's Julian date");
 }
 
 /* One double-difference epoch geometry shared by the moving-baseline test. */
@@ -425,12 +446,17 @@ static void test_moving_baseline(void) {
         size_t n = 0;
         check(sidereon_moving_baseline_solution_epoch_count(sol, &n) ==
                   SIDEREON_STATUS_OK &&
-                  n == 1,
+                  n == W5_CAPROUND_MB_EPOCH_COUNT,
               "moving_baseline epoch count");
         SidereonMovingBaselineEpochSummary summary;
         check(sidereon_moving_baseline_solution_epoch(sol, 0, &summary) ==
                   SIDEREON_STATUS_OK,
               "moving_baseline epoch summary");
+        check(same_bits(summary.baseline_m[0], W5_CAPROUND_MB_BASELINE_M_BITS[0]) &&
+                  same_bits(summary.baseline_m[1], W5_CAPROUND_MB_BASELINE_M_BITS[1]) &&
+                  same_bits(summary.baseline_m[2], W5_CAPROUND_MB_BASELINE_M_BITS[2]) &&
+                  same_bits(summary.baseline_length_m, W5_CAPROUND_MB_BASELINE_LENGTH_M_BITS),
+              "moving_baseline matches the engine's baseline");
         /* The perfect synthetic geometry recovers the planted baseline closely. */
         double err = 0.0;
         for (int k = 0; k < 3; k++) {
@@ -439,6 +465,24 @@ static void test_moving_baseline(void) {
         check(sqrt(err) < 0.5 && summary.baseline_length_m > 0.0,
               "moving_baseline recovers the planted baseline");
         sidereon_moving_baseline_solution_free(sol);
+    }
+
+    union {
+        SidereonMovingBaselineConfig config;
+        SidereonMovingBaselineSolution *solution;
+    } aliased;
+    aliased.config = config;
+    check(sidereon_solve_moving_baseline(&aliased.config, &aliased.solution) ==
+                  SIDEREON_STATUS_OK &&
+              aliased.solution != NULL,
+          "moving_baseline snapshots config before writing aliased output");
+    if (aliased.solution) {
+        SidereonMovingBaselineEpochSummary summary;
+        check(sidereon_moving_baseline_solution_epoch(aliased.solution, 0, &summary) ==
+                  SIDEREON_STATUS_OK &&
+                  same_bits(summary.baseline_length_m, W5_CAPROUND_MB_BASELINE_LENGTH_M_BITS),
+              "moving_baseline aliased output matches disjoint result");
+        sidereon_moving_baseline_solution_free(aliased.solution);
     }
 }
 
@@ -454,30 +498,33 @@ static void test_rtcm(void) {
 
     size_t count = 0;
     check(sidereon_rtcm_messages_count(messages, &count) == SIDEREON_STATUS_OK &&
-              count == 5,
+              count == W5_CAPROUND_RTCM_MESSAGE_COUNT,
           "rtcm_messages_count");
 
     /* Message 0: 1006 station coordinates. */
     SidereonRtcmMessageKind kind;
     uint16_t number = 0;
     check(sidereon_rtcm_message_kind(messages, 0, &kind, &number) == SIDEREON_STATUS_OK &&
-              kind == SIDEREON_RTCM_MESSAGE_KIND_STATION_COORDINATES && number == 1006,
+              kind == W5_CAPROUND_RTCM_MESSAGE_0_KIND && number == W5_CAPROUND_RTCM_MESSAGE_0_NUMBER,
           "rtcm_message_kind 1006");
     SidereonRtcmStationCoordinates station;
     check(sidereon_rtcm_message_station_coordinates(messages, 0, &station) ==
               SIDEREON_STATUS_OK &&
-              station.reference_station_id == 2003 && station.has_antenna_height &&
-              fabs(station.antenna_height_m - 1.5) < 1e-9 && fabs(station.x_m) > 1000.0,
+              station.reference_station_id == W5_CAPROUND_STATION_REFERENCE_STATION_ID &&
+              station.has_antenna_height == W5_CAPROUND_STATION_HAS_ANTENNA_HEIGHT &&
+              same_bits(station.antenna_height_m, W5_CAPROUND_STATION_ANTENNA_HEIGHT_M_BITS) &&
+              same_bits(station.x_m, W5_CAPROUND_STATION_X_M_BITS),
           "rtcm station coordinates fields");
 
     /* Message 1: 1008 antenna descriptor (with strings). */
     check(sidereon_rtcm_message_kind(messages, 1, &kind, &number) == SIDEREON_STATUS_OK &&
-              kind == SIDEREON_RTCM_MESSAGE_KIND_ANTENNA_DESCRIPTOR && number == 1008,
+              kind == W5_CAPROUND_RTCM_MESSAGE_1_KIND && number == W5_CAPROUND_RTCM_MESSAGE_1_NUMBER,
           "rtcm_message_kind 1008");
     SidereonRtcmAntennaDescriptor antenna;
     check(sidereon_rtcm_message_antenna_descriptor(messages, 1, &antenna) ==
               SIDEREON_STATUS_OK &&
-              antenna.has_antenna_serial_number && !antenna.has_receiver_type,
+              antenna.has_antenna_serial_number == W5_CAPROUND_ANTENNA_HAS_SERIAL_NUMBER &&
+              antenna.has_receiver_type == W5_CAPROUND_ANTENNA_HAS_RECEIVER_TYPE,
           "rtcm antenna descriptor fields");
     char descriptor[64];
     size_t written = 0, required = 0;
@@ -485,63 +532,73 @@ static void test_rtcm(void) {
               messages, 1, SIDEREON_RTCM_ANTENNA_STRING_FIELD_ANTENNA_DESCRIPTOR,
               (uint8_t *)descriptor, sizeof(descriptor), &written, &required) ==
               SIDEREON_STATUS_OK &&
-              required == strlen("TRM59800.00") && written == required,
+              required == W5_CAPROUND_ANTENNA_DESCRIPTOR_LEN && written == required,
           "rtcm antenna descriptor string");
     descriptor[written] = '\0';
-    check(strcmp(descriptor, "TRM59800.00") == 0, "rtcm antenna descriptor string value");
+    check(strcmp(descriptor, W5_CAPROUND_ANTENNA_DESCRIPTOR) == 0,
+          "rtcm antenna descriptor string value");
 
     /* Message 2: 1019 GPS ephemeris. */
     SidereonRtcmGpsEphemeris gps;
     check(sidereon_rtcm_message_gps_ephemeris(messages, 2, &gps) == SIDEREON_STATUS_OK &&
-              gps.satellite_id == 8 && gps.week_number == 123 && gps.a_f0 == 12345,
+              gps.satellite_id == W5_CAPROUND_GPS_SATELLITE_ID &&
+              gps.week_number == W5_CAPROUND_GPS_WEEK_NUMBER && gps.a_f0 == W5_CAPROUND_GPS_A_F0,
           "rtcm gps ephemeris fields");
 
     /* Message 3: 1020 GLONASS ephemeris. */
     SidereonRtcmGlonassEphemeris glo;
     check(sidereon_rtcm_message_glonass_ephemeris(messages, 3, &glo) ==
               SIDEREON_STATUS_OK &&
-              glo.satellite_id == 5 && glo.frequency_channel == 8 && glo.m_n_t == 700,
+              glo.satellite_id == W5_CAPROUND_GLONASS_SATELLITE_ID &&
+              glo.frequency_channel == W5_CAPROUND_GLONASS_FREQUENCY_CHANNEL &&
+              glo.m_n_t == W5_CAPROUND_GLONASS_M_N_T,
           "rtcm glonass ephemeris fields");
 
     /* Message 4: 1077 GPS MSM7 observation. */
     SidereonRtcmMsmInfo msm;
     check(sidereon_rtcm_message_msm_info(messages, 4, &msm) == SIDEREON_STATUS_OK &&
-              msm.message_number == 1077 && msm.kind == SIDEREON_RTCM_MSM_KIND_MSM7 &&
-              msm.system == SIDEREON_GNSS_SYSTEM_GPS && msm.satellite_count == 1 &&
-              msm.signal_count == 1 && msm.header.reference_station_id == 2003,
+              msm.message_number == W5_CAPROUND_MSM_MESSAGE_NUMBER &&
+              msm.kind == W5_CAPROUND_MSM_KIND && msm.system == W5_CAPROUND_MSM_SYSTEM &&
+              msm.satellite_count == W5_CAPROUND_MSM_SATELLITE_COUNT &&
+              msm.signal_count == W5_CAPROUND_MSM_SIGNAL_COUNT &&
+              msm.header.reference_station_id == W5_CAPROUND_MSM_REFERENCE_STATION_ID,
           "rtcm msm info");
     SidereonRtcmMsmSatellite msm_sats[4];
     written = 0;
     required = 0;
     check(sidereon_rtcm_message_msm_satellites(messages, 4, msm_sats, 4, &written,
                                                &required) == SIDEREON_STATUS_OK &&
-              required == 1 && written == 1 && msm_sats[0].id == 8 &&
-              msm_sats[0].has_extended_info,
+              required == W5_CAPROUND_MSM_SATELLITE_COUNT && written == required &&
+              msm_sats[0].id == W5_CAPROUND_MSM_SATELLITE_0_ID &&
+              msm_sats[0].has_extended_info == W5_CAPROUND_MSM_SATELLITE_0_HAS_EXTENDED_INFO,
           "rtcm msm satellites");
     SidereonRtcmMsmSignal msm_sigs[4];
     written = 0;
     required = 0;
     check(sidereon_rtcm_message_msm_signals(messages, 4, msm_sigs, 4, &written,
                                             &required) == SIDEREON_STATUS_OK &&
-              required == 1 && written == 1 && msm_sigs[0].signal_id == 2 &&
-              msm_sigs[0].has_fine_phase_range_rate,
+              required == W5_CAPROUND_MSM_SIGNAL_COUNT && written == required &&
+              msm_sigs[0].signal_id == W5_CAPROUND_MSM_SIGNAL_0_ID &&
+              msm_sigs[0].has_fine_phase_range_rate ==
+                  W5_CAPROUND_MSM_SIGNAL_0_HAS_FINE_PHASE_RANGE_RATE,
           "rtcm msm signals");
 
     uint8_t loss_bit = 0;
     uint8_t half_bit = 0;
     check(sidereon_rtcm_lli_bits(&loss_bit, &half_bit) == SIDEREON_STATUS_OK &&
-              loss_bit == 1 && half_bit == 2,
+              loss_bit == W5_CAPROUND_LLI_LOSS_OF_LOCK && half_bit == W5_CAPROUND_LLI_HALF_CYCLE,
           "rtcm lli bits");
 
     bool has_min = false;
     uint32_t min_lock_ms = 0;
     check(sidereon_rtcm_minimum_lock_time_ms(SIDEREON_RTCM_MSM_KIND_MSM7, 64, &has_min,
                                              &min_lock_ms) == SIDEREON_STATUS_OK &&
-              has_min && min_lock_ms == 64,
+              has_min == W5_CAPROUND_MIN_LOCK_64_PRESENT && min_lock_ms == W5_CAPROUND_MIN_LOCK_64_MS,
           "rtcm minimum lock time msm7");
     check(sidereon_rtcm_minimum_lock_time_ms(SIDEREON_RTCM_MSM_KIND_MSM7, 705, &has_min,
                                              &min_lock_ms) == SIDEREON_STATUS_OK &&
-              !has_min && min_lock_ms == 0,
+              has_min == W5_CAPROUND_MIN_LOCK_705_PRESENT &&
+              min_lock_ms == W5_CAPROUND_MIN_LOCK_705_MS,
           "rtcm minimum lock time reserved");
 
     SidereonRtcmPreviousLock previous_lock;
@@ -552,13 +609,13 @@ static void test_rtcm(void) {
     uint8_t lli = 0;
     check(sidereon_rtcm_derive_lli(&previous_lock, true, 512, true, &lli) ==
               SIDEREON_STATUS_OK &&
-              lli == (loss_bit | half_bit),
+              lli == W5_CAPROUND_DERIVED_LLI,
           "rtcm derive lli uncovered gap and half-cycle");
 
     uint64_t elapsed_ms = 0;
     check(sidereon_rtcm_msm_epoch_dt_ms(SIDEREON_GNSS_SYSTEM_GPS, 604799000, 500,
                                         &elapsed_ms) == SIDEREON_STATUS_OK &&
-              elapsed_ms == 1500,
+              elapsed_ms == W5_CAPROUND_MSM_EPOCH_DT_MS,
           "rtcm msm epoch rollover");
 
     char rinex_code[8];
@@ -567,10 +624,11 @@ static void test_rtcm(void) {
     check(sidereon_rtcm_msm_signal_rinex_code(SIDEREON_GNSS_SYSTEM_GPS, 2,
                                               (uint8_t *)rinex_code, sizeof(rinex_code),
                                               &written, &required) == SIDEREON_STATUS_OK &&
-              required == 2 && written == 2,
+              required == W5_CAPROUND_GPS_SIGNAL_2_RINEX_CODE_LEN && written == required,
           "rtcm msm signal rinex code");
     rinex_code[written] = '\0';
-    check(strcmp(rinex_code, "1C") == 0, "rtcm msm signal rinex code value");
+    check(strcmp(rinex_code, W5_CAPROUND_GPS_SIGNAL_2_RINEX_CODE) == 0,
+          "rtcm msm signal rinex code value");
 
     SidereonRtcmLockTimeTracker *tracker = NULL;
     check(sidereon_rtcm_lock_time_tracker_new(&tracker) == SIDEREON_STATUS_OK &&
@@ -583,9 +641,11 @@ static void test_rtcm(void) {
         check(sidereon_rtcm_lock_time_tracker_observe(tracker, messages, 4, lli_rows, 2,
                                                       &written, &required) ==
                   SIDEREON_STATUS_OK &&
-                  required == 1 && written == 1 && lli_rows[0].satellite_id == 8 &&
-                  lli_rows[0].signal_id == 2 && lli_rows[0].lli == 0 &&
-                  lli_rows[0].has_min_lock_time_ms,
+                  required == W5_CAPROUND_TRACKER_CELL_COUNT && written == required &&
+                  lli_rows[0].satellite_id == W5_CAPROUND_TRACKER_CELL_0_SATELLITE_ID &&
+                  lli_rows[0].signal_id == W5_CAPROUND_TRACKER_CELL_0_SIGNAL_ID &&
+                  lli_rows[0].lli == W5_CAPROUND_TRACKER_CELL_0_LLI &&
+                  lli_rows[0].has_min_lock_time_ms == W5_CAPROUND_TRACKER_CELL_0_HAS_MIN_LOCK_TIME,
               "rtcm lock time tracker observe");
         check(sidereon_rtcm_lock_time_tracker_reset(tracker) == SIDEREON_STATUS_OK,
               "rtcm lock time tracker reset");
@@ -599,8 +659,8 @@ static void test_rtcm(void) {
     required = 0;
     check(sidereon_rtcm_message_to_frame(messages, 0, reframe, sizeof(reframe), &written,
                                          &required) == SIDEREON_STATUS_OK &&
-              written == required && required == 27 &&
-              memcmp(reframe, RTCM_STREAM, 27) == 0,
+              written == required && required == W5_CAPROUND_MESSAGE_0_FRAME_LEN &&
+              memcmp(reframe, RTCM_STREAM, required) == 0,
           "rtcm message_to_frame round-trips the 1006 frame");
 
     /* Message-body encode (without the frame) for message 0. */
@@ -609,7 +669,7 @@ static void test_rtcm(void) {
     required = 0;
     check(sidereon_rtcm_message_encode(messages, 0, body, sizeof(body), &written,
                                        &required) == SIDEREON_STATUS_OK &&
-              written == required && required == 21,
+              written == required && required == W5_CAPROUND_MESSAGE_0_BODY_LEN,
           "rtcm message_encode body length");
 
     sidereon_rtcm_messages_free(messages);
@@ -638,29 +698,31 @@ static void test_rtcm(void) {
         size_t stream_count = 0;
         check(sidereon_rtcm_messages_count(stream_messages, &stream_count) ==
                       SIDEREON_STATUS_OK &&
-                  stream_count == 5,
+                  stream_count == W5_CAPROUND_NOISY_MESSAGE_COUNT,
               "rtcm_decode_stream message count");
         size_t resync_bytes = 0;
         check(sidereon_rtcm_stream_diagnostics_resync_bytes(diagnostics, &resync_bytes) ==
                       SIDEREON_STATUS_OK &&
-                  resync_bytes == 2,
+                  resync_bytes == W5_CAPROUND_NOISY_RESYNC_BYTES,
               "rtcm stream diagnostics resync bytes");
         size_t skipped = 0;
         check(sidereon_rtcm_stream_diagnostics_skipped_frames_count(diagnostics, &skipped) ==
                       SIDEREON_STATUS_OK &&
-                  skipped == 1,
+                  skipped == W5_CAPROUND_NOISY_SKIPPED_COUNT,
               "rtcm stream diagnostics skipped count");
         SidereonRtcmFrameSkip skip;
         check(sidereon_rtcm_stream_diagnostics_skipped_frame(diagnostics, 0, &skip) ==
                       SIDEREON_STATUS_OK &&
-                  skip.offset == 2 && skip.has_message_number && skip.message_number == 1077 &&
-                  skip.reason == SIDEREON_RTCM_FRAME_SKIP_REASON_TRUNCATED,
+                  skip.offset == W5_CAPROUND_NOISY_SKIP_OFFSET &&
+                  skip.has_message_number == W5_CAPROUND_NOISY_SKIP_HAS_MESSAGE_NUMBER &&
+                  skip.message_number == W5_CAPROUND_NOISY_SKIP_MESSAGE_NUMBER &&
+                  skip.reason == W5_CAPROUND_NOISY_SKIP_REASON,
               "rtcm stream diagnostics skipped frame");
         written = 123;
         required = 123;
         check(sidereon_rtcm_stream_diagnostics_skipped_frame_message(
                   diagnostics, 0, NULL, 0, &written, &required) == SIDEREON_STATUS_OK &&
-                  written == 0 && required == 0,
+                  written == 0 && required == W5_CAPROUND_NOISY_SKIP_MESSAGE_LEN,
               "rtcm stream diagnostics truncated message text");
     }
     sidereon_rtcm_messages_free(stream_messages);
@@ -675,18 +737,18 @@ static void test_rtcm(void) {
     if (frames) {
         size_t fcount = 0;
         check(sidereon_rtcm_frames_count(frames, &fcount) == SIDEREON_STATUS_OK &&
-                  fcount == 5,
+                  fcount == W5_CAPROUND_FRAME_COUNT,
               "rtcm_frames_count");
         size_t flen = 0;
         check(sidereon_rtcm_frame_len(frames, 0, &flen) == SIDEREON_STATUS_OK &&
-                  flen == 27,
+                  flen == W5_CAPROUND_FRAME_0_LEN,
               "rtcm_frame_len");
         uint8_t fbody[64];
         written = 0;
         required = 0;
         check(sidereon_rtcm_frame_body(frames, 0, fbody, sizeof(fbody), &written,
                                        &required) == SIDEREON_STATUS_OK &&
-                  required == 21,
+                  required == W5_CAPROUND_FRAME_0_BODY_LEN,
               "rtcm_frame_body");
         sidereon_rtcm_frames_free(frames);
     }
@@ -698,7 +760,7 @@ static void test_rtcm(void) {
     required = 0;
     check(sidereon_rtcm_encode_frame(payload, sizeof(payload), frame, sizeof(frame),
                                      &written, &required) == SIDEREON_STATUS_OK &&
-              written == required && required == sizeof(payload) + 6,
+              written == required && required == W5_CAPROUND_PAYLOAD_FRAME_LEN,
           "rtcm_encode_frame");
     uint8_t out_body[16];
     size_t body_written = 0, body_required = 0, frame_len = 0;

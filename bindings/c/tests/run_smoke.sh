@@ -92,9 +92,23 @@ grep -Fq "sidereon_solve_spp or sidereon_solve_spp_v2 and must be freed exactly 
 grep -Fq "with sidereon_spk_load and release with sidereon_spk_free" include/sidereon.h
 grep -Fq "sidereon_constellation_build and release with sidereon_constellation_free" include/sidereon.h
 
+echo "== compiling complete RINEX OBS surface smoke program =="
+rinex_obs_complete_out="${target_dir}/rinex_obs_complete_smoke"
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
+    -I"${binding_root}/include" \
+    "${here}/rinex_obs_complete_smoke.c" \
+    -L"${lib_dir}" \
+    -lsidereon \
+    -Wl,-rpath,"${lib_dir}" \
+    -lm \
+    -o "${rinex_obs_complete_out}"
+
+echo "== running complete RINEX OBS surface smoke program =="
+"${rinex_obs_complete_out}"
+
 echo "== compiling smoke program =="
 out="${target_dir}/smoke"
-cc -std=c11 -Wall -Wextra -Werror \
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -I"${binding_root}/include" \
     -I"${here}" \
     "${here}/smoke.c" \
@@ -111,7 +125,7 @@ echo "== running smoke program =="
 
 echo "== compiling data_distribution_smoke program =="
 data_distribution_out="${target_dir}/data_distribution_smoke"
-cc -std=c11 -Wall -Wextra -Werror \
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -I"${binding_root}/include" \
     "${here}/data_distribution_smoke.c" \
     -L"${lib_dir}" \
@@ -127,7 +141,7 @@ echo "== compiling sp3_exact_smoke program =="
 sp3_exact_out="${target_dir}/sp3_exact_smoke"
 python3 "${here}/gen_sp3_terminal_record_fixture.py" \
     --output "${target_dir}/sp3_terminal_record_fixture.h"
-cc -std=c11 -Wall -Wextra -Werror \
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -I"${binding_root}/include" \
     -I"${target_dir}" \
     "${here}/sp3_exact_smoke.c" \
@@ -144,7 +158,7 @@ echo "== running sp3_exact_smoke program =="
 # the SP3 merge agreement metric). Built and run with the same warnings-as-errors.
 echo "== compiling newgaps program =="
 newgaps_out="${target_dir}/newgaps"
-cc -std=c11 -Wall -Wextra -Werror \
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -I"${binding_root}/include" \
     -I"${here}" \
     "${here}/newgaps.c" \
@@ -161,7 +175,7 @@ echo "== running newgaps program =="
 # serializers. Built and run with the same warnings-as-errors.
 echo "== compiling ccsds_serialize program =="
 ccsds_out="${target_dir}/ccsds_serialize"
-cc -std=c11 -Wall -Wextra -Werror \
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -I"${binding_root}/include" \
     -I"${here}" \
     "${here}/ccsds_serialize.c" \
@@ -180,7 +194,7 @@ echo "== running ccsds_serialize program =="
 # committed TLE in prop_fixture.h, so it needs no runtime fixture paths.
 echo "== compiling constellation_smoke program =="
 constellation_out="${target_dir}/constellation_smoke"
-cc -std=c11 -Wall -Wextra -Werror \
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -I"${binding_root}/include" \
     -I"${here}" \
     "${here}/constellation_smoke.c" \
@@ -199,7 +213,7 @@ echo "== running constellation_smoke program =="
 # 2026 wrong-epoch SP3 (fallback). Built with the same warnings-as-errors.
 echo "== compiling robustness_smoke program =="
 robustness_out="${target_dir}/robustness_smoke"
-cc -std=c11 -Wall -Wextra -Werror \
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -I"${binding_root}/include" \
     -I"${here}" \
     "${here}/robustness_smoke.c" \
@@ -219,7 +233,7 @@ echo "== running robustness_smoke program =="
 # (broadcast observables + velocity). Built with the same warnings-as-errors.
 echo "== compiling parity_smoke program =="
 parity_out="${target_dir}/parity_smoke"
-cc -std=c11 -Wall -Wextra -Werror \
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -I"${binding_root}/include" \
     -I"${here}" \
     "${here}/parity_smoke.c" \
@@ -240,7 +254,7 @@ echo "== running parity_smoke program =="
 # the same warnings-as-errors.
 echo "== compiling extras_smoke program =="
 extras_out="${target_dir}/extras_smoke"
-cc -std=c11 -Wall -Wextra -Werror \
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -I"${binding_root}/include" \
     -I"${here}" \
     "${here}/extras_smoke.c" \
@@ -264,7 +278,7 @@ echo "== running extras_smoke program =="
 # warnings-as-errors.
 echo "== compiling round2_smoke program =="
 round2_out="${target_dir}/round2_smoke"
-cc -std=c11 -Wall -Wextra -Werror \
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -I"${binding_root}/include" \
     -I"${here}" \
     "${here}/round2_smoke.c" \
@@ -284,7 +298,7 @@ echo "== running round2_smoke program =="
 # needs no runtime fixture paths. Built with the same warnings-as-errors.
 echo "== compiling capround_smoke program =="
 capround_out="${target_dir}/capround_smoke"
-cc -std=c11 -Wall -Wextra -Werror \
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -I"${binding_root}/include" \
     -I"${here}" \
     "${here}/capround_smoke.c" \
@@ -305,7 +319,7 @@ echo "== running capround_smoke program =="
 # warnings-as-errors.
 echo "== compiling merged_smoke program =="
 merged_out="${target_dir}/merged_smoke"
-cc -std=c11 -Wall -Wextra -Werror \
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -I"${binding_root}/include" \
     -I"${here}" \
     "${here}/merged_smoke.c" \
@@ -324,7 +338,7 @@ echo "== running merged_smoke program =="
 # with the same warnings-as-errors.
 echo "== compiling parity_gaps_smoke program =="
 parity_gaps_out="${target_dir}/parity_gaps_smoke"
-cc -std=c11 -Wall -Wextra -Werror \
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -I"${binding_root}/include" \
     -I"${here}" \
     "${here}/parity_gaps_smoke.c" \
@@ -342,7 +356,7 @@ echo "== running parity_gaps_smoke program =="
 # fit/drift.
 echo "== compiling core_caps_smoke program =="
 core_caps_out="${target_dir}/core_caps_smoke"
-cc -std=c11 -Wall -Wextra -Werror \
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -I"${binding_root}/include" \
     -I"${here}" \
     "${here}/core_caps_smoke.c" \
@@ -360,7 +374,7 @@ echo "== running core_caps_smoke program =="
 # strict validation helpers, and source-backed piecewise reduced-orbit fit/drift.
 echo "== compiling full_coverage_smoke program =="
 full_coverage_out="${target_dir}/full_coverage_smoke"
-cc -std=c11 -Wall -Wextra -Werror \
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -I"${binding_root}/include" \
     -I"${here}" \
     "${here}/full_coverage_smoke.c" \
@@ -383,7 +397,7 @@ echo "== running full_coverage_smoke program =="
 # and the ESBC broadcast NAV (broadcast batch observables).
 echo "== compiling caps_extra_smoke program =="
 caps_extra_out="${target_dir}/caps_extra_smoke"
-cc -std=c11 -Wall -Wextra -Werror \
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -I"${binding_root}/include" \
     -I"${here}" \
     "${here}/caps_extra_smoke.c" \
@@ -403,7 +417,7 @@ echo "== running caps_extra_smoke program =="
 # calls, and the validation-error paths report InvalidArgument. Uses the GRG SP3.
 echo "== compiling precise_samples_smoke program =="
 precise_samples_out="${target_dir}/precise_samples_smoke"
-cc -std=c11 -Wall -Wextra -Werror \
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -I"${binding_root}/include" \
     -I"${here}" \
     "${here}/precise_samples_smoke.c" \
@@ -421,7 +435,7 @@ echo "== running precise_samples_smoke program =="
 # observable-state parity; source-localization inputs are synthetic in the test.
 echo "== compiling cap013_smoke program =="
 cap013_out="${target_dir}/cap013_smoke"
-cc -std=c11 -Wall -Wextra -Werror \
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -I"${binding_root}/include" \
     -I"${here}" \
     "${here}/cap013_smoke.c" \
@@ -437,7 +451,7 @@ echo "== running cap013_smoke program =="
 # Track filter and RTS smoother surface, plus tide force-model switches.
 echo "== compiling track_smoke program =="
 track_out="${target_dir}/track_smoke"
-cc -std=c11 -Wall -Wextra -Werror \
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -I"${binding_root}/include" \
     -I"${here}" \
     "${here}/track_smoke.c" \
@@ -455,7 +469,7 @@ echo "== running track_smoke program =="
 # orbit-fit residual ledgers. Self-contained.
 echo "== compiling cap015_smoke program =="
 cap015_out="${target_dir}/cap015_smoke"
-cc -std=c11 -Wall -Wextra -Werror \
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -I"${binding_root}/include" \
     -I"${here}" \
     "${here}/cap015_smoke.c" \
@@ -472,7 +486,7 @@ echo "== running cap015_smoke program =="
 # simulator, and signal-analysis closed forms. Self-contained.
 echo "== compiling domain018_smoke program =="
 domain018_out="${target_dir}/domain018_smoke"
-cc -std=c11 -Wall -Wextra -Werror \
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -I"${binding_root}/include" \
     -I"${here}" \
     "${here}/domain018_smoke.c" \
@@ -491,7 +505,7 @@ echo "== running domain018_smoke program =="
 # reliability noncentrality component marshaling.
 echo "== compiling wave2_smoke program =="
 wave2_out="${target_dir}/wave2_smoke"
-cc -std=c11 -Wall -Wextra -Werror \
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -I"${binding_root}/include" \
     -I"${here}" \
     "${here}/wave2_smoke.c" \
@@ -511,7 +525,7 @@ echo "== running wave2_smoke program =="
 # fixture and local core DTED tiles.
 echo "== compiling core012_smoke program =="
 core012_out="${target_dir}/core012_smoke"
-cc -std=c11 -Wall -Wextra -Werror \
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -I"${binding_root}/include" \
     -I"${here}" \
     "${here}/core012_smoke.c" \
@@ -529,7 +543,7 @@ echo "== running core012_smoke program =="
 # batches, NMEA sans-IO, space-weather tables, and NTRIP sans-IO.
 echo "== compiling round2_parity_smoke program =="
 round2_parity_out="${target_dir}/round2_parity_smoke"
-cc -std=c11 -Wall -Wextra -Werror \
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -I"${binding_root}/include" \
     -I"${here}" \
     "${here}/round2_parity_smoke.c" \
@@ -546,7 +560,7 @@ echo "== running round2_parity_smoke program =="
 # SBAS, SSR, and shared-label API.
 echo "== compiling phaseb_smoke program =="
 phaseb_out="${target_dir}/phaseb_smoke"
-cc -std=c11 -Wall -Wextra -Werror \
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -I"${binding_root}/include" \
     -I"${here}" \
     "${here}/phaseb_smoke.c" \
@@ -564,7 +578,7 @@ echo "== running phaseb_smoke program =="
 # C convenience functions.
 echo "== compiling rtk_rinex_smoke program =="
 rtk_rinex_out="${target_dir}/rtk_rinex_smoke"
-cc -std=c11 -Wall -Wextra -Werror \
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -I"${binding_root}/include" \
     -I"${here}" \
     "${here}/rtk_rinex_smoke.c" \
@@ -576,3 +590,19 @@ cc -std=c11 -Wall -Wextra -Werror \
 
 echo "== running rtk_rinex_smoke program =="
 "${rtk_rinex_out}" "${rtk_sp3_path}" "${wtzr_obs_path}" "${wtzz_obs_path}"
+
+# ANTEX retention and typed refusals, BLQ blocks with retained comments, the
+# SBAS PRN window, and the RTCM MSM encode refusal.
+echo "== compiling format_contracts_smoke program =="
+format_contracts_out="${target_dir}/format_contracts_smoke"
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
+    -I"${binding_root}/include" \
+    "${here}/format_contracts_smoke.c" \
+    -L"${lib_dir}" \
+    -lsidereon \
+    -Wl,-rpath,"${lib_dir}" \
+    -lm \
+    -o "${format_contracts_out}"
+
+echo "== running format_contracts_smoke program =="
+"${format_contracts_out}" "${antex_path}"

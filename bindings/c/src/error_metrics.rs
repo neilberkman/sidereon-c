@@ -102,20 +102,27 @@ pub unsafe extern "C" fn sidereon_error_metrics_from_enu_covariance_m2(
     out_metrics: *mut SidereonPositionErrorMetrics,
     out_error: *mut SidereonErrorMetricsErrorKind,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_error_metrics_from_enu_covariance_m2",
         SidereonStatus::Panic,
         || {
+            c_try!(validate_error_metrics_out(
+                "sidereon_error_metrics_from_enu_covariance_m2",
+                out_metrics,
+                "out_metrics",
+                out_error,
+            ));
+            let covariance_result = read_mat3(
+                "sidereon_error_metrics_from_enu_covariance_m2",
+                "covariance_enu_m2",
+                covariance_enu_m2,
+            );
             let out = c_try!(init_error_metrics_out(
                 "sidereon_error_metrics_from_enu_covariance_m2",
                 out_metrics,
                 out_error,
             ));
-            let covariance = c_try!(read_mat3(
-                "sidereon_error_metrics_from_enu_covariance_m2",
-                "covariance_enu_m2",
-                covariance_enu_m2,
-            ));
+            let covariance = c_try!(covariance_result);
             match sidereon_core::error_metrics::metrics_from_enu_covariance_m2(covariance) {
                 Ok(metrics) => {
                     *out.0 = position_error_metrics_to_c(metrics);
@@ -142,20 +149,27 @@ pub unsafe extern "C" fn sidereon_error_metrics_from_ecef_covariance_m2(
     out_metrics: *mut SidereonPositionErrorMetrics,
     out_error: *mut SidereonErrorMetricsErrorKind,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_error_metrics_from_ecef_covariance_m2",
         SidereonStatus::Panic,
         || {
+            c_try!(validate_error_metrics_out(
+                "sidereon_error_metrics_from_ecef_covariance_m2",
+                out_metrics,
+                "out_metrics",
+                out_error,
+            ));
+            let covariance_result = read_mat3(
+                "sidereon_error_metrics_from_ecef_covariance_m2",
+                "covariance_ecef_m2",
+                covariance_ecef_m2,
+            );
             let out = c_try!(init_error_metrics_out(
                 "sidereon_error_metrics_from_ecef_covariance_m2",
                 out_metrics,
                 out_error,
             ));
-            let covariance = c_try!(read_mat3(
-                "sidereon_error_metrics_from_ecef_covariance_m2",
-                "covariance_ecef_m2",
-                covariance_ecef_m2,
-            ));
+            let covariance = c_try!(covariance_result);
             let receiver = c_try!(geodetic_to_wgs84(
                 "sidereon_error_metrics_from_ecef_covariance_m2",
                 "receiver",
@@ -187,20 +201,28 @@ pub unsafe extern "C" fn sidereon_error_metrics_from_position_covariance(
     out_metrics: *mut SidereonPositionErrorMetrics,
     out_error: *mut SidereonErrorMetricsErrorKind,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_error_metrics_from_position_covariance",
         SidereonStatus::Panic,
         || {
+            c_try!(validate_error_metrics_out(
+                "sidereon_error_metrics_from_position_covariance",
+                out_metrics,
+                "out_metrics",
+                out_error,
+            ));
+            let covariance_result = require_ref(
+                covariance,
+                "sidereon_error_metrics_from_position_covariance",
+                "covariance",
+            )
+            .copied();
             let out = c_try!(init_error_metrics_out(
                 "sidereon_error_metrics_from_position_covariance",
                 out_metrics,
                 out_error,
             ));
-            let covariance = c_try!(require_ref(
-                covariance,
-                "sidereon_error_metrics_from_position_covariance",
-                "covariance"
-            ));
+            let covariance = c_try!(covariance_result);
             let core_covariance = sidereon_core::geometry::PositionCovariance {
                 ecef_m2: mat3_from_row_major(covariance.ecef_m2),
                 enu_m2: mat3_from_row_major(covariance.enu_m2),
@@ -229,20 +251,28 @@ pub unsafe extern "C" fn sidereon_error_metrics_from_kinematic_solution(
     out_metrics: *mut SidereonPositionErrorMetrics,
     out_error: *mut SidereonErrorMetricsErrorKind,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_error_metrics_from_kinematic_solution",
         SidereonStatus::Panic,
         || {
+            c_try!(validate_error_metrics_out(
+                "sidereon_error_metrics_from_kinematic_solution",
+                out_metrics,
+                "out_metrics",
+                out_error,
+            ));
+            let solution_result = require_ref(
+                solution,
+                "sidereon_error_metrics_from_kinematic_solution",
+                "solution",
+            )
+            .copied();
             let out = c_try!(init_error_metrics_out(
                 "sidereon_error_metrics_from_kinematic_solution",
                 out_metrics,
                 out_error,
             ));
-            let solution = c_try!(require_ref(
-                solution,
-                "sidereon_error_metrics_from_kinematic_solution",
-                "solution"
-            ));
+            let solution = c_try!(solution_result);
             let core_solution = sidereon_core::precise_positioning::KinematicEpochSolution {
                 position_m: solution.position_m,
                 clock_m: 0.0,
@@ -252,6 +282,9 @@ pub unsafe extern "C" fn sidereon_error_metrics_from_kinematic_solution(
                 used_sats: Vec::new(),
                 innovation_rms_m: 0.0,
                 status: sidereon_core::precise_positioning::KinematicEpochStatus::Updated,
+                // The metrics read only the position and its covariance.
+                ssr_bias_exclusions: Vec::new(),
+                unplaced_observations: Vec::new(),
             };
             match sidereon_core::error_metrics::metrics_from_kinematic_solution(&core_solution) {
                 Ok(metrics) => {
@@ -278,20 +311,27 @@ pub unsafe extern "C" fn sidereon_error_metrics_error_ellipse_from_enu_m2(
     out_ellipse: *mut SidereonErrorEllipse,
     out_error: *mut SidereonErrorMetricsErrorKind,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_error_metrics_error_ellipse_from_enu_m2",
         SidereonStatus::Panic,
         || {
+            c_try!(validate_error_metrics_out(
+                "sidereon_error_metrics_error_ellipse_from_enu_m2",
+                out_ellipse,
+                "out_ellipse",
+                out_error,
+            ));
+            let covariance_result = read_mat3(
+                "sidereon_error_metrics_error_ellipse_from_enu_m2",
+                "covariance_enu_m2",
+                covariance_enu_m2,
+            );
             let out = c_try!(init_error_ellipse_out(
                 "sidereon_error_metrics_error_ellipse_from_enu_m2",
                 out_ellipse,
                 out_error,
             ));
-            let covariance = c_try!(read_mat3(
-                "sidereon_error_metrics_error_ellipse_from_enu_m2",
-                "covariance_enu_m2",
-                covariance_enu_m2,
-            ));
+            let covariance = c_try!(covariance_result);
             match sidereon_core::error_metrics::error_ellipse_from_enu_m2(covariance) {
                 Ok(ellipse) => {
                     *out.0 = error_ellipse_to_c(ellipse);
@@ -318,21 +358,28 @@ pub unsafe extern "C" fn sidereon_error_metrics_horizontal_radius_at(
     out_radius: *mut SidereonPercentileRadius,
     out_error: *mut SidereonErrorMetricsErrorKind,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_error_metrics_horizontal_radius_at",
         SidereonStatus::Panic,
         || {
+            c_try!(validate_error_metrics_out(
+                "sidereon_error_metrics_horizontal_radius_at",
+                out_radius,
+                "out_radius",
+                out_error,
+            ));
+            let covariance_result = read_mat3(
+                "sidereon_error_metrics_horizontal_radius_at",
+                "covariance_enu_m2",
+                covariance_enu_m2,
+            );
             let out = c_try!(init_percentile_radius_out(
                 "sidereon_error_metrics_horizontal_radius_at",
                 out_radius,
                 out_error,
                 probability,
             ));
-            let covariance = c_try!(read_mat3(
-                "sidereon_error_metrics_horizontal_radius_at",
-                "covariance_enu_m2",
-                covariance_enu_m2,
-            ));
+            let covariance = c_try!(covariance_result);
             match sidereon_core::error_metrics::horizontal_radius_at(covariance, probability) {
                 Ok(radius) => {
                     *out.0 = percentile_radius_to_c(radius);
@@ -359,21 +406,28 @@ pub unsafe extern "C" fn sidereon_error_metrics_spherical_radius_at(
     out_radius: *mut SidereonPercentileRadius,
     out_error: *mut SidereonErrorMetricsErrorKind,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_error_metrics_spherical_radius_at",
         SidereonStatus::Panic,
         || {
+            c_try!(validate_error_metrics_out(
+                "sidereon_error_metrics_spherical_radius_at",
+                out_radius,
+                "out_radius",
+                out_error,
+            ));
+            let covariance_result = read_mat3(
+                "sidereon_error_metrics_spherical_radius_at",
+                "covariance_enu_m2",
+                covariance_enu_m2,
+            );
             let out = c_try!(init_percentile_radius_out(
                 "sidereon_error_metrics_spherical_radius_at",
                 out_radius,
                 out_error,
                 probability,
             ));
-            let covariance = c_try!(read_mat3(
-                "sidereon_error_metrics_spherical_radius_at",
-                "covariance_enu_m2",
-                covariance_enu_m2,
-            ));
+            let covariance = c_try!(covariance_result);
             match sidereon_core::error_metrics::spherical_radius_at(covariance, probability) {
                 Ok(radius) => {
                     *out.0 = percentile_radius_to_c(radius);
@@ -399,7 +453,7 @@ pub unsafe extern "C" fn sidereon_error_metrics_vertical_radius_at(
     out_radius_m: *mut f64,
     out_error: *mut SidereonErrorMetricsErrorKind,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_error_metrics_vertical_radius_at",
         SidereonStatus::Panic,
         || {
@@ -421,6 +475,17 @@ pub unsafe extern "C" fn sidereon_error_metrics_vertical_radius_at(
     )
 }
 
+unsafe fn validate_error_metrics_out<T: Copy>(
+    fn_name: &str,
+    output: *mut T,
+    output_name: &str,
+    out_error: *mut SidereonErrorMetricsErrorKind,
+) -> Result<(), SidereonStatus> {
+    let output = require_out(output, fn_name, output_name)?;
+    let out_error = require_out(out_error, fn_name, "out_error")?;
+    reject_output_pair_alias(fn_name, output, output_name, out_error, "out_error")
+}
+
 unsafe fn init_error_metrics_out<'a>(
     fn_name: &str,
     out_metrics: *mut SidereonPositionErrorMetrics,
@@ -432,11 +497,12 @@ unsafe fn init_error_metrics_out<'a>(
     ),
     SidereonStatus,
 > {
+    validate_error_metrics_out(fn_name, out_metrics, "out_metrics", out_error)?;
     let out_metrics = require_out(out_metrics, fn_name, "out_metrics")?;
     *out_metrics = empty_position_error_metrics();
     let out_error = require_out(out_error, fn_name, "out_error")?;
     *out_error = SidereonErrorMetricsErrorKind::None;
-    Ok((out_metrics, out_error))
+    Ok((&mut *out_metrics, &mut *out_error))
 }
 
 unsafe fn init_error_ellipse_out<'a>(
@@ -450,6 +516,7 @@ unsafe fn init_error_ellipse_out<'a>(
     ),
     SidereonStatus,
 > {
+    validate_error_metrics_out(fn_name, out_ellipse, "out_ellipse", out_error)?;
     let out_ellipse = require_out(out_ellipse, fn_name, "out_ellipse")?;
     *out_ellipse = SidereonErrorEllipse {
         semi_major_m: 0.0,
@@ -458,7 +525,7 @@ unsafe fn init_error_ellipse_out<'a>(
     };
     let out_error = require_out(out_error, fn_name, "out_error")?;
     *out_error = SidereonErrorMetricsErrorKind::None;
-    Ok((out_ellipse, out_error))
+    Ok((&mut *out_ellipse, &mut *out_error))
 }
 
 unsafe fn init_percentile_radius_out<'a>(
@@ -473,11 +540,12 @@ unsafe fn init_percentile_radius_out<'a>(
     ),
     SidereonStatus,
 > {
+    validate_error_metrics_out(fn_name, out_radius, "out_radius", out_error)?;
     let out_radius = require_out(out_radius, fn_name, "out_radius")?;
     *out_radius = empty_percentile_radius(probability);
     let out_error = require_out(out_error, fn_name, "out_error")?;
     *out_error = SidereonErrorMetricsErrorKind::None;
-    Ok((out_radius, out_error))
+    Ok((&mut *out_radius, &mut *out_error))
 }
 
 unsafe fn init_vertical_radius_out<'a>(
@@ -485,11 +553,24 @@ unsafe fn init_vertical_radius_out<'a>(
     out_radius_m: *mut f64,
     out_error: *mut SidereonErrorMetricsErrorKind,
 ) -> Result<(&'a mut f64, &'a mut SidereonErrorMetricsErrorKind), SidereonStatus> {
+    validate_error_metrics_out(fn_name, out_radius_m, "out_radius_m", out_error)?;
     let out_radius_m = require_out(out_radius_m, fn_name, "out_radius_m")?;
     *out_radius_m = 0.0;
     let out_error = require_out(out_error, fn_name, "out_error")?;
     *out_error = SidereonErrorMetricsErrorKind::None;
-    Ok((out_radius_m, out_error))
+    Ok((&mut *out_radius_m, &mut *out_error))
+}
+
+unsafe fn reject_output_pair_alias<T, U>(
+    fn_name: &str,
+    first: *mut T,
+    first_name: &str,
+    second: *mut U,
+    second_name: &str,
+) -> Result<(), SidereonStatus> {
+    let first = checked_output_range(fn_name, first, 1, first_name)?;
+    let second = checked_output_range(fn_name, second, 1, second_name)?;
+    reject_overlapping_outputs(fn_name, first, second, first_name, second_name)
 }
 
 fn empty_position_error_metrics() -> SidereonPositionErrorMetrics {
@@ -573,6 +654,11 @@ fn map_error_metrics_error(
     err: sidereon_core::error_metrics::ErrorMetricsError,
     out_error: &mut SidereonErrorMetricsErrorKind,
 ) -> SidereonStatus {
+    crate::engine_error::record_engine_error(
+        crate::engine_error::SidereonEngineErrorFamily::ErrorMetrics,
+        fn_name,
+        crate::engine_error::error_metrics_error_value(&err),
+    );
     *out_error = match err {
         sidereon_core::error_metrics::ErrorMetricsError::NonFinite => {
             SidereonErrorMetricsErrorKind::NonFinite
@@ -589,4 +675,437 @@ fn map_error_metrics_error(
     };
     set_last_error(format!("{fn_name}: {err:?}"));
     SidereonStatus::InvalidArgument
+}
+
+#[cfg(test)]
+mod engine_error_tests {
+    use super::*;
+    use crate::engine_error::{snapshot_engine_error_for_test, SidereonEngineErrorFamily};
+
+    #[repr(C)]
+    union PositionCovarianceMetricsStorage {
+        covariance: SidereonPositionCovariance,
+        metrics: SidereonPositionErrorMetrics,
+    }
+
+    #[repr(C)]
+    union CovarianceErrorStorage {
+        covariance: [f64; 9],
+        error: SidereonErrorMetricsErrorKind,
+    }
+
+    fn kinematic_input(position_m: [f64; 3]) -> SidereonKinematicSolutionMetricsInput {
+        SidereonKinematicSolutionMetricsInput {
+            position_m,
+            position_covariance_m2: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+        }
+    }
+
+    unsafe fn assert_rotation_refusal(
+        input: &SidereonKinematicSolutionMetricsInput,
+        metrics: *mut SidereonPositionErrorMetrics,
+        out_error: *mut SidereonErrorMetricsErrorKind,
+    ) -> String {
+        assert_eq!(
+            sidereon_error_metrics_from_kinematic_solution(input, metrics, out_error),
+            SidereonStatus::InvalidArgument
+        );
+        assert_eq!(*out_error, SidereonErrorMetricsErrorKind::Rotation);
+        let (info, payload) =
+            snapshot_engine_error_for_test().expect("typed error-metrics refusal");
+        assert_eq!(info.family, SidereonEngineErrorFamily::ErrorMetrics);
+        assert_eq!(info.payload_len, payload.len());
+        let value: serde_json::Value = serde_json::from_str(&payload).expect("valid JSON");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "schema_version":1,
+                "family":"error_metrics",
+                "operation":"sidereon_error_metrics_from_kinematic_solution",
+                "error":{
+                    "kind":"rotation",
+                    "fields":{"cause":{
+                        "kind":"invalid_input",
+                        "fields":{"field":"position_m","reason":"geodetic conversion failed"}
+                    }}
+                }
+            })
+        );
+        let mut message = vec![0 as std::os::raw::c_char; 256];
+        unsafe { crate::sidereon_last_error_message(message.as_mut_ptr(), message.len()) };
+        assert_eq!(
+            unsafe { std::ffi::CStr::from_ptr(message.as_ptr()) }
+                .to_str()
+                .expect("legacy UTF-8"),
+            "sidereon_error_metrics_from_kinematic_solution: Rotation(InvalidInput { field: \"position_m\", reason: \"geodetic conversion failed\" })"
+        );
+        payload
+    }
+
+    #[test]
+    fn kinematic_rotation_error_retains_complete_owned_payload_and_resets() {
+        let invalid = kinematic_input([f64::NAN, 0.0, 0.0]);
+        let valid = kinematic_input([6_378_137.0, 0.0, 0.0]);
+        let mut metrics = empty_position_error_metrics();
+        let mut out_error = SidereonErrorMetricsErrorKind::None;
+        let expected = unsafe { assert_rotation_refusal(&invalid, &mut metrics, &mut out_error) };
+
+        let mut written = 0;
+        let mut required = 0;
+        assert_eq!(
+            unsafe {
+                crate::sidereon_last_engine_error_payload(
+                    std::ptr::null_mut(),
+                    0,
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(required, expected.len());
+        let mut canary = [0xA5_u8; 8];
+        assert_eq!(
+            unsafe {
+                crate::sidereon_last_engine_error_payload(
+                    canary.as_mut_ptr(),
+                    canary.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+        assert_eq!(canary, [0xA5; 8]);
+        assert_eq!(required, expected.len());
+
+        let mut payload_bytes = vec![0; required];
+        assert_eq!(
+            unsafe {
+                crate::sidereon_last_engine_error_payload(
+                    payload_bytes.as_mut_ptr(),
+                    payload_bytes.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(written, expected.len());
+        assert_eq!(String::from_utf8(payload_bytes).unwrap(), expected);
+        let mut info = crate::engine_error::SidereonEngineErrorInfo {
+            family: SidereonEngineErrorFamily::None,
+            payload_len: 0,
+        };
+        assert_eq!(
+            unsafe { crate::sidereon_last_engine_error_info(&mut info) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(info.family, SidereonEngineErrorFamily::ErrorMetrics);
+        assert_eq!(snapshot_engine_error_for_test().unwrap().1, expected);
+
+        assert_eq!(
+            unsafe {
+                assert_rotation_refusal(&invalid, &mut metrics, &mut out_error);
+                sidereon_error_metrics_from_kinematic_solution(&valid, &mut metrics, &mut out_error)
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(out_error, SidereonErrorMetricsErrorKind::None);
+        assert_eq!(metrics.sigma_e_m, 1.0);
+        assert_eq!(metrics.sigma_n_m, 1.0);
+        assert_eq!(metrics.sigma_u_m, 1.0);
+        assert_eq!(metrics.drms_m, std::f64::consts::SQRT_2);
+        assert_eq!(metrics.two_drms_m, 2.0 * std::f64::consts::SQRT_2);
+        assert_eq!(metrics.mrse_m, 1.732_050_807_568_877_2);
+        assert!(snapshot_engine_error_for_test().is_none());
+
+        unsafe { assert_rotation_refusal(&invalid, &mut metrics, &mut out_error) };
+        assert_eq!(
+            unsafe {
+                sidereon_error_metrics_from_kinematic_solution(
+                    &invalid,
+                    std::ptr::null_mut(),
+                    &mut out_error,
+                )
+            },
+            SidereonStatus::NullPointer
+        );
+        assert!(snapshot_engine_error_for_test().is_none());
+    }
+
+    #[test]
+    fn position_covariance_input_can_overlap_metrics_output() {
+        let covariance = SidereonPositionCovariance {
+            ecef_m2: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            enu_m2: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+        };
+        let mut expected = empty_position_error_metrics();
+        let mut expected_error = SidereonErrorMetricsErrorKind::NonFinite;
+        assert_eq!(
+            unsafe {
+                sidereon_error_metrics_from_position_covariance(
+                    &covariance,
+                    &mut expected,
+                    &mut expected_error,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(expected_error, SidereonErrorMetricsErrorKind::None);
+
+        let mut storage = PositionCovarianceMetricsStorage { covariance };
+        let storage_ptr = &mut storage as *mut PositionCovarianceMetricsStorage;
+        let covariance_ptr = unsafe { std::ptr::addr_of!((*storage_ptr).covariance) };
+        let metrics_ptr = unsafe { std::ptr::addr_of_mut!((*storage_ptr).metrics) };
+        let mut actual_error = SidereonErrorMetricsErrorKind::NonFinite;
+        assert_eq!(
+            unsafe {
+                sidereon_error_metrics_from_position_covariance(
+                    covariance_ptr,
+                    metrics_ptr,
+                    &mut actual_error,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(actual_error, SidereonErrorMetricsErrorKind::None);
+        let actual = unsafe { metrics_ptr.read() };
+        assert_eq!(actual.sigma_e_m, expected.sigma_e_m);
+        assert_eq!(actual.sigma_n_m, expected.sigma_n_m);
+        assert_eq!(actual.sigma_u_m, expected.sigma_u_m);
+        assert_eq!(actual.drms_m, expected.drms_m);
+    }
+
+    #[test]
+    fn enu_covariance_input_can_overlap_error_output() {
+        let covariance = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        let mut expected = empty_position_error_metrics();
+        let mut expected_error = SidereonErrorMetricsErrorKind::NonFinite;
+        assert_eq!(
+            unsafe {
+                sidereon_error_metrics_from_enu_covariance_m2(
+                    covariance.as_ptr(),
+                    &mut expected,
+                    &mut expected_error,
+                )
+            },
+            SidereonStatus::Ok
+        );
+
+        let mut storage = CovarianceErrorStorage { covariance };
+        let storage_ptr = &mut storage as *mut CovarianceErrorStorage;
+        let covariance_ptr = unsafe { std::ptr::addr_of!((*storage_ptr).covariance).cast::<f64>() };
+        let error_ptr = unsafe { std::ptr::addr_of_mut!((*storage_ptr).error) };
+        let mut actual = empty_position_error_metrics();
+        assert_eq!(
+            unsafe {
+                sidereon_error_metrics_from_enu_covariance_m2(
+                    covariance_ptr,
+                    &mut actual,
+                    error_ptr,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(
+            unsafe { error_ptr.read() },
+            SidereonErrorMetricsErrorKind::None
+        );
+        assert_eq!(actual.sigma_e_m, expected.sigma_e_m);
+        assert_eq!(actual.sigma_n_m, expected.sigma_n_m);
+        assert_eq!(actual.sigma_u_m, expected.sigma_u_m);
+        assert_eq!(actual.drms_m, expected.drms_m);
+    }
+
+    #[test]
+    fn output_pair_overlap_is_refused_before_reset_and_null_error_preserves_first_output() {
+        let covariance = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        let mut metrics = empty_position_error_metrics();
+        metrics.sigma_e_m = 42.0;
+        let metrics_ptr = &mut metrics as *mut SidereonPositionErrorMetrics;
+        let overlapping_error = metrics_ptr.cast::<SidereonErrorMetricsErrorKind>();
+        assert_eq!(
+            unsafe {
+                sidereon_error_metrics_from_enu_covariance_m2(
+                    covariance.as_ptr(),
+                    metrics_ptr,
+                    overlapping_error,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+        assert_eq!(metrics.sigma_e_m, 42.0);
+
+        assert_eq!(
+            unsafe {
+                sidereon_error_metrics_from_enu_covariance_m2(
+                    covariance.as_ptr(),
+                    metrics_ptr,
+                    std::ptr::null_mut(),
+                )
+            },
+            SidereonStatus::NullPointer
+        );
+        // Output-pair validation now precedes resetting either output.
+        assert_eq!(metrics.sigma_e_m, 42.0);
+    }
+
+    #[test]
+    fn every_error_metrics_producer_clears_freshly_seeded_detail() {
+        let invalid = kinematic_input([f64::NAN, 0.0, 0.0]);
+        let valid = kinematic_input([6_378_137.0, 0.0, 0.0]);
+        let matrix = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        let covariance = SidereonPositionCovariance {
+            ecef_m2: matrix,
+            enu_m2: matrix,
+        };
+        let receiver = SidereonGeodetic {
+            lat_rad: 0.1,
+            lon_rad: 0.2,
+            height_m: 0.0,
+        };
+        let mut metrics = empty_position_error_metrics();
+        let mut ellipse = error_ellipse_to_c(sidereon_core::error_metrics::ErrorEllipse {
+            semi_major_m: 0.0,
+            semi_minor_m: 0.0,
+            orientation_rad: 0.0,
+        });
+        let mut radius = empty_percentile_radius(0.95);
+        let mut vertical_radius = 0.0;
+        let mut out_error = SidereonErrorMetricsErrorKind::None;
+
+        macro_rules! assert_success {
+            ($call:expr) => {{
+                unsafe { assert_rotation_refusal(&invalid, &mut metrics, &mut out_error) };
+                assert_eq!($call, SidereonStatus::Ok);
+                assert!(snapshot_engine_error_for_test().is_none());
+            }};
+        }
+        macro_rules! assert_null {
+            ($call:expr) => {{
+                unsafe { assert_rotation_refusal(&invalid, &mut metrics, &mut out_error) };
+                assert_eq!($call, SidereonStatus::NullPointer);
+                assert!(snapshot_engine_error_for_test().is_none());
+            }};
+        }
+
+        assert_success!(unsafe {
+            sidereon_error_metrics_from_enu_covariance_m2(
+                matrix.as_ptr(),
+                &mut metrics,
+                &mut out_error,
+            )
+        });
+        assert_success!(unsafe {
+            sidereon_error_metrics_from_ecef_covariance_m2(
+                matrix.as_ptr(),
+                receiver,
+                &mut metrics,
+                &mut out_error,
+            )
+        });
+        assert_success!(unsafe {
+            sidereon_error_metrics_from_position_covariance(
+                &covariance,
+                &mut metrics,
+                &mut out_error,
+            )
+        });
+        assert_success!(unsafe {
+            sidereon_error_metrics_from_kinematic_solution(&valid, &mut metrics, &mut out_error)
+        });
+        assert_success!(unsafe {
+            sidereon_error_metrics_error_ellipse_from_enu_m2(
+                matrix.as_ptr(),
+                &mut ellipse,
+                &mut out_error,
+            )
+        });
+        assert_success!(unsafe {
+            sidereon_error_metrics_horizontal_radius_at(
+                matrix.as_ptr(),
+                0.95,
+                &mut radius,
+                &mut out_error,
+            )
+        });
+        assert_success!(unsafe {
+            sidereon_error_metrics_spherical_radius_at(
+                matrix.as_ptr(),
+                0.95,
+                &mut radius,
+                &mut out_error,
+            )
+        });
+        assert_success!(unsafe {
+            sidereon_error_metrics_vertical_radius_at(
+                1.0,
+                0.95,
+                &mut vertical_radius,
+                &mut out_error,
+            )
+        });
+
+        assert_null!(unsafe {
+            sidereon_error_metrics_from_enu_covariance_m2(
+                matrix.as_ptr(),
+                std::ptr::null_mut(),
+                &mut out_error,
+            )
+        });
+        assert_null!(unsafe {
+            sidereon_error_metrics_from_ecef_covariance_m2(
+                matrix.as_ptr(),
+                receiver,
+                std::ptr::null_mut(),
+                &mut out_error,
+            )
+        });
+        assert_null!(unsafe {
+            sidereon_error_metrics_from_position_covariance(
+                &covariance,
+                std::ptr::null_mut(),
+                &mut out_error,
+            )
+        });
+        assert_null!(unsafe {
+            sidereon_error_metrics_from_kinematic_solution(
+                &valid,
+                std::ptr::null_mut(),
+                &mut out_error,
+            )
+        });
+        assert_null!(unsafe {
+            sidereon_error_metrics_error_ellipse_from_enu_m2(
+                matrix.as_ptr(),
+                std::ptr::null_mut(),
+                &mut out_error,
+            )
+        });
+        assert_null!(unsafe {
+            sidereon_error_metrics_horizontal_radius_at(
+                matrix.as_ptr(),
+                0.95,
+                std::ptr::null_mut(),
+                &mut out_error,
+            )
+        });
+        assert_null!(unsafe {
+            sidereon_error_metrics_spherical_radius_at(
+                matrix.as_ptr(),
+                0.95,
+                std::ptr::null_mut(),
+                &mut out_error,
+            )
+        });
+        assert_null!(unsafe {
+            sidereon_error_metrics_vertical_radius_at(
+                1.0,
+                0.95,
+                std::ptr::null_mut(),
+                &mut out_error,
+            )
+        });
+    }
 }

@@ -4,6 +4,9 @@
 bindings/**/target
 **/*.rs.bk
 
+# Python bytecode written when the fixture-header scripts run.
+__pycache__/
+
 # Built C shared libraries.
 *.so
 *.dylib

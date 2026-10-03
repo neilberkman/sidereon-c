@@ -28,6 +28,7 @@
 
 #include "broadcast_fixture.h"
 #include "spp_fixture.h"
+#include "w6_robustness_pins.h"
 
 static int fail(const char *what, int code) {
     char message[512];
@@ -74,6 +75,115 @@ static uint8_t *read_file(const char *path, size_t *out_len) {
     fclose(f);
     *out_len = (size_t)size;
     return buf;
+}
+
+/* The expected FDE, robust, coarse-search and fallback results below are
+ * sidereon-core's own for the inputs this program builds, from tests/valgen
+ * (w6_robustness). */
+static bool same_tokens(const SidereonSatelliteToken *tokens, size_t count,
+                        const char *const *expected, size_t expected_count) {
+    if (count != expected_count) {
+        return false;
+    }
+    for (size_t i = 0; i < count; i++) {
+        if (strncmp(tokens[i].bytes, expected[i], sizeof(tokens[i].bytes)) != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* The solution's used satellites equal the pinned list, in order. */
+static bool used_is(const SidereonSppSolution *sol, const char *const *expected,
+                    size_t expected_count) {
+    size_t count = 0;
+    if (sidereon_spp_solution_used_sat_count(sol, &count) != SIDEREON_STATUS_OK ||
+        count != expected_count) {
+        return false;
+    }
+    SidereonSatelliteToken *ids = calloc(count == 0 ? 1 : count, sizeof(*ids));
+    if (ids == NULL) {
+        return false;
+    }
+    size_t written = 0;
+    size_t required = 0;
+    bool same = sidereon_spp_solution_used_sat_ids(sol, ids, count, &written, &required) ==
+                    SIDEREON_STATUS_OK &&
+                same_tokens(ids, written, expected, expected_count);
+    free(ids);
+    return same;
+}
+
+static bool unresolved_raim_matches_solution(
+    const SidereonRaimNormalizedResidual *rows, size_t row_count,
+    const SidereonSppSolution *solution, SidereonRaimWeightsMode weights_mode) {
+    size_t used_count = 0;
+    size_t ids_written = 0;
+    size_t ids_required = 0;
+    size_t residuals_written = 0;
+    size_t residuals_required = 0;
+    size_t variances_written = 0;
+    size_t variances_required = 0;
+    if (sidereon_spp_solution_used_sat_count(solution, &used_count) != SIDEREON_STATUS_OK ||
+        used_count != row_count ||
+        sidereon_spp_solution_used_sat_ids(solution, NULL, 0, &ids_written, &ids_required) !=
+            SIDEREON_STATUS_OK ||
+        sidereon_spp_solution_residuals(solution, NULL, 0, &residuals_written,
+                                        &residuals_required) != SIDEREON_STATUS_OK ||
+        sidereon_spp_solution_pseudorange_variances(
+            solution, NULL, 0, &variances_written, &variances_required) != SIDEREON_STATUS_OK ||
+        ids_required != used_count || residuals_required != used_count ||
+        variances_required != used_count) {
+        return false;
+    }
+    SidereonSatelliteToken *ids = calloc(used_count, sizeof(*ids));
+    double *residuals = calloc(used_count, sizeof(*residuals));
+    double *variances = calloc(used_count, sizeof(*variances));
+    if (ids == NULL || residuals == NULL || variances == NULL) {
+        free(ids);
+        free(residuals);
+        free(variances);
+        return false;
+    }
+    bool copied = sidereon_spp_solution_used_sat_ids(
+                      solution, ids, used_count, &ids_written, &ids_required) == SIDEREON_STATUS_OK &&
+                  sidereon_spp_solution_residuals(
+                      solution, residuals, used_count, &residuals_written,
+                      &residuals_required) == SIDEREON_STATUS_OK &&
+                  sidereon_spp_solution_pseudorange_variances(
+                      solution, variances, used_count, &variances_written,
+                      &variances_required) == SIDEREON_STATUS_OK &&
+                  ids_written == used_count && residuals_written == used_count &&
+                  variances_written == used_count;
+    bool matches = copied;
+    for (size_t row = 0; matches && row < row_count; row++) {
+        size_t index = 0;
+        while (index < used_count &&
+               strncmp(ids[index].bytes, rows[row].sat_id.bytes,
+                       sizeof(ids[index].bytes)) != 0) {
+            index++;
+        }
+        if (index == used_count || !(variances[index] > 0.0) ||
+            !isfinite(rows[row].normalized_residual)) {
+            matches = false;
+            break;
+        }
+        double expected;
+        if (weights_mode == SIDEREON_RAIM_WEIGHTS_MODE_SOLUTION) {
+            expected = residuals[index] / sqrt(variances[index]);
+        } else if (weights_mode == SIDEREON_RAIM_WEIGHTS_MODE_UNIT) {
+            expected = residuals[index];
+        } else {
+            matches = false;
+            break;
+        }
+        matches = fabs(rows[row].normalized_residual - expected) <=
+                  1e-12 * (1.0 + fabs(expected));
+    }
+    free(ids);
+    free(residuals);
+    free(variances);
+    return matches;
 }
 
 static bool token_equals(const SidereonSatelliteToken *token, const char *expected) {
@@ -130,6 +240,7 @@ static void fill_broadcast_inputs(SidereonObservation *obs, SidereonSppInputs *i
     inputs->temperature_k = bits_to_f64(BC_TEMPERATURE_K_BITS);
     inputs->relative_humidity = bits_to_f64(BC_RELATIVE_HUMIDITY_BITS);
     inputs->with_geodetic = true;
+    inputs->pseudorange_code = SIDEREON_PSEUDORANGE_CODE_SINGLE_FREQUENCY;
 }
 
 /* (1) FDE over broadcast: clean set excludes nothing, corrupted satellite is
@@ -144,8 +255,8 @@ static int exercise_fde(SidereonBroadcastEphemeris *broadcast) {
         return fail("fde: sidereon_fde_options_init", 1);
     }
     options.p_fa = 1.0e-3;
-    options.unit_weights = true;
-    options.max_iterations = BC_OBS_COUNT; /* generous exclusion budget */
+    options.weights_mode = SIDEREON_RAIM_WEIGHTS_MODE_UNIT;
+    options.max_exclusions = BC_OBS_COUNT; /* generous exclusion budget */
 
     /* Clean run: the set is self-consistent, so RAIM excludes nothing. */
     SidereonFdeSolution *clean = NULL;
@@ -156,10 +267,10 @@ static int exercise_fde(SidereonBroadcastEphemeris *broadcast) {
     size_t clean_written = 99;
     size_t clean_required = 99;
     if (sidereon_fde_solution_iterations(clean, &clean_iters) != SIDEREON_STATUS_OK ||
-        clean_iters != 0 ||
+        clean_iters != W6_ROB_CLEAN_ITERATIONS ||
         sidereon_fde_solution_excluded_sats(clean, NULL, 0, &clean_written, &clean_required) !=
             SIDEREON_STATUS_OK ||
-        clean_written != 0 || clean_required != 0) {
+        clean_written != 0 || clean_required != W6_ROB_CLEAN_EXCLUDED_COUNT) {
         sidereon_fde_solution_free(clean);
         return fail("fde: clean run excluded a satellite", 1);
     }
@@ -170,7 +281,7 @@ static int exercise_fde(SidereonBroadcastEphemeris *broadcast) {
     }
     size_t clean_used = 0;
     if (sidereon_spp_solution_used_sat_count(clean_sol, &clean_used) != SIDEREON_STATUS_OK ||
-        clean_used < 5) {
+        !used_is(clean_sol, W6_ROB_CLEAN_USED, W6_ROB_CLEAN_USED_COUNT)) {
         sidereon_spp_solution_free(clean_sol);
         sidereon_fde_solution_free(clean);
         return fail("fde: clean used-sat count", 1);
@@ -188,8 +299,8 @@ static int exercise_fde(SidereonBroadcastEphemeris *broadcast) {
     }
     sidereon_spp_solution_free(clean_sol);
     sidereon_fde_solution_free(clean);
-    if (bad_sat == NULL) {
-        return fail("fde: no used satellite to corrupt", 1);
+    if (bad_sat == NULL || strcmp(bad_sat, W6_ROB_BAD_SAT) != 0) {
+        return fail("fde: satellite to corrupt", 1);
     }
 
     /* Corrupted run: bias the chosen used satellite's pseudorange by 200 m. The
@@ -212,7 +323,8 @@ static int exercise_fde(SidereonBroadcastEphemeris *broadcast) {
         return fail("fde: corrupted solve", 1);
     }
     size_t iters = 0;
-    if (sidereon_fde_solution_iterations(fixed, &iters) != SIDEREON_STATUS_OK || iters < 1) {
+    if (sidereon_fde_solution_iterations(fixed, &iters) != SIDEREON_STATUS_OK ||
+        iters != W6_ROB_CORRUPT_ITERATIONS) {
         sidereon_fde_solution_free(fixed);
         return fail("fde: corrupted run performed no exclusion", 1);
     }
@@ -221,7 +333,7 @@ static int exercise_fde(SidereonBroadcastEphemeris *broadcast) {
     size_t required = 0;
     if (sidereon_fde_solution_excluded_sats(fixed, NULL, 0, &written, &required) !=
             SIDEREON_STATUS_OK ||
-        required < 1 || written != 0) {
+        required != W6_ROB_CORRUPT_EXCLUDED_COUNT || written != 0) {
         sidereon_fde_solution_free(fixed);
         return fail("fde: excluded count query", 1);
     }
@@ -232,7 +344,8 @@ static int exercise_fde(SidereonBroadcastEphemeris *broadcast) {
     }
     if (sidereon_fde_solution_excluded_sats(fixed, excluded, required, &written, &required) !=
             SIDEREON_STATUS_OK ||
-        written != required) {
+        written != required ||
+        !same_tokens(excluded, written, W6_ROB_CORRUPT_EXCLUDED, W6_ROB_CORRUPT_EXCLUDED_COUNT)) {
         free(excluded);
         sidereon_fde_solution_free(fixed);
         return fail("fde: excluded fill", 1);
@@ -262,13 +375,151 @@ static int exercise_fde(SidereonBroadcastEphemeris *broadcast) {
     }
     size_t survivor_used = 0;
     if (sidereon_spp_solution_used_sat_count(survivor, &survivor_used) != SIDEREON_STATUS_OK ||
-        survivor_used < 4) {
+        !used_is(survivor, W6_ROB_CORRUPT_USED, W6_ROB_CORRUPT_USED_COUNT)) {
         sidereon_spp_solution_free(survivor);
         sidereon_fde_solution_free(fixed);
         return fail("fde: surviving used-sat count", 1);
     }
     sidereon_spp_solution_free(survivor);
+
+    /* The accepted solution's detection test is sidereon-core's. */
+    SidereonRaimResult accepted;
+    if (sidereon_fde_solution_raim(fixed, &accepted) != SIDEREON_STATUS_OK ||
+        accepted.fault_detected != W6_ROB_CORRUPT_RAIM_FAULT_DETECTED ||
+        accepted.testable != W6_ROB_CORRUPT_RAIM_TESTABLE ||
+        accepted.test_statistic != bits_to_f64(W6_ROB_CORRUPT_RAIM_TEST_STATISTIC_BITS)) {
+        sidereon_fde_solution_free(fixed);
+        return fail("fde: accepted solution detection test", 1);
+    }
     sidereon_fde_solution_free(fixed);
+
+    /* With no exclusion budget the fault stays unresolved: the call reports
+     * SOLVE and keeps the last solution, the exclusions and its test. */
+    SidereonFdeOptions no_budget = options;
+    no_budget.max_exclusions = 0;
+    SidereonFdeSolution *unresolved = (SidereonFdeSolution *)(uintptr_t)1;
+    if (sidereon_fde_solve_broadcast(broadcast, &corrupt_inputs, &no_budget, &unresolved) !=
+            SIDEREON_STATUS_SOLVE ||
+        unresolved != NULL) {
+        return fail("fde: unresolved fault status", 1);
+    }
+    SidereonFdeUnresolvedInfo info;
+    SidereonSppSolution *last = NULL;
+    size_t last_written = 99;
+    size_t last_required = 99;
+    if (sidereon_last_fde_unresolved(&info) != SIDEREON_STATUS_OK ||
+        info.reason != W6_ROB_UNRESOLVED_REASON ||
+        info.excluded_count != W6_ROB_UNRESOLVED_EXCLUDED_COUNT ||
+        info.raim.fault_detected != W6_ROB_UNRESOLVED_FAULT_DETECTED ||
+        info.raim.test_statistic != bits_to_f64(W6_ROB_UNRESOLVED_TEST_STATISTIC_BITS) ||
+        sidereon_last_fde_unresolved_excluded_sats(NULL, 0, &last_written, &last_required) !=
+            SIDEREON_STATUS_OK ||
+        last_written != 0 || last_required != W6_ROB_UNRESOLVED_EXCLUDED_COUNT ||
+        sidereon_last_fde_unresolved_solution(&last) != SIDEREON_STATUS_OK || last == NULL ||
+        !used_is(last, W6_ROB_UNRESOLVED_USED, W6_ROB_UNRESOLVED_USED_COUNT)) {
+        sidereon_spp_solution_free(last);
+        return fail("fde: unresolved fault record", 1);
+    }
+
+    size_t residual_written = 99;
+    size_t residual_required = 99;
+    if (info.raim.normalized_residual_count == 0 ||
+        sidereon_last_fde_unresolved_raim_normalized_residuals(
+            NULL, 0, &residual_written, &residual_required) != SIDEREON_STATUS_OK ||
+        residual_written != 0 || residual_required != info.raim.normalized_residual_count) {
+        sidereon_spp_solution_free(last);
+        return fail("fde: unresolved normalized-residual sizing", 1);
+    }
+    SidereonRaimNormalizedResidual *residuals =
+        calloc(residual_required, sizeof(*residuals));
+    if (residuals == NULL ||
+        sidereon_last_fde_unresolved_raim_normalized_residuals(
+            residuals, residual_required, &residual_written, &residual_required) !=
+            SIDEREON_STATUS_OK ||
+        residual_written != info.raim.normalized_residual_count) {
+        free(residuals);
+        sidereon_spp_solution_free(last);
+        return fail("fde: unresolved normalized-residual copy", 1);
+    }
+    for (size_t i = 1; i < residual_written; i++) {
+        if (strcmp(residuals[i - 1].sat_id.bytes, residuals[i].sat_id.bytes) >= 0) {
+            free(residuals);
+            sidereon_spp_solution_free(last);
+            return fail("fde: unresolved normalized-residual order", 1);
+        }
+    }
+    if (!unresolved_raim_matches_solution(
+            residuals, residual_written, last, (SidereonRaimWeightsMode)options.weights_mode)) {
+        free(residuals);
+        sidereon_spp_solution_free(last);
+        return fail("fde: unresolved normalized residuals differ from core solution", 1);
+    }
+    free(residuals);
+    if (sidereon_last_fde_unresolved(&info) != SIDEREON_STATUS_OK ||
+        info.reason != W6_ROB_UNRESOLVED_REASON) {
+        sidereon_spp_solution_free(last);
+        return fail("fde: unresolved readers changed retained state", 1);
+    }
+    sidereon_spp_solution_free(last);
+
+    SidereonFdeOptions invalid_quality = options;
+    invalid_quality.p_fa = 0.0;
+    SidereonFdeSolution *invalid_result = (SidereonFdeSolution *)(uintptr_t)1;
+    if (sidereon_fde_solve_broadcast(
+            broadcast, &inputs, &invalid_quality, &invalid_result) !=
+            SIDEREON_STATUS_INVALID_ARGUMENT ||
+        invalid_result != NULL ||
+        sidereon_last_quality_error_kind() != SIDEREON_QUALITY_ERROR_KIND_INVALID_PROBABILITY ||
+        sidereon_last_fde_unresolved(&info) != SIDEREON_STATUS_OK ||
+        info.reason != SIDEREON_FDE_UNRESOLVED_REASON_NONE) {
+        return fail("fde: RAIM error kind or paired state reset", 1);
+    }
+
+    /* Every producer clears the prior unresolved record before validating any
+     * public pointer, including the robust wrappers. */
+    SidereonFdeSolution *early = (SidereonFdeSolution *)(uintptr_t)1;
+    if (sidereon_fde_solve_broadcast(broadcast, &corrupt_inputs, &no_budget, &unresolved) !=
+            SIDEREON_STATUS_SOLVE ||
+        sidereon_fde_solve_spp(NULL, NULL, NULL, &early) != SIDEREON_STATUS_NULL_POINTER ||
+        early != NULL || sidereon_last_fde_unresolved(&info) != SIDEREON_STATUS_OK ||
+        info.reason != SIDEREON_FDE_UNRESOLVED_REASON_NONE) {
+        return fail("fde: SPP early refusal did not clear unresolved state", 1);
+    }
+    early = (SidereonFdeSolution *)(uintptr_t)1;
+    if (sidereon_fde_solve_broadcast(broadcast, &corrupt_inputs, &no_budget, &unresolved) !=
+            SIDEREON_STATUS_SOLVE ||
+        sidereon_fde_solve_broadcast(NULL, NULL, NULL, &early) != SIDEREON_STATUS_NULL_POINTER ||
+        early != NULL || sidereon_last_fde_unresolved(&info) != SIDEREON_STATUS_OK ||
+        info.reason != SIDEREON_FDE_UNRESOLVED_REASON_NONE) {
+        return fail("fde: broadcast early refusal did not clear unresolved state", 1);
+    }
+    early = (SidereonFdeSolution *)(uintptr_t)1;
+    if (sidereon_fde_solve_broadcast(broadcast, &corrupt_inputs, &no_budget, &unresolved) !=
+            SIDEREON_STATUS_SOLVE ||
+        sidereon_robust_fde_solve_spp(NULL, NULL, NULL, NULL, &early) !=
+            SIDEREON_STATUS_NULL_POINTER ||
+        early != NULL || sidereon_last_fde_unresolved(&info) != SIDEREON_STATUS_OK ||
+        info.reason != SIDEREON_FDE_UNRESOLVED_REASON_NONE) {
+        return fail("fde: robust SPP early refusal did not clear unresolved state", 1);
+    }
+    early = (SidereonFdeSolution *)(uintptr_t)1;
+    if (sidereon_fde_solve_broadcast(broadcast, &corrupt_inputs, &no_budget, &unresolved) !=
+            SIDEREON_STATUS_SOLVE ||
+        sidereon_robust_fde_solve_broadcast(NULL, NULL, NULL, NULL, &early) !=
+            SIDEREON_STATUS_NULL_POINTER ||
+        early != NULL || sidereon_last_fde_unresolved(&info) != SIDEREON_STATUS_OK ||
+        info.reason != SIDEREON_FDE_UNRESOLVED_REASON_NONE) {
+        return fail("fde: robust broadcast early refusal did not clear unresolved state", 1);
+    }
+    SidereonFdeSolution *cleared_by_success = NULL;
+    if (sidereon_fde_solve_broadcast(broadcast, &inputs, &options, &cleared_by_success) !=
+            SIDEREON_STATUS_OK ||
+        cleared_by_success == NULL || sidereon_last_fde_unresolved(&info) != SIDEREON_STATUS_OK ||
+        info.reason != SIDEREON_FDE_UNRESOLVED_REASON_NONE) {
+        sidereon_fde_solution_free(cleared_by_success);
+        return fail("fde: successful producer did not clear unresolved state", 1);
+    }
+    sidereon_fde_solution_free(cleared_by_success);
 
     printf("fde: clean iterations = 0, corrupted excluded %s after %zu iteration(s)\n", bad_sat,
            iters);
@@ -299,6 +550,7 @@ static void fill_grg_inputs(SidereonObservation *observations, SidereonSppInputs
     base->temperature_k = bits_to_f64(SPP_TEMPERATURE_K_BITS);
     base->relative_humidity = bits_to_f64(SPP_RELATIVE_HUMIDITY_BITS);
     base->with_geodetic = true;
+    base->pseudorange_code = SIDEREON_PSEUDORANGE_CODE_SINGLE_FREQUENCY;
 }
 
 /* (2) Robust Huber/IRLS reweighting and (3) coarse-search cold start, each a
@@ -324,8 +576,9 @@ static int exercise_robust_and_coarse(const SidereonSp3 *sp3) {
     }
     SidereonSppMetadata metadata;
     if (sidereon_spp_solution_metadata(robust_sol, &metadata) != SIDEREON_STATUS_OK ||
-        metadata.outer_iterations != 1 || !metadata.has_final_robust_scale_m ||
-        !isfinite(metadata.final_robust_scale_m)) {
+        metadata.outer_iterations != W6_ROB_ROBUST_OUTER_ITERATIONS ||
+        metadata.has_final_robust_scale_m != W6_ROB_ROBUST_HAS_SCALE ||
+        memcmp(&metadata.final_robust_scale_m, &W6_ROB_ROBUST_SCALE_BITS, sizeof(double)) != 0) {
         sidereon_spp_solution_free(robust_sol);
         return fail("robust: reweighting not reported", 1);
     }
@@ -356,12 +609,24 @@ static int exercise_robust_and_coarse(const SidereonSp3 *sp3) {
         sidereon_spp_solution_free(coarse_sol);
         return fail("coarse: position readout", 1);
     }
+    for (int i = 0; i < 3; i++) {
+        uint64_t bits = 0;
+        memcpy(&bits, &position[i], sizeof(bits));
+        if (bits != W6_ROB_COARSE_POSITION_BITS[i]) {
+            sidereon_spp_solution_free(coarse_sol);
+            return fail("coarse: position differs from sidereon-core's coarse solve", 1);
+        }
+    }
+    /* Acceptance criterion, separate from the engine value above: the cold
+     * start from the geocenter lands within 1 mm of the warm-start SPP golden
+     * (tests/sppgen), i.e. in the same basin. */
     double dx = position[0] - bits_to_f64(SPP_EXPECTED_X_BITS[0]);
     double dy = position[1] - bits_to_f64(SPP_EXPECTED_X_BITS[1]);
     double dz = position[2] - bits_to_f64(SPP_EXPECTED_X_BITS[2]);
     double dpos = sqrt(dx * dx + dy * dy + dz * dz);
     if (!(dpos < 1.0e-3)) {
         sidereon_spp_solution_free(coarse_sol);
+        fprintf(stderr, "coarse: dpos = %.9e m\n", dpos);
         return fail("coarse: cold start did not recover the reference position", 1);
     }
     sidereon_spp_solution_free(coarse_sol);
@@ -389,7 +654,7 @@ static int exercise_fallback_broadcast(SidereonBroadcastEphemeris *broadcast,
     }
     SidereonFixSourceKind kind = SIDEREON_FIX_SOURCE_KIND_PRECISE;
     if (sidereon_sourced_solution_source_kind(fb_empty, &kind) != SIDEREON_STATUS_OK ||
-        kind != SIDEREON_FIX_SOURCE_KIND_BROADCAST) {
+        kind != W6_ROB_FALLBACK_EMPTY_KIND) {
         sidereon_sourced_solution_free(fb_empty);
         return fail("fallback: empty set did not pick broadcast", 1);
     }
@@ -417,7 +682,7 @@ static int exercise_fallback_broadcast(SidereonBroadcastEphemeris *broadcast,
     }
     kind = SIDEREON_FIX_SOURCE_KIND_PRECISE;
     if (sidereon_sourced_solution_source_kind(fb_wrong, &kind) != SIDEREON_STATUS_OK ||
-        kind != SIDEREON_FIX_SOURCE_KIND_BROADCAST) {
+        kind != W6_ROB_FALLBACK_WRONG_EPOCH_KIND) {
         sidereon_sourced_solution_free(fb_wrong);
         sidereon_sp3_free(wrong);
         return fail("fallback: wrong epoch did not pick broadcast", 1);

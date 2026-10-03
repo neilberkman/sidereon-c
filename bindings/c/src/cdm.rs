@@ -1,4 +1,9 @@
 use super::*;
+use crate::engine_error::{
+    engine_error_operation_boundary, record_engine_error, SidereonEngineErrorFamily,
+};
+use serde_json::json;
+use sidereon_core::astro::cdm::{CdmError, CdmInputErrorKind, TextIssue};
 
 // --- CDM conjunction data message (sidereon_core::astro::cdm) -----------------
 
@@ -43,7 +48,7 @@ pub unsafe extern "C" fn sidereon_cdm_parse_kvn(
     len: usize,
     out_cdm: *mut *mut SidereonCdm,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_cdm_parse_kvn", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_cdm_parse_kvn", SidereonStatus::Panic, || {
         cdm_parse(
             "sidereon_cdm_parse_kvn",
             text,
@@ -64,7 +69,7 @@ pub unsafe extern "C" fn sidereon_cdm_parse_xml(
     len: usize,
     out_cdm: *mut *mut SidereonCdm,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_cdm_parse_xml", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_cdm_parse_xml", SidereonStatus::Panic, || {
         cdm_parse(
             "sidereon_cdm_parse_xml",
             text,
@@ -96,7 +101,7 @@ pub unsafe extern "C" fn sidereon_cdm_to_kvn(
     out_written: *mut usize,
     out_required: *mut usize,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_cdm_to_kvn", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_cdm_to_kvn", SidereonStatus::Panic, || {
         c_try!(init_copy_counts(
             "sidereon_cdm_to_kvn",
             out_written,
@@ -133,7 +138,7 @@ pub unsafe extern "C" fn sidereon_cdm_to_xml(
     out_written: *mut usize,
     out_required: *mut usize,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_cdm_to_xml", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_cdm_to_xml", SidereonStatus::Panic, || {
         c_try!(init_copy_counts(
             "sidereon_cdm_to_xml",
             out_written,
@@ -235,17 +240,17 @@ pub unsafe extern "C" fn sidereon_cdm_numbers(
     ffi_boundary("sidereon_cdm_numbers", SidereonStatus::Panic, || {
         let cdm = c_try!(require_ref(cdm, "sidereon_cdm_numbers", "cdm"));
         let c = &cdm.inner;
-        if let Some(p) = out_miss_distance_m.as_mut() {
-            *p = c.miss_distance_m.unwrap_or(f64::NAN);
+        if !out_miss_distance_m.is_null() {
+            out_miss_distance_m.write(c.miss_distance_m.unwrap_or(f64::NAN));
         }
-        if let Some(p) = out_relative_speed_m_s.as_mut() {
-            *p = c.relative_speed_m_s.unwrap_or(f64::NAN);
+        if !out_relative_speed_m_s.is_null() {
+            out_relative_speed_m_s.write(c.relative_speed_m_s.unwrap_or(f64::NAN));
         }
-        if let Some(p) = out_collision_probability.as_mut() {
-            *p = c.collision_probability.unwrap_or(f64::NAN);
+        if !out_collision_probability.is_null() {
+            out_collision_probability.write(c.collision_probability.unwrap_or(f64::NAN));
         }
-        if let Some(p) = out_hard_body_radius_m.as_mut() {
-            *p = c.hard_body_radius_m.unwrap_or(f64::NAN);
+        if !out_hard_body_radius_m.is_null() {
+            out_hard_body_radius_m.write(c.hard_body_radius_m.unwrap_or(f64::NAN));
         }
         SidereonStatus::Ok
     })
@@ -562,7 +567,592 @@ unsafe fn cdm_parse(
     }
 }
 
-fn map_cdm_error(fn_name: &str, err: sidereon_core::astro::cdm::CdmError) -> SidereonStatus {
+fn cdm_node(kind: &str, fields: serde_json::Value) -> serde_json::Value {
+    json!({
+        "kind": kind,
+        "fields": fields,
+    })
+}
+
+fn cdm_input_error_kind_name(kind: CdmInputErrorKind) -> &'static str {
+    match kind {
+        CdmInputErrorKind::Missing => "missing",
+        CdmInputErrorKind::NonFinite => "non_finite",
+        CdmInputErrorKind::FloatParse => "float_parse",
+        CdmInputErrorKind::IntParse => "int_parse",
+        CdmInputErrorKind::NotPositive => "not_positive",
+        CdmInputErrorKind::Negative => "negative",
+        CdmInputErrorKind::OutOfRange => "out_of_range",
+        CdmInputErrorKind::InvalidCivilDate => "invalid_civil_date",
+        CdmInputErrorKind::InvalidCivilTime => "invalid_civil_time",
+    }
+}
+
+fn text_issue_name(issue: TextIssue) -> &'static str {
+    match issue {
+        TextIssue::LineBreak => "line_break",
+        TextIssue::SurroundingWhitespace => "surrounding_whitespace",
+        TextIssue::InteriorWhitespace => "interior_whitespace",
+        TextIssue::KeywordSeparator => "keyword_separator",
+        TextIssue::XmlIllegalCharacter => "xml_illegal_character",
+        TextIssue::Empty => "empty",
+        TextIssue::DetachedComment => "detached_comment",
+        TextIssue::RepeatedParameter => "repeated_parameter",
+        TextIssue::CommentNotCarried => "comment_not_carried",
+    }
+}
+
+/// Convert a `CdmError` into a structured JSON error node.
+pub(crate) fn cdm_error_value(error: &CdmError) -> serde_json::Value {
+    match error {
+        CdmError::IncompleteStateVector => cdm_node("incomplete_state_vector", json!({})),
+        CdmError::InvalidField { field, kind } => cdm_node(
+            "invalid_field",
+            json!({
+                "field": field,
+                "kind": cdm_input_error_kind_name(*kind),
+            }),
+        ),
+        CdmError::MalformedXml(message) => cdm_node(
+            "malformed_xml",
+            json!({
+                "message": message,
+            }),
+        ),
+        CdmError::DuplicateField {
+            field,
+            first,
+            second,
+        } => cdm_node(
+            "duplicate_field",
+            json!({
+                "field": field,
+                "first": first,
+                "second": second,
+            }),
+        ),
+        CdmError::UnitMismatch {
+            field,
+            unit,
+            expected,
+        } => cdm_node(
+            "unit_mismatch",
+            json!({
+                "field": field,
+                "unit": unit,
+                "expected": expected,
+            }),
+        ),
+        CdmError::UnexpectedObjectCount(count) => cdm_node(
+            "unexpected_object_count",
+            json!({
+                "count": count,
+            }),
+        ),
+        CdmError::MultipleMessages { count } => cdm_node(
+            "multiple_messages",
+            json!({
+                "count": count,
+            }),
+        ),
+        CdmError::UnknownField(field) => cdm_node(
+            "unknown_field",
+            json!({
+                "field": field,
+            }),
+        ),
+        CdmError::MalformedLine { line, text } => cdm_node(
+            "malformed_line",
+            json!({
+                "line": line,
+                "text": text,
+            }),
+        ),
+        CdmError::UnknownObject(object) => cdm_node(
+            "unknown_object",
+            json!({
+                "object": object,
+            }),
+        ),
+        CdmError::RepeatedObject(object) => cdm_node(
+            "repeated_object",
+            json!({
+                "object": object,
+            }),
+        ),
+        CdmError::UnwritableText {
+            field,
+            value,
+            issue,
+        } => cdm_node(
+            "unwritable_text",
+            json!({
+                "field": field,
+                "value": value,
+                "issue": text_issue_name(*issue),
+            }),
+        ),
+        CdmError::HardBodyRadiusComment { comment } => cdm_node(
+            "hard_body_radius_comment",
+            json!({
+                "comment": comment,
+            }),
+        ),
+    }
+}
+
+fn map_cdm_error(fn_name: &str, err: CdmError) -> SidereonStatus {
+    record_engine_error(
+        SidereonEngineErrorFamily::Cdm,
+        fn_name,
+        cdm_error_value(&err),
+    );
     set_last_error(format!("{fn_name}: {err}"));
     SidereonStatus::InvalidArgument
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine_error::{
+        clear_engine_error, sidereon_last_engine_error_info, sidereon_last_engine_error_payload,
+        SidereonEngineErrorFamily, SidereonEngineErrorInfo,
+    };
+    use crate::SidereonStatus;
+    use serde_json::{json, Value};
+    use std::ptr;
+
+    const CDM_KVN_FIXTURE: &str = include_str!("../tests/fixtures/cdm/ccsds_example2.kvn");
+    const CDM_XML_FIXTURE: &str = include_str!("../tests/fixtures/cdm/ccsds_example2.xml");
+
+    #[test]
+    fn table_driven_cdm_error_mapping() {
+        let cases: Vec<(CdmError, &'static str)> = vec![
+            (CdmError::IncompleteStateVector, "incomplete_state_vector"),
+            (
+                CdmError::InvalidField {
+                    field: "MISS_DISTANCE",
+                    kind: CdmInputErrorKind::NotPositive,
+                },
+                "invalid_field",
+            ),
+            (
+                CdmError::MalformedXml("syntax error".into()),
+                "malformed_xml",
+            ),
+            (
+                CdmError::DuplicateField {
+                    field: "TCA".into(),
+                    first: "2026-01-01T00:00:00".into(),
+                    second: "2026-01-02T00:00:00".into(),
+                },
+                "duplicate_field",
+            ),
+            (
+                CdmError::UnitMismatch {
+                    field: "MISS_DISTANCE".into(),
+                    unit: "km".into(),
+                    expected: Some("m"),
+                },
+                "unit_mismatch",
+            ),
+            (
+                CdmError::UnitMismatch {
+                    field: "COLLISION_PROBABILITY".into(),
+                    unit: "n/a".into(),
+                    expected: None,
+                },
+                "unit_mismatch",
+            ),
+            (
+                CdmError::UnexpectedObjectCount(4),
+                "unexpected_object_count",
+            ),
+            (CdmError::MultipleMessages { count: 3 }, "multiple_messages"),
+            (
+                CdmError::UnknownField("UNKNOWN_TAG".into()),
+                "unknown_field",
+            ),
+            (
+                CdmError::MalformedLine {
+                    line: 15,
+                    text: "NOT_AN_ASSIGNMENT".into(),
+                },
+                "malformed_line",
+            ),
+            (CdmError::UnknownObject("OBJECT3".into()), "unknown_object"),
+            (
+                CdmError::RepeatedObject("OBJECT1".into()),
+                "repeated_object",
+            ),
+            (
+                CdmError::UnwritableText {
+                    field: "COMMENT".into(),
+                    value: "line\nbreak".into(),
+                    issue: TextIssue::LineBreak,
+                },
+                "unwritable_text",
+            ),
+            (
+                CdmError::HardBodyRadiusComment {
+                    comment: "HBR = 5.0".into(),
+                },
+                "hard_body_radius_comment",
+            ),
+        ];
+
+        for (err, expected_kind) in cases {
+            let val = cdm_error_value(&err);
+            assert_eq!(val["kind"], expected_kind);
+            match &err {
+                CdmError::IncompleteStateVector => {
+                    assert_eq!(val["fields"], json!({}));
+                }
+                CdmError::InvalidField { field, kind } => {
+                    assert_eq!(val["fields"]["field"], *field);
+                    assert_eq!(val["fields"]["kind"], cdm_input_error_kind_name(*kind));
+                }
+                CdmError::MalformedXml(msg) => {
+                    assert_eq!(val["fields"]["message"], msg.as_str());
+                }
+                CdmError::DuplicateField {
+                    field,
+                    first,
+                    second,
+                } => {
+                    assert_eq!(val["fields"]["field"], field.as_str());
+                    assert_eq!(val["fields"]["first"], first.as_str());
+                    assert_eq!(val["fields"]["second"], second.as_str());
+                }
+                CdmError::UnitMismatch {
+                    field,
+                    unit,
+                    expected,
+                } => {
+                    assert_eq!(val["fields"]["field"], field.as_str());
+                    assert_eq!(val["fields"]["unit"], unit.as_str());
+                    assert_eq!(val["fields"]["expected"], json!(expected));
+                }
+                CdmError::UnexpectedObjectCount(count) => {
+                    assert_eq!(val["fields"]["count"], *count);
+                }
+                CdmError::MultipleMessages { count } => {
+                    assert_eq!(val["fields"]["count"], *count);
+                }
+                CdmError::UnknownField(f) => {
+                    assert_eq!(val["fields"]["field"], f.as_str());
+                }
+                CdmError::MalformedLine { line, text } => {
+                    assert_eq!(val["fields"]["line"], *line);
+                    assert_eq!(val["fields"]["text"], text.as_str());
+                }
+                CdmError::UnknownObject(obj) => {
+                    assert_eq!(val["fields"]["object"], obj.as_str());
+                }
+                CdmError::RepeatedObject(obj) => {
+                    assert_eq!(val["fields"]["object"], obj.as_str());
+                }
+                CdmError::UnwritableText {
+                    field,
+                    value,
+                    issue,
+                } => {
+                    assert_eq!(val["fields"]["field"], field.as_str());
+                    assert_eq!(val["fields"]["value"], value.as_str());
+                    assert_eq!(val["fields"]["issue"], text_issue_name(*issue));
+                }
+                CdmError::HardBodyRadiusComment { comment } => {
+                    assert_eq!(val["fields"]["comment"], comment.as_str());
+                }
+            }
+        }
+
+        // Exhaustively verify all CdmInputErrorKind variants
+        let input_kinds = [
+            (CdmInputErrorKind::Missing, "missing"),
+            (CdmInputErrorKind::NonFinite, "non_finite"),
+            (CdmInputErrorKind::FloatParse, "float_parse"),
+            (CdmInputErrorKind::IntParse, "int_parse"),
+            (CdmInputErrorKind::NotPositive, "not_positive"),
+            (CdmInputErrorKind::Negative, "negative"),
+            (CdmInputErrorKind::OutOfRange, "out_of_range"),
+            (CdmInputErrorKind::InvalidCivilDate, "invalid_civil_date"),
+            (CdmInputErrorKind::InvalidCivilTime, "invalid_civil_time"),
+        ];
+        for (kind, name) in input_kinds {
+            assert_eq!(cdm_input_error_kind_name(kind), name);
+            let val = cdm_error_value(&CdmError::InvalidField {
+                field: "TEST",
+                kind,
+            });
+            assert_eq!(val["fields"]["kind"], name);
+        }
+
+        // Exhaustively verify all TextIssue variants
+        let text_issues = [
+            (TextIssue::LineBreak, "line_break"),
+            (TextIssue::SurroundingWhitespace, "surrounding_whitespace"),
+            (TextIssue::InteriorWhitespace, "interior_whitespace"),
+            (TextIssue::KeywordSeparator, "keyword_separator"),
+            (TextIssue::XmlIllegalCharacter, "xml_illegal_character"),
+            (TextIssue::Empty, "empty"),
+            (TextIssue::DetachedComment, "detached_comment"),
+            (TextIssue::RepeatedParameter, "repeated_parameter"),
+            (TextIssue::CommentNotCarried, "comment_not_carried"),
+        ];
+        for (issue, name) in text_issues {
+            assert_eq!(text_issue_name(issue), name);
+            let val = cdm_error_value(&CdmError::UnwritableText {
+                field: "PARAM".into(),
+                value: "VAL".into(),
+                issue,
+            });
+            assert_eq!(val["fields"]["issue"], name);
+        }
+    }
+
+    #[test]
+    fn cdm_public_producer_control_and_refusals() {
+        clear_engine_error();
+
+        // Valid control: parse KVN, serialize to KVN, free
+        unsafe {
+            let mut cdm: *mut SidereonCdm = ptr::null_mut();
+            assert_eq!(
+                sidereon_cdm_parse_kvn(CDM_KVN_FIXTURE.as_ptr(), CDM_KVN_FIXTURE.len(), &mut cdm,),
+                SidereonStatus::Ok
+            );
+            assert!(!cdm.is_null());
+
+            let mut info = SidereonEngineErrorInfo {
+                family: SidereonEngineErrorFamily::Cdm,
+                payload_len: 99,
+            };
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+            assert_eq!(info.payload_len, 0);
+
+            // Serialize to KVN
+            let mut written = 0;
+            let mut required = 0;
+            assert_eq!(
+                sidereon_cdm_to_kvn(cdm, ptr::null_mut(), 0, &mut written, &mut required),
+                SidereonStatus::Ok
+            );
+            assert!(required > 0);
+            let mut out_buf = vec![0u8; required];
+            assert_eq!(
+                sidereon_cdm_to_kvn(
+                    cdm,
+                    out_buf.as_mut_ptr(),
+                    out_buf.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, required);
+
+            sidereon_cdm_free(cdm);
+        }
+
+        // Valid control XML: parse XML, serialize to XML, free
+        unsafe {
+            let mut cdm: *mut SidereonCdm = ptr::null_mut();
+            assert_eq!(
+                sidereon_cdm_parse_xml(CDM_XML_FIXTURE.as_ptr(), CDM_XML_FIXTURE.len(), &mut cdm,),
+                SidereonStatus::Ok
+            );
+            assert!(!cdm.is_null());
+
+            let mut written = 0;
+            let mut required = 0;
+            assert_eq!(
+                sidereon_cdm_to_xml(cdm, ptr::null_mut(), 0, &mut written, &mut required),
+                SidereonStatus::Ok
+            );
+            assert!(required > 0);
+
+            sidereon_cdm_free(cdm);
+        }
+
+        // Real public refusal 1: malformed KVN in sidereon_cdm_parse_kvn
+        unsafe {
+            let mut cdm: *mut SidereonCdm = ptr::null_mut();
+            let bad_kvn = b"CCSDS_CDM_VERS = 1.0\nNOT_A_VALID_KVN_LINE\n";
+            assert_eq!(
+                sidereon_cdm_parse_kvn(bad_kvn.as_ptr(), bad_kvn.len(), &mut cdm),
+                SidereonStatus::InvalidArgument
+            );
+            assert!(cdm.is_null());
+
+            let mut info = SidereonEngineErrorInfo {
+                family: SidereonEngineErrorFamily::None,
+                payload_len: 0,
+            };
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::Cdm);
+            assert!(info.payload_len > 0);
+
+            let mut written = 0;
+            let mut required = 0;
+            let mut buf = vec![0u8; info.payload_len];
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    buf.as_mut_ptr(),
+                    buf.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            let payload: Value = serde_json::from_slice(&buf).expect("valid JSON");
+            assert_eq!(payload["schema_version"], 1);
+            assert_eq!(payload["family"], "cdm");
+            assert_eq!(payload["operation"], "sidereon_cdm_parse_kvn");
+            assert_eq!(payload["error"]["kind"], "malformed_line");
+            assert_eq!(payload["error"]["fields"]["line"], 2);
+        }
+
+        // Real public refusal 2: malformed XML in sidereon_cdm_parse_xml
+        unsafe {
+            let mut cdm: *mut SidereonCdm = ptr::null_mut();
+            let bad_xml = b"<cdm><unclosed>";
+            assert_eq!(
+                sidereon_cdm_parse_xml(bad_xml.as_ptr(), bad_xml.len(), &mut cdm),
+                SidereonStatus::InvalidArgument
+            );
+            assert!(cdm.is_null());
+
+            let mut info = SidereonEngineErrorInfo {
+                family: SidereonEngineErrorFamily::None,
+                payload_len: 0,
+            };
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::Cdm);
+            assert!(info.payload_len > 0);
+
+            let mut written = 0;
+            let mut required = 0;
+            let mut buf = vec![0u8; info.payload_len];
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    buf.as_mut_ptr(),
+                    buf.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            let payload: Value = serde_json::from_slice(&buf).expect("valid JSON");
+            assert_eq!(payload["schema_version"], 1);
+            assert_eq!(payload["family"], "cdm");
+            assert_eq!(payload["operation"], "sidereon_cdm_parse_xml");
+            assert_eq!(payload["error"]["kind"], "malformed_xml");
+        }
+    }
+
+    #[test]
+    fn cdm_producer_early_clearing_and_retention() {
+        clear_engine_error();
+
+        unsafe {
+            // Seed engine error via a real refusal
+            let mut cdm: *mut SidereonCdm = ptr::null_mut();
+            let bad_kvn = b"CCSDS_CDM_VERS = 1.0\nNOT_A_VALID_LINE\n";
+            assert_eq!(
+                sidereon_cdm_parse_kvn(bad_kvn.as_ptr(), bad_kvn.len(), &mut cdm),
+                SidereonStatus::InvalidArgument
+            );
+
+            let mut info = SidereonEngineErrorInfo {
+                family: SidereonEngineErrorFamily::None,
+                payload_len: 0,
+            };
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::Cdm);
+            let expected_len = info.payload_len;
+            assert!(expected_len > 0);
+
+            // Free retains the error
+            sidereon_cdm_free(ptr::null_mut());
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::Cdm);
+            assert_eq!(info.payload_len, expected_len);
+
+            // Two-pass payload retrieval: Pass 1 query length
+            let mut written = 999;
+            let mut required = 0;
+            assert_eq!(
+                sidereon_last_engine_error_payload(ptr::null_mut(), 0, &mut written, &mut required),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, 0);
+            assert_eq!(required, expected_len);
+
+            // Short buffer query returns InvalidArgument and retains
+            let mut short_buf = vec![0u8; expected_len - 1];
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    short_buf.as_mut_ptr(),
+                    short_buf.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::InvalidArgument
+            );
+            assert_eq!(written, 0);
+            assert_eq!(required, expected_len);
+
+            // Pass 2: Exact buffer query succeeds
+            let mut buf = vec![0u8; expected_len];
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    buf.as_mut_ptr(),
+                    buf.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, expected_len);
+            assert_eq!(required, expected_len);
+
+            // Record is still retained after read
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::Cdm);
+
+            // Early-validation clearing: null out pointer on sidereon_cdm_parse_kvn
+            assert_eq!(
+                sidereon_cdm_parse_kvn(bad_kvn.as_ptr(), bad_kvn.len(), ptr::null_mut()),
+                SidereonStatus::NullPointer
+            );
+
+            // The producer operation boundary cleared the slot before early checks!
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+            assert_eq!(info.payload_len, 0);
+        }
+    }
 }

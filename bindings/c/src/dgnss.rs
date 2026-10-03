@@ -1,4 +1,8 @@
 use super::*;
+use crate::engine_error::{
+    dgnss_error_value, engine_error_operation_boundary, record_engine_error,
+    SidereonEngineErrorFamily,
+};
 
 // --- DGNSS differential corrections (sidereon_core::dgnss) -------------------
 
@@ -51,7 +55,7 @@ pub unsafe extern "C" fn sidereon_dgnss_pseudorange_corrections(
     t_rx_j2000_s: f64,
     out_corrections: *mut *mut SidereonDgnssCorrections,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_dgnss_pseudorange_corrections",
         SidereonStatus::Panic,
         || {
@@ -125,7 +129,8 @@ pub unsafe extern "C" fn sidereon_dgnss_corrections_count(
 /// whether the table has an entry for it.
 ///
 /// Safety: corrections is a live handle; satellite_id is a null-terminated token;
-/// out_value points to a double; out_present points to a bool.
+/// out_value points to a double; out_present points to a bool. The output
+/// ranges must not overlap.
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_dgnss_correction(
     corrections: *const SidereonDgnssCorrections,
@@ -134,6 +139,27 @@ pub unsafe extern "C" fn sidereon_dgnss_correction(
     out_present: *mut bool,
 ) -> SidereonStatus {
     ffi_boundary("sidereon_dgnss_correction", SidereonStatus::Panic, || {
+        if !out_value.is_null() && !out_present.is_null() {
+            let value_range = c_try!(super::checked_output_range(
+                "sidereon_dgnss_correction",
+                out_value,
+                1,
+                "out_value"
+            ));
+            let present_range = c_try!(super::checked_output_range(
+                "sidereon_dgnss_correction",
+                out_present,
+                1,
+                "out_present"
+            ));
+            c_try!(super::reject_overlapping_outputs(
+                "sidereon_dgnss_correction",
+                value_range,
+                present_range,
+                "out_value",
+                "out_present"
+            ));
+        }
         let out_value = c_try!(require_out(
             out_value,
             "sidereon_dgnss_correction",
@@ -187,7 +213,7 @@ pub unsafe extern "C" fn sidereon_dgnss_apply_corrections(
     corrections: *const SidereonDgnssCorrections,
     out_applied: *mut *mut SidereonDgnssApplied,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_dgnss_apply_corrections",
         SidereonStatus::Panic,
         || {
@@ -246,7 +272,7 @@ pub unsafe extern "C" fn sidereon_dgnss_position_solve(
     inputs: *const SidereonSppInputsV2,
     out_solution: *mut *mut SidereonDgnssSolution,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_dgnss_position_solve",
         SidereonStatus::Panic,
         || {
@@ -325,11 +351,11 @@ pub unsafe extern "C" fn sidereon_dgnss_applied_counts(
                 "sidereon_dgnss_applied_counts",
                 "applied"
             ));
-            if let Some(p) = out_corrected_count.as_mut() {
-                *p = applied.corrected.len();
+            if !out_corrected_count.is_null() {
+                out_corrected_count.write(applied.corrected.len());
             }
-            if let Some(p) = out_dropped_count.as_mut() {
-                *p = applied.dropped.len();
+            if !out_dropped_count.is_null() {
+                out_dropped_count.write(applied.dropped.len());
             }
             SidereonStatus::Ok
         },
@@ -582,9 +608,383 @@ unsafe fn code_observations_from_c(
 }
 
 fn map_dgnss_error(fn_name: &str, err: sidereon_core::dgnss::DgnssError) -> SidereonStatus {
+    record_engine_error(
+        SidereonEngineErrorFamily::Dgnss,
+        fn_name,
+        dgnss_error_value(&err),
+    );
     set_last_error(format!("{fn_name}: {err}"));
     match err {
         sidereon_core::dgnss::DgnssError::InvalidInput { .. } => SidereonStatus::InvalidArgument,
         sidereon_core::dgnss::DgnssError::Spp(_) => SidereonStatus::Solve,
+        sidereon_core::dgnss::DgnssError::Ut1OutsideCoverage(_) => {
+            SidereonStatus::Ut1OutsideCoverage
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine_error::{
+        clear_engine_error, sidereon_last_engine_error_info, sidereon_last_engine_error_payload,
+        SidereonEngineErrorInfo,
+    };
+    use sidereon_core::astro::math::least_squares::SolveError;
+    use sidereon_core::astro::time::DegradeReason;
+    use sidereon_core::dgnss::DgnssError;
+    use sidereon_core::positioning::SppError;
+
+    fn get_last_error_string() -> String {
+        unsafe {
+            let len = sidereon_last_error_message(ptr::null_mut(), 0);
+            if len == 0 {
+                return String::new();
+            }
+            let mut buf = vec![0 as c_char; len + 1];
+            sidereon_last_error_message(buf.as_mut_ptr(), buf.len());
+            CStr::from_ptr(buf.as_ptr()).to_string_lossy().into_owned()
+        }
+    }
+
+    fn get_last_engine_error_two_pass() -> (SidereonEngineErrorInfo, String) {
+        unsafe {
+            let mut info = SidereonEngineErrorInfo {
+                family: SidereonEngineErrorFamily::None,
+                payload_len: 0,
+            };
+            let status = sidereon_last_engine_error_info(&mut info);
+            assert_eq!(status, SidereonStatus::Ok);
+
+            let mut written = 0usize;
+            let mut required = 0usize;
+            let status =
+                sidereon_last_engine_error_payload(ptr::null_mut(), 0, &mut written, &mut required);
+            assert_eq!(status, SidereonStatus::Ok);
+            assert_eq!(written, 0);
+            assert_eq!(required, info.payload_len);
+
+            if required == 0 {
+                return (info, String::new());
+            }
+
+            let mut buf = vec![0u8; required];
+            let status = sidereon_last_engine_error_payload(
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut written,
+                &mut required,
+            );
+            assert_eq!(status, SidereonStatus::Ok);
+            assert_eq!(written, required);
+            let payload = String::from_utf8(buf).expect("valid utf-8 payload");
+            (info, payload)
+        }
+    }
+
+    #[test]
+    fn test_dgnss_map_error_all_variants() {
+        clear_engine_error();
+
+        let cases = [
+            (
+                DgnssError::InvalidInput {
+                    field: "base_position_m",
+                    reason: "non-finite",
+                },
+                SidereonStatus::InvalidArgument,
+                "invalid_input",
+            ),
+            (
+                DgnssError::Spp(SppError::Singular(SolveError::SingularJacobian)),
+                SidereonStatus::Solve,
+                "spp",
+            ),
+            (
+                DgnssError::Ut1OutsideCoverage(DegradeReason::BeforeCoverage),
+                SidereonStatus::Ut1OutsideCoverage,
+                "ut1_outside_coverage",
+            ),
+        ];
+
+        for (err, expected_status, expected_kind) in cases {
+            clear_engine_error();
+            let status = map_dgnss_error("test_dgnss_op", err);
+            assert_eq!(status, expected_status);
+
+            let (info, payload) = get_last_engine_error_two_pass();
+            assert_eq!(info.family, SidereonEngineErrorFamily::Dgnss);
+            let parsed: serde_json::Value =
+                serde_json::from_str(&payload).expect("valid json payload");
+            assert_eq!(parsed["schema_version"], 1);
+            assert_eq!(parsed["family"], "dgnss");
+            assert_eq!(parsed["operation"], "test_dgnss_op");
+            assert_eq!(parsed["error"]["kind"], expected_kind);
+        }
+
+        clear_engine_error();
+    }
+
+    #[test]
+    fn test_dgnss_public_refusal_valid_control_undersize_and_retention() {
+        clear_engine_error();
+
+        let sat = CString::new("G01").expect("valid CString");
+        let obs_valid = [SidereonCodeObservation {
+            sat_id: sat.as_ptr(),
+            pseudorange_m: 20_000_000.0,
+        }];
+        let obs_invalid = [SidereonCodeObservation {
+            sat_id: sat.as_ptr(),
+            pseudorange_m: -100.0,
+        }];
+        let corrections = SidereonDgnssCorrections {
+            inner: BTreeMap::new(),
+        };
+
+        // 1. Create one valid owned result first
+        let mut live_applied: *mut SidereonDgnssApplied = ptr::null_mut();
+        let status = unsafe {
+            sidereon_dgnss_apply_corrections(obs_valid.as_ptr(), 1, &corrections, &mut live_applied)
+        };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert!(!live_applied.is_null());
+
+        // 2. Real public refusal into separate refusal pointer: negative pseudorange
+        let mut out_applied_refusal: *mut SidereonDgnssApplied = ptr::null_mut();
+        let status = unsafe {
+            sidereon_dgnss_apply_corrections(
+                obs_invalid.as_ptr(),
+                1,
+                &corrections,
+                &mut out_applied_refusal,
+            )
+        };
+        assert_eq!(status, SidereonStatus::InvalidArgument);
+        assert!(out_applied_refusal.is_null());
+
+        let msg = get_last_error_string();
+        assert!(msg.contains("rover_observation.pseudorange_m"));
+
+        let (info, payload_str) = get_last_engine_error_two_pass();
+        assert_eq!(info.family, SidereonEngineErrorFamily::Dgnss);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&payload_str).expect("valid json payload");
+        assert_eq!(parsed["schema_version"], 1);
+        assert_eq!(parsed["family"], "dgnss");
+        assert_eq!(parsed["operation"], "sidereon_dgnss_apply_corrections");
+        assert_eq!(parsed["error"]["kind"], "invalid_input");
+        assert_eq!(
+            parsed["error"]["fields"]["field"],
+            "rover_observation.pseudorange_m"
+        );
+        assert_eq!(parsed["error"]["fields"]["reason"], "not positive");
+        assert!(parsed["error"]["fields"].get("kind").is_none());
+
+        // 3. Undersize buffer contract: InvalidArgument, 0 written, full required, no copy
+        let expected_len = info.payload_len;
+        let mut written = 999;
+        let mut required = 0;
+        let status = unsafe {
+            sidereon_last_engine_error_payload(ptr::null_mut(), 0, &mut written, &mut required)
+        };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert_eq!(written, 0);
+        assert_eq!(required, expected_len);
+
+        let mut short_buf = vec![0u8; expected_len - 1];
+        let status = unsafe {
+            sidereon_last_engine_error_payload(
+                short_buf.as_mut_ptr(),
+                short_buf.len(),
+                &mut written,
+                &mut required,
+            )
+        };
+        assert_eq!(status, SidereonStatus::InvalidArgument);
+        assert_eq!(written, 0);
+        assert_eq!(required, expected_len);
+        assert!(short_buf.iter().all(|&b| b == 0));
+
+        let mut full_buf = vec![0u8; expected_len];
+        let status = unsafe {
+            sidereon_last_engine_error_payload(
+                full_buf.as_mut_ptr(),
+                full_buf.len(),
+                &mut written,
+                &mut required,
+            )
+        };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert_eq!(written, expected_len);
+        assert_eq!(required, expected_len);
+        assert_eq!(full_buf, payload_str.as_bytes());
+
+        // 4. Error retained through live getters and live free of valid applied handle
+        let mut corr_count = 999usize;
+        let mut drop_count = 999usize;
+        let status = unsafe {
+            sidereon_dgnss_applied_counts(live_applied, &mut corr_count, &mut drop_count)
+        };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert_eq!(corr_count, 0);
+        assert_eq!(drop_count, 1);
+
+        let (info_retained, payload_retained) = get_last_engine_error_two_pass();
+        assert_eq!(info_retained.family, SidereonEngineErrorFamily::Dgnss);
+        assert_eq!(info_retained.payload_len, expected_len);
+        assert_eq!(payload_retained, payload_str);
+
+        let mut count = 999usize;
+        let status = unsafe { sidereon_dgnss_corrections_count(&corrections, &mut count) };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert_eq!(count, 0);
+
+        let (info_retained_corr, payload_retained_corr) = get_last_engine_error_two_pass();
+        assert_eq!(info_retained_corr.family, SidereonEngineErrorFamily::Dgnss);
+        assert_eq!(payload_retained_corr, payload_str);
+
+        unsafe { sidereon_dgnss_applied_free(live_applied) };
+
+        let (info_retained2, payload_retained2) = get_last_engine_error_two_pass();
+        assert_eq!(info_retained2.family, SidereonEngineErrorFamily::Dgnss);
+        assert_eq!(payload_retained2, payload_str);
+
+        clear_engine_error();
+    }
+
+    #[test]
+    fn test_dgnss_real_refusal_clearing_and_early_arg_reset() {
+        clear_engine_error();
+
+        let sat = CString::new("G01").expect("valid CString");
+        let obs_valid = [SidereonCodeObservation {
+            sat_id: sat.as_ptr(),
+            pseudorange_m: 20_000_000.0,
+        }];
+        let obs_invalid = [SidereonCodeObservation {
+            sat_id: sat.as_ptr(),
+            pseudorange_m: -100.0,
+        }];
+        let corrections = SidereonDgnssCorrections {
+            inner: BTreeMap::new(),
+        };
+
+        let trigger_real_refusal = || {
+            let mut out = ptr::null_mut();
+            let status = unsafe {
+                sidereon_dgnss_apply_corrections(obs_invalid.as_ptr(), 1, &corrections, &mut out)
+            };
+            assert_eq!(status, SidereonStatus::InvalidArgument);
+            assert!(out.is_null());
+            let (info, _) = get_last_engine_error_two_pass();
+            assert_eq!(info.family, SidereonEngineErrorFamily::Dgnss);
+            assert!(info.payload_len > 0);
+        };
+
+        // 1. Early argument check: null observations with count > 0
+        trigger_real_refusal();
+        let mut out_applied: *mut SidereonDgnssApplied = ptr::null_mut();
+        let status = unsafe {
+            sidereon_dgnss_apply_corrections(ptr::null(), 1, &corrections, &mut out_applied)
+        };
+        assert_eq!(status, SidereonStatus::NullPointer);
+        let (info, payload) = get_last_engine_error_two_pass();
+        assert_eq!(info.family, SidereonEngineErrorFamily::None);
+        assert_eq!(info.payload_len, 0);
+        assert!(payload.is_empty());
+
+        // 2. Early argument check: null corrections
+        trigger_real_refusal();
+        let status = unsafe {
+            sidereon_dgnss_apply_corrections(obs_valid.as_ptr(), 1, ptr::null(), &mut out_applied)
+        };
+        assert_eq!(status, SidereonStatus::NullPointer);
+        let (info, payload) = get_last_engine_error_two_pass();
+        assert_eq!(info.family, SidereonEngineErrorFamily::None);
+        assert_eq!(info.payload_len, 0);
+        assert!(payload.is_empty());
+
+        // 3. Early argument check: null out_applied
+        trigger_real_refusal();
+        let status = unsafe {
+            sidereon_dgnss_apply_corrections(obs_valid.as_ptr(), 1, &corrections, ptr::null_mut())
+        };
+        assert_eq!(status, SidereonStatus::NullPointer);
+        let (info, payload) = get_last_engine_error_two_pass();
+        assert_eq!(info.family, SidereonEngineErrorFamily::None);
+        assert_eq!(info.payload_len, 0);
+        assert!(payload.is_empty());
+
+        // 4. Producer boundaries table for all 3 DGNSS producing functions:
+        // Producer 1: sidereon_dgnss_pseudorange_corrections
+        trigger_real_refusal();
+        let status = unsafe {
+            sidereon_dgnss_pseudorange_corrections(
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                0,
+                0.0,
+                ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, SidereonStatus::NullPointer);
+        let (info, payload) = get_last_engine_error_two_pass();
+        assert_eq!(info.family, SidereonEngineErrorFamily::None);
+        assert_eq!(info.payload_len, 0);
+        assert!(payload.is_empty());
+
+        // Producer 2: sidereon_dgnss_apply_corrections
+        trigger_real_refusal();
+        let status = unsafe {
+            sidereon_dgnss_apply_corrections(ptr::null(), 0, ptr::null(), ptr::null_mut())
+        };
+        assert_eq!(status, SidereonStatus::NullPointer);
+        let (info, payload) = get_last_engine_error_two_pass();
+        assert_eq!(info.family, SidereonEngineErrorFamily::None);
+        assert_eq!(info.payload_len, 0);
+        assert!(payload.is_empty());
+
+        // Producer 3: sidereon_dgnss_position_solve
+        trigger_real_refusal();
+        let status = unsafe {
+            sidereon_dgnss_position_solve(
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, SidereonStatus::NullPointer);
+        let (info, payload) = get_last_engine_error_two_pass();
+        assert_eq!(info.family, SidereonEngineErrorFamily::None);
+        assert_eq!(info.payload_len, 0);
+        assert!(payload.is_empty());
+
+        // 5. Success reset after real producing refusal
+        trigger_real_refusal();
+        let mut out_applied_succ: *mut SidereonDgnssApplied = ptr::null_mut();
+        let status = unsafe {
+            sidereon_dgnss_apply_corrections(
+                obs_valid.as_ptr(),
+                1,
+                &corrections,
+                &mut out_applied_succ,
+            )
+        };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert!(!out_applied_succ.is_null());
+        let (info, payload) = get_last_engine_error_two_pass();
+        assert_eq!(info.family, SidereonEngineErrorFamily::None);
+        assert_eq!(info.payload_len, 0);
+        assert!(payload.is_empty());
+
+        unsafe { sidereon_dgnss_applied_free(out_applied_succ) };
+        clear_engine_error();
     }
 }

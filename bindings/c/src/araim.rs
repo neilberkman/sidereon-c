@@ -1,4 +1,9 @@
 use super::*;
+use crate::engine_error::{
+    degrade_reason_name, engine_error_operation_boundary, record_engine_error,
+    SidereonEngineErrorFamily,
+};
+use serde_json::{json, Value};
 
 // --- ARAIM integrity (sidereon_core::araim) ---------------------------------
 
@@ -214,7 +219,7 @@ pub unsafe extern "C" fn sidereon_araim(
     allocation: *const SidereonAraimIntegrityAllocation,
     out_result: *mut *mut SidereonAraimResult,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_araim", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_araim", SidereonStatus::Panic, || {
         let out_result = c_try!(require_out(out_result, "sidereon_araim", "out_result"));
         *out_result = ptr::null_mut();
         let geometry = c_try!(require_ref(geometry, "sidereon_araim", "geometry"));
@@ -448,10 +453,12 @@ pub(crate) unsafe fn araim_geometry_from_c(
             system,
         )?);
     }
+    // The caller supplies the rows directly, so no UT1 was read to form them.
     Ok(AraimGeometry {
         rows: parsed_rows,
         receiver,
         clock_systems,
+        ut1_degraded: None,
     })
 }
 
@@ -507,14 +514,48 @@ pub(crate) unsafe fn araim_ism_from_c(
     Ok(Ism::new(constellations, satellites))
 }
 
-fn map_araim_error(fn_name: &str, err: AraimError) -> SidereonStatus {
+fn araim_node(kind: &str, fields: Value) -> Value {
+    json!({
+        "kind": kind,
+        "fields": fields,
+    })
+}
+
+pub(crate) fn araim_error_value(error: &AraimError) -> Value {
+    use AraimError as E;
+    match error {
+        E::InsufficientGeometry => araim_node("insufficient_geometry", json!({})),
+        E::UnmonitorableFaultMass => araim_node("unmonitorable_fault_mass", json!({})),
+        E::NumericalFailure => araim_node("numerical_failure", json!({})),
+        E::InvalidIsm => araim_node("invalid_ism", json!({})),
+        E::InvalidAllocation => araim_node("invalid_allocation", json!({})),
+        E::Ut1OutsideCoverage(reason) => araim_node(
+            "ut1_outside_coverage",
+            json!({
+                "reason": degrade_reason_name(*reason),
+            }),
+        ),
+    }
+}
+
+pub(crate) fn map_araim_error_retaining(fn_name: &str, err: &AraimError) -> SidereonStatus {
     set_last_error(format!("{fn_name}: {err}"));
     match err {
         AraimError::InvalidIsm | AraimError::InvalidAllocation => SidereonStatus::InvalidArgument,
         AraimError::InsufficientGeometry
         | AraimError::UnmonitorableFaultMass
         | AraimError::NumericalFailure => SidereonStatus::Solve,
+        AraimError::Ut1OutsideCoverage(_) => SidereonStatus::Ut1OutsideCoverage,
     }
+}
+
+fn map_araim_error(fn_name: &str, err: AraimError) -> SidereonStatus {
+    record_engine_error(
+        SidereonEngineErrorFamily::Araim,
+        fn_name,
+        araim_error_value(&err),
+    );
+    map_araim_error_retaining(fn_name, &err)
 }
 
 fn araim_summary_to_c(value: &CoreAraimResult) -> SidereonAraimSummary {
@@ -564,5 +605,392 @@ fn araim_sat_model_from_c(value: SidereonAraimSatelliteIsmModel) -> SatelliteIsm
             value.b_nom_m,
             value.p_sat,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine_error::{
+        clear_engine_error, sidereon_last_engine_error_info, sidereon_last_engine_error_payload,
+        SidereonEngineErrorInfo,
+    };
+    use sidereon_core::astro::time::DegradeReason;
+
+    #[test]
+    fn table_driven_araim_error_mapping() {
+        let cases = [
+            (
+                AraimError::InsufficientGeometry,
+                "insufficient_geometry",
+                json!({}),
+                SidereonStatus::Solve,
+            ),
+            (
+                AraimError::UnmonitorableFaultMass,
+                "unmonitorable_fault_mass",
+                json!({}),
+                SidereonStatus::Solve,
+            ),
+            (
+                AraimError::NumericalFailure,
+                "numerical_failure",
+                json!({}),
+                SidereonStatus::Solve,
+            ),
+            (
+                AraimError::InvalidIsm,
+                "invalid_ism",
+                json!({}),
+                SidereonStatus::InvalidArgument,
+            ),
+            (
+                AraimError::InvalidAllocation,
+                "invalid_allocation",
+                json!({}),
+                SidereonStatus::InvalidArgument,
+            ),
+            (
+                AraimError::Ut1OutsideCoverage(DegradeReason::BeforeCoverage),
+                "ut1_outside_coverage",
+                json!({"reason": "before_coverage"}),
+                SidereonStatus::Ut1OutsideCoverage,
+            ),
+            (
+                AraimError::Ut1OutsideCoverage(DegradeReason::AfterCoverage),
+                "ut1_outside_coverage",
+                json!({"reason": "after_coverage"}),
+                SidereonStatus::Ut1OutsideCoverage,
+            ),
+        ];
+
+        for (err, kind, fields, status) in cases {
+            let v = araim_error_value(&err);
+            assert_eq!(v["kind"], json!(kind));
+            assert_eq!(v["fields"], fields);
+            assert_eq!(map_araim_error_retaining("test", &err), status);
+        }
+    }
+
+    const INV_SQRT_3: f64 = 0.577_350_269_189_625_8;
+
+    #[test]
+    fn araim_producer_real_refusal_valid_control_and_retention() {
+        clear_engine_error();
+
+        let constellation = SidereonAraimConstellationIsm {
+            system: SidereonGnssSystem::Gps as u32,
+            p_const: 0.0,
+            default_sat: SidereonAraimSatelliteIsmModel {
+                sigma_ura_m: 2.0,
+                sigma_ure_m: 1.0,
+                has_effective_sigma_int_m: false,
+                effective_sigma_int_m: 0.0,
+                has_effective_sigma_acc_m: false,
+                effective_sigma_acc_m: 0.0,
+                b_nom_m: 0.25,
+                p_sat: 0.0,
+            },
+        };
+        let ism = SidereonAraimIsm {
+            constellations: &constellation,
+            constellation_count: 1,
+            satellites: ptr::null(),
+            satellite_count: 0,
+        };
+
+        let allocation = SidereonAraimIntegrityAllocation {
+            phmi_total: 1.0e-7,
+            phmi_vert: 9.8e-8,
+            phmi_hor: 2.0e-9,
+            pfa_vert: 3.9e-6,
+            pfa_hor: 9.0e-8,
+            p_threshold_unmonitored: 0.0,
+            p_emt: 1.0e-5,
+            max_fault_order: 0,
+        };
+
+        let clock_systems = [SidereonGnssSystem::Gps as u32];
+        let empty_geometry = SidereonAraimGeometry {
+            rows: ptr::null(),
+            row_count: 0,
+            receiver: SidereonGeodetic {
+                lat_rad: 0.0,
+                lon_rad: 0.0,
+                height_m: 0.0,
+            },
+            clock_systems: clock_systems.as_ptr(),
+            clock_system_count: clock_systems.len(),
+        };
+
+        unsafe {
+            // Real public refusal: empty geometry rows
+            let mut out_handle: *mut SidereonAraimResult = ptr::null_mut();
+            assert_eq!(
+                sidereon_araim(&empty_geometry, &ism, &allocation, &mut out_handle,),
+                SidereonStatus::Solve
+            );
+            assert!(out_handle.is_null());
+
+            let mut info = SidereonEngineErrorInfo {
+                family: SidereonEngineErrorFamily::None,
+                payload_len: 0,
+            };
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::Araim);
+            assert!(info.payload_len > 0);
+            let expected_len = info.payload_len;
+
+            // Two-pass payload retrieval: Pass 1 query with null/0 buffer
+            let mut written = 999;
+            let mut required = 0;
+            assert_eq!(
+                sidereon_last_engine_error_payload(ptr::null_mut(), 0, &mut written, &mut required),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, 0);
+            assert_eq!(required, expected_len);
+
+            // Short buffer query returns InvalidArgument, 0 written, full required, and retains
+            let mut short_buf = vec![0u8; expected_len - 1];
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    short_buf.as_mut_ptr(),
+                    short_buf.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::InvalidArgument
+            );
+            assert_eq!(written, 0);
+            assert_eq!(required, expected_len);
+
+            // Pass 2: Exact buffer query succeeds
+            let mut buf = vec![0u8; expected_len];
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    buf.as_mut_ptr(),
+                    buf.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, expected_len);
+            assert_eq!(required, expected_len);
+
+            let parsed: Value =
+                serde_json::from_slice(&buf).expect("ARAIM error payload must be valid JSON");
+            assert_eq!(parsed["schema_version"], 1);
+            assert_eq!(parsed["family"], "araim");
+            assert_eq!(parsed["operation"], "sidereon_araim");
+            assert_eq!(parsed["error"]["kind"], "insufficient_geometry");
+            assert_eq!(parsed["error"]["fields"], json!({}));
+
+            // Valid control: 4-satellite tetrahedron geometry
+            let rows = [
+                SidereonAraimRow {
+                    sat_id: c"G01".as_ptr(),
+                    line_of_sight: SidereonLineOfSight {
+                        e_x: INV_SQRT_3,
+                        e_y: INV_SQRT_3,
+                        e_z: INV_SQRT_3,
+                    },
+                    system: SidereonGnssSystem::Gps as u32,
+                    elevation_rad: std::f64::consts::FRAC_PI_2,
+                },
+                SidereonAraimRow {
+                    sat_id: c"G02".as_ptr(),
+                    line_of_sight: SidereonLineOfSight {
+                        e_x: INV_SQRT_3,
+                        e_y: -INV_SQRT_3,
+                        e_z: -INV_SQRT_3,
+                    },
+                    system: SidereonGnssSystem::Gps as u32,
+                    elevation_rad: std::f64::consts::FRAC_PI_2,
+                },
+                SidereonAraimRow {
+                    sat_id: c"G03".as_ptr(),
+                    line_of_sight: SidereonLineOfSight {
+                        e_x: -INV_SQRT_3,
+                        e_y: INV_SQRT_3,
+                        e_z: -INV_SQRT_3,
+                    },
+                    system: SidereonGnssSystem::Gps as u32,
+                    elevation_rad: std::f64::consts::FRAC_PI_2,
+                },
+                SidereonAraimRow {
+                    sat_id: c"G04".as_ptr(),
+                    line_of_sight: SidereonLineOfSight {
+                        e_x: -INV_SQRT_3,
+                        e_y: -INV_SQRT_3,
+                        e_z: INV_SQRT_3,
+                    },
+                    system: SidereonGnssSystem::Gps as u32,
+                    elevation_rad: std::f64::consts::FRAC_PI_2,
+                },
+            ];
+            let valid_geometry = SidereonAraimGeometry {
+                rows: rows.as_ptr(),
+                row_count: rows.len(),
+                receiver: SidereonGeodetic {
+                    lat_rad: 0.0,
+                    lon_rad: 0.0,
+                    height_m: 0.0,
+                },
+                clock_systems: clock_systems.as_ptr(),
+                clock_system_count: clock_systems.len(),
+            };
+
+            let mut valid_handle: *mut SidereonAraimResult = ptr::null_mut();
+            assert_eq!(
+                sidereon_araim(&valid_geometry, &ism, &allocation, &mut valid_handle,),
+                SidereonStatus::Ok
+            );
+            assert!(!valid_handle.is_null());
+
+            // Success resets the engine-error slot
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+            assert_eq!(info.payload_len, 0);
+
+            // Re-seed a real public refusal while valid_handle is live
+            let mut failed_handle: *mut SidereonAraimResult = ptr::null_mut();
+            assert_eq!(
+                sidereon_araim(&empty_geometry, &ism, &allocation, &mut failed_handle),
+                SidereonStatus::Solve
+            );
+            assert!(failed_handle.is_null());
+
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::Araim);
+            let reseeded_len = info.payload_len;
+            assert!(reseeded_len > 0);
+
+            // Capture owned payload bytes
+            let mut payload_before = vec![0u8; reseeded_len];
+            let mut written = 0;
+            let mut required = 0;
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    payload_before.as_mut_ptr(),
+                    payload_before.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, reseeded_len);
+
+            // Summary reader retains
+            let mut summary = SidereonAraimSummary {
+                hpl_m: 0.0,
+                vpl_m: 0.0,
+                sigma_acc_h_m: 0.0,
+                sigma_acc_v_m: 0.0,
+                emt_m: 0.0,
+                p_unmonitored: 0.0,
+                available: false,
+                availability: false,
+                fault_mode_count: 0,
+            };
+            assert_eq!(
+                sidereon_araim_result_summary(valid_handle, &mut summary),
+                SidereonStatus::Ok
+            );
+            assert!(summary.available);
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::Araim);
+            assert_eq!(info.payload_len, reseeded_len);
+
+            // Fault modes reader retains
+            let mut mode_written = 0;
+            let mut mode_required = 0;
+            assert_eq!(
+                sidereon_araim_result_fault_modes(
+                    valid_handle,
+                    ptr::null_mut(),
+                    0,
+                    &mut mode_written,
+                    &mut mode_required,
+                ),
+                SidereonStatus::Ok
+            );
+            assert!(mode_required > 0);
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::Araim);
+            assert_eq!(info.payload_len, reseeded_len);
+
+            // Excluded sats reader retains
+            let mut sat_written = 0;
+            let mut sat_required = 0;
+            assert_eq!(
+                sidereon_araim_result_fault_mode_excluded_sats(
+                    valid_handle,
+                    0,
+                    ptr::null_mut(),
+                    0,
+                    &mut sat_written,
+                    &mut sat_required,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::Araim);
+            assert_eq!(info.payload_len, reseeded_len);
+
+            // Verify payload is retained after getters and compare bytes
+            let mut payload_after = vec![0u8; reseeded_len];
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    payload_after.as_mut_ptr(),
+                    payload_after.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, reseeded_len);
+            assert_eq!(payload_before, payload_after);
+
+            // Destructor retains
+            sidereon_araim_result_free(valid_handle);
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::Araim);
+            assert_eq!(info.payload_len, reseeded_len);
+
+            // Early argument reset: passing null out_result clears slot
+            assert_eq!(
+                sidereon_araim(&valid_geometry, &ism, &allocation, ptr::null_mut(),),
+                SidereonStatus::NullPointer
+            );
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+            assert_eq!(info.payload_len, 0);
+        }
     }
 }

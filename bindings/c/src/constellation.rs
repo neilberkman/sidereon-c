@@ -1070,7 +1070,7 @@ pub struct SidereonConstellationDiff {
 /// Resolve a Galileo GSAT number to its PRN. Delegates to
 /// sidereon_core::constellation::galileo_prn_for_gsat.
 ///
-/// Safety: out_present and out_prn must point to writable storage.
+/// Safety: out_present and out_prn must point to disjoint writable storage.
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_constellation_galileo_prn_for_gsat(
     gsat: u16,
@@ -1081,6 +1081,32 @@ pub unsafe extern "C" fn sidereon_constellation_galileo_prn_for_gsat(
         "sidereon_constellation_galileo_prn_for_gsat",
         SidereonStatus::Panic,
         || {
+            if !out_present.is_null() && !out_prn.is_null() {
+                let outputs = [
+                    Some((
+                        c_try!(super::checked_output_range(
+                            "sidereon_constellation_galileo_prn_for_gsat",
+                            out_present,
+                            1,
+                            "out_present"
+                        )),
+                        "out_present",
+                    )),
+                    Some((
+                        c_try!(super::checked_output_range(
+                            "sidereon_constellation_galileo_prn_for_gsat",
+                            out_prn,
+                            1,
+                            "out_prn"
+                        )),
+                        "out_prn",
+                    )),
+                ];
+                c_try!(super::reject_overlapping_optional_outputs(
+                    "sidereon_constellation_galileo_prn_for_gsat",
+                    &outputs
+                ));
+            }
             let out_present = c_try!(require_out(
                 out_present,
                 "sidereon_constellation_galileo_prn_for_gsat",
@@ -1105,7 +1131,7 @@ pub unsafe extern "C" fn sidereon_constellation_galileo_prn_for_gsat(
 /// Resolve a GLONASS vehicle number to its slot. Delegates to
 /// sidereon_core::constellation::glonass_slot_for_number.
 ///
-/// Safety: out_present and out_slot must point to writable storage.
+/// Safety: out_present and out_slot must point to disjoint writable storage.
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_constellation_glonass_slot_for_number(
     number: u16,
@@ -1116,6 +1142,32 @@ pub unsafe extern "C" fn sidereon_constellation_glonass_slot_for_number(
         "sidereon_constellation_glonass_slot_for_number",
         SidereonStatus::Panic,
         || {
+            if !out_present.is_null() && !out_slot.is_null() {
+                let outputs = [
+                    Some((
+                        c_try!(super::checked_output_range(
+                            "sidereon_constellation_glonass_slot_for_number",
+                            out_present,
+                            1,
+                            "out_present"
+                        )),
+                        "out_present",
+                    )),
+                    Some((
+                        c_try!(super::checked_output_range(
+                            "sidereon_constellation_glonass_slot_for_number",
+                            out_slot,
+                            1,
+                            "out_slot"
+                        )),
+                        "out_slot",
+                    )),
+                ];
+                c_try!(super::reject_overlapping_optional_outputs(
+                    "sidereon_constellation_glonass_slot_for_number",
+                    &outputs
+                ));
+            }
             let out_present = c_try!(require_out(
                 out_present,
                 "sidereon_constellation_glonass_slot_for_number",
@@ -1140,7 +1192,7 @@ pub unsafe extern "C" fn sidereon_constellation_glonass_slot_for_number(
 /// Resolve a GLONASS slot to its FDMA frequency channel. Delegates to
 /// sidereon_core::constellation::glonass_fdma_channel.
 ///
-/// Safety: out_present and out_channel must point to writable storage.
+/// Safety: out_present and out_channel must point to disjoint writable storage.
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_constellation_glonass_fdma_channel(
     slot: u16,
@@ -1151,6 +1203,32 @@ pub unsafe extern "C" fn sidereon_constellation_glonass_fdma_channel(
         "sidereon_constellation_glonass_fdma_channel",
         SidereonStatus::Panic,
         || {
+            if !out_present.is_null() && !out_channel.is_null() {
+                let outputs = [
+                    Some((
+                        c_try!(super::checked_output_range(
+                            "sidereon_constellation_glonass_fdma_channel",
+                            out_present,
+                            1,
+                            "out_present"
+                        )),
+                        "out_present",
+                    )),
+                    Some((
+                        c_try!(super::checked_output_range(
+                            "sidereon_constellation_glonass_fdma_channel",
+                            out_channel,
+                            1,
+                            "out_channel"
+                        )),
+                        "out_channel",
+                    )),
+                ];
+                c_try!(super::reject_overlapping_optional_outputs(
+                    "sidereon_constellation_glonass_fdma_channel",
+                    &outputs
+                ));
+            }
             let out_present = c_try!(require_out(
                 out_present,
                 "sidereon_constellation_glonass_fdma_channel",

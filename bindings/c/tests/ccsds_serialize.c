@@ -19,6 +19,7 @@
 #include <string.h>
 
 #include "sidereon.h"
+#include "w6_ccsds_serialize_pins.h"
 
 static int fail(const char *context) {
     size_t needed = sidereon_last_error_message(NULL, 0);
@@ -150,7 +151,8 @@ static int exercise_oem(const char *kvn_path, const char *xml_path) {
     size_t segs_xml = 0;
     if (sidereon_oem_segment_count(from_kvn, &segs_kvn) != SIDEREON_STATUS_OK ||
         sidereon_oem_segment_count(from_xml, &segs_xml) != SIDEREON_STATUS_OK ||
-        segs_kvn == 0 || segs_kvn != segs_xml) {
+        segs_kvn != W6_CCSDS_OEM_KVN_SEGMENTS || segs_xml != W6_CCSDS_OEM_XML_SEGMENTS ||
+        segs_kvn != segs_xml) {
         rc = fail("sidereon_oem_segment_count");
         goto cleanup;
     }
@@ -282,7 +284,11 @@ static int exercise_ionex(const char *path) {
         goto cleanup;
     }
     size_t epochs = 0;
-    if (sidereon_ionex_epoch_count(ionex, &epochs) != SIDEREON_STATUS_OK) {
+    /* The OEM segment counts, IONEX epoch count and RINEX version are
+     * sidereon-core's own reading of the fixtures (tests/valgen,
+     * w6_ccsds_serialize); each round trip must preserve them. */
+    if (sidereon_ionex_epoch_count(ionex, &epochs) != SIDEREON_STATUS_OK ||
+        epochs != W6_CCSDS_IONEX_EPOCHS) {
         rc = fail("sidereon_ionex_epoch_count");
         goto cleanup;
     }
@@ -332,6 +338,12 @@ static int exercise_rinex(const char *path) {
     double version = 0.0;
     if (sidereon_rinex_obs_version(obs, &version) != SIDEREON_STATUS_OK) {
         rc = fail("sidereon_rinex_obs_version");
+        goto cleanup;
+    }
+    uint64_t version_bits = 0;
+    memcpy(&version_bits, &version, sizeof(version_bits));
+    if (version_bits != W6_CCSDS_RINEX_VERSION_BITS) {
+        rc = fail("sidereon_rinex_obs_version value");
         goto cleanup;
     }
 

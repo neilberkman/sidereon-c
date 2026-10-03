@@ -1,4 +1,8 @@
 use super::*;
+use crate::engine_error::{
+    engine_error_operation_boundary, record_engine_error, SidereonEngineErrorFamily,
+};
+use serde_json::{json, Value};
 
 // --- Quality remainder (sidereon_core::quality) ------------------------------
 
@@ -38,13 +42,11 @@ pub unsafe extern "C" fn sidereon_weight_vector(
             "sidereon_weight_vector",
             "out_values"
         ));
-        let out_values = out_values as *mut f64;
         let out_present = c_try!(require_out(
             out_present,
             "sidereon_weight_vector",
             "out_present"
         ));
-        let out_present = out_present as *mut bool;
         c_try!(validate_element_count::<f64>(
             "sidereon_weight_vector",
             "count",
@@ -195,7 +197,7 @@ pub unsafe extern "C" fn sidereon_error_ellipse_2x2(
     confidence: f64,
     out_ellipse: *mut SidereonErrorEllipse2,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_error_ellipse_2x2", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_error_ellipse_2x2", SidereonStatus::Panic, || {
         let out_ellipse = c_try!(require_out(
             out_ellipse,
             "sidereon_error_ellipse_2x2",
@@ -221,6 +223,116 @@ pub unsafe extern "C" fn sidereon_error_ellipse_2x2(
         };
         SidereonStatus::Ok
     })
+}
+
+#[cfg(test)]
+mod dop_error_ellipse_engine_tests {
+    use super::*;
+    use crate::engine_error::{clear_engine_error, snapshot_engine_error_for_test};
+
+    fn seed_dop_failure() {
+        let los = [
+            SidereonLineOfSight {
+                e_x: 1.0,
+                e_y: 0.0,
+                e_z: 0.0,
+            },
+            SidereonLineOfSight {
+                e_x: 0.0,
+                e_y: 1.0,
+                e_z: 0.0,
+            },
+            SidereonLineOfSight {
+                e_x: 0.0,
+                e_y: 0.0,
+                e_z: 1.0,
+            },
+        ];
+        let weights = [1.0; 3];
+        let receiver = SidereonGeodetic {
+            lat_rad: 0.0,
+            lon_rad: 0.0,
+            height_m: 0.0,
+        };
+        let mut result = crate::SidereonDop {
+            gdop: 0.0,
+            pdop: 0.0,
+            hdop: 0.0,
+            vdop: 0.0,
+            tdop: 0.0,
+        };
+        assert_eq!(
+            unsafe {
+                crate::sidereon_dop(
+                    los.as_ptr(),
+                    weights.as_ptr(),
+                    los.len(),
+                    receiver,
+                    &mut result,
+                )
+            },
+            SidereonStatus::Solve
+        );
+        assert!(snapshot_engine_error_for_test().is_some());
+    }
+
+    #[test]
+    fn error_ellipse_records_complete_dop_failure_and_resets() {
+        clear_engine_error();
+        let covariance = [1.0, 2.0, 2.0, 1.0];
+        let mut output = SidereonErrorEllipse2 {
+            confidence: 0.0,
+            chi_square_scale: 0.0,
+            semi_major: 0.0,
+            semi_minor: 0.0,
+            orientation_rad: 0.0,
+        };
+        assert_eq!(
+            unsafe { sidereon_error_ellipse_2x2(covariance.as_ptr(), 0.95, &mut output) },
+            SidereonStatus::InvalidArgument
+        );
+        let (info, payload) = snapshot_engine_error_for_test().expect("ellipse DOP failure");
+        assert_eq!(
+            info.family,
+            crate::engine_error::SidereonEngineErrorFamily::Dop
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&payload).expect("ellipse payload"),
+            serde_json::json!({
+                "schema_version": 1,
+                "family": "dop",
+                "operation": "sidereon_error_ellipse_2x2",
+                "error": {
+                    "kind": "invalid_input",
+                    "fields": {"field": "covariance", "reason": "not positive semidefinite"}
+                }
+            })
+        );
+        let required = unsafe { crate::sidereon_last_error_message(ptr::null_mut(), 0) };
+        let mut message = vec![0 as std::ffi::c_char; required + 1];
+        unsafe { crate::sidereon_last_error_message(message.as_mut_ptr(), message.len()) };
+        assert_eq!(
+            unsafe { std::ffi::CStr::from_ptr(message.as_ptr()) }
+                .to_str()
+                .expect("legacy utf-8"),
+            "sidereon_error_ellipse_2x2: invalid DOP input covariance: not positive semidefinite"
+        );
+
+        seed_dop_failure();
+        let good = [4.0, 0.0, 0.0, 9.0];
+        assert_eq!(
+            unsafe { sidereon_error_ellipse_2x2(good.as_ptr(), 0.95, &mut output) },
+            SidereonStatus::Ok
+        );
+        assert!(snapshot_engine_error_for_test().is_none());
+        seed_dop_failure();
+        assert_eq!(
+            unsafe { sidereon_error_ellipse_2x2(good.as_ptr(), 0.95, ptr::null_mut()) },
+            SidereonStatus::NullPointer
+        );
+        assert!(snapshot_engine_error_for_test().is_none());
+        clear_engine_error();
+    }
 }
 
 // --- Residual-distribution statistics ---------------------------------------
@@ -274,7 +386,7 @@ pub unsafe extern "C" fn sidereon_residual_skewness(
     bias: bool,
     out: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_residual_skewness", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_residual_skewness", SidereonStatus::Panic, || {
         let out = c_try!(require_out(out, "sidereon_residual_skewness", "out"));
         *out = 0.0;
         let x = c_try!(require_slice(x, len, "sidereon_residual_skewness", "x"));
@@ -303,7 +415,7 @@ pub unsafe extern "C" fn sidereon_residual_kurtosis(
     bias: bool,
     out: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_residual_kurtosis", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_residual_kurtosis", SidereonStatus::Panic, || {
         let out = c_try!(require_out(out, "sidereon_residual_kurtosis", "out"));
         *out = 0.0;
         let x = c_try!(require_slice(x, len, "sidereon_residual_kurtosis", "x"));
@@ -332,7 +444,7 @@ pub unsafe extern "C" fn sidereon_residual_moments(
     bias: bool,
     out_moments: *mut SidereonResidualMoments,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_residual_moments", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_residual_moments", SidereonStatus::Panic, || {
         let out_moments = c_try!(require_out(
             out_moments,
             "sidereon_residual_moments",
@@ -372,7 +484,7 @@ pub unsafe extern "C" fn sidereon_residual_jarque_bera(
     len: usize,
     out: *mut SidereonJarqueBera,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_residual_jarque_bera",
         SidereonStatus::Panic,
         || {
@@ -409,7 +521,7 @@ pub unsafe extern "C" fn sidereon_residual_shapiro_wilk(
     len: usize,
     out: *mut SidereonShapiroWilk,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_residual_shapiro_wilk",
         SidereonStatus::Panic,
         || {
@@ -891,7 +1003,7 @@ pub unsafe extern "C" fn sidereon_track_filter_config_from_position(
     acceleration_variance_spectral_density_m2_s3: f64,
     out_config: *mut *mut SidereonTrackFilterConfig,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_track_filter_config_from_position",
         SidereonStatus::Panic,
         || {
@@ -956,7 +1068,7 @@ pub unsafe extern "C" fn sidereon_track_filter_config_from_position_velocity(
     acceleration_variance_spectral_density_m2_s3: f64,
     out_config: *mut *mut SidereonTrackFilterConfig,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_track_filter_config_from_position_velocity",
         SidereonStatus::Panic,
         || {
@@ -1090,7 +1202,7 @@ pub unsafe extern "C" fn sidereon_track_filter_new(
     config: *const SidereonTrackFilterConfig,
     out_filter: *mut *mut SidereonTrackFilter,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_track_filter_new", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_track_filter_new", SidereonStatus::Panic, || {
         let config = c_try!(require_ref(config, "sidereon_track_filter_new", "config"));
         let out_filter = c_try!(require_out(
             out_filter,
@@ -1125,7 +1237,7 @@ pub unsafe extern "C" fn sidereon_track_filter_new_from_position(
     acceleration_variance_spectral_density_m2_s3: f64,
     out_filter: *mut *mut SidereonTrackFilter,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_track_filter_new_from_position",
         SidereonStatus::Panic,
         || {
@@ -1338,7 +1450,7 @@ pub unsafe extern "C" fn sidereon_track_filter_predict(
     dt_s: f64,
     out_prediction: *mut SidereonTrackPrediction,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_track_filter_predict",
         SidereonStatus::Panic,
         || {
@@ -1374,7 +1486,7 @@ pub unsafe extern "C" fn sidereon_track_filter_predict_recorded(
     history: *mut SidereonTrackRtsHistoryBuilder,
     out_prediction: *mut SidereonTrackPrediction,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_track_filter_predict_recorded",
         SidereonStatus::Panic,
         || {
@@ -1425,7 +1537,7 @@ pub unsafe extern "C" fn sidereon_track_filter_position_innovation(
     innovation_covariance_len: usize,
     out_report: *mut SidereonTrackInnovation,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_track_filter_position_innovation",
         SidereonStatus::Panic,
         || {
@@ -1499,7 +1611,7 @@ pub unsafe extern "C" fn sidereon_track_filter_state_innovation(
     innovation_covariance_len: usize,
     out_report: *mut SidereonTrackInnovation,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_track_filter_state_innovation",
         SidereonStatus::Panic,
         || {
@@ -1574,7 +1686,7 @@ pub unsafe extern "C" fn sidereon_track_filter_update_position(
     covariance_len: usize,
     out_update: *mut SidereonTrackUpdate,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_track_filter_update_position",
         SidereonStatus::Panic,
         || {
@@ -1620,7 +1732,7 @@ pub unsafe extern "C" fn sidereon_track_filter_update_state(
     covariance_len: usize,
     out_update: *mut SidereonTrackUpdate,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_track_filter_update_state",
         SidereonStatus::Panic,
         || {
@@ -1681,7 +1793,7 @@ pub unsafe extern "C" fn sidereon_track_filter_update_position_gated(
     confidence: f64,
     out_update: *mut SidereonTrackGatedUpdate,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_track_filter_update_position_gated",
         SidereonStatus::Panic,
         || {
@@ -1731,7 +1843,7 @@ pub unsafe extern "C" fn sidereon_track_filter_update_position_recorded(
     history: *mut SidereonTrackRtsHistoryBuilder,
     out_update: *mut SidereonTrackUpdate,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_track_filter_update_position_recorded",
         SidereonStatus::Panic,
         || {
@@ -1788,7 +1900,7 @@ pub unsafe extern "C" fn sidereon_track_filter_update_position_gated_recorded(
     history: *mut SidereonTrackRtsHistoryBuilder,
     out_update: *mut SidereonTrackGatedUpdate,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_track_filter_update_position_gated_recorded",
         SidereonStatus::Panic,
         || {
@@ -1841,7 +1953,7 @@ pub unsafe extern "C" fn sidereon_track_filter_record_prediction_only(
     filter: *const SidereonTrackFilter,
     history: *mut SidereonTrackRtsHistoryBuilder,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_track_filter_record_prediction_only",
         SidereonStatus::Panic,
         || {
@@ -1899,7 +2011,7 @@ pub unsafe extern "C" fn sidereon_track_rts_history_builder_from_filter(
     filter: *const SidereonTrackFilter,
     out_history: *mut *mut SidereonTrackRtsHistoryBuilder,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_track_rts_history_builder_from_filter",
         SidereonStatus::Panic,
         || {
@@ -1933,7 +2045,7 @@ pub unsafe extern "C" fn sidereon_track_rts_history_builder_finish(
     history: *const SidereonTrackRtsHistoryBuilder,
     out_history: *mut *mut SidereonTrackRtsHistory,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_track_rts_history_builder_finish",
         SidereonStatus::Panic,
         || {
@@ -2181,7 +2293,7 @@ pub unsafe extern "C" fn sidereon_smooth_track_rts(
     history: *const SidereonTrackRtsHistory,
     out_smoothed: *mut *mut SidereonSmoothedTrack,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_smooth_track_rts", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_smooth_track_rts", SidereonStatus::Panic, || {
         let history = c_try!(require_ref(history, "sidereon_smooth_track_rts", "history"));
         let out_smoothed = c_try!(require_out(
             out_smoothed,
@@ -2642,7 +2754,7 @@ pub unsafe extern "C" fn sidereon_nis(
 /// Safety: out must point to a double.
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_chi2_inv(p: f64, k: usize, out: *mut f64) -> SidereonStatus {
-    ffi_boundary("sidereon_chi2_inv", SidereonStatus::Panic, || {
+    quality_operation_boundary("sidereon_chi2_inv", SidereonStatus::Panic, || {
         let out = c_try!(require_out(out, "sidereon_chi2_inv", "out"));
         *out = 0.0;
         match sidereon_core::quality::chi2_inv(p, k) {
@@ -2650,7 +2762,7 @@ pub unsafe extern "C" fn sidereon_chi2_inv(p: f64, k: usize, out: *mut f64) -> S
                 *out = v;
                 SidereonStatus::Ok
             }
-            Err(err) => extra_invalid_arg("sidereon_chi2_inv", err),
+            Err(err) => map_quality_error("sidereon_chi2_inv", err),
         }
     })
 }
@@ -2673,9 +2785,7 @@ pub unsafe extern "C" fn sidereon_sigmas(
 ) -> SidereonStatus {
     ffi_boundary("sidereon_sigmas", SidereonStatus::Panic, || {
         let out_values = c_try!(require_out(out_values, "sidereon_sigmas", "out_values"));
-        let out_values = out_values as *mut f64;
         let out_present = c_try!(require_out(out_present, "sidereon_sigmas", "out_present"));
-        let out_present = out_present as *mut bool;
         c_try!(validate_element_count::<f64>(
             "sidereon_sigmas",
             "count",
@@ -2738,12 +2848,37 @@ unsafe fn write_entry_map_positional(
     }
 }
 
-/// Map a residual-distribution error to a status code. All causes (non-finite
-/// value, too few samples, zero variance/range) are input conditions and report
-/// SIDEREON_STATUS_INVALID_ARGUMENT.
-fn map_normality_error(fn_name: &str, err: NormalityError) -> SidereonStatus {
+fn normality_node(kind: &str, fields: Value) -> Value {
+    json!({"kind": kind, "fields": fields})
+}
+
+pub(crate) fn normality_error_value(error: &NormalityError) -> Value {
+    use NormalityError as E;
+    match error {
+        E::NonFinite => normality_node("non_finite", json!({})),
+        E::InsufficientData { need, got } => {
+            normality_node("insufficient_data", json!({"need": need, "got": got}))
+        }
+        E::ZeroVariance => normality_node("zero_variance", json!({})),
+        E::ZeroRange => normality_node("zero_range", json!({})),
+    }
+}
+
+fn map_normality_error_retaining(fn_name: &str, err: NormalityError) -> SidereonStatus {
     set_last_error(format!("{fn_name}: {err}"));
     SidereonStatus::InvalidArgument
+}
+
+/// Map a residual-distribution error to a status code and record typed engine
+/// detail. All causes (non-finite value, too few samples, zero variance/range)
+/// are input conditions and report SIDEREON_STATUS_INVALID_ARGUMENT.
+fn map_normality_error(fn_name: &str, err: NormalityError) -> SidereonStatus {
+    record_engine_error(
+        SidereonEngineErrorFamily::Normality,
+        fn_name,
+        normality_error_value(&err),
+    );
+    map_normality_error_retaining(fn_name, err)
 }
 
 fn map_primitive_error(fn_name: &str, err: core_estimation::PrimitiveError) -> SidereonStatus {
@@ -3048,7 +3183,843 @@ fn smoothed_track_epoch<'a>(
     })
 }
 
-fn map_track_error(fn_name: &str, err: core_estimation::TrackError) -> SidereonStatus {
+fn track_node(kind: &str, fields: Value) -> Value {
+    json!({"kind": kind, "fields": fields})
+}
+
+pub(crate) fn track_error_value(error: &core_estimation::TrackError) -> Value {
+    use core_estimation::TrackError as E;
+    match error {
+        E::InvalidInput { field, reason } => {
+            track_node("invalid_input", json!({"field": field, "reason": reason}))
+        }
+        E::DimensionMismatch {
+            field,
+            expected,
+            actual,
+        } => track_node(
+            "dimension_mismatch",
+            json!({"field": field, "expected": expected, "actual": actual}),
+        ),
+        E::NonPositiveSemidefinite { field } => {
+            track_node("non_positive_semidefinite", json!({"field": field}))
+        }
+        E::NonPositiveDefinite { field } => {
+            track_node("non_positive_definite", json!({"field": field}))
+        }
+    }
+}
+
+fn map_track_error_retaining(fn_name: &str, err: core_estimation::TrackError) -> SidereonStatus {
     set_last_error(format!("{fn_name}: {err}"));
     SidereonStatus::InvalidArgument
+}
+
+fn map_track_error(fn_name: &str, err: core_estimation::TrackError) -> SidereonStatus {
+    record_engine_error(
+        SidereonEngineErrorFamily::Track,
+        fn_name,
+        track_error_value(&err),
+    );
+    map_track_error_retaining(fn_name, err)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine_error::{
+        clear_engine_error, sidereon_last_engine_error_info, sidereon_last_engine_error_payload,
+        SidereonEngineErrorFamily, SidereonEngineErrorInfo,
+    };
+    use sidereon_core::quality::normality::NormalityError;
+    use std::mem::MaybeUninit;
+    use std::ptr;
+
+    #[test]
+    fn table_driven_normality_error_mapping() {
+        let cases: Vec<(NormalityError, &'static str)> = vec![
+            (NormalityError::NonFinite, "non_finite"),
+            (
+                NormalityError::InsufficientData { need: 5, got: 2 },
+                "insufficient_data",
+            ),
+            (NormalityError::ZeroVariance, "zero_variance"),
+            (NormalityError::ZeroRange, "zero_range"),
+        ];
+
+        for (err, expected_kind) in cases {
+            let val = normality_error_value(&err);
+            assert_eq!(val["kind"], expected_kind);
+            match &err {
+                NormalityError::NonFinite
+                | NormalityError::ZeroVariance
+                | NormalityError::ZeroRange => {
+                    assert_eq!(val["fields"], json!({}));
+                }
+                NormalityError::InsufficientData { need, got } => {
+                    assert_eq!(val["fields"]["need"], *need);
+                    assert_eq!(val["fields"]["got"], *got);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn table_driven_track_error_mapping() {
+        let cases: Vec<(core_estimation::TrackError, &'static str)> = vec![
+            (
+                core_estimation::TrackError::InvalidInput {
+                    field: "initial_velocity_variance_m2_s2",
+                    reason: "must be non-negative",
+                },
+                "invalid_input",
+            ),
+            (
+                core_estimation::TrackError::DimensionMismatch {
+                    field: "initial_position_m",
+                    expected: 3,
+                    actual: 2,
+                },
+                "dimension_mismatch",
+            ),
+            (
+                core_estimation::TrackError::NonPositiveSemidefinite {
+                    field: "position_covariance_m2",
+                },
+                "non_positive_semidefinite",
+            ),
+            (
+                core_estimation::TrackError::NonPositiveDefinite {
+                    field: "covariance_m2",
+                },
+                "non_positive_definite",
+            ),
+        ];
+
+        for (err, expected_kind) in cases {
+            let val = track_error_value(&err);
+            assert_eq!(val["kind"], expected_kind);
+            match &err {
+                core_estimation::TrackError::InvalidInput { field, reason } => {
+                    assert_eq!(val["fields"]["field"], *field);
+                    assert_eq!(val["fields"]["reason"], *reason);
+                }
+                core_estimation::TrackError::DimensionMismatch {
+                    field,
+                    expected,
+                    actual,
+                } => {
+                    assert_eq!(val["fields"]["field"], *field);
+                    assert_eq!(val["fields"]["expected"], *expected);
+                    assert_eq!(val["fields"]["actual"], *actual);
+                }
+                core_estimation::TrackError::NonPositiveSemidefinite { field }
+                | core_estimation::TrackError::NonPositiveDefinite { field } => {
+                    assert_eq!(val["fields"]["field"], *field);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn normality_public_producer_control_and_refusals() {
+        clear_engine_error();
+
+        // 1. Valid producer control: skewness with 5 samples
+        let residuals = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let mut skew = 0.0;
+        unsafe {
+            assert_eq!(
+                sidereon_residual_skewness(residuals.as_ptr(), residuals.len(), false, &mut skew),
+                SidereonStatus::Ok
+            );
+            let mut info = SidereonEngineErrorInfo {
+                family: SidereonEngineErrorFamily::Normality,
+                payload_len: 123,
+            };
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+            assert_eq!(info.payload_len, 0);
+        }
+
+        // 2. Real public refusal: skewness with too few samples (2 < 3 when bias=false)
+        let short_residuals = [1.0, 2.0];
+        unsafe {
+            assert_eq!(
+                sidereon_residual_skewness(
+                    short_residuals.as_ptr(),
+                    short_residuals.len(),
+                    false,
+                    &mut skew
+                ),
+                SidereonStatus::InvalidArgument
+            );
+
+            let mut info = SidereonEngineErrorInfo {
+                family: SidereonEngineErrorFamily::None,
+                payload_len: 0,
+            };
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::Normality);
+            assert!(info.payload_len > 0);
+
+            let mut written = 0;
+            let mut required = 0;
+            let mut buf = vec![0u8; info.payload_len];
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    buf.as_mut_ptr(),
+                    buf.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, info.payload_len);
+            let payload: Value = serde_json::from_slice(&buf).expect("valid JSON payload");
+            assert_eq!(payload["schema_version"], 1);
+            assert_eq!(payload["family"], "normality");
+            assert_eq!(payload["operation"], "sidereon_residual_skewness");
+            assert_eq!(payload["error"]["kind"], "insufficient_data");
+            assert_eq!(payload["error"]["fields"]["need"], 3);
+            assert_eq!(payload["error"]["fields"]["got"], 2);
+        }
+
+        // 3. Real public refusal: Shapiro-Wilk with all equal values (zero range)
+        let equal_residuals = [2.5, 2.5, 2.5, 2.5];
+        let mut sw = MaybeUninit::uninit();
+        unsafe {
+            assert_eq!(
+                sidereon_residual_shapiro_wilk(
+                    equal_residuals.as_ptr(),
+                    equal_residuals.len(),
+                    sw.as_mut_ptr()
+                ),
+                SidereonStatus::InvalidArgument
+            );
+
+            let mut info = SidereonEngineErrorInfo {
+                family: SidereonEngineErrorFamily::None,
+                payload_len: 0,
+            };
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::Normality);
+            assert!(info.payload_len > 0);
+
+            let mut written = 0;
+            let mut required = 0;
+            let mut buf = vec![0u8; info.payload_len];
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    buf.as_mut_ptr(),
+                    buf.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, info.payload_len);
+            let payload: Value = serde_json::from_slice(&buf).expect("valid JSON payload");
+            assert_eq!(payload["schema_version"], 1);
+            assert_eq!(payload["family"], "normality");
+            assert_eq!(payload["operation"], "sidereon_residual_shapiro_wilk");
+            assert_eq!(payload["error"]["kind"], "zero_range");
+            assert_eq!(payload["error"]["fields"], json!({}));
+        }
+    }
+
+    #[test]
+    fn normality_producer_early_clearing_and_retention() {
+        clear_engine_error();
+
+        let equal_residuals = [2.5, 2.5, 2.5, 2.5];
+        let mut sw = MaybeUninit::uninit();
+        unsafe {
+            // Seed retained engine error with actual refusal
+            assert_eq!(
+                sidereon_residual_shapiro_wilk(
+                    equal_residuals.as_ptr(),
+                    equal_residuals.len(),
+                    sw.as_mut_ptr()
+                ),
+                SidereonStatus::InvalidArgument
+            );
+
+            let mut info = SidereonEngineErrorInfo {
+                family: SidereonEngineErrorFamily::None,
+                payload_len: 0,
+            };
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::Normality);
+            let expected_len = info.payload_len;
+            assert!(expected_len > 0);
+
+            // Pass 1: query length retains
+            let mut written = 999;
+            let mut required = 0;
+            assert_eq!(
+                sidereon_last_engine_error_payload(ptr::null_mut(), 0, &mut written, &mut required),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, 0);
+            assert_eq!(required, expected_len);
+
+            // Short buffer query returns InvalidArgument, writes 0, retains
+            let mut short_buf = vec![0u8; expected_len - 1];
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    short_buf.as_mut_ptr(),
+                    short_buf.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::InvalidArgument
+            );
+            assert_eq!(written, 0);
+            assert_eq!(required, expected_len);
+
+            // Pass 2: Exact buffer query succeeds and retains
+            let mut buf = vec![0u8; expected_len];
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    buf.as_mut_ptr(),
+                    buf.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, expected_len);
+            assert_eq!(required, expected_len);
+
+            // Retained after read
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::Normality);
+
+            // Successful producer resets error slot
+            let residuals = [1.0, 2.0, 3.0, 4.0, 5.0];
+            let mut skew = 0.0;
+            assert_eq!(
+                sidereon_residual_skewness(residuals.as_ptr(), residuals.len(), false, &mut skew),
+                SidereonStatus::Ok
+            );
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+            assert_eq!(info.payload_len, 0);
+
+            // Reseed refusal
+            assert_eq!(
+                sidereon_residual_shapiro_wilk(
+                    equal_residuals.as_ptr(),
+                    equal_residuals.len(),
+                    sw.as_mut_ptr()
+                ),
+                SidereonStatus::InvalidArgument
+            );
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::Normality);
+
+            // Producer early null check resets error slot before validation
+            assert_eq!(
+                sidereon_residual_skewness(
+                    residuals.as_ptr(),
+                    residuals.len(),
+                    false,
+                    ptr::null_mut()
+                ),
+                SidereonStatus::NullPointer
+            );
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+            assert_eq!(info.payload_len, 0);
+        }
+    }
+
+    #[test]
+    fn track_public_producer_control_and_refusals() {
+        clear_engine_error();
+
+        let initial_pos = [10.0, 20.0, 30.0];
+        let pos_cov = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+
+        // 1. Valid producer controls: config and filter creation
+        let mut config: *mut SidereonTrackFilterConfig = ptr::null_mut();
+        unsafe {
+            assert_eq!(
+                sidereon_track_filter_config_from_position(
+                    SidereonTrackCoordinateFrame::Ecef as u32,
+                    0.0,
+                    initial_pos.as_ptr(),
+                    3,
+                    pos_cov.as_ptr(),
+                    pos_cov.len(),
+                    1.0,
+                    0.1,
+                    &mut config,
+                ),
+                SidereonStatus::Ok
+            );
+            assert!(!config.is_null());
+
+            let mut info = SidereonEngineErrorInfo {
+                family: SidereonEngineErrorFamily::Track,
+                payload_len: 123,
+            };
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+            assert_eq!(info.payload_len, 0);
+
+            let mut filter: *mut SidereonTrackFilter = ptr::null_mut();
+            assert_eq!(
+                sidereon_track_filter_new(config, &mut filter),
+                SidereonStatus::Ok
+            );
+            assert!(!filter.is_null());
+
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+            assert_eq!(info.payload_len, 0);
+
+            // 2. Real public refusal 1: invalid dt_s (negative) on predict
+            let mut pred = MaybeUninit::uninit();
+            assert_eq!(
+                sidereon_track_filter_predict(filter, -1.0, pred.as_mut_ptr()),
+                SidereonStatus::InvalidArgument
+            );
+
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::Track);
+            assert!(info.payload_len > 0);
+
+            let mut written = 0;
+            let mut required = 0;
+            let mut buf = vec![0u8; info.payload_len];
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    buf.as_mut_ptr(),
+                    buf.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, info.payload_len);
+            let payload: Value = serde_json::from_slice(&buf).expect("valid JSON payload");
+            assert_eq!(payload["schema_version"], 1);
+            assert_eq!(payload["family"], "track");
+            assert_eq!(payload["operation"], "sidereon_track_filter_predict");
+            assert_eq!(payload["error"]["kind"], "invalid_input");
+            assert_eq!(payload["error"]["fields"]["field"], "dt_s");
+            assert_eq!(payload["error"]["fields"]["reason"], "must be positive");
+
+            // 3. Valid zero-observation-covariance control (P=I, R=0 -> P+R=I succeeds)
+            let obs_pos = [11.0, 21.0, 31.0];
+            let zero_cov = [0.0; 9];
+            let mut innov = [0.0; 3];
+            let mut innov_cov = [0.0; 9];
+            let mut report = MaybeUninit::uninit();
+            assert_eq!(
+                sidereon_track_filter_position_innovation(
+                    filter,
+                    obs_pos.as_ptr(),
+                    3,
+                    zero_cov.as_ptr(),
+                    zero_cov.len(),
+                    innov.as_mut_ptr(),
+                    innov.len(),
+                    innov_cov.as_mut_ptr(),
+                    innov_cov.len(),
+                    report.as_mut_ptr(),
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+            assert_eq!(info.payload_len, 0);
+
+            // 4. Real public refusal 2: singular innovation covariance (P=0, R=0 -> P+R=0 fails)
+            let zero_pos_cov = [0.0; 9];
+            let mut zero_config: *mut SidereonTrackFilterConfig = ptr::null_mut();
+            assert_eq!(
+                sidereon_track_filter_config_from_position(
+                    SidereonTrackCoordinateFrame::Ecef as u32,
+                    0.0,
+                    initial_pos.as_ptr(),
+                    3,
+                    zero_pos_cov.as_ptr(),
+                    zero_pos_cov.len(),
+                    1.0,
+                    0.1,
+                    &mut zero_config,
+                ),
+                SidereonStatus::Ok
+            );
+            assert!(!zero_config.is_null());
+
+            let mut zero_filter: *mut SidereonTrackFilter = ptr::null_mut();
+            assert_eq!(
+                sidereon_track_filter_new(zero_config, &mut zero_filter),
+                SidereonStatus::Ok
+            );
+            assert!(!zero_filter.is_null());
+            sidereon_track_filter_config_free(zero_config);
+
+            assert_eq!(
+                sidereon_track_filter_position_innovation(
+                    zero_filter,
+                    obs_pos.as_ptr(),
+                    3,
+                    zero_cov.as_ptr(),
+                    zero_cov.len(),
+                    innov.as_mut_ptr(),
+                    innov.len(),
+                    innov_cov.as_mut_ptr(),
+                    innov_cov.len(),
+                    report.as_mut_ptr(),
+                ),
+                SidereonStatus::InvalidArgument
+            );
+
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::Track);
+            assert!(info.payload_len > 0);
+
+            let mut buf = vec![0u8; info.payload_len];
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    buf.as_mut_ptr(),
+                    buf.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            let payload: Value = serde_json::from_slice(&buf).expect("valid JSON payload");
+            assert_eq!(payload["schema_version"], 1);
+            assert_eq!(payload["family"], "track");
+            assert_eq!(
+                payload["operation"],
+                "sidereon_track_filter_position_innovation"
+            );
+            assert_eq!(payload["error"]["kind"], "non_positive_definite");
+            assert_eq!(payload["error"]["fields"]["field"], "innovation_covariance");
+
+            sidereon_track_filter_free(zero_filter);
+
+            // 5. Real public refusal 3: non-positive-semidefinite covariance on config
+            let bad_cov = [-1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+            let mut bad_config: *mut SidereonTrackFilterConfig = ptr::null_mut();
+            assert_eq!(
+                sidereon_track_filter_config_from_position(
+                    SidereonTrackCoordinateFrame::Ecef as u32,
+                    0.0,
+                    initial_pos.as_ptr(),
+                    3,
+                    bad_cov.as_ptr(),
+                    bad_cov.len(),
+                    1.0,
+                    0.1,
+                    &mut bad_config,
+                ),
+                SidereonStatus::InvalidArgument
+            );
+
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::Track);
+            assert!(info.payload_len > 0);
+
+            let mut buf = vec![0u8; info.payload_len];
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    buf.as_mut_ptr(),
+                    buf.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            let payload: Value = serde_json::from_slice(&buf).expect("valid JSON payload");
+            assert_eq!(payload["schema_version"], 1);
+            assert_eq!(payload["family"], "track");
+            assert_eq!(
+                payload["operation"],
+                "sidereon_track_filter_config_from_position"
+            );
+            assert_eq!(payload["error"]["kind"], "non_positive_semidefinite");
+            assert_eq!(
+                payload["error"]["fields"]["field"],
+                "position_covariance_m2"
+            );
+
+            sidereon_track_filter_free(filter);
+            sidereon_track_filter_config_free(config);
+        }
+    }
+
+    #[test]
+    fn track_producer_early_clearing_and_retention() {
+        clear_engine_error();
+
+        let initial_pos = [10.0, 20.0, 30.0];
+        let pos_cov = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+
+        let mut filter: *mut SidereonTrackFilter = ptr::null_mut();
+        unsafe {
+            assert_eq!(
+                sidereon_track_filter_new_from_position(
+                    SidereonTrackCoordinateFrame::Ecef as u32,
+                    0.0,
+                    initial_pos.as_ptr(),
+                    3,
+                    pos_cov.as_ptr(),
+                    pos_cov.len(),
+                    1.0,
+                    0.1,
+                    &mut filter,
+                ),
+                SidereonStatus::Ok
+            );
+            assert!(!filter.is_null());
+
+            // Seed refusal on filter: predict with negative dt_s
+            let mut pred = MaybeUninit::uninit();
+            assert_eq!(
+                sidereon_track_filter_predict(filter, -1.0, pred.as_mut_ptr()),
+                SidereonStatus::InvalidArgument
+            );
+
+            let mut info = SidereonEngineErrorInfo {
+                family: SidereonEngineErrorFamily::None,
+                payload_len: 0,
+            };
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::Track);
+            let expected_len = info.payload_len;
+            assert!(expected_len > 0);
+
+            // Free retains
+            sidereon_track_filter_config_free(ptr::null_mut());
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::Track);
+            assert_eq!(info.payload_len, expected_len);
+
+            // Live handle readers retain active slot
+            let mut state = MaybeUninit::uninit();
+            assert_eq!(
+                sidereon_track_filter_state(filter, state.as_mut_ptr()),
+                SidereonStatus::Ok
+            );
+
+            let mut pos = [0.0; 3];
+            let mut written = 0;
+            let mut required = 0;
+            assert_eq!(
+                sidereon_track_filter_position_m(
+                    filter,
+                    pos.as_mut_ptr(),
+                    pos.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, 3);
+
+            let mut vel = [0.0; 3];
+            assert_eq!(
+                sidereon_track_filter_velocity_m_s(
+                    filter,
+                    vel.as_mut_ptr(),
+                    vel.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, 3);
+
+            let mut state_vec = [0.0; 6];
+            assert_eq!(
+                sidereon_track_filter_state_vector(
+                    filter,
+                    state_vec.as_mut_ptr(),
+                    state_vec.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, 6);
+
+            let mut cov = [0.0; 36];
+            assert_eq!(
+                sidereon_track_filter_covariance(
+                    filter,
+                    cov.as_mut_ptr(),
+                    cov.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, 36);
+
+            // RTS history builder new & free retain
+            let mut history: *mut SidereonTrackRtsHistoryBuilder = ptr::null_mut();
+            assert_eq!(
+                sidereon_track_rts_history_builder_new(&mut history),
+                SidereonStatus::Ok
+            );
+            assert!(!history.is_null());
+            sidereon_track_rts_history_builder_free(history);
+
+            // Active slot still retained
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::Track);
+            assert_eq!(info.payload_len, expected_len);
+
+            // Pass 1: query length retains
+            let mut written = 999;
+            let mut required = 0;
+            assert_eq!(
+                sidereon_last_engine_error_payload(ptr::null_mut(), 0, &mut written, &mut required),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, 0);
+            assert_eq!(required, expected_len);
+
+            // Short buffer query returns InvalidArgument, writes 0, retains
+            let mut short_buf = vec![0u8; expected_len - 1];
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    short_buf.as_mut_ptr(),
+                    short_buf.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::InvalidArgument
+            );
+            assert_eq!(written, 0);
+            assert_eq!(required, expected_len);
+
+            // Pass 2: Exact buffer query succeeds and retains
+            let mut buf = vec![0u8; expected_len];
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    buf.as_mut_ptr(),
+                    buf.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, expected_len);
+            assert_eq!(required, expected_len);
+
+            // Successful producer resets error slot
+            assert_eq!(
+                sidereon_track_filter_predict(filter, 1.0, pred.as_mut_ptr()),
+                SidereonStatus::Ok
+            );
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+            assert_eq!(info.payload_len, 0);
+
+            // Reseed refusal
+            assert_eq!(
+                sidereon_track_filter_predict(filter, -1.0, pred.as_mut_ptr()),
+                SidereonStatus::InvalidArgument
+            );
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::Track);
+
+            // Live filter free retains active slot
+            sidereon_track_filter_free(filter);
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::Track);
+            assert_eq!(info.payload_len, expected_len);
+
+            // Producer early null check resets error slot before validation
+            assert_eq!(
+                sidereon_track_filter_config_from_position(
+                    SidereonTrackCoordinateFrame::Ecef as u32,
+                    0.0,
+                    initial_pos.as_ptr(),
+                    3,
+                    pos_cov.as_ptr(),
+                    pos_cov.len(),
+                    1.0,
+                    0.1,
+                    ptr::null_mut(),
+                ),
+                SidereonStatus::NullPointer
+            );
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+            assert_eq!(info.payload_len, 0);
+        }
+    }
 }

@@ -103,24 +103,16 @@ pub unsafe extern "C" fn sidereon_solve_velocity(
     options: *const SidereonVelocityOptions,
     out_solution: *mut *mut SidereonVelocitySolution,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_solve_velocity", SidereonStatus::Panic, || {
-        let out_solution = c_try!(require_out(
-            out_solution,
-            "sidereon_solve_velocity",
-            "out_solution"
-        ));
+    const FN_NAME: &str = "sidereon_solve_velocity";
+    engine_error_operation_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let out_solution = c_try!(require_out(out_solution, FN_NAME, "out_solution"));
         *out_solution = ptr::null_mut();
-        let sp3 = c_try!(require_ref(sp3, "sidereon_solve_velocity", "sp3"));
-        let raw = c_try!(require_slice(
-            observations,
-            count,
-            "sidereon_solve_velocity",
-            "observations"
-        ));
+        let sp3 = c_try!(require_ref(sp3, FN_NAME, "sp3"));
+        let raw = c_try!(require_slice(observations, count, FN_NAME, "observations"));
         let receiver = c_try!(require_slice(
             receiver_ecef_m,
             3,
-            "sidereon_solve_velocity",
+            FN_NAME,
             "receiver_ecef_m"
         ));
         let receiver_ecef_m = [receiver[0], receiver[1], receiver[2]];
@@ -128,10 +120,10 @@ pub unsafe extern "C" fn sidereon_solve_velocity(
         let core_options = if options.is_null() {
             VelocitySolveOptions::default()
         } else {
-            let options = c_try!(require_ref(options, "sidereon_solve_velocity", "options"));
+            let options = c_try!(require_ref(options, FN_NAME, "options"));
             let mut opts = VelocitySolveOptions::default();
             opts.observable = c_try!(velocity_observable_from_c(
-                "sidereon_solve_velocity",
+                FN_NAME,
                 "options.observable",
                 options.observable,
             ));
@@ -142,7 +134,7 @@ pub unsafe extern "C" fn sidereon_solve_velocity(
 
         let mut parsed = Vec::with_capacity(raw.len());
         for obs in raw {
-            let satellite_id = c_try!(parse_satellite_token("sidereon_solve_velocity", obs.sat_id));
+            let satellite_id = c_try!(parse_satellite_token(FN_NAME, obs.sat_id));
             parsed.push(VelocityObservation {
                 satellite_id,
                 value: obs.value,
@@ -151,7 +143,7 @@ pub unsafe extern "C" fn sidereon_solve_velocity(
             });
         }
 
-        let inner = c_try!(guard(SidereonStatus::Solve, || {
+        let inner = c_try!(guard(FN_NAME, SidereonStatus::Solve, || {
             sidereon::solve_velocity(
                 &sp3.inner,
                 &parsed,
@@ -481,81 +473,58 @@ pub unsafe extern "C" fn sidereon_solve_velocity_broadcast(
     options: *const SidereonVelocityOptions,
     out_solution: *mut *mut SidereonVelocitySolution,
 ) -> SidereonStatus {
-    ffi_boundary(
-        "sidereon_solve_velocity_broadcast",
-        SidereonStatus::Panic,
-        || {
-            let out_solution = c_try!(require_out(
-                out_solution,
-                "sidereon_solve_velocity_broadcast",
-                "out_solution"
+    const FN_NAME: &str = "sidereon_solve_velocity_broadcast";
+    engine_error_operation_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let out_solution = c_try!(require_out(out_solution, FN_NAME, "out_solution"));
+        *out_solution = ptr::null_mut();
+        let broadcast = c_try!(require_ref(broadcast, FN_NAME, "broadcast"));
+        let raw = c_try!(require_slice(observations, count, FN_NAME, "observations"));
+        let receiver = c_try!(require_slice(
+            receiver_ecef_m,
+            3,
+            FN_NAME,
+            "receiver_ecef_m"
+        ));
+        let receiver_ecef_m = [receiver[0], receiver[1], receiver[2]];
+
+        let core_options = if options.is_null() {
+            VelocitySolveOptions::default()
+        } else {
+            let options = c_try!(require_ref(options, FN_NAME, "options"));
+            let mut opts = VelocitySolveOptions::default();
+            opts.observable = c_try!(velocity_observable_from_c(
+                FN_NAME,
+                "options.observable",
+                options.observable,
             ));
-            *out_solution = ptr::null_mut();
-            let broadcast = c_try!(require_ref(
-                broadcast,
-                "sidereon_solve_velocity_broadcast",
-                "broadcast"
-            ));
-            let raw = c_try!(require_slice(
-                observations,
-                count,
-                "sidereon_solve_velocity_broadcast",
-                "observations"
-            ));
-            let receiver = c_try!(require_slice(
+            opts.light_time = options.light_time;
+            opts.sagnac = options.sagnac;
+            opts
+        };
+
+        let mut parsed = Vec::with_capacity(raw.len());
+        for obs in raw {
+            let satellite_id = c_try!(parse_satellite_token(FN_NAME, obs.sat_id));
+            parsed.push(VelocityObservation {
+                satellite_id,
+                value: obs.value,
+                carrier_hz: obs.carrier_hz,
+                sat_clock_drift_s_s: obs.sat_clock_drift_s_s,
+            });
+        }
+
+        let inner = c_try!(guard(FN_NAME, SidereonStatus::Solve, || {
+            sidereon::solve_velocity(
+                &broadcast.inner,
+                &parsed,
                 receiver_ecef_m,
-                3,
-                "sidereon_solve_velocity_broadcast",
-                "receiver_ecef_m"
-            ));
-            let receiver_ecef_m = [receiver[0], receiver[1], receiver[2]];
-
-            let core_options = if options.is_null() {
-                VelocitySolveOptions::default()
-            } else {
-                let options = c_try!(require_ref(
-                    options,
-                    "sidereon_solve_velocity_broadcast",
-                    "options"
-                ));
-                let mut opts = VelocitySolveOptions::default();
-                opts.observable = c_try!(velocity_observable_from_c(
-                    "sidereon_solve_velocity_broadcast",
-                    "options.observable",
-                    options.observable,
-                ));
-                opts.light_time = options.light_time;
-                opts.sagnac = options.sagnac;
-                opts
-            };
-
-            let mut parsed = Vec::with_capacity(raw.len());
-            for obs in raw {
-                let satellite_id = c_try!(parse_satellite_token(
-                    "sidereon_solve_velocity_broadcast",
-                    obs.sat_id
-                ));
-                parsed.push(VelocityObservation {
-                    satellite_id,
-                    value: obs.value,
-                    carrier_hz: obs.carrier_hz,
-                    sat_clock_drift_s_s: obs.sat_clock_drift_s_s,
-                });
-            }
-
-            let inner = c_try!(guard(SidereonStatus::Solve, || {
-                sidereon::solve_velocity(
-                    &broadcast.inner,
-                    &parsed,
-                    receiver_ecef_m,
-                    t_rx_j2000_s,
-                    core_options,
-                )
-            }));
-            write_boxed_handle(out_solution, SidereonVelocitySolution { inner });
-            SidereonStatus::Ok
-        },
-    )
+                t_rx_j2000_s,
+                core_options,
+            )
+        }));
+        write_boxed_handle(out_solution, SidereonVelocitySolution { inner });
+        SidereonStatus::Ok
+    })
 }
 
 #[cfg(test)]
@@ -599,11 +568,8 @@ mod tests {
         obs.range_rate_m_s - receiver_projection + sidereon_core::constants::C_M_S * DRIFT_TRUE
     }
 
-    fn assert_close(got: f64, want: f64, tol: f64) {
-        assert!(
-            (got - want).abs() <= tol,
-            "got {got:e}, want {want:e}, tol {tol:e}"
-        );
+    fn assert_same_bits(got: f64, want: f64) {
+        assert_eq!(got.to_bits(), want.to_bits(), "got {got:e}, want {want:e}");
     }
 
     #[test]
@@ -630,6 +596,9 @@ mod tests {
             .collect::<Vec<_>>();
         let mut solve_opts = VelocitySolveOptions::default();
         solve_opts.observable = VelocityObservable::Doppler;
+        // The options the C call below passes.
+        solve_opts.light_time = true;
+        solve_opts.sagnac = true;
         let expected = sidereon_core::velocity::solve(
             &sp3,
             &core_observations,
@@ -679,13 +648,13 @@ mod tests {
             unsafe { sidereon_velocity_solution_velocity(solution, velocity.as_mut_ptr(), 3) };
         assert_eq!(status, SidereonStatus::Ok);
         for (got, want) in velocity.iter().zip(expected.velocity_m_s) {
-            assert_close(*got, want, 1.0e-9);
+            assert_same_bits(*got, want);
         }
 
         let mut drift = 0.0;
         let status = unsafe { sidereon_velocity_solution_clock_drift(solution, &mut drift) };
         assert_eq!(status, SidereonStatus::Ok);
-        assert_close(drift, expected.clock_drift_s_s, 1.0e-18);
+        assert_same_bits(drift, expected.clock_drift_s_s);
 
         let mut covariance = [0.0; 16];
         let status = unsafe {
@@ -694,10 +663,253 @@ mod tests {
         assert_eq!(status, SidereonStatus::Ok);
         let expected_covariance = flatten_velocity_covariance(expected.state_covariance);
         for (got, want) in covariance.iter().zip(expected_covariance) {
-            assert_close(*got, want, 1.0e-12);
+            assert_same_bits(*got, want);
         }
 
         unsafe { sidereon_velocity_solution_free(solution) };
+    }
+
+    #[test]
+    fn test_velocity_public_refusal_and_early_null_controls() {
+        use crate::engine_error::{
+            clear_engine_error, sidereon_last_engine_error_info,
+            sidereon_last_engine_error_payload, snapshot_engine_error_for_test,
+            SidereonEngineErrorFamily, SidereonEngineErrorInfo,
+        };
+        use serde_json::Value;
+
+        clear_engine_error();
+        let sp3 = fixture_sp3();
+        let sp3_handle = SidereonSp3 { inner: sp3 };
+        let options = SidereonVelocityOptions {
+            observable: SidereonVelocityObservable::Doppler as u32,
+            light_time: true,
+            sagnac: true,
+        };
+
+        // 1. Refusal: empty observations triggers VelocityError::NoObservations
+        let mut solution = ptr::null_mut();
+        let status = unsafe {
+            sidereon_solve_velocity(
+                &sp3_handle,
+                ptr::null(),
+                0,
+                RECEIVER.as_ptr(),
+                T_RX_J2000_S,
+                &options,
+                &mut solution,
+            )
+        };
+        assert_eq!(status, SidereonStatus::Solve);
+        assert!(solution.is_null());
+
+        let mut info = SidereonEngineErrorInfo {
+            family: SidereonEngineErrorFamily::None,
+            payload_len: 0,
+        };
+        assert_eq!(
+            unsafe { sidereon_last_engine_error_info(&mut info) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(info.family, SidereonEngineErrorFamily::Facade);
+        assert!(info.payload_len > 0);
+
+        let mut buf = vec![0u8; info.payload_len];
+        let mut written = 0;
+        let mut required = 0;
+        assert_eq!(
+            unsafe {
+                sidereon_last_engine_error_payload(
+                    buf.as_mut_ptr(),
+                    buf.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(written, info.payload_len);
+        let payload: Value = serde_json::from_slice(&buf).expect("valid JSON payload");
+        assert_eq!(payload["schema_version"], 1);
+        assert_eq!(payload["family"], "facade");
+        assert_eq!(payload["operation"], "sidereon_solve_velocity");
+        assert_eq!(payload["error"]["kind"], "velocity");
+        assert_eq!(
+            payload["error"]["fields"]["cause"]["kind"],
+            "no_observations"
+        );
+
+        let mut legacy_buf = vec![0 as c_char; 256];
+        let needed = unsafe {
+            crate::sidereon_last_error_message(legacy_buf.as_mut_ptr(), legacy_buf.len())
+        };
+        assert!(needed > 0);
+
+        // 2. Early-null check: null out_solution clears TLS
+        let status = unsafe {
+            sidereon_solve_velocity(
+                &sp3_handle,
+                ptr::null(),
+                0,
+                RECEIVER.as_ptr(),
+                T_RX_J2000_S,
+                &options,
+                ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, SidereonStatus::NullPointer);
+        assert_eq!(
+            unsafe { sidereon_last_engine_error_info(&mut info) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(info.family, SidereonEngineErrorFamily::None);
+        assert_eq!(info.payload_len, 0);
+
+        // Build the same real synthetic Doppler observations used by the
+        // covariance parity test and use a successful public solve to reset a
+        // genuinely populated engine-error slot.
+        let sats = visible_gps(&sp3_handle.inner);
+        assert!(sats.len() >= 4);
+        let core_observations = sats
+            .iter()
+            .copied()
+            .map(|sat| {
+                let range_rate = synth_range_rate(&sp3_handle.inner, sat);
+                VelocityObservation {
+                    satellite_id: sat,
+                    value: sidereon_core::velocity::range_rate_to_doppler(
+                        range_rate,
+                        sidereon_core::constants::F_L1_HZ,
+                    )
+                    .expect("range-rate to Doppler"),
+                    carrier_hz: sidereon_core::constants::F_L1_HZ,
+                    sat_clock_drift_s_s: 0.0,
+                }
+            })
+            .collect::<Vec<_>>();
+        let sat_tokens = core_observations
+            .iter()
+            .map(|obs| CString::new(obs.satellite_id.to_string()).expect("sat token"))
+            .collect::<Vec<_>>();
+        let c_observations = core_observations
+            .iter()
+            .zip(&sat_tokens)
+            .map(|(obs, token)| SidereonVelocityObservation {
+                sat_id: token.as_ptr(),
+                value: obs.value,
+                carrier_hz: obs.carrier_hz,
+                sat_clock_drift_s_s: obs.sat_clock_drift_s_s,
+            })
+            .collect::<Vec<_>>();
+
+        let mut seed_solution = ptr::null_mut();
+        let status = unsafe {
+            sidereon_solve_velocity(
+                &sp3_handle,
+                ptr::null(),
+                0,
+                RECEIVER.as_ptr(),
+                T_RX_J2000_S,
+                &options,
+                &mut seed_solution,
+            )
+        };
+        assert_eq!(status, SidereonStatus::Solve);
+        assert!(seed_solution.is_null());
+        let (success_seed_info, success_seed_payload) =
+            snapshot_engine_error_for_test().expect("real refusal before successful solve");
+        assert_eq!(success_seed_info.family, SidereonEngineErrorFamily::Facade);
+        assert!(!success_seed_payload.is_empty());
+
+        let mut live_solution = ptr::null_mut();
+        let status = unsafe {
+            sidereon_solve_velocity(
+                &sp3_handle,
+                c_observations.as_ptr(),
+                c_observations.len(),
+                RECEIVER.as_ptr(),
+                T_RX_J2000_S,
+                &options,
+                &mut live_solution,
+            )
+        };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert!(!live_solution.is_null());
+        assert!(snapshot_engine_error_for_test().is_none());
+
+        // Record a fresh refusal while retaining the live solution handle.
+        let mut refused_again = ptr::null_mut();
+        let status = unsafe {
+            sidereon_solve_velocity(
+                &sp3_handle,
+                ptr::null(),
+                0,
+                RECEIVER.as_ptr(),
+                T_RX_J2000_S,
+                &options,
+                &mut refused_again,
+            )
+        };
+        assert_eq!(status, SidereonStatus::Solve);
+        assert!(refused_again.is_null());
+        let (base_info, base_payload) =
+            snapshot_engine_error_for_test().expect("Velocity error recorded before getters");
+        assert_eq!(base_info.family, SidereonEngineErrorFamily::Facade);
+        assert!(!base_payload.is_empty());
+
+        let mut velocity = [0.0; 3];
+        assert_eq!(
+            unsafe {
+                sidereon_velocity_solution_velocity(
+                    live_solution,
+                    velocity.as_mut_ptr(),
+                    velocity.len(),
+                )
+            },
+            SidereonStatus::Ok
+        );
+        let (after_velocity_info, after_velocity_payload) =
+            snapshot_engine_error_for_test().expect("retained across velocity getter");
+        assert_eq!(after_velocity_info.family, base_info.family);
+        assert_eq!(after_velocity_info.payload_len, base_info.payload_len);
+        assert_eq!(after_velocity_payload.as_bytes(), base_payload.as_bytes());
+
+        let mut drift = 0.0;
+        assert_eq!(
+            unsafe { sidereon_velocity_solution_clock_drift(live_solution, &mut drift) },
+            SidereonStatus::Ok
+        );
+        let (after_drift_info, after_drift_payload) =
+            snapshot_engine_error_for_test().expect("retained across drift getter");
+        assert_eq!(after_drift_info.family, base_info.family);
+        assert_eq!(after_drift_info.payload_len, base_info.payload_len);
+        assert_eq!(after_drift_payload.as_bytes(), base_payload.as_bytes());
+
+        let mut covariance = [0.0; 16];
+        assert_eq!(
+            unsafe {
+                sidereon_velocity_solution_state_covariance(
+                    live_solution,
+                    covariance.as_mut_ptr(),
+                    covariance.len(),
+                )
+            },
+            SidereonStatus::Ok
+        );
+        let (after_covariance_info, after_covariance_payload) =
+            snapshot_engine_error_for_test().expect("retained across covariance getter");
+        assert_eq!(after_covariance_info.family, base_info.family);
+        assert_eq!(after_covariance_info.payload_len, base_info.payload_len);
+        assert_eq!(after_covariance_payload.as_bytes(), base_payload.as_bytes());
+
+        unsafe { sidereon_velocity_solution_free(live_solution) };
+        let (after_free_info, after_free_payload) =
+            snapshot_engine_error_for_test().expect("retained across live solution free");
+        assert_eq!(after_free_info.family, base_info.family);
+        assert_eq!(after_free_info.payload_len, base_info.payload_len);
+        assert_eq!(after_free_payload.as_bytes(), base_payload.as_bytes());
+
+        clear_engine_error();
     }
 }
 
