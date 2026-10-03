@@ -5099,6 +5099,7 @@ mod tests {
             ContinuityOptionRejection, ContinuityOptionsError, MergeToleranceError,
             MergeToleranceField, Sp3EpochIntervalError, Sp3EpochIntervalRejection,
         };
+        use sidereon_core::rinex::observations::RinexObsWriteError;
         use sidereon_core::rtcm::{RtcmConversionError, RtcmEncodeError};
         use sidereon_core::sbas::SbasEncodeError;
         use sidereon_core::terrain::{DtedHorizontalDatum, DtedTileError};
@@ -5636,6 +5637,54 @@ mod tests {
             v_scen["fields"]["cause"]["fields"]["cause"]["fields"]["cause"]["fields"]["scale"],
             json!("GPST")
         );
+
+        // Display and each public conversion retain the typed cause. The
+        // truncated recognized body traverses both private RTCM conversions:
+        // OutOfInput -> DecodeError -> Error.
+        assert_eq!(
+            E::Parse("bad line".into()).to_string(),
+            "parse error: bad line"
+        );
+
+        let rinex_source = RinexObsWriteError::NotVersionTwo { version: 3.0 };
+        let rinex_message = rinex_source.to_string();
+        let rinex_error: E = rinex_source.into();
+        assert_eq!(rinex_error, E::InvalidInput(rinex_message));
+
+        let rtcm_encode_source = RtcmEncodeError::NegativeZeroWithValue {
+            message_number: 1020,
+            field: "df001".into(),
+            value: 42,
+        };
+        let rtcm_encode_expected = rtcm_encode_source.clone();
+        let rtcm_encode_error: E = rtcm_encode_source.into();
+        assert_eq!(
+            rtcm_encode_error,
+            E::RtcmEncode(Box::new(rtcm_encode_expected))
+        );
+
+        let rtcm_conversion_source = RtcmConversionError::GalileoWeekOverflow;
+        let rtcm_conversion_expected = rtcm_conversion_source.clone();
+        let rtcm_conversion_error: E = rtcm_conversion_source.into();
+        assert_eq!(
+            rtcm_conversion_error,
+            E::RtcmConversion(Box::new(rtcm_conversion_expected))
+        );
+
+        let sbas_source = SbasEncodeError::UnrecognizedPreamble { preamble: 0x42 };
+        let sbas_expected = sbas_source.clone();
+        let sbas_error: E = sbas_source.into();
+        assert_eq!(sbas_error, E::SbasEncode(Box::new(sbas_expected)));
+
+        let truncated = sidereon_core::rtcm::Message::decode(&[0x3e, 0xd0])
+            .expect_err("recognized RTCM 1005 body must be truncated");
+        match truncated {
+            E::Parse(message) => assert!(
+                message.contains("RTCM body truncated"),
+                "unexpected truncated-body message: {message}"
+            ),
+            other => panic!("expected parse error from truncated RTCM body, got {other:?}"),
+        }
     }
 
     #[test]

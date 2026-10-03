@@ -1013,6 +1013,9 @@ static SidereonRtcmMessages *roundtrip(SidereonRtcmMessages *built, const char *
     return decoded;
 }
 
+#define CHECK_EPH_FIELD(actual, expected, field, family)                                      \
+    check((actual).field == (expected).field, family " round-trip field " #field)
+
 /* Each constructed message is compared, after encode and decode, with the
  * fields it was built from. The captured 1046 frame is compared with
  * sidereon-core's decode of it (tests/valgen, bin w3_merged). */
@@ -1082,19 +1085,72 @@ static void test_rtcm_construct(void) {
     memset(&gps, 0, sizeof(gps));
     gps.satellite_id = 8;
     gps.week_number = 123;
-    gps.a_f0 = 12345;
-    gps.t_oe = 7200;
+    gps.sv_accuracy = 9;
+    gps.code_on_l2 = 2;
+    gps.idot = -1234;
+    gps.iode = 45;
+    gps.t_oc = 12345;
+    gps.a_f2 = -12;
+    gps.a_f1 = 12345;
+    gps.a_f0 = -123456;
+    gps.iodc = 789;
+    gps.c_rs = -1234;
+    gps.delta_n = 2345;
+    gps.m0 = -INT64_C(123456789);
+    gps.c_uc = 3456;
+    gps.eccentricity = UINT64_C(305419896);
+    gps.c_us = -4567;
     gps.sqrt_a = UINT64_C(2702336448);
+    gps.t_oe = 23456;
+    gps.c_ic = 5678;
+    gps.omega0 = -INT64_C(234567890);
+    gps.c_is = -6789;
+    gps.i0 = INT64_C(345678901);
+    gps.c_rc = 7890;
+    gps.omega = -INT64_C(456789012);
+    gps.omega_dot = -123456;
+    gps.t_gd = -37;
+    gps.sv_health = 23;
+    gps.l2_p_data_flag = true;
+    gps.fit_interval = true;
     built = NULL;
     check(sidereon_rtcm_build_gps_ephemeris(&gps, &built) == SIDEREON_STATUS_OK,
           "rtcm_build_gps_ephemeris");
     decoded = roundtrip(built, "rtcm gps ephemeris construct round-trip");
     if (decoded) {
         SidereonRtcmGpsEphemeris got;
-        check(sidereon_rtcm_message_gps_ephemeris(decoded, 0, &got) == SIDEREON_STATUS_OK &&
-                  got.satellite_id == gps.satellite_id && got.week_number == gps.week_number &&
-                  got.a_f0 == gps.a_f0 && got.t_oe == gps.t_oe && got.sqrt_a == gps.sqrt_a,
-              "rtcm gps ephemeris construct fields");
+        check(sidereon_rtcm_message_gps_ephemeris(decoded, 0, &got) == SIDEREON_STATUS_OK,
+              "rtcm gps ephemeris accessor");
+        CHECK_EPH_FIELD(got, gps, satellite_id, "rtcm gps ephemeris");
+        CHECK_EPH_FIELD(got, gps, week_number, "rtcm gps ephemeris");
+        CHECK_EPH_FIELD(got, gps, sv_accuracy, "rtcm gps ephemeris");
+        CHECK_EPH_FIELD(got, gps, code_on_l2, "rtcm gps ephemeris");
+        CHECK_EPH_FIELD(got, gps, idot, "rtcm gps ephemeris");
+        CHECK_EPH_FIELD(got, gps, iode, "rtcm gps ephemeris");
+        CHECK_EPH_FIELD(got, gps, t_oc, "rtcm gps ephemeris");
+        CHECK_EPH_FIELD(got, gps, a_f2, "rtcm gps ephemeris");
+        CHECK_EPH_FIELD(got, gps, a_f1, "rtcm gps ephemeris");
+        CHECK_EPH_FIELD(got, gps, a_f0, "rtcm gps ephemeris");
+        CHECK_EPH_FIELD(got, gps, iodc, "rtcm gps ephemeris");
+        CHECK_EPH_FIELD(got, gps, c_rs, "rtcm gps ephemeris");
+        CHECK_EPH_FIELD(got, gps, delta_n, "rtcm gps ephemeris");
+        CHECK_EPH_FIELD(got, gps, m0, "rtcm gps ephemeris");
+        CHECK_EPH_FIELD(got, gps, c_uc, "rtcm gps ephemeris");
+        CHECK_EPH_FIELD(got, gps, eccentricity, "rtcm gps ephemeris");
+        CHECK_EPH_FIELD(got, gps, c_us, "rtcm gps ephemeris");
+        CHECK_EPH_FIELD(got, gps, sqrt_a, "rtcm gps ephemeris");
+        CHECK_EPH_FIELD(got, gps, t_oe, "rtcm gps ephemeris");
+        CHECK_EPH_FIELD(got, gps, c_ic, "rtcm gps ephemeris");
+        CHECK_EPH_FIELD(got, gps, omega0, "rtcm gps ephemeris");
+        CHECK_EPH_FIELD(got, gps, c_is, "rtcm gps ephemeris");
+        CHECK_EPH_FIELD(got, gps, i0, "rtcm gps ephemeris");
+        CHECK_EPH_FIELD(got, gps, c_rc, "rtcm gps ephemeris");
+        CHECK_EPH_FIELD(got, gps, omega, "rtcm gps ephemeris");
+        CHECK_EPH_FIELD(got, gps, omega_dot, "rtcm gps ephemeris");
+        CHECK_EPH_FIELD(got, gps, t_gd, "rtcm gps ephemeris");
+        CHECK_EPH_FIELD(got, gps, sv_health, "rtcm gps ephemeris");
+        CHECK_EPH_FIELD(got, gps, l2_p_data_flag, "rtcm gps ephemeris");
+        CHECK_EPH_FIELD(got, gps, fit_interval, "rtcm gps ephemeris");
         sidereon_rtcm_messages_free(decoded);
     }
 
@@ -1103,20 +1159,195 @@ static void test_rtcm_construct(void) {
     memset(&glo, 0, sizeof(glo));
     glo.satellite_id = 5;
     glo.frequency_channel = 8;
+    glo.almanac_health = true;
+    glo.almanac_health_availability = true;
+    glo.p1 = 3;
+    glo.t_k = 1234;
+    glo.b_n_msb = true;
+    glo.p2 = true;
+    glo.t_b = 63;
+    glo.xn_dot = 0;
+    glo.xn = 0;
+    glo.xn_dot_dot = 0;
+    glo.yn_dot = 0;
+    glo.yn = 0;
+    glo.yn_dot_dot = 0;
+    glo.zn_dot = 0;
+    glo.zn = 0;
+    glo.zn_dot_dot = 0;
+    glo.p3 = true;
+    glo.gamma_n = 0;
+    glo.m_p = 2;
+    glo.m_l_n_third = true;
+    glo.tau_n = 0;
+    glo.delta_tau_n = 0;
+    glo.e_n = 17;
+    glo.m_p4 = true;
+    glo.m_f_t = 9;
     glo.m_n_t = 700;
-    glo.t_b = 30;
+    glo.m_m = 3;
+    glo.additional_data_available = true;
+    glo.n_a = 1000;
+    glo.tau_c = 0;
+    glo.m_n4 = 21;
+    glo.m_tau_gps = 0;
+    glo.m_l_n_fifth = true;
+    glo.reserved = 85;
+    /* All fourteen sign-magnitude values are transmitted as negative zero,
+     * exercising every GlonassEphemeris NEGATIVE_ZERO_* bit. */
+    glo.negative_zero = UINT16_C(0x3fff);
     built = NULL;
     check(sidereon_rtcm_build_glonass_ephemeris(&glo, &built) == SIDEREON_STATUS_OK,
           "rtcm_build_glonass_ephemeris");
     decoded = roundtrip(built, "rtcm glonass ephemeris construct round-trip");
     if (decoded) {
         SidereonRtcmGlonassEphemeris got;
-        check(sidereon_rtcm_message_glonass_ephemeris(decoded, 0, &got) == SIDEREON_STATUS_OK &&
-                  got.satellite_id == glo.satellite_id &&
-                  got.frequency_channel == glo.frequency_channel && got.m_n_t == glo.m_n_t &&
-                  got.t_b == glo.t_b,
-              "rtcm glonass ephemeris construct fields");
+        check(sidereon_rtcm_message_glonass_ephemeris(decoded, 0, &got) ==
+                  SIDEREON_STATUS_OK,
+              "rtcm glonass ephemeris accessor");
+        CHECK_EPH_FIELD(got, glo, satellite_id, "rtcm glonass ephemeris");
+        CHECK_EPH_FIELD(got, glo, frequency_channel, "rtcm glonass ephemeris");
+        CHECK_EPH_FIELD(got, glo, almanac_health, "rtcm glonass ephemeris");
+        CHECK_EPH_FIELD(got, glo, almanac_health_availability, "rtcm glonass ephemeris");
+        CHECK_EPH_FIELD(got, glo, p1, "rtcm glonass ephemeris");
+        CHECK_EPH_FIELD(got, glo, t_k, "rtcm glonass ephemeris");
+        CHECK_EPH_FIELD(got, glo, b_n_msb, "rtcm glonass ephemeris");
+        CHECK_EPH_FIELD(got, glo, p2, "rtcm glonass ephemeris");
+        CHECK_EPH_FIELD(got, glo, t_b, "rtcm glonass ephemeris");
+        CHECK_EPH_FIELD(got, glo, xn_dot, "rtcm glonass ephemeris");
+        CHECK_EPH_FIELD(got, glo, xn, "rtcm glonass ephemeris");
+        CHECK_EPH_FIELD(got, glo, xn_dot_dot, "rtcm glonass ephemeris");
+        CHECK_EPH_FIELD(got, glo, yn_dot, "rtcm glonass ephemeris");
+        CHECK_EPH_FIELD(got, glo, yn, "rtcm glonass ephemeris");
+        CHECK_EPH_FIELD(got, glo, yn_dot_dot, "rtcm glonass ephemeris");
+        CHECK_EPH_FIELD(got, glo, zn_dot, "rtcm glonass ephemeris");
+        CHECK_EPH_FIELD(got, glo, zn, "rtcm glonass ephemeris");
+        CHECK_EPH_FIELD(got, glo, zn_dot_dot, "rtcm glonass ephemeris");
+        CHECK_EPH_FIELD(got, glo, p3, "rtcm glonass ephemeris");
+        CHECK_EPH_FIELD(got, glo, gamma_n, "rtcm glonass ephemeris");
+        CHECK_EPH_FIELD(got, glo, m_p, "rtcm glonass ephemeris");
+        CHECK_EPH_FIELD(got, glo, m_l_n_third, "rtcm glonass ephemeris");
+        CHECK_EPH_FIELD(got, glo, tau_n, "rtcm glonass ephemeris");
+        CHECK_EPH_FIELD(got, glo, delta_tau_n, "rtcm glonass ephemeris");
+        CHECK_EPH_FIELD(got, glo, e_n, "rtcm glonass ephemeris");
+        CHECK_EPH_FIELD(got, glo, m_p4, "rtcm glonass ephemeris");
+        CHECK_EPH_FIELD(got, glo, m_f_t, "rtcm glonass ephemeris");
+        CHECK_EPH_FIELD(got, glo, m_n_t, "rtcm glonass ephemeris");
+        CHECK_EPH_FIELD(got, glo, m_m, "rtcm glonass ephemeris");
+        CHECK_EPH_FIELD(got, glo, additional_data_available, "rtcm glonass ephemeris");
+        CHECK_EPH_FIELD(got, glo, n_a, "rtcm glonass ephemeris");
+        CHECK_EPH_FIELD(got, glo, tau_c, "rtcm glonass ephemeris");
+        CHECK_EPH_FIELD(got, glo, m_n4, "rtcm glonass ephemeris");
+        CHECK_EPH_FIELD(got, glo, m_tau_gps, "rtcm glonass ephemeris");
+        CHECK_EPH_FIELD(got, glo, m_l_n_fifth, "rtcm glonass ephemeris");
+        CHECK_EPH_FIELD(got, glo, reserved, "rtcm glonass ephemeris");
+        CHECK_EPH_FIELD(got, glo, negative_zero, "rtcm glonass ephemeris");
         sidereon_rtcm_messages_free(decoded);
+    }
+
+    /* Retain a nonempty 1020 tail through lenient frame decode and prove that
+       the policy encoder reproduces the exact body and typed departure. */
+    SidereonRtcmMessages *glo_policy_source = NULL;
+    check(sidereon_rtcm_build_glonass_ephemeris(&glo, &glo_policy_source) ==
+                  SIDEREON_STATUS_OK &&
+              glo_policy_source != NULL,
+          "rtcm glonass policy source");
+    const bool glo_trailing_bits[8] = {true, false, true, false, true, false, true, false};
+    SidereonRtcmMessages *glo_tailed = NULL;
+    if (glo_policy_source) {
+        check(sidereon_rtcm_message_with_trailing_bits(
+                  glo_policy_source, 0, glo_trailing_bits, 8, &glo_tailed) ==
+                      SIDEREON_STATUS_OK &&
+                  glo_tailed != NULL,
+              "rtcm glonass trailing-bit clone");
+        sidereon_rtcm_messages_free(glo_policy_source);
+    }
+    if (glo_tailed) {
+        uint8_t glo_body[256];
+        size_t glo_body_written = 0, glo_body_required = 0;
+        SidereonRtcmDeparture glo_body_departures[1];
+        size_t glo_body_departures_written = 0, glo_body_departures_required = 0;
+        memset(glo_body_departures, 0, sizeof(glo_body_departures));
+        int glo_body_ok =
+            sidereon_rtcm_message_encode_with_policy(
+                glo_tailed, 0, SIDEREON_RTCM_POLICY_LENIENT, glo_body, sizeof(glo_body),
+                &glo_body_written, &glo_body_required, glo_body_departures, 1,
+                &glo_body_departures_written, &glo_body_departures_required) ==
+                SIDEREON_STATUS_OK &&
+            glo_body_written == glo_body_required && glo_body_required > 0 &&
+            glo_body_departures_written == 1 && glo_body_departures_required == 1 &&
+            glo_body_departures[0].kind == 1 &&
+            glo_body_departures[0].message_number == 1020 &&
+            glo_body_departures[0].bit_count == 8;
+        check(glo_body_ok, "rtcm glonass lenient body and departure");
+
+        uint8_t glo_frame[320];
+        size_t glo_frame_written = 0, glo_frame_required = 0;
+        SidereonRtcmDeparture glo_frame_departures[1];
+        size_t glo_frame_departures_written = 0, glo_frame_departures_required = 0;
+        memset(glo_frame_departures, 0, sizeof(glo_frame_departures));
+        int glo_frame_ok =
+            sidereon_rtcm_message_to_frame_with_policy(
+                glo_tailed, 0, SIDEREON_RTCM_POLICY_LENIENT, glo_frame, sizeof(glo_frame),
+                &glo_frame_written, &glo_frame_required, glo_frame_departures, 1,
+                &glo_frame_departures_written, &glo_frame_departures_required) ==
+                SIDEREON_STATUS_OK &&
+            glo_frame_written == glo_frame_required && glo_frame_required > glo_body_required &&
+            glo_frame_departures_written == 1 && glo_frame_departures_required == 1 &&
+            glo_frame_departures[0].kind == 1 &&
+            glo_frame_departures[0].message_number == 1020 &&
+            glo_frame_departures[0].bit_count == 8;
+        check(glo_frame_ok, "rtcm glonass lenient frame and departure");
+
+        if (glo_body_ok && glo_frame_ok) {
+            SidereonRtcmMessages *glo_retained = NULL;
+            SidereonRtcmStreamDiagnostics *glo_diagnostics = NULL;
+            check(sidereon_rtcm_decode_stream_with_policy(
+                      glo_frame, glo_frame_written, SIDEREON_RTCM_POLICY_LENIENT,
+                      &glo_retained, &glo_diagnostics) == SIDEREON_STATUS_OK &&
+                      glo_retained != NULL && glo_diagnostics != NULL,
+                  "rtcm glonass lenient stream decode");
+            if (glo_retained && glo_diagnostics) {
+                size_t departure_count = 0;
+                check(sidereon_rtcm_stream_diagnostics_departure_count(
+                          glo_diagnostics, &departure_count) == SIDEREON_STATUS_OK &&
+                          departure_count == 1,
+                      "rtcm glonass stream departure count");
+
+                bool returned_bits[8] = {false};
+                size_t bits_written = 0, bits_required = 0;
+                check(sidereon_rtcm_message_trailing_bits(
+                          glo_retained, 0, returned_bits, 8, &bits_written, &bits_required) ==
+                              SIDEREON_STATUS_OK &&
+                          bits_written == 8 && bits_required == 8 &&
+                          memcmp(returned_bits, glo_trailing_bits, sizeof(returned_bits)) == 0,
+                      "rtcm glonass retained trailing bits");
+
+                uint8_t glo_roundtrip_body[256];
+                size_t roundtrip_written = 0, roundtrip_required = 0;
+                SidereonRtcmDeparture roundtrip_departures[1];
+                size_t roundtrip_departures_written = 0, roundtrip_departures_required = 0;
+                memset(roundtrip_departures, 0, sizeof(roundtrip_departures));
+                check(sidereon_rtcm_message_encode_with_policy(
+                          glo_retained, 0, SIDEREON_RTCM_POLICY_LENIENT,
+                          glo_roundtrip_body, sizeof(glo_roundtrip_body), &roundtrip_written,
+                          &roundtrip_required, roundtrip_departures, 1,
+                          &roundtrip_departures_written, &roundtrip_departures_required) ==
+                              SIDEREON_STATUS_OK &&
+                          roundtrip_written == glo_body_written &&
+                          roundtrip_required == glo_body_required &&
+                          memcmp(glo_roundtrip_body, glo_body, glo_body_written) == 0 &&
+                          roundtrip_departures_written == 1 &&
+                          roundtrip_departures_required == 1 &&
+                          roundtrip_departures[0].kind == 1 &&
+                          roundtrip_departures[0].message_number == 1020 &&
+                          roundtrip_departures[0].bit_count == 8,
+                      "rtcm glonass lenient exact body round-trip");
+            }
+            sidereon_rtcm_messages_free(glo_retained);
+            sidereon_rtcm_stream_diagnostics_free(glo_diagnostics);
+        }
+        sidereon_rtcm_messages_free(glo_tailed);
     }
 
     /* 1042 BeiDou ephemeris. */
@@ -1124,23 +1355,69 @@ static void test_rtcm_construct(void) {
     memset(&bds, 0, sizeof(bds));
     bds.satellite_id = 19;
     bds.week_number = 902;
+    bds.sv_urai = 11;
+    bds.idot = -1234;
     bds.aode = 17;
     bds.t_oc = 12000;
+    bds.a_f2 = -321;
     bds.a_f1 = 12345;
     bds.a_f0 = -45678;
+    bds.aodc = 23;
+    bds.c_rs = -23456;
+    bds.delta_n = 23456;
+    bds.m0 = -INT64_C(123456789);
+    bds.c_uc = 4567;
+    bds.eccentricity = UINT64_C(305419896);
+    bds.c_us = -5678;
     bds.sqrt_a = UINT64_C(2852448983);
     bds.t_oe = 12000;
+    bds.c_ic = 6789;
+    bds.omega0 = -INT64_C(234567890);
+    bds.c_is = -7890;
+    bds.i0 = INT64_C(345678901);
+    bds.c_rc = 8901;
+    bds.omega = -INT64_C(456789012);
+    bds.omega_dot = -123456;
+    bds.t_gd1 = -321;
+    bds.t_gd2 = 432;
+    bds.sv_health = true;
     built = NULL;
     check(sidereon_rtcm_build_beidou_ephemeris(&bds, &built) == SIDEREON_STATUS_OK,
           "rtcm_build_beidou_ephemeris");
     decoded = roundtrip(built, "rtcm beidou ephemeris construct round-trip");
     if (decoded) {
         SidereonRtcmBeidouEphemeris got;
-        check(sidereon_rtcm_message_beidou_ephemeris(decoded, 0, &got) == SIDEREON_STATUS_OK &&
-                  got.satellite_id == bds.satellite_id && got.week_number == bds.week_number &&
-                  got.aode == bds.aode && got.t_oc == bds.t_oc && got.a_f1 == bds.a_f1 &&
-                  got.a_f0 == bds.a_f0 && got.sqrt_a == bds.sqrt_a && got.t_oe == bds.t_oe,
-              "rtcm beidou ephemeris construct fields");
+        check(sidereon_rtcm_message_beidou_ephemeris(decoded, 0, &got) ==
+                  SIDEREON_STATUS_OK,
+              "rtcm beidou ephemeris accessor");
+        CHECK_EPH_FIELD(got, bds, satellite_id, "rtcm beidou ephemeris");
+        CHECK_EPH_FIELD(got, bds, week_number, "rtcm beidou ephemeris");
+        CHECK_EPH_FIELD(got, bds, sv_urai, "rtcm beidou ephemeris");
+        CHECK_EPH_FIELD(got, bds, idot, "rtcm beidou ephemeris");
+        CHECK_EPH_FIELD(got, bds, aode, "rtcm beidou ephemeris");
+        CHECK_EPH_FIELD(got, bds, t_oc, "rtcm beidou ephemeris");
+        CHECK_EPH_FIELD(got, bds, a_f2, "rtcm beidou ephemeris");
+        CHECK_EPH_FIELD(got, bds, a_f1, "rtcm beidou ephemeris");
+        CHECK_EPH_FIELD(got, bds, a_f0, "rtcm beidou ephemeris");
+        CHECK_EPH_FIELD(got, bds, aodc, "rtcm beidou ephemeris");
+        CHECK_EPH_FIELD(got, bds, c_rs, "rtcm beidou ephemeris");
+        CHECK_EPH_FIELD(got, bds, delta_n, "rtcm beidou ephemeris");
+        CHECK_EPH_FIELD(got, bds, m0, "rtcm beidou ephemeris");
+        CHECK_EPH_FIELD(got, bds, c_uc, "rtcm beidou ephemeris");
+        CHECK_EPH_FIELD(got, bds, eccentricity, "rtcm beidou ephemeris");
+        CHECK_EPH_FIELD(got, bds, c_us, "rtcm beidou ephemeris");
+        CHECK_EPH_FIELD(got, bds, sqrt_a, "rtcm beidou ephemeris");
+        CHECK_EPH_FIELD(got, bds, t_oe, "rtcm beidou ephemeris");
+        CHECK_EPH_FIELD(got, bds, c_ic, "rtcm beidou ephemeris");
+        CHECK_EPH_FIELD(got, bds, omega0, "rtcm beidou ephemeris");
+        CHECK_EPH_FIELD(got, bds, c_is, "rtcm beidou ephemeris");
+        CHECK_EPH_FIELD(got, bds, i0, "rtcm beidou ephemeris");
+        CHECK_EPH_FIELD(got, bds, c_rc, "rtcm beidou ephemeris");
+        CHECK_EPH_FIELD(got, bds, omega, "rtcm beidou ephemeris");
+        CHECK_EPH_FIELD(got, bds, omega_dot, "rtcm beidou ephemeris");
+        CHECK_EPH_FIELD(got, bds, t_gd1, "rtcm beidou ephemeris");
+        CHECK_EPH_FIELD(got, bds, t_gd2, "rtcm beidou ephemeris");
+        CHECK_EPH_FIELD(got, bds, sv_health, "rtcm beidou ephemeris");
         sidereon_rtcm_messages_free(decoded);
     }
 
@@ -1148,25 +1425,72 @@ static void test_rtcm_construct(void) {
     SidereonRtcmQzssEphemeris qzs;
     memset(&qzs, 0, sizeof(qzs));
     qzs.satellite_id = 3;
-    qzs.week_number = 123;
-    qzs.iode = 11;
     qzs.t_oc = 7200;
-    qzs.a_f0 = 23456;
+    qzs.a_f2 = -12;
+    qzs.a_f1 = 12345;
+    qzs.a_f0 = -45678;
+    qzs.iode = 11;
+    qzs.c_rs = -1234;
+    qzs.delta_n = 2345;
+    qzs.m0 = -INT64_C(123456789);
+    qzs.c_uc = 3456;
+    qzs.eccentricity = UINT64_C(305419896);
+    qzs.c_us = -4567;
     qzs.sqrt_a = UINT64_C(2702336448);
     qzs.t_oe = 3600;
+    qzs.c_ic = 5678;
+    qzs.omega0 = -INT64_C(234567890);
+    qzs.c_is = -6789;
+    qzs.i0 = INT64_C(345678901);
+    qzs.c_rc = 7890;
+    qzs.omega = -INT64_C(456789012);
+    qzs.omega_dot = -123456;
+    qzs.idot = -1234;
     qzs.codes_on_l2 = 1;
+    qzs.week_number = 123;
+    qzs.ura = 9;
+    qzs.sv_health = 23;
+    qzs.t_gd = -37;
+    qzs.iodc = 789;
+    qzs.fit_interval = true;
     built = NULL;
     check(sidereon_rtcm_build_qzss_ephemeris(&qzs, &built) == SIDEREON_STATUS_OK,
           "rtcm_build_qzss_ephemeris");
     decoded = roundtrip(built, "rtcm qzss ephemeris construct round-trip");
     if (decoded) {
         SidereonRtcmQzssEphemeris got;
-        check(sidereon_rtcm_message_qzss_ephemeris(decoded, 0, &got) == SIDEREON_STATUS_OK &&
-                  got.satellite_id == qzs.satellite_id && got.week_number == qzs.week_number &&
-                  got.iode == qzs.iode && got.t_oc == qzs.t_oc && got.a_f0 == qzs.a_f0 &&
-                  got.codes_on_l2 == qzs.codes_on_l2 && got.sqrt_a == qzs.sqrt_a &&
-                  got.t_oe == qzs.t_oe,
-              "rtcm qzss ephemeris construct fields");
+        check(sidereon_rtcm_message_qzss_ephemeris(decoded, 0, &got) ==
+                  SIDEREON_STATUS_OK,
+              "rtcm qzss ephemeris accessor");
+        CHECK_EPH_FIELD(got, qzs, satellite_id, "rtcm qzss ephemeris");
+        CHECK_EPH_FIELD(got, qzs, t_oc, "rtcm qzss ephemeris");
+        CHECK_EPH_FIELD(got, qzs, a_f2, "rtcm qzss ephemeris");
+        CHECK_EPH_FIELD(got, qzs, a_f1, "rtcm qzss ephemeris");
+        CHECK_EPH_FIELD(got, qzs, a_f0, "rtcm qzss ephemeris");
+        CHECK_EPH_FIELD(got, qzs, iode, "rtcm qzss ephemeris");
+        CHECK_EPH_FIELD(got, qzs, c_rs, "rtcm qzss ephemeris");
+        CHECK_EPH_FIELD(got, qzs, delta_n, "rtcm qzss ephemeris");
+        CHECK_EPH_FIELD(got, qzs, m0, "rtcm qzss ephemeris");
+        CHECK_EPH_FIELD(got, qzs, c_uc, "rtcm qzss ephemeris");
+        CHECK_EPH_FIELD(got, qzs, eccentricity, "rtcm qzss ephemeris");
+        CHECK_EPH_FIELD(got, qzs, c_us, "rtcm qzss ephemeris");
+        CHECK_EPH_FIELD(got, qzs, sqrt_a, "rtcm qzss ephemeris");
+        CHECK_EPH_FIELD(got, qzs, t_oe, "rtcm qzss ephemeris");
+        CHECK_EPH_FIELD(got, qzs, c_ic, "rtcm qzss ephemeris");
+        CHECK_EPH_FIELD(got, qzs, omega0, "rtcm qzss ephemeris");
+        CHECK_EPH_FIELD(got, qzs, c_is, "rtcm qzss ephemeris");
+        CHECK_EPH_FIELD(got, qzs, i0, "rtcm qzss ephemeris");
+        CHECK_EPH_FIELD(got, qzs, c_rc, "rtcm qzss ephemeris");
+        CHECK_EPH_FIELD(got, qzs, omega, "rtcm qzss ephemeris");
+        CHECK_EPH_FIELD(got, qzs, omega_dot, "rtcm qzss ephemeris");
+        CHECK_EPH_FIELD(got, qzs, idot, "rtcm qzss ephemeris");
+        CHECK_EPH_FIELD(got, qzs, codes_on_l2, "rtcm qzss ephemeris");
+        CHECK_EPH_FIELD(got, qzs, week_number, "rtcm qzss ephemeris");
+        CHECK_EPH_FIELD(got, qzs, ura, "rtcm qzss ephemeris");
+        CHECK_EPH_FIELD(got, qzs, sv_health, "rtcm qzss ephemeris");
+        CHECK_EPH_FIELD(got, qzs, t_gd, "rtcm qzss ephemeris");
+        CHECK_EPH_FIELD(got, qzs, iodc, "rtcm qzss ephemeris");
+        CHECK_EPH_FIELD(got, qzs, fit_interval, "rtcm qzss ephemeris");
         sidereon_rtcm_messages_free(decoded);
     }
 
@@ -1175,13 +1499,32 @@ static void test_rtcm_construct(void) {
     memset(&gal_fnav, 0, sizeof(gal_fnav));
     gal_fnav.satellite_id = 12;
     gal_fnav.week_number = 1402;
-    gal_fnav.iod_nav = 7;
+    gal_fnav.iod_nav = 777;
     gal_fnav.sisa = 42;
+    gal_fnav.idot = -1234;
     gal_fnav.t_oc = 5150;
+    gal_fnav.a_f2 = -12;
     gal_fnav.a_f1 = -151;
     gal_fnav.a_f0 = -471483;
+    gal_fnav.c_rs = -1234;
+    gal_fnav.delta_n = 2345;
+    gal_fnav.m0 = -INT64_C(123456789);
+    gal_fnav.c_uc = 3456;
+    gal_fnav.eccentricity = UINT64_C(305419896);
+    gal_fnav.c_us = -4567;
     gal_fnav.sqrt_a = UINT64_C(2852448983);
     gal_fnav.t_oe = 5150;
+    gal_fnav.c_ic = 5678;
+    gal_fnav.omega0 = -INT64_C(234567890);
+    gal_fnav.c_is = -6789;
+    gal_fnav.i0 = INT64_C(345678901);
+    gal_fnav.c_rc = 7890;
+    gal_fnav.omega = -INT64_C(456789012);
+    gal_fnav.omega_dot = -123456;
+    gal_fnav.bgd_e5a_e1 = -123;
+    gal_fnav.e5a_signal_health = 3;
+    gal_fnav.e5a_data_validity = true;
+    gal_fnav.reserved = 85;
     built = NULL;
     check(sidereon_rtcm_build_galileo_fnav_ephemeris(&gal_fnav, &built) ==
               SIDEREON_STATUS_OK,
@@ -1190,13 +1533,38 @@ static void test_rtcm_construct(void) {
     if (decoded) {
         SidereonRtcmGalileoFnavEphemeris got;
         check(sidereon_rtcm_message_galileo_fnav_ephemeris(decoded, 0, &got) ==
-                      SIDEREON_STATUS_OK &&
-                  got.satellite_id == gal_fnav.satellite_id &&
-                  got.week_number == gal_fnav.week_number && got.iod_nav == gal_fnav.iod_nav &&
-                  got.sisa == gal_fnav.sisa && got.t_oc == gal_fnav.t_oc &&
-                  got.a_f1 == gal_fnav.a_f1 && got.a_f0 == gal_fnav.a_f0 &&
-                  got.sqrt_a == gal_fnav.sqrt_a && got.t_oe == gal_fnav.t_oe,
-              "rtcm galileo fnav ephemeris construct fields");
+                  SIDEREON_STATUS_OK,
+              "rtcm galileo fnav ephemeris accessor");
+        CHECK_EPH_FIELD(got, gal_fnav, satellite_id, "rtcm galileo fnav ephemeris");
+        CHECK_EPH_FIELD(got, gal_fnav, week_number, "rtcm galileo fnav ephemeris");
+        CHECK_EPH_FIELD(got, gal_fnav, iod_nav, "rtcm galileo fnav ephemeris");
+        CHECK_EPH_FIELD(got, gal_fnav, sisa, "rtcm galileo fnav ephemeris");
+        CHECK_EPH_FIELD(got, gal_fnav, idot, "rtcm galileo fnav ephemeris");
+        CHECK_EPH_FIELD(got, gal_fnav, t_oc, "rtcm galileo fnav ephemeris");
+        CHECK_EPH_FIELD(got, gal_fnav, a_f2, "rtcm galileo fnav ephemeris");
+        CHECK_EPH_FIELD(got, gal_fnav, a_f1, "rtcm galileo fnav ephemeris");
+        CHECK_EPH_FIELD(got, gal_fnav, a_f0, "rtcm galileo fnav ephemeris");
+        CHECK_EPH_FIELD(got, gal_fnav, c_rs, "rtcm galileo fnav ephemeris");
+        CHECK_EPH_FIELD(got, gal_fnav, delta_n, "rtcm galileo fnav ephemeris");
+        CHECK_EPH_FIELD(got, gal_fnav, m0, "rtcm galileo fnav ephemeris");
+        CHECK_EPH_FIELD(got, gal_fnav, c_uc, "rtcm galileo fnav ephemeris");
+        CHECK_EPH_FIELD(got, gal_fnav, eccentricity, "rtcm galileo fnav ephemeris");
+        CHECK_EPH_FIELD(got, gal_fnav, c_us, "rtcm galileo fnav ephemeris");
+        CHECK_EPH_FIELD(got, gal_fnav, sqrt_a, "rtcm galileo fnav ephemeris");
+        CHECK_EPH_FIELD(got, gal_fnav, t_oe, "rtcm galileo fnav ephemeris");
+        CHECK_EPH_FIELD(got, gal_fnav, c_ic, "rtcm galileo fnav ephemeris");
+        CHECK_EPH_FIELD(got, gal_fnav, omega0, "rtcm galileo fnav ephemeris");
+        CHECK_EPH_FIELD(got, gal_fnav, c_is, "rtcm galileo fnav ephemeris");
+        CHECK_EPH_FIELD(got, gal_fnav, i0, "rtcm galileo fnav ephemeris");
+        CHECK_EPH_FIELD(got, gal_fnav, c_rc, "rtcm galileo fnav ephemeris");
+        CHECK_EPH_FIELD(got, gal_fnav, omega, "rtcm galileo fnav ephemeris");
+        CHECK_EPH_FIELD(got, gal_fnav, omega_dot, "rtcm galileo fnav ephemeris");
+        CHECK_EPH_FIELD(got, gal_fnav, bgd_e5a_e1, "rtcm galileo fnav ephemeris");
+        CHECK_EPH_FIELD(got, gal_fnav, e5a_signal_health,
+                        "rtcm galileo fnav ephemeris");
+        CHECK_EPH_FIELD(got, gal_fnav, e5a_data_validity,
+                        "rtcm galileo fnav ephemeris");
+        CHECK_EPH_FIELD(got, gal_fnav, reserved, "rtcm galileo fnav ephemeris");
         sidereon_rtcm_messages_free(decoded);
     }
 
@@ -1205,15 +1573,35 @@ static void test_rtcm_construct(void) {
     memset(&gal_inav, 0, sizeof(gal_inav));
     gal_inav.satellite_id = 3;
     gal_inav.week_number = 1402;
-    gal_inav.iod_nav = 7;
+    gal_inav.iod_nav = 777;
     gal_inav.sisa_index = 107;
+    gal_inav.idot = -1234;
     gal_inav.t_oc = 5150;
+    gal_inav.a_f2 = -12;
     gal_inav.a_f1 = -151;
     gal_inav.a_f0 = -471483;
+    gal_inav.c_rs = -1234;
+    gal_inav.delta_n = 2345;
+    gal_inav.m0 = -INT64_C(123456789);
+    gal_inav.c_uc = 3456;
+    gal_inav.eccentricity = UINT64_C(305419896);
+    gal_inav.c_us = -4567;
     gal_inav.sqrt_a = UINT64_C(2852448983);
     gal_inav.t_oe = 5150;
-    gal_inav.bgd_e5a_e1 = 5;
-    gal_inav.bgd_e5b_e1 = 7;
+    gal_inav.c_ic = 5678;
+    gal_inav.omega0 = -INT64_C(234567890);
+    gal_inav.c_is = -6789;
+    gal_inav.i0 = INT64_C(345678901);
+    gal_inav.c_rc = 7890;
+    gal_inav.omega = -INT64_C(456789012);
+    gal_inav.omega_dot = -123456;
+    gal_inav.bgd_e5a_e1 = -123;
+    gal_inav.bgd_e5b_e1 = 234;
+    gal_inav.e5b_signal_health = 3;
+    gal_inav.e5b_data_validity = true;
+    gal_inav.e1b_signal_health = 2;
+    gal_inav.e1b_data_validity = true;
+    gal_inav.reserved = 2;
     built = NULL;
     check(sidereon_rtcm_build_galileo_inav_ephemeris(&gal_inav, &built) ==
               SIDEREON_STATUS_OK,
@@ -1222,15 +1610,43 @@ static void test_rtcm_construct(void) {
     if (decoded) {
         SidereonRtcmGalileoInavEphemeris got;
         check(sidereon_rtcm_message_galileo_inav_ephemeris(decoded, 0, &got) ==
-                      SIDEREON_STATUS_OK &&
-                  got.satellite_id == gal_inav.satellite_id &&
-                  got.week_number == gal_inav.week_number && got.iod_nav == gal_inav.iod_nav &&
-                  got.sisa_index == gal_inav.sisa_index && got.t_oc == gal_inav.t_oc &&
-                  got.a_f1 == gal_inav.a_f1 && got.a_f0 == gal_inav.a_f0 &&
-                  got.sqrt_a == gal_inav.sqrt_a && got.t_oe == gal_inav.t_oe &&
-                  got.bgd_e5a_e1 == gal_inav.bgd_e5a_e1 &&
-                  got.bgd_e5b_e1 == gal_inav.bgd_e5b_e1,
-              "rtcm galileo inav ephemeris construct fields");
+                  SIDEREON_STATUS_OK,
+              "rtcm galileo inav ephemeris accessor");
+        CHECK_EPH_FIELD(got, gal_inav, satellite_id, "rtcm galileo inav ephemeris");
+        CHECK_EPH_FIELD(got, gal_inav, week_number, "rtcm galileo inav ephemeris");
+        CHECK_EPH_FIELD(got, gal_inav, iod_nav, "rtcm galileo inav ephemeris");
+        CHECK_EPH_FIELD(got, gal_inav, sisa_index, "rtcm galileo inav ephemeris");
+        CHECK_EPH_FIELD(got, gal_inav, idot, "rtcm galileo inav ephemeris");
+        CHECK_EPH_FIELD(got, gal_inav, t_oc, "rtcm galileo inav ephemeris");
+        CHECK_EPH_FIELD(got, gal_inav, a_f2, "rtcm galileo inav ephemeris");
+        CHECK_EPH_FIELD(got, gal_inav, a_f1, "rtcm galileo inav ephemeris");
+        CHECK_EPH_FIELD(got, gal_inav, a_f0, "rtcm galileo inav ephemeris");
+        CHECK_EPH_FIELD(got, gal_inav, c_rs, "rtcm galileo inav ephemeris");
+        CHECK_EPH_FIELD(got, gal_inav, delta_n, "rtcm galileo inav ephemeris");
+        CHECK_EPH_FIELD(got, gal_inav, m0, "rtcm galileo inav ephemeris");
+        CHECK_EPH_FIELD(got, gal_inav, c_uc, "rtcm galileo inav ephemeris");
+        CHECK_EPH_FIELD(got, gal_inav, eccentricity, "rtcm galileo inav ephemeris");
+        CHECK_EPH_FIELD(got, gal_inav, c_us, "rtcm galileo inav ephemeris");
+        CHECK_EPH_FIELD(got, gal_inav, sqrt_a, "rtcm galileo inav ephemeris");
+        CHECK_EPH_FIELD(got, gal_inav, t_oe, "rtcm galileo inav ephemeris");
+        CHECK_EPH_FIELD(got, gal_inav, c_ic, "rtcm galileo inav ephemeris");
+        CHECK_EPH_FIELD(got, gal_inav, omega0, "rtcm galileo inav ephemeris");
+        CHECK_EPH_FIELD(got, gal_inav, c_is, "rtcm galileo inav ephemeris");
+        CHECK_EPH_FIELD(got, gal_inav, i0, "rtcm galileo inav ephemeris");
+        CHECK_EPH_FIELD(got, gal_inav, c_rc, "rtcm galileo inav ephemeris");
+        CHECK_EPH_FIELD(got, gal_inav, omega, "rtcm galileo inav ephemeris");
+        CHECK_EPH_FIELD(got, gal_inav, omega_dot, "rtcm galileo inav ephemeris");
+        CHECK_EPH_FIELD(got, gal_inav, bgd_e5a_e1, "rtcm galileo inav ephemeris");
+        CHECK_EPH_FIELD(got, gal_inav, bgd_e5b_e1, "rtcm galileo inav ephemeris");
+        CHECK_EPH_FIELD(got, gal_inav, e5b_signal_health,
+                        "rtcm galileo inav ephemeris");
+        CHECK_EPH_FIELD(got, gal_inav, e5b_data_validity,
+                        "rtcm galileo inav ephemeris");
+        CHECK_EPH_FIELD(got, gal_inav, e1b_signal_health,
+                        "rtcm galileo inav ephemeris");
+        CHECK_EPH_FIELD(got, gal_inav, e1b_data_validity,
+                        "rtcm galileo inav ephemeris");
+        CHECK_EPH_FIELD(got, gal_inav, reserved, "rtcm galileo inav ephemeris");
         sidereon_rtcm_messages_free(decoded);
     }
 

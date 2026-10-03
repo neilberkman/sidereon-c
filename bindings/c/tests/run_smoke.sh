@@ -92,6 +92,20 @@ grep -Fq "sidereon_solve_spp or sidereon_solve_spp_v2 and must be freed exactly 
 grep -Fq "with sidereon_spk_load and release with sidereon_spk_free" include/sidereon.h
 grep -Fq "sidereon_constellation_build and release with sidereon_constellation_free" include/sidereon.h
 
+echo "== compiling complete RINEX OBS surface smoke program =="
+rinex_obs_complete_out="${target_dir}/rinex_obs_complete_smoke"
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
+    -I"${binding_root}/include" \
+    "${here}/rinex_obs_complete_smoke.c" \
+    -L"${lib_dir}" \
+    -lsidereon \
+    -Wl,-rpath,"${lib_dir}" \
+    -lm \
+    -o "${rinex_obs_complete_out}"
+
+echo "== running complete RINEX OBS surface smoke program =="
+"${rinex_obs_complete_out}"
+
 echo "== compiling smoke program =="
 out="${target_dir}/smoke"
 cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \

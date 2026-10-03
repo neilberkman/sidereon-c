@@ -8463,6 +8463,246 @@ mod sp3_typed_error_abi_tests {
     }
 
     #[test]
+    fn exact_error_details_preserve_all_current_variant_fields() {
+        use sidereon_core::data::{DataCatalogError, ProductType};
+        use ExactSp3ValidationError as E;
+
+        let parse_value = sidereon_core::Error::Parse("bad bytes".into());
+        let parse_text = parse_value.to_string();
+        let parse_debug = format!("{parse_value:?}");
+        let catalog_value = DataCatalogError::UnknownCenter("bad".into());
+        let catalog_text = catalog_value.to_string();
+        let catalog_debug = format!("{catalog_value:?}");
+        let cases = vec![
+            (
+                E::Parse(parse_value),
+                serde_json::json!({"variant":"parse","error":parse_text,"debug":parse_debug}),
+            ),
+            (
+                E::Catalog(catalog_value),
+                serde_json::json!({"variant":"catalog","error":catalog_text,"debug":catalog_debug}),
+            ),
+            (
+                E::WrongProductFamily {
+                    actual: ProductType::Clk,
+                },
+                serde_json::json!({"variant":"wrong_product_family","actual":"clk"}),
+            ),
+            (
+                E::InvalidIssue {
+                    issue: "2460".into(),
+                },
+                serde_json::json!({"variant":"invalid_issue","issue":"2460"}),
+            ),
+            (
+                E::UnsupportedSpanToken { token: "3D".into() },
+                serde_json::json!({"variant":"unsupported_span_token","token":"3D"}),
+            ),
+            (
+                E::UnsupportedSampleToken { token: "7S".into() },
+                serde_json::json!({"variant":"unsupported_sample_token","token":"7S"}),
+            ),
+            (
+                E::NonCanonicalSpanToken {
+                    token: "24H".into(),
+                    canonical: "1D".into(),
+                },
+                serde_json::json!({"variant":"non_canonical_span_token","token":"24H","canonical":"1D"}),
+            ),
+            (
+                E::NonCanonicalSampleToken {
+                    token: "60S".into(),
+                    canonical: "1M".into(),
+                },
+                serde_json::json!({"variant":"non_canonical_sample_token","token":"60S","canonical":"1M"}),
+            ),
+            (
+                E::InvalidExpectedAgency {
+                    agency: "bad!".into(),
+                },
+                serde_json::json!({"variant":"invalid_expected_agency","agency":"bad!"}),
+            ),
+            (
+                E::AgencyMismatch {
+                    expected: "COD".into(),
+                    actual: "GFZ".into(),
+                },
+                serde_json::json!({"variant":"agency_mismatch","expected":"COD","actual":"GFZ"}),
+            ),
+            (E::MissingEof, serde_json::json!({"variant":"missing_eof"})),
+            (
+                E::MalformedEofRecord {
+                    line_number: usize::MAX,
+                    record_length: 2048,
+                },
+                serde_json::json!({"variant":"malformed_eof_record","line_number":usize::MAX.to_string(),"record_length":"2048"}),
+            ),
+            (
+                E::TrailingContentAfterEof,
+                serde_json::json!({"variant":"trailing_content_after_eof"}),
+            ),
+            (
+                E::MandatoryHeaderRecordCount {
+                    record: "%i",
+                    expected: 2,
+                    actual: 1,
+                },
+                serde_json::json!({"variant":"mandatory_header_record_count","record":"%i","expected":"2","actual":"1"}),
+            ),
+            (
+                E::MissingDeclaredSatelliteCount,
+                serde_json::json!({"variant":"missing_declared_satellite_count"}),
+            ),
+            (
+                E::DeclaredSatelliteCountMismatch {
+                    declared: usize::MAX,
+                    tokens: 3,
+                },
+                serde_json::json!({"variant":"declared_satellite_count_mismatch","declared":usize::MAX.to_string(),"tokens":"3"}),
+            ),
+            (
+                E::DuplicateDeclaredSatellite {
+                    token: "G01".into(),
+                    first_index: 0,
+                    duplicate_index: usize::MAX,
+                },
+                serde_json::json!({"variant":"duplicate_declared_satellite","token":"G01","first_index":"0","duplicate_index":usize::MAX.to_string()}),
+            ),
+            (
+                E::NoDeclaredSatellites,
+                serde_json::json!({"variant":"no_declared_satellites"}),
+            ),
+            (
+                E::SatelliteRecordSequenceMismatch {
+                    record: "P",
+                    epoch_index: 4,
+                    expected: vec!["G01".into()],
+                    actual: vec!["G02".into()],
+                },
+                serde_json::json!({"variant":"satellite_record_sequence_mismatch","record":"P","epoch_index":"4","expected":["G01"],"actual":["G02"]}),
+            ),
+            (
+                E::BodyRecordInterleavingMismatch {
+                    epoch_index: 5,
+                    expected: vec!["PG01".into(), "VG01".into()],
+                    actual: vec!["VG01".into(), "PG01".into()],
+                },
+                serde_json::json!({"variant":"body_record_interleaving_mismatch","epoch_index":"5","expected":["PG01","VG01"],"actual":["VG01","PG01"]}),
+            ),
+            (
+                E::NonFiniteHeaderCadence,
+                serde_json::json!({"variant":"non_finite_header_cadence"}),
+            ),
+            (
+                E::NonPositiveHeaderCadence {
+                    actual_s: f64::NEG_INFINITY,
+                },
+                serde_json::json!({"variant":"non_positive_header_cadence","actual_s":"-inf"}),
+            ),
+            (
+                E::UnsupportedHeaderCadence { actual_s: 100000.0 },
+                serde_json::json!({"variant":"unsupported_header_cadence","actual_s":"100000"}),
+            ),
+            (
+                E::CadenceMismatch {
+                    requested_s: 300.0,
+                    header_s: 600.0,
+                },
+                serde_json::json!({"variant":"cadence_mismatch","requested_s":"300","header_s":"600"}),
+            ),
+            (
+                E::DeclaredEpochCountMismatch {
+                    declared: u64::MAX,
+                    parsed: usize::MAX,
+                },
+                serde_json::json!({"variant":"declared_epoch_count_mismatch","declared":u64::MAX.to_string(),"parsed":usize::MAX.to_string()}),
+            ),
+            (
+                E::MissingDeclaredStart,
+                serde_json::json!({"variant":"missing_declared_start"}),
+            ),
+            (
+                E::DeclaredStartMismatch {
+                    requested_j2000_s: 1.25,
+                    declared_j2000_s: 1.5,
+                    requested_tick: i128::MAX,
+                    declared_tick: Some(i128::MIN),
+                },
+                serde_json::json!({"variant":"declared_start_mismatch","requested_j2000_s":"1.25","declared_j2000_s":"1.5","requested_tick":i128::MAX.to_string(),"declared_tick":i128::MIN.to_string()}),
+            ),
+            (
+                E::RequestBeforeGpsEpoch,
+                serde_json::json!({"variant":"request_before_gps_epoch"}),
+            ),
+            (
+                E::NonFiniteHeaderStartMetadata { field: "mjd" },
+                serde_json::json!({"variant":"non_finite_header_start_metadata","field":"mjd"}),
+            ),
+            (
+                E::InvalidHeaderStartMetadata {
+                    field: "seconds_of_week",
+                    actual: f64::INFINITY,
+                },
+                serde_json::json!({"variant":"invalid_header_start_metadata","field":"seconds_of_week","actual":"inf"}),
+            ),
+            (
+                E::HeaderStartMetadataMismatch {
+                    field: "mjd",
+                    requested: 60000.0,
+                    actual: 60001.0,
+                },
+                serde_json::json!({"variant":"header_start_metadata_mismatch","field":"mjd","requested":"60000","actual":"60001"}),
+            ),
+            (
+                E::EmptyEpochGrid,
+                serde_json::json!({"variant":"empty_epoch_grid"}),
+            ),
+            (
+                E::FirstEpochMismatch {
+                    requested_j2000_s: 1.0,
+                    actual_j2000_s: 2.0,
+                },
+                serde_json::json!({"variant":"first_epoch_mismatch","requested_j2000_s":"1","actual_j2000_s":"2"}),
+            ),
+            (
+                E::IrregularEpochGrid {
+                    epoch_index: usize::MAX,
+                    requested_s: 300.0,
+                    actual_s: 299.99999999,
+                },
+                serde_json::json!({"variant":"irregular_epoch_grid","epoch_index":usize::MAX.to_string(),"requested_s":"300","actual_s":"299.99999999"}),
+            ),
+            (
+                E::SpanNotMultipleOfCadence {
+                    span_s: u64::MAX,
+                    cadence_s: 300,
+                },
+                serde_json::json!({"variant":"span_not_multiple_of_cadence","span_s":u64::MAX.to_string(),"cadence_s":"300"}),
+            ),
+            (
+                E::SpanMismatch {
+                    parsed: 20,
+                    half_open: 21,
+                    inclusive: 22,
+                },
+                serde_json::json!({"variant":"span_mismatch","parsed":"20","half_open":"21","inclusive":"22"}),
+            ),
+            (
+                E::FormatVersionMismatch {
+                    requested: "d".into(),
+                    actual: "c".into(),
+                },
+                serde_json::json!({"variant":"format_version_mismatch","requested":"d","actual":"c"}),
+            ),
+        ];
+
+        assert_eq!(cases.len(), 37);
+        for (error, expected) in cases {
+            assert_eq!(exact_sp3_error_details(&error), expected, "{error:?}");
+        }
+    }
+
+    #[test]
     fn structured_errors_cover_identity_merge_exact_and_continuity_producers() {
         let artifact = c_artifact_identity();
         let mut options = MaybeUninit::<SidereonSp3MergeOptions>::uninit();
@@ -9159,6 +9399,154 @@ mod sp3_geometry_engine_error_tests {
 mod sp3_write_error_epoch_mapping_tests {
     use super::*;
 
+    struct Expected {
+        kind: SidereonSp3WriteErrorKind,
+        field: Option<&'static str>,
+        text_value: Option<&'static str>,
+        sat: Option<GnssSatelliteId>,
+        epoch_index: Option<usize>,
+        comment_index: Option<usize>,
+        columns: Option<usize>,
+        decimals: Option<usize>,
+        integer_value: Option<u64>,
+        number: Option<f64>,
+        year: Option<i64>,
+        field_seconds: Option<f64>,
+        residual_s: Option<f64>,
+        epoch_time_scale: Option<u32>,
+        header_time_scale: Option<u32>,
+        time_system: Option<&'static str>,
+        declared_epochs: Option<u64>,
+        epochs: Option<usize>,
+        entries: Option<usize>,
+        satellites: Option<usize>,
+        codes: Option<usize>,
+        stored: Option<f64>,
+        native: Option<f64>,
+        column_value: Option<f64>,
+        exponent: Option<i16>,
+    }
+
+    impl Expected {
+        fn new(kind: SidereonSp3WriteErrorKind) -> Self {
+            Self {
+                kind,
+                field: None,
+                text_value: None,
+                sat: None,
+                epoch_index: None,
+                comment_index: None,
+                columns: None,
+                decimals: None,
+                integer_value: None,
+                number: None,
+                year: None,
+                field_seconds: None,
+                residual_s: None,
+                epoch_time_scale: None,
+                header_time_scale: None,
+                time_system: None,
+                declared_epochs: None,
+                epochs: None,
+                entries: None,
+                satellites: None,
+                codes: None,
+                stored: None,
+                native: None,
+                column_value: None,
+                exponent: None,
+            }
+        }
+    }
+
+    fn optional_f64(actual_present: bool, actual: f64, expected: Option<f64>, name: &str) {
+        assert_eq!(actual_present, expected.is_some(), "presence of {name}");
+        if let Some(expected) = expected {
+            assert_eq!(actual.to_bits(), expected.to_bits(), "value of {name}");
+        } else {
+            assert!(actual.is_nan(), "absent {name} sentinel");
+        }
+    }
+
+    fn assert_complete_mapping(error: Sp3WriteError, expected: Expected) {
+        let mut mapped = sp3_write_refusal(&error);
+        mapped.error.has_field = mapped.field.is_some();
+        mapped.error.has_text_value = mapped.text_value.is_some();
+        let actual = mapped.error;
+        assert_eq!(actual.kind, expected.kind, "kind for {error:?}");
+        assert_eq!(mapped.field, expected.field, "field for {error:?}");
+        assert_eq!(
+            mapped.text_value.as_deref(),
+            expected.text_value,
+            "text for {error:?}"
+        );
+        assert_eq!(actual.has_field, expected.field.is_some());
+        assert_eq!(actual.has_text_value, expected.text_value.is_some());
+        assert_eq!(actual.has_sat_id, expected.sat.is_some());
+        if let Some(sat) = expected.sat {
+            assert_eq!(actual.sat_id.bytes, satellite_token(sat).bytes);
+        } else {
+            assert_eq!(actual.sat_id.bytes, [0; SATELLITE_TOKEN_C_BYTES]);
+        }
+        macro_rules! optional_copy {
+            ($flag:ident, $value:ident, $expected:ident) => {{
+                assert_eq!(
+                    actual.$flag,
+                    expected.$expected.is_some(),
+                    stringify!($value)
+                );
+                assert_eq!(actual.$flag.then_some(actual.$value), expected.$expected);
+            }};
+        }
+        optional_copy!(has_epoch_index, epoch_index, epoch_index);
+        optional_copy!(has_comment_index, comment_index, comment_index);
+        optional_copy!(has_columns, columns, columns);
+        optional_copy!(has_decimals, decimals, decimals);
+        optional_copy!(has_integer_value, integer_value, integer_value);
+        optional_copy!(has_year, year, year);
+        optional_copy!(has_epoch_time_scale, epoch_time_scale, epoch_time_scale);
+        optional_copy!(has_header_time_scale, header_time_scale, header_time_scale);
+        optional_copy!(has_declared_epochs, declared_epochs, declared_epochs);
+        optional_copy!(has_epochs, epochs, epochs);
+        optional_copy!(has_entries, entries, entries);
+        optional_copy!(has_satellites, satellites, satellites);
+        optional_copy!(has_codes, codes, codes);
+        optional_copy!(has_exponent, exponent, exponent);
+        optional_f64(actual.has_number, actual.number, expected.number, "number");
+        optional_f64(
+            actual.has_field_seconds,
+            actual.field_seconds,
+            expected.field_seconds,
+            "field_seconds",
+        );
+        optional_f64(
+            actual.has_residual_s,
+            actual.residual_s,
+            expected.residual_s,
+            "residual_s",
+        );
+        optional_f64(actual.has_stored, actual.stored, expected.stored, "stored");
+        optional_f64(actual.has_native, actual.native, expected.native, "native");
+        optional_f64(
+            actual.has_column_value,
+            actual.column_value,
+            expected.column_value,
+            "column_value",
+        );
+        assert_eq!(actual.has_time_system, expected.time_system.is_some());
+        let actual_time_system = actual.has_time_system.then(|| {
+            let bytes = actual
+                .time_system
+                .iter()
+                .copied()
+                .take_while(|byte| *byte != 0)
+                .map(|byte| byte as u8)
+                .collect::<Vec<_>>();
+            String::from_utf8(bytes).unwrap()
+        });
+        assert_eq!(actual_time_system.as_deref(), expected.time_system);
+    }
+
     #[test]
     fn current_epoch_writer_refusals_keep_named_kinds_and_index() {
         let satellite = "G07".parse::<GnssSatelliteId>().unwrap();
@@ -9208,5 +9596,190 @@ mod sp3_write_error_epoch_mapping_tests {
             assert!(mapped.error.has_epoch_index);
             assert!(mapped.error.has_sat_id);
         }
+    }
+
+    #[test]
+    fn every_sp3_write_refusal_keeps_its_complete_public_payload() {
+        use sidereon_core::astro::time::TimeScale;
+        use sidereon_core::ephemeris::Sp3TimeSystem;
+        use SidereonSp3WriteErrorKind as Kind;
+
+        macro_rules! check {
+            ($error:expr, $kind:expr $(, $field:ident : $value:expr)* $(,)?) => {{
+                assert_complete_mapping(
+                    $error,
+                    Expected {
+                        $($field: $value,)*
+                        ..Expected::new($kind)
+                    },
+                );
+            }};
+        }
+
+        let satellite = "G07".parse::<GnssSatelliteId>().unwrap();
+        let unrepresentable = GnssSatelliteId {
+            system: sidereon_core::GnssSystem::Gps,
+            prn: 100,
+        };
+        check!(
+            Sp3WriteError::TextNotColumnSafe { field: "agency", value: "A\nB".into() },
+            Kind::TextNotColumnSafe,
+            field: Some("agency"), text_value: Some("A\nB"),
+        );
+        check!(
+            Sp3WriteError::TextNotColumnStable { field: "orbit type", value: " FIT ".into() },
+            Kind::TextNotColumnStable,
+            field: Some("orbit type"), text_value: Some(" FIT "),
+        );
+        check!(
+            Sp3WriteError::BlankDescriptor { field: "data used", value: "".into() },
+            Kind::BlankDescriptor,
+            field: Some("data used"), text_value: Some(""),
+        );
+        check!(
+            Sp3WriteError::EmptyComment { index: 3, value: "".into() },
+            Kind::EmptyComment,
+            comment_index: Some(3), text_value: Some(""),
+        );
+        check!(
+            Sp3WriteError::TextTooWide { field: "agency", columns: 4, value: "ABCDE".into() },
+            Kind::TextTooWide,
+            field: Some("agency"), columns: Some(4), text_value: Some("ABCDE"),
+        );
+        check!(
+            Sp3WriteError::IntegerTooWide { field: "epoch count", columns: 7, value: u64::MAX },
+            Kind::IntegerTooWide,
+            field: Some("epoch count"), columns: Some(7), integer_value: Some(u64::MAX),
+        );
+        check!(
+            Sp3WriteError::NonFinite { field: "interval" },
+            Kind::NonFinite,
+            field: Some("interval"),
+        );
+        check!(
+            Sp3WriteError::NumberTooWide { field: "clock base", columns: 10, decimals: 7, value: 12_345.25 },
+            Kind::NumberTooWide,
+            field: Some("clock base"), columns: Some(10), decimals: Some(7), number: Some(12_345.25),
+        );
+        check!(
+            Sp3WriteError::PrecisionNotRepresentable { field: "position base", columns: 10, decimals: 7, value: 1.25000001 },
+            Kind::PrecisionNotRepresentable,
+            field: Some("position base"), columns: Some(10), decimals: Some(7), number: Some(1.25000001),
+        );
+        check!(
+            Sp3WriteError::AccuracyNotRepresentable { sat: satellite, epoch_index: 5, component: "position", exponent: Some(-12) },
+            Kind::AccuracyNotRepresentable,
+            sat: Some(satellite), epoch_index: Some(5), field: Some("position"), exponent: Some(-12),
+        );
+        check!(
+            Sp3WriteError::AccuracyRecordMismatch { sat: satellite, epoch_index: 6 },
+            Kind::AccuracyRecordMismatch,
+            sat: Some(satellite), epoch_index: Some(6),
+        );
+        check!(
+            Sp3WriteError::AccuracyBasisMissing { sat: satellite, epoch_index: 8 },
+            Kind::AccuracyBasisMissing,
+            sat: Some(satellite), epoch_index: Some(8),
+        );
+        check!(
+            Sp3WriteError::YearNotRepresentable { epoch_index: 9, year: -12_345 },
+            Kind::YearNotRepresentable,
+            epoch_index: Some(9), year: Some(-12_345),
+        );
+        check!(
+            Sp3WriteError::EpochNotRestatable { epoch_index: 10, field_seconds: 59.125, residual_s: 0.000_000_01 },
+            Kind::EpochNotRestatable,
+            epoch_index: Some(10), field_seconds: Some(59.125), residual_s: Some(0.000_000_01),
+        );
+        check!(
+            Sp3WriteError::EpochTimeScaleMismatch { epoch_index: 11, epoch_scale: TimeScale::Gpst, header_scale: TimeScale::Utc },
+            Kind::EpochTimeScaleMismatch,
+            epoch_index: Some(11), epoch_time_scale: Some(time_scale_to_c_code(TimeScale::Gpst)), header_time_scale: Some(time_scale_to_c_code(TimeScale::Utc)),
+        );
+        check!(
+            Sp3WriteError::HeaderTimeScaleMismatch { time_system: Sp3TimeSystem::Galileo, time_scale: TimeScale::Gpst },
+            Kind::HeaderTimeScaleMismatch,
+            time_system: Some("GAL"), header_time_scale: Some(time_scale_to_c_code(TimeScale::Gpst)),
+        );
+        check!(
+            Sp3WriteError::EpochCountMismatch { declared: u64::MAX, epochs: 12 },
+            Kind::EpochCountMismatch,
+            declared_epochs: Some(u64::MAX), epochs: Some(12),
+        );
+        check!(
+            Sp3WriteError::AccuracyCodeCountMismatch { satellites: 13, codes: 12 },
+            Kind::AccuracyCodeCountMismatch,
+            satellites: Some(13), codes: Some(12),
+        );
+        check!(
+            Sp3WriteError::DuplicateSatellite { sat: satellite },
+            Kind::DuplicateSatellite,
+            sat: Some(satellite),
+        );
+        check!(
+            Sp3WriteError::SatelliteNotRepresentable { sat: unrepresentable },
+            Kind::SatelliteNotRepresentable,
+            sat: Some(unrepresentable),
+        );
+        check!(
+            Sp3WriteError::EpochArrayLengthMismatch { field: "clocks", epochs: 14, entries: 13 },
+            Kind::EpochArrayLengthMismatch,
+            field: Some("clocks"), epochs: Some(14), entries: Some(13),
+        );
+        check!(
+            Sp3WriteError::UndeclaredSatelliteRecord { sat: satellite, epoch_index: 15 },
+            Kind::UndeclaredSatelliteRecord,
+            sat: Some(satellite), epoch_index: Some(15),
+        );
+        check!(
+            Sp3WriteError::ConflictingRecords { sat: satellite, epoch_index: 16 },
+            Kind::ConflictingRecords,
+            sat: Some(satellite), epoch_index: Some(16),
+        );
+        check!(
+            Sp3WriteError::VelocityStateInPositionProduct { field: "velocity x", sat: satellite, epoch_index: 17 },
+            Kind::VelocityStateInPositionProduct,
+            field: Some("velocity x"), sat: Some(satellite), epoch_index: Some(17),
+        );
+        check!(
+            Sp3WriteError::RecordValueNonFinite { field: "clock", sat: satellite, epoch_index: 18 },
+            Kind::RecordValueNonFinite,
+            field: Some("clock"), sat: Some(satellite), epoch_index: Some(18),
+        );
+        check!(
+            Sp3WriteError::RecordValueTooWide { field: "position x", sat: satellite, epoch_index: 19, columns: 14, decimals: 6, column_value: 123_456_789.25 },
+            Kind::RecordValueTooWide,
+            field: Some("position x"), sat: Some(satellite), epoch_index: Some(19), columns: Some(14), decimals: Some(6), column_value: Some(123_456_789.25),
+        );
+        check!(
+            Sp3WriteError::RecordValueNotRepresentable { field: "clock", sat: satellite, epoch_index: 20, columns: 14, decimals: 6, stored: 0.000_001_25, column_value: 1.250_000_01 },
+            Kind::RecordValueNotRepresentable,
+            field: Some("clock"), sat: Some(satellite), epoch_index: Some(20), columns: Some(14), decimals: Some(6), stored: Some(0.000_001_25), column_value: Some(1.250_000_01),
+        );
+        check!(
+            Sp3WriteError::RecordReadsAsAbsent { field: "clock", sat: satellite, epoch_index: 21, column_value: 999_999.999_999 },
+            Kind::RecordReadsAsAbsent,
+            field: Some("clock"), sat: Some(satellite), epoch_index: Some(21), column_value: Some(999_999.999_999),
+        );
+        check!(
+            Sp3WriteError::RecordFieldsDisagree { field: "velocity y", sat: satellite, epoch_index: 22, stored: Some(-0.0), native: None },
+            Kind::RecordFieldsDisagree,
+            field: Some("velocity y"), sat: Some(satellite), epoch_index: Some(22), stored: Some(-0.0),
+        );
+        check!(
+            Sp3WriteError::AccuracyNotRepresentable { sat: satellite, epoch_index: 23, component: "clock", exponent: None },
+            Kind::AccuracyNotRepresentable,
+            sat: Some(satellite), epoch_index: Some(23), field: Some("clock"),
+        );
+        check!(
+            Sp3WriteError::EpochNotRestatable { epoch_index: 24, field_seconds: 0.0, residual_s: f64::NAN },
+            Kind::EpochNotRestatable,
+            epoch_index: Some(24), field_seconds: Some(0.0),
+        );
+        check!(
+            Sp3WriteError::RecordFieldsDisagree { field: "clock rate", sat: satellite, epoch_index: 25, stored: None, native: Some(-2.5) },
+            Kind::RecordFieldsDisagree,
+            field: Some("clock rate"), sat: Some(satellite), epoch_index: Some(25), native: Some(-2.5),
+        );
     }
 }

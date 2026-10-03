@@ -2519,6 +2519,7 @@ pub unsafe extern "C" fn sidereon_exact_cache_free(cache: *mut SidereonExactCach
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
     use std::ffi::{CStr, CString};
     use std::fs;
     use std::mem::MaybeUninit;
@@ -3628,6 +3629,168 @@ mod tests {
         assert_ne!(
             coord_node["fields"]["lat_deg"]["bits_hex"],
             coord_node["fields"]["lon_deg"]["bits_hex"]
+        );
+
+        let payload_cases: Vec<(DataCatalogError, Value)> = vec![
+            (
+                DataCatalogError::UnknownCenter("unknown_c".into()),
+                json!({"center":"unknown_c"}),
+            ),
+            (
+                DataCatalogError::UnknownProductType("unknown_pt".into()),
+                json!({"product_type":"unknown_pt"}),
+            ),
+            (
+                DataCatalogError::UnsupportedProduct {
+                    center: AnalysisCenter::Cod,
+                    product_type: ProductType::Sp3,
+                },
+                json!({"center":"cod","product_type":"sp3"}),
+            ),
+            (
+                DataCatalogError::UnsupportedDistribution {
+                    source: DistributionSource::Direct,
+                    product_type: ProductType::Sp3,
+                },
+                json!({"source":"direct","product_type":"sp3"}),
+            ),
+            (
+                DataCatalogError::UnsupportedProductEra {
+                    center: AnalysisCenter::Cod,
+                    product_type: ProductType::Sp3,
+                    date: ProductDate {
+                        year: 2020,
+                        month: 1,
+                        day: 2,
+                    },
+                },
+                json!({"center":"cod","product_type":"sp3","year":2020,"month":1,"day":2,"date":"2020-01-02"}),
+            ),
+            (
+                DataCatalogError::UnsupportedDistributionEra {
+                    source: DistributionSource::Direct,
+                    center: AnalysisCenter::Cod,
+                    product_type: ProductType::Sp3,
+                    date: ProductDate {
+                        year: 2020,
+                        month: 1,
+                        day: 2,
+                    },
+                },
+                json!({"source":"direct","center":"cod","product_type":"sp3","year":2020,"month":1,"day":2,"date":"2020-01-02"}),
+            ),
+            (
+                DataCatalogError::InvalidOfficialFilename("bad..name".into()),
+                json!({"filename":"bad..name"}),
+            ),
+            (
+                DataCatalogError::InconsistentProductIdentity {
+                    field: "official_filename",
+                },
+                json!({"field":"official_filename"}),
+            ),
+            (
+                DataCatalogError::NoOpenMirror {
+                    center: "cod".into(),
+                    product_type: "sp3".into(),
+                },
+                json!({"center":"cod","product_type":"sp3"}),
+            ),
+            (
+                DataCatalogError::DateBeforeGpsEpoch(ProductDate {
+                    year: 1970,
+                    month: 1,
+                    day: 1,
+                }),
+                json!({"year":1970,"month":1,"day":1,"date":"1970-01-01"}),
+            ),
+            (
+                DataCatalogError::InvalidGpsDayOfWeek(7),
+                json!({"day_of_week":7}),
+            ),
+            (
+                DataCatalogError::InvalidSample("99X".into()),
+                json!({"sample":"99X"}),
+            ),
+            (
+                DataCatalogError::UnsupportedSample {
+                    center: AnalysisCenter::Cod,
+                    product_type: ProductType::Sp3,
+                    sample: "99X".into(),
+                },
+                json!({"center":"cod","product_type":"sp3","sample":"99X"}),
+            ),
+            (
+                DataCatalogError::InvalidSpan("99D".into()),
+                json!({"span":"99D"}),
+            ),
+            (
+                DataCatalogError::InvalidIssue("9999".into()),
+                json!({"issue":"9999"}),
+            ),
+            (
+                DataCatalogError::MissingIssue {
+                    center: AnalysisCenter::IgsUlt,
+                },
+                json!({"center":"igs_ult"}),
+            ),
+            (
+                DataCatalogError::UnexpectedIssue {
+                    center: AnalysisCenter::Cod,
+                },
+                json!({"center":"cod"}),
+            ),
+            (
+                DataCatalogError::UnsupportedIssue {
+                    center: AnalysisCenter::IgsUlt,
+                    issue: "0130".into(),
+                },
+                json!({"center":"igs_ult","issue":"0130"}),
+            ),
+            (
+                DataCatalogError::InvalidDateTime {
+                    hour: 25,
+                    minute: 61,
+                    second: 62,
+                },
+                json!({"hour":25,"minute":61,"second":62}),
+            ),
+            (
+                DataCatalogError::UnsupportedNominalSchedule {
+                    center: AnalysisCenter::WumNrt,
+                    product_type: ProductType::Sp3,
+                },
+                json!({"center":"wum_nrt","product_type":"sp3"}),
+            ),
+            (
+                DataCatalogError::UnrecognizedArchiveListing {
+                    reason: "bad grammar".into(),
+                },
+                json!({"reason":"bad grammar"}),
+            ),
+            (
+                DataCatalogError::InvalidStation("BADSTATION".into()),
+                json!({"station":"BADSTATION"}),
+            ),
+            (
+                DataCatalogError::InvalidTileIndex {
+                    lat_index: -95,
+                    lon_index: 185,
+                },
+                json!({"lat_index":-95,"lon_index":185}),
+            ),
+            (
+                DataCatalogError::InvalidTileId("invalid_tile".into()),
+                json!({"tile_id":"invalid_tile"}),
+            ),
+        ];
+        for (error, expected_fields) in payload_cases {
+            assert_eq!(data_catalog_error_value(&error)["fields"], expected_fields);
+        }
+
+        assert_eq!(
+            DataCatalogError::UnknownCenter("unknown_c".into()).to_string(),
+            "unknown analysis center \"unknown_c\""
         );
     }
 

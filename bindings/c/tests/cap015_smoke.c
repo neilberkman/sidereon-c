@@ -70,6 +70,19 @@ static int test_error_metrics(void) {
     if (err != SIDEREON_ERROR_METRICS_ERROR_KIND_NONE) {
         return fail("error metrics unexpected error detail");
     }
+    if (!same_bits(metrics.ellipse.semi_major_m, W5_CAP015_ISO_ELLIPSE_SEMI_MAJOR_M_BITS) ||
+        !same_bits(metrics.ellipse.semi_minor_m, W5_CAP015_ISO_ELLIPSE_SEMI_MINOR_M_BITS) ||
+        !same_bits(metrics.ellipse.orientation_rad, W5_CAP015_ISO_ELLIPSE_ORIENTATION_RAD_BITS)) {
+        return fail("isotropic metrics ellipse differs from the engine's");
+    }
+    const double expected_r99 = sqrt(-2.0 * log(1.0 - 0.99)) * sigma;
+    if (!close_rel(metrics.r99_m.radius_m, expected_r99, 1.0e-12) ||
+        metrics.r99_m.probability != 0.99) {
+        return fail("isotropic metrics R99");
+    }
+    if (!close_rel(metrics.vep_m, 0.674490 * sigma, 1.0e-12)) {
+        return fail("isotropic metrics VEP");
+    }
     if (!same_bits(metrics.cep_m.radius_m, W5_CAP015_ISO_CEP_M_BITS) ||
         !same_bits(metrics.r95_m.radius_m, W5_CAP015_ISO_R95_M_BITS) ||
         !same_bits(metrics.sep_m.radius_m, W5_CAP015_ISO_SEP_M_BITS) ||

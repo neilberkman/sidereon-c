@@ -1,6 +1,6 @@
 use super::*;
 use sidereon_core::rinex::observations::{
-    CarrierPhaseRow, CorrectionUnavailable, RinexObsWriteError,
+    CarrierPhaseRow, CorrectionUnavailable, ObsDowngradeChange, ObsHeader, RinexObsWriteError,
 };
 
 /// A parsed RINEX observation product. Create with sidereon_rinex_obs_parse and
@@ -65,6 +65,89 @@ pub struct SidereonRinexObsHeader {
     pub has_marker_name: bool,
     /// Marker name, null-terminated when present.
     pub marker_name: [c_char; RINEX_OBS_MARKER_C_BYTES],
+}
+
+/// One detached header snapshot in a RINEX observation header timeline.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonRinexObsHeaderSegment {
+    /// First epoch index for which this header is in effect.
+    pub first_epoch_index: usize,
+    /// A copied summary of the header in effect from first_epoch_index.
+    pub header: SidereonRinexObsHeader,
+}
+
+/// Kind of one ordered change made by a RINEX 2 downgrade.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonRinexObsDowngradeChangeKind {
+    CodeRenamed = 0,
+    CodeMoved = 1,
+    CodeAdded = 2,
+    CodeListRemoved = 3,
+    ValueRounded = 4,
+    CycleSlipRounded = 5,
+    ScaleFactorsRemoved = 6,
+    EpochPicosecondsRemoved = 7,
+    ClockOffsetRounded = 8,
+    InEventLists = 9,
+    DeprecatedRecordsRemoved = 10,
+    EventRecordsRewritten = 11,
+}
+
+/// Fixed-width metadata for one RINEX 2 downgrade change. Text and string-list
+/// payloads are copied separately from the owning result.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonRinexObsDowngradeChange {
+    pub kind: SidereonRinexObsDowngradeChangeKind,
+    pub has_nested_change: bool,
+    pub has_system: bool,
+    pub system: u32,
+    pub has_epoch_index: bool,
+    pub epoch_index: usize,
+    pub has_satellite: bool,
+    pub satellite: SidereonSatelliteToken,
+    pub has_from_index: bool,
+    pub from_index: usize,
+    pub has_to_index: bool,
+    pub to_index: usize,
+    pub has_from_value: bool,
+    pub from_value: f64,
+    pub has_to_value: bool,
+    pub to_value: f64,
+    pub has_picoseconds: bool,
+    pub picoseconds: u32,
+    pub has_count: bool,
+    pub count: usize,
+    pub has_code: bool,
+    pub has_from_text: bool,
+    pub has_to_text: bool,
+    pub has_label: bool,
+    pub codes_count: usize,
+    pub records_count: usize,
+    pub from_records_count: usize,
+    pub to_records_count: usize,
+}
+
+/// Which scalar text payload to copy from a downgrade change.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonRinexObsDowngradeTextField {
+    Code = 0,
+    From = 1,
+    To = 2,
+    Label = 3,
+}
+
+/// Which string-list payload to address on a downgrade change.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonRinexObsDowngradeStringList {
+    Codes = 0,
+    Records = 1,
+    FromRecords = 2,
+    ToRecords = 3,
 }
 
 /// One per-system RINEX observation code from the header.
@@ -324,35 +407,100 @@ pub unsafe extern "C" fn sidereon_rinex_obs_header(
         ));
         *out_header = empty_rinex_obs_header();
         let obs = c_try!(require_ref(obs, "sidereon_rinex_obs_header", "obs"));
-        let header = obs.inner.header();
-        let mut out = empty_rinex_obs_header();
-        out.version = header.version;
-        if let Some(position) = header.approx_position_m {
-            out.has_approx_position_m = true;
-            out.approx_position_m = position;
-        }
-        if let Some(delta) = header.antenna_delta_hen_m {
-            out.has_antenna_delta_hen_m = true;
-            out.antenna_delta_hen_m = delta;
-        }
-        if let Some(interval_s) = header.interval_s {
-            out.has_interval_s = true;
-            out.interval_s = interval_s;
-        }
-        if let Some((epoch, scale)) = header.time_of_first_obs {
-            out.has_time_of_first_obs = true;
-            out.time_of_first_obs = rinex_epoch_time_to_c(epoch);
-            out.time_of_first_obs_scale = time_scale_to_c_code(scale);
-        }
-        out.obs_code_count = header.obs_codes.values().map(Vec::len).sum();
-        out.phase_shift_count = header.phase_shifts.len();
-        out.scale_factor_count = header.scale_factors.len();
-        out.glonass_slot_count = header.glonass_slots.len();
-        if let Some(marker_name) = &header.marker_name {
-            out.has_marker_name = true;
-            out.marker_name = fixed_c_chars::<RINEX_OBS_MARKER_C_BYTES>(marker_name);
-        }
-        *out_header = out;
+        *out_header = rinex_obs_header_to_c(obs.inner.header());
+        SidereonStatus::Ok
+    })
+}
+
+/// Copy the header in effect at one epoch. The returned value is detached from
+/// the observation handle. An index equal to the epoch count is rejected.
+///
+/// Safety: obs must be a live handle; out_header must point to one writable
+/// SidereonRinexObsHeader.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rinex_obs_header_at(
+    obs: *const SidereonRinexObs,
+    epoch_index: usize,
+    out_header: *mut SidereonRinexObsHeader,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_rinex_obs_header_at";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let out_header = c_try!(require_out(out_header, FN_NAME, "out_header"));
+        *out_header = empty_rinex_obs_header();
+        let obs = c_try!(require_ref(obs, FN_NAME, "obs"));
+        let header = match obs.inner.header_at(epoch_index) {
+            Ok(header) => header,
+            Err(error) => {
+                set_last_error(format!("{FN_NAME}: {error}"));
+                return SidereonStatus::InvalidArgument;
+            }
+        };
+        *out_header = rinex_obs_header_to_c(&header);
+        SidereonStatus::Ok
+    })
+}
+
+/// Copy every detached header-timeline segment in file order. The first row is
+/// always `(0, file_header)`; later rows are effective event headers only.
+/// Uses the standard two-call variable-length output contract.
+///
+/// Safety: obs must be live; out points to len writable segments or is NULL
+/// when len is zero; count outputs point to writable size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rinex_obs_header_timeline(
+    obs: *const SidereonRinexObs,
+    out: *mut SidereonRinexObsHeaderSegment,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_rinex_obs_header_timeline";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(FN_NAME, out_written, out_required));
+        let obs = c_try!(require_ref(obs, FN_NAME, "obs"));
+        let timeline = match obs.inner.header_timeline() {
+            Ok(timeline) => timeline,
+            Err(error) => {
+                set_last_error(format!("{FN_NAME}: {error}"));
+                return SidereonStatus::InvalidArgument;
+            }
+        };
+        let values: Vec<SidereonRinexObsHeaderSegment> = timeline
+            .segments()
+            .map(
+                |(first_epoch_index, header)| SidereonRinexObsHeaderSegment {
+                    first_epoch_index,
+                    header: rinex_obs_header_to_c(header),
+                },
+            )
+            .collect();
+        c_try!(copy_prefix_to_c(
+            FN_NAME,
+            "out",
+            &values,
+            out,
+            len,
+            out_written,
+            out_required,
+        ));
+        SidereonStatus::Ok
+    })
+}
+
+/// Copy how many input records the reader deliberately skipped.
+///
+/// Safety: obs must be live; out_count points to writable size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rinex_obs_skipped_records(
+    obs: *const SidereonRinexObs,
+    out_count: *mut usize,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_rinex_obs_skipped_records";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let out_count = c_try!(require_out(out_count, FN_NAME, "out_count"));
+        *out_count = 0;
+        let obs = c_try!(require_ref(obs, FN_NAME, "obs"));
+        *out_count = obs.inner.skipped_records;
         SidereonStatus::Ok
     })
 }
@@ -1071,6 +1219,31 @@ pub struct SidereonRinexObsWriteResult {
     pub(crate) detail: String,
 }
 
+/// Fixed-width outcome of one RINEX 2 downgrade attempt.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonRinexObsDowngradeOutcome {
+    /// True when a fresh product is available to take exactly once.
+    pub is_ok: bool,
+    /// OK on success, INVALID_ARGUMENT on a typed semantic refusal.
+    pub status: SidereonStatus,
+    /// The complete typed refusal; kind is None on success.
+    pub error: SidereonRinexObsWriteError,
+    /// Number of ordered top-level changes on success.
+    pub change_count: usize,
+}
+
+/// Owned RINEX 2 downgrade result. It owns the fresh product until taken, the
+/// complete ordered change tree, and every typed refusal text payload.
+pub struct SidereonRinexObsDowngradeResult {
+    pub(crate) outcome: SidereonRinexObsDowngradeOutcome,
+    pub(crate) product: Option<Box<SidereonRinexObs>>,
+    pub(crate) changes: Vec<ObsDowngradeChange>,
+    pub(crate) message: String,
+    pub(crate) code: String,
+    pub(crate) detail: String,
+}
+
 fn no_rinex_obs_write_error() -> SidereonRinexObsWriteError {
     SidereonRinexObsWriteError {
         kind: SidereonRinexObsWriteErrorKind::None,
@@ -1294,6 +1467,207 @@ fn rinex_obs_write_result(
                 detail: detail.unwrap_or_default(),
             }
         }
+    }
+}
+
+fn empty_rinex_obs_downgrade_change(
+    kind: SidereonRinexObsDowngradeChangeKind,
+) -> SidereonRinexObsDowngradeChange {
+    SidereonRinexObsDowngradeChange {
+        kind,
+        has_nested_change: false,
+        has_system: false,
+        system: 0,
+        has_epoch_index: false,
+        epoch_index: 0,
+        has_satellite: false,
+        satellite: SidereonSatelliteToken {
+            bytes: [0; SATELLITE_TOKEN_C_BYTES],
+        },
+        has_from_index: false,
+        from_index: 0,
+        has_to_index: false,
+        to_index: 0,
+        has_from_value: false,
+        from_value: f64::NAN,
+        has_to_value: false,
+        to_value: f64::NAN,
+        has_picoseconds: false,
+        picoseconds: 0,
+        has_count: false,
+        count: 0,
+        has_code: false,
+        has_from_text: false,
+        has_to_text: false,
+        has_label: false,
+        codes_count: 0,
+        records_count: 0,
+        from_records_count: 0,
+        to_records_count: 0,
+    }
+}
+
+fn rinex_obs_downgrade_change_to_c(change: &ObsDowngradeChange) -> SidereonRinexObsDowngradeChange {
+    use SidereonRinexObsDowngradeChangeKind as Kind;
+    let mut out = empty_rinex_obs_downgrade_change(match change {
+        ObsDowngradeChange::CodeRenamed { .. } => Kind::CodeRenamed,
+        ObsDowngradeChange::CodeMoved { .. } => Kind::CodeMoved,
+        ObsDowngradeChange::CodeAdded { .. } => Kind::CodeAdded,
+        ObsDowngradeChange::CodeListRemoved { .. } => Kind::CodeListRemoved,
+        ObsDowngradeChange::ValueRounded { .. } => Kind::ValueRounded,
+        ObsDowngradeChange::CycleSlipRounded { .. } => Kind::CycleSlipRounded,
+        ObsDowngradeChange::ScaleFactorsRemoved { .. } => Kind::ScaleFactorsRemoved,
+        ObsDowngradeChange::EpochPicosecondsRemoved { .. } => Kind::EpochPicosecondsRemoved,
+        ObsDowngradeChange::ClockOffsetRounded { .. } => Kind::ClockOffsetRounded,
+        ObsDowngradeChange::InEventLists { .. } => Kind::InEventLists,
+        ObsDowngradeChange::DeprecatedRecordsRemoved { .. } => Kind::DeprecatedRecordsRemoved,
+        ObsDowngradeChange::EventRecordsRewritten { .. } => Kind::EventRecordsRewritten,
+    });
+    let system = |out: &mut SidereonRinexObsDowngradeChange, value: GnssSystem| {
+        out.has_system = true;
+        out.system = gnss_system_to_c(value) as u32;
+    };
+    let epoch = |out: &mut SidereonRinexObsDowngradeChange, value: usize| {
+        out.has_epoch_index = true;
+        out.epoch_index = value;
+    };
+    match change {
+        ObsDowngradeChange::CodeRenamed { system: value, .. } => {
+            system(&mut out, *value);
+            out.has_from_text = true;
+            out.has_to_text = true;
+        }
+        ObsDowngradeChange::CodeMoved {
+            system: value,
+            from,
+            to,
+            ..
+        } => {
+            system(&mut out, *value);
+            out.has_code = true;
+            out.has_from_index = true;
+            out.from_index = *from;
+            out.has_to_index = true;
+            out.to_index = *to;
+        }
+        ObsDowngradeChange::CodeAdded { system: value, .. } => {
+            system(&mut out, *value);
+            out.has_code = true;
+        }
+        ObsDowngradeChange::CodeListRemoved {
+            system: value,
+            codes,
+        } => {
+            system(&mut out, *value);
+            out.codes_count = codes.len();
+        }
+        ObsDowngradeChange::ValueRounded {
+            epoch_index,
+            satellite,
+            from,
+            to,
+            ..
+        }
+        | ObsDowngradeChange::CycleSlipRounded {
+            epoch_index,
+            satellite,
+            from,
+            to,
+            ..
+        } => {
+            epoch(&mut out, *epoch_index);
+            out.has_satellite = true;
+            out.satellite = satellite_token(*satellite);
+            out.has_code = true;
+            out.has_from_value = true;
+            out.from_value = *from;
+            out.has_to_value = true;
+            out.to_value = *to;
+        }
+        ObsDowngradeChange::ScaleFactorsRemoved { count } => {
+            out.has_count = true;
+            out.count = *count;
+        }
+        ObsDowngradeChange::EpochPicosecondsRemoved {
+            epoch_index,
+            picoseconds,
+        } => {
+            epoch(&mut out, *epoch_index);
+            out.has_picoseconds = true;
+            out.picoseconds = *picoseconds;
+        }
+        ObsDowngradeChange::ClockOffsetRounded {
+            epoch_index,
+            from,
+            to,
+        } => {
+            epoch(&mut out, *epoch_index);
+            out.has_from_value = true;
+            out.from_value = *from;
+            out.has_to_value = true;
+            out.to_value = *to;
+        }
+        ObsDowngradeChange::InEventLists { epoch_index, .. } => {
+            epoch(&mut out, *epoch_index);
+            out.has_nested_change = true;
+        }
+        ObsDowngradeChange::DeprecatedRecordsRemoved {
+            epoch_index,
+            records,
+            ..
+        } => {
+            if let Some(value) = epoch_index {
+                epoch(&mut out, *value);
+            }
+            out.has_label = true;
+            out.records_count = records.len();
+        }
+        ObsDowngradeChange::EventRecordsRewritten {
+            epoch_index,
+            from,
+            to,
+        } => {
+            epoch(&mut out, *epoch_index);
+            out.from_records_count = from.len();
+            out.to_records_count = to.len();
+        }
+    }
+    out
+}
+
+fn rinex_obs_downgrade_change_at_depth(
+    mut change: &ObsDowngradeChange,
+    depth: usize,
+) -> Option<&ObsDowngradeChange> {
+    for _ in 0..depth {
+        change = match change {
+            ObsDowngradeChange::InEventLists { change, .. } => change.as_ref(),
+            _ => return None,
+        };
+    }
+    Some(change)
+}
+
+fn rinex_obs_downgrade_change_text(change: &ObsDowngradeChange, field: u32) -> Option<&str> {
+    match (field, change) {
+        (0, ObsDowngradeChange::CodeMoved { code, .. })
+        | (0, ObsDowngradeChange::CodeAdded { code, .. })
+        | (0, ObsDowngradeChange::ValueRounded { code, .. })
+        | (0, ObsDowngradeChange::CycleSlipRounded { code, .. }) => Some(code),
+        (1, ObsDowngradeChange::CodeRenamed { from, .. }) => Some(from),
+        (2, ObsDowngradeChange::CodeRenamed { to, .. }) => Some(to),
+        (3, ObsDowngradeChange::DeprecatedRecordsRemoved { label, .. }) => Some(label),
+        _ => None,
+    }
+}
+
+fn rinex_obs_downgrade_change_list(change: &ObsDowngradeChange, list: u32) -> Option<&[String]> {
+    match (list, change) {
+        (0, ObsDowngradeChange::CodeListRemoved { codes, .. }) => Some(codes),
+        (1, ObsDowngradeChange::DeprecatedRecordsRemoved { records, .. }) => Some(records),
+        (2, ObsDowngradeChange::EventRecordsRewritten { from, .. }) => Some(from),
+        (3, ObsDowngradeChange::EventRecordsRewritten { to, .. }) => Some(to),
+        _ => None,
     }
 }
 
@@ -1553,6 +1927,337 @@ pub unsafe extern "C" fn sidereon_rinex_obs_write_result_get_detail(
         ));
         SidereonStatus::Ok
     })
+}
+
+/// Downgrade an observation product to a RINEX 2 version without mutating the
+/// source. A well-formed call always returns an owned result: either a fresh
+/// product plus every ordered change, or the complete typed write refusal.
+///
+/// Safety: obs must be live; out_result points to one writable result pointer,
+/// initialized to NULL by this function. Free it with
+/// sidereon_rinex_obs_downgrade_result_free.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rinex_obs_downgrade_to_rinex2(
+    obs: *const SidereonRinexObs,
+    version: f64,
+    out_result: *mut *mut SidereonRinexObsDowngradeResult,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_rinex_obs_downgrade_to_rinex2";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let out_result = c_try!(require_out(out_result, FN_NAME, "out_result"));
+        *out_result = ptr::null_mut();
+        let obs = c_try!(require_ref(obs, FN_NAME, "obs"));
+        let result = match obs.inner.downgrade_to_rinex2(version) {
+            Ok((product, changes)) => SidereonRinexObsDowngradeResult {
+                outcome: SidereonRinexObsDowngradeOutcome {
+                    is_ok: true,
+                    status: SidereonStatus::Ok,
+                    error: no_rinex_obs_write_error(),
+                    change_count: changes.len(),
+                },
+                product: Some(Box::new(SidereonRinexObs { inner: product })),
+                changes,
+                message: String::new(),
+                code: String::new(),
+                detail: String::new(),
+            },
+            Err(error) => {
+                let (typed, code, detail) = rinex_obs_write_refusal(&error);
+                SidereonRinexObsDowngradeResult {
+                    outcome: SidereonRinexObsDowngradeOutcome {
+                        is_ok: false,
+                        status: SidereonStatus::InvalidArgument,
+                        error: typed,
+                        change_count: 0,
+                    },
+                    product: None,
+                    changes: Vec::new(),
+                    message: format!("{FN_NAME}: {error}"),
+                    code: code.unwrap_or_default(),
+                    detail: detail.unwrap_or_default(),
+                }
+            }
+        };
+        write_boxed_handle(out_result, result);
+        SidereonStatus::Ok
+    })
+}
+
+/// Release a downgrade result. Any fresh product not yet taken is released too.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rinex_obs_downgrade_result_free(
+    result: *mut SidereonRinexObsDowngradeResult,
+) {
+    ffi_boundary("sidereon_rinex_obs_downgrade_result_free", (), || {
+        free_boxed(result);
+    });
+}
+
+/// Copy the fixed-width outcome of a downgrade attempt.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rinex_obs_downgrade_result_get_outcome(
+    result: *const SidereonRinexObsDowngradeResult,
+    out_outcome: *mut SidereonRinexObsDowngradeOutcome,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_rinex_obs_downgrade_result_get_outcome";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let out_outcome = c_try!(require_out(out_outcome, FN_NAME, "out_outcome"));
+        *out_outcome = SidereonRinexObsDowngradeOutcome {
+            is_ok: false,
+            status: SidereonStatus::InvalidArgument,
+            error: no_rinex_obs_write_error(),
+            change_count: 0,
+        };
+        let result = c_try!(require_ref(result, FN_NAME, "result"));
+        *out_outcome = result.outcome;
+        SidereonStatus::Ok
+    })
+}
+
+/// Transfer the fresh downgraded product out of a successful result exactly
+/// once. The product remains valid after the result and source are freed.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rinex_obs_downgrade_result_take_obs(
+    result: *mut SidereonRinexObsDowngradeResult,
+    out_obs: *mut *mut SidereonRinexObs,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_rinex_obs_downgrade_result_take_obs";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let out_obs = c_try!(require_out(out_obs, FN_NAME, "out_obs"));
+        *out_obs = ptr::null_mut();
+        let result = c_try!(require_mut(result, FN_NAME, "result"));
+        if !result.outcome.is_ok {
+            set_last_error(result.message.clone());
+            return result.outcome.status;
+        }
+        let Some(product) = result.product.take() else {
+            set_last_error(format!("{FN_NAME}: downgraded product was already taken"));
+            return SidereonStatus::InvalidArgument;
+        };
+        *out_obs = Box::into_raw(product);
+        SidereonStatus::Ok
+    })
+}
+
+/// Copy one fixed-width change descriptor. `depth=0` selects an ordered
+/// top-level change; each greater depth follows one InEventLists nested change.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rinex_obs_downgrade_result_get_change(
+    result: *const SidereonRinexObsDowngradeResult,
+    change_index: usize,
+    depth: usize,
+    out_change: *mut SidereonRinexObsDowngradeChange,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_rinex_obs_downgrade_result_get_change";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let out_change = c_try!(require_out(out_change, FN_NAME, "out_change"));
+        *out_change =
+            empty_rinex_obs_downgrade_change(SidereonRinexObsDowngradeChangeKind::CodeRenamed);
+        let result = c_try!(require_ref(result, FN_NAME, "result"));
+        let Some(change) = result
+            .changes
+            .get(change_index)
+            .and_then(|change| rinex_obs_downgrade_change_at_depth(change, depth))
+        else {
+            set_last_error(format!(
+                "{FN_NAME}: no change at index {change_index}, depth {depth}"
+            ));
+            return SidereonStatus::InvalidArgument;
+        };
+        *out_change = rinex_obs_downgrade_change_to_c(change);
+        SidereonStatus::Ok
+    })
+}
+
+/// Copy one scalar text payload from a downgrade change. field is a
+/// SidereonRinexObsDowngradeTextField value. An absent payload is an empty
+/// successful output; invalid field values are rejected.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rinex_obs_downgrade_result_get_change_text(
+    result: *const SidereonRinexObsDowngradeResult,
+    change_index: usize,
+    depth: usize,
+    field: u32,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_rinex_obs_downgrade_result_get_change_text";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(FN_NAME, out_written, out_required));
+        if field > SidereonRinexObsDowngradeTextField::Label as u32 {
+            set_last_error(format!("{FN_NAME}: invalid text field {field}"));
+            return SidereonStatus::InvalidArgument;
+        }
+        let result = c_try!(require_ref(result, FN_NAME, "result"));
+        let Some(change) = result
+            .changes
+            .get(change_index)
+            .and_then(|change| rinex_obs_downgrade_change_at_depth(change, depth))
+        else {
+            set_last_error(format!(
+                "{FN_NAME}: no change at index {change_index}, depth {depth}"
+            ));
+            return SidereonStatus::InvalidArgument;
+        };
+        let text = rinex_obs_downgrade_change_text(change, field).unwrap_or("");
+        c_try!(copy_prefix_to_c(
+            FN_NAME,
+            "out",
+            text.as_bytes(),
+            out,
+            len,
+            out_written,
+            out_required,
+        ));
+        SidereonStatus::Ok
+    })
+}
+
+/// Copy one string from a vector payload. list is a
+/// SidereonRinexObsDowngradeStringList value; item_index must be in the count
+/// reported by the fixed descriptor.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rinex_obs_downgrade_result_get_change_list_item(
+    result: *const SidereonRinexObsDowngradeResult,
+    change_index: usize,
+    depth: usize,
+    list: u32,
+    item_index: usize,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_rinex_obs_downgrade_result_get_change_list_item";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(FN_NAME, out_written, out_required));
+        if list > SidereonRinexObsDowngradeStringList::ToRecords as u32 {
+            set_last_error(format!("{FN_NAME}: invalid string list {list}"));
+            return SidereonStatus::InvalidArgument;
+        }
+        let result = c_try!(require_ref(result, FN_NAME, "result"));
+        let Some(change) = result
+            .changes
+            .get(change_index)
+            .and_then(|change| rinex_obs_downgrade_change_at_depth(change, depth))
+        else {
+            set_last_error(format!(
+                "{FN_NAME}: no change at index {change_index}, depth {depth}"
+            ));
+            return SidereonStatus::InvalidArgument;
+        };
+        let Some(text) =
+            rinex_obs_downgrade_change_list(change, list).and_then(|values| values.get(item_index))
+        else {
+            set_last_error(format!(
+                "{FN_NAME}: no list item {item_index} for change {change_index}, depth {depth}, list {list}"
+            ));
+            return SidereonStatus::InvalidArgument;
+        };
+        c_try!(copy_prefix_to_c(
+            FN_NAME,
+            "out",
+            text.as_bytes(),
+            out,
+            len,
+            out_written,
+            out_required,
+        ));
+        SidereonStatus::Ok
+    })
+}
+
+unsafe fn copy_rinex_obs_downgrade_result_text(
+    fn_name: &str,
+    result: *const SidereonRinexObsDowngradeResult,
+    field: u32,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(fn_name, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(fn_name, out_written, out_required));
+        let result = c_try!(require_ref(result, fn_name, "result"));
+        let text = match field {
+            0 => &result.message,
+            1 => &result.code,
+            2 => &result.detail,
+            _ => unreachable!(),
+        };
+        c_try!(copy_prefix_to_c(
+            fn_name,
+            "out",
+            text.as_bytes(),
+            out,
+            len,
+            out_written,
+            out_required,
+        ));
+        SidereonStatus::Ok
+    })
+}
+
+/// Copy the route-prefixed typed refusal message, or empty text on success.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rinex_obs_downgrade_result_get_message(
+    result: *const SidereonRinexObsDowngradeResult,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    copy_rinex_obs_downgrade_result_text(
+        "sidereon_rinex_obs_downgrade_result_get_message",
+        result,
+        0,
+        out,
+        len,
+        out_written,
+        out_required,
+    )
+}
+
+/// Copy the observation-code payload of a typed refusal, or empty text.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rinex_obs_downgrade_result_get_code(
+    result: *const SidereonRinexObsDowngradeResult,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    copy_rinex_obs_downgrade_result_text(
+        "sidereon_rinex_obs_downgrade_result_get_code",
+        result,
+        1,
+        out,
+        len,
+        out_written,
+        out_required,
+    )
+}
+
+/// Copy the detail payload of a typed refusal, or empty text.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rinex_obs_downgrade_result_get_detail(
+    result: *const SidereonRinexObsDowngradeResult,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    copy_rinex_obs_downgrade_result_text(
+        "sidereon_rinex_obs_downgrade_result_get_detail",
+        result,
+        2,
+        out,
+        len,
+        out_written,
+        out_required,
+    )
 }
 
 /// Release a RINEX observation handle from sidereon_rinex_obs_parse. Passing NULL
@@ -3108,6 +3813,37 @@ fn empty_rinex_obs_header() -> SidereonRinexObsHeader {
         has_marker_name: false,
         marker_name: [0; RINEX_OBS_MARKER_C_BYTES],
     }
+}
+
+fn rinex_obs_header_to_c(header: &ObsHeader) -> SidereonRinexObsHeader {
+    let mut out = empty_rinex_obs_header();
+    out.version = header.version;
+    if let Some(position) = header.approx_position_m {
+        out.has_approx_position_m = true;
+        out.approx_position_m = position;
+    }
+    if let Some(delta) = header.antenna_delta_hen_m {
+        out.has_antenna_delta_hen_m = true;
+        out.antenna_delta_hen_m = delta;
+    }
+    if let Some(interval_s) = header.interval_s {
+        out.has_interval_s = true;
+        out.interval_s = interval_s;
+    }
+    if let Some((epoch, scale)) = header.time_of_first_obs {
+        out.has_time_of_first_obs = true;
+        out.time_of_first_obs = rinex_epoch_time_to_c(epoch);
+        out.time_of_first_obs_scale = time_scale_to_c_code(scale);
+    }
+    out.obs_code_count = header.obs_codes.values().map(Vec::len).sum();
+    out.phase_shift_count = header.phase_shifts.len();
+    out.scale_factor_count = header.scale_factors.len();
+    out.glonass_slot_count = header.glonass_slots.len();
+    if let Some(marker_name) = &header.marker_name {
+        out.has_marker_name = true;
+        out.marker_name = fixed_c_chars::<RINEX_OBS_MARKER_C_BYTES>(marker_name);
+    }
+    out
 }
 
 fn rinex_obs_error(fn_name: &str, err: CoreError) -> SidereonStatus {

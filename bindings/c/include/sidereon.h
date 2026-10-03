@@ -1981,6 +1981,24 @@ typedef enum SidereonRinexCorrectionStatus {
 } SidereonRinexCorrectionStatus;
 
 /**
+ * Kind of one ordered change made by a RINEX 2 downgrade.
+ */
+typedef enum SidereonRinexObsDowngradeChangeKind {
+    SIDEREON_RINEX_OBS_DOWNGRADE_CHANGE_KIND_CODE_RENAMED = 0,
+    SIDEREON_RINEX_OBS_DOWNGRADE_CHANGE_KIND_CODE_MOVED = 1,
+    SIDEREON_RINEX_OBS_DOWNGRADE_CHANGE_KIND_CODE_ADDED = 2,
+    SIDEREON_RINEX_OBS_DOWNGRADE_CHANGE_KIND_CODE_LIST_REMOVED = 3,
+    SIDEREON_RINEX_OBS_DOWNGRADE_CHANGE_KIND_VALUE_ROUNDED = 4,
+    SIDEREON_RINEX_OBS_DOWNGRADE_CHANGE_KIND_CYCLE_SLIP_ROUNDED = 5,
+    SIDEREON_RINEX_OBS_DOWNGRADE_CHANGE_KIND_SCALE_FACTORS_REMOVED = 6,
+    SIDEREON_RINEX_OBS_DOWNGRADE_CHANGE_KIND_EPOCH_PICOSECONDS_REMOVED = 7,
+    SIDEREON_RINEX_OBS_DOWNGRADE_CHANGE_KIND_CLOCK_OFFSET_ROUNDED = 8,
+    SIDEREON_RINEX_OBS_DOWNGRADE_CHANGE_KIND_IN_EVENT_LISTS = 9,
+    SIDEREON_RINEX_OBS_DOWNGRADE_CHANGE_KIND_DEPRECATED_RECORDS_REMOVED = 10,
+    SIDEREON_RINEX_OBS_DOWNGRADE_CHANGE_KIND_EVENT_RECORDS_REWRITTEN = 11,
+} SidereonRinexObsDowngradeChangeKind;
+
+/**
  * Which refusal a RINEX observation write reported. Every kind but None names
  * a `RinexObsWriteError` variant of the engine.
  */
@@ -4628,6 +4646,26 @@ typedef enum SidereonRinexObsKind {
      */
     SIDEREON_RINEX_OBS_KIND_UNKNOWN = 4,
 } SidereonRinexObsKind;
+
+/**
+ * Which scalar text payload to copy from a downgrade change.
+ */
+typedef enum SidereonRinexObsDowngradeTextField {
+    SIDEREON_RINEX_OBS_DOWNGRADE_TEXT_FIELD_CODE = 0,
+    SIDEREON_RINEX_OBS_DOWNGRADE_TEXT_FIELD_FROM = 1,
+    SIDEREON_RINEX_OBS_DOWNGRADE_TEXT_FIELD_TO = 2,
+    SIDEREON_RINEX_OBS_DOWNGRADE_TEXT_FIELD_LABEL = 3,
+} SidereonRinexObsDowngradeTextField;
+
+/**
+ * Which string-list payload to address on a downgrade change.
+ */
+typedef enum SidereonRinexObsDowngradeStringList {
+    SIDEREON_RINEX_OBS_DOWNGRADE_STRING_LIST_CODES = 0,
+    SIDEREON_RINEX_OBS_DOWNGRADE_STRING_LIST_RECORDS = 1,
+    SIDEREON_RINEX_OBS_DOWNGRADE_STRING_LIST_FROM_RECORDS = 2,
+    SIDEREON_RINEX_OBS_DOWNGRADE_STRING_LIST_TO_RECORDS = 3,
+} SidereonRinexObsDowngradeStringList;
 
 /**
  * Which text part of an ANTEX failure a text route copies.
@@ -7363,6 +7401,12 @@ typedef struct SidereonRinexNavRecords SidereonRinexNavRecords;
  * release with sidereon_rinex_obs_free.
  */
 typedef struct SidereonRinexObs SidereonRinexObs;
+
+/**
+ * Owned RINEX 2 downgrade result. It owns the fresh product until taken, the
+ * complete ordered change tree, and every typed refusal text payload.
+ */
+typedef struct SidereonRinexObsDowngradeResult SidereonRinexObsDowngradeResult;
 
 /**
  * An owned record of one RINEX observation write: the text on success, or the
@@ -19805,162 +19849,39 @@ typedef struct SidereonRinexObsCode {
 } SidereonRinexObsCode;
 
 /**
- * One parsed RINEX observation epoch summary.
+ * Fixed-width metadata for one RINEX 2 downgrade change. Text and string-list
+ * payloads are copied separately from the owning result.
  */
-typedef struct SidereonRinexObsEpoch {
-    /**
-     * Whether epoch carries a time. False for an event record whose epoch
-     * fields are blank, which RINEX 2.11 and 3.05 allow for an event without a
-     * significant epoch; an observation or cycle-slip epoch always has one.
-     */
-    bool has_epoch;
-    /**
-     * Civil epoch in the file's time scale when has_epoch is true. When it is
-     * false the integer fields are 0, which names no calendar date, and second
-     * is NaN.
-     */
-    struct SidereonCalendarEpoch epoch;
-    /**
-     * RINEX epoch flag.
-     */
-    uint8_t flag;
-    /**
-     * Number of satellites observed at this epoch.
-     */
-    size_t satellite_count;
-} SidereonRinexObsEpoch;
-
-/**
- * Parsed RINEX observation header summary.
- */
-typedef struct SidereonRinexObsHeader {
-    /**
-     * Full RINEX version.
-     */
-    double version;
-    /**
-     * Whether approx_position_m is present.
-     */
-    bool has_approx_position_m;
-    /**
-     * Surveyed a-priori receiver position, ECEF meters.
-     */
-    double approx_position_m[3];
-    /**
-     * Whether antenna_delta_hen_m is present.
-     */
-    bool has_antenna_delta_hen_m;
-    /**
-     * Antenna offset in RINEX height/east/north convention, meters.
-     */
-    double antenna_delta_hen_m[3];
-    /**
-     * Whether interval_s is present.
-     */
-    bool has_interval_s;
-    /**
-     * Nominal epoch spacing, seconds.
-     */
-    double interval_s;
-    /**
-     * Whether time_of_first_obs is present.
-     */
-    bool has_time_of_first_obs;
-    /**
-     * First observation epoch.
-     */
-    struct SidereonCalendarEpoch time_of_first_obs;
-    /**
-     * Time scale of time_of_first_obs as SidereonTimeScale.
-     */
-    uint32_t time_of_first_obs_scale;
-    /**
-     * Number of per-system observation-code rows.
-     */
-    size_t obs_code_count;
-    /**
-     * Number of phase-shift header rows.
-     */
-    size_t phase_shift_count;
-    /**
-     * Number of scale-factor header rows.
-     */
-    size_t scale_factor_count;
-    /**
-     * Number of GLONASS slot/channel rows.
-     */
-    size_t glonass_slot_count;
-    /**
-     * Whether marker_name is present.
-     */
-    bool has_marker_name;
-    /**
-     * Marker name, null-terminated when present.
-     */
-    char marker_name[RINEX_OBS_MARKER_C_BYTES];
-} SidereonRinexObsHeader;
-
-/**
- * One selected single-frequency pseudorange row from a RINEX OBS epoch.
- */
-typedef struct SidereonRinexObsPseudorange {
-    /**
-     * Satellite token.
-     */
-    struct SidereonSatelliteToken sat_id;
-    /**
-     * Selected code pseudorange, meters.
-     */
-    double pseudorange_m;
-} SidereonRinexObsPseudorange;
-
-/**
- * One RINEX receiver-clock phase-deviation sample in seconds.
- */
-typedef struct SidereonClockPhaseSample {
-    /**
-     * Whether phase_s carries a receiver-clock phase deviation.
-     */
-    bool has_phase_s;
-    /**
-     * Receiver-clock phase deviation, seconds, when present.
-     */
-    double phase_s;
-} SidereonClockPhaseSample;
-
-/**
- * One labelled raw RINEX observation value.
- */
-typedef struct SidereonRinexObsValue {
-    /**
-     * Satellite token.
-     */
-    struct SidereonSatelliteToken sat_id;
-    /**
-     * RINEX observation code.
-     */
-    char code[RINEX_OBS_CODE_C_BYTES];
-    /**
-     * Observation kind as SidereonRinexObsKind.
-     */
-    uint32_t kind;
-    /**
-     * Whether value is present. False means the field was blank.
-     */
-    bool has_value;
-    /**
-     * Parsed value when present.
-     */
-    double value;
-    /**
-     * Loss-of-lock indicator, or -1 when absent.
-     */
-    int32_t lli;
-    /**
-     * Signal-strength indicator, or -1 when absent.
-     */
-    int32_t ssi;
-} SidereonRinexObsValue;
+typedef struct SidereonRinexObsDowngradeChange {
+    enum SidereonRinexObsDowngradeChangeKind kind;
+    bool has_nested_change;
+    bool has_system;
+    uint32_t system;
+    bool has_epoch_index;
+    size_t epoch_index;
+    bool has_satellite;
+    struct SidereonSatelliteToken satellite;
+    bool has_from_index;
+    size_t from_index;
+    bool has_to_index;
+    size_t to_index;
+    bool has_from_value;
+    double from_value;
+    bool has_to_value;
+    double to_value;
+    bool has_picoseconds;
+    uint32_t picoseconds;
+    bool has_count;
+    size_t count;
+    bool has_code;
+    bool has_from_text;
+    bool has_to_text;
+    bool has_label;
+    size_t codes_count;
+    size_t records_count;
+    size_t from_records_count;
+    size_t to_records_count;
+} SidereonRinexObsDowngradeChange;
 
 /**
  * Typed detail of a refused RINEX observation write.
@@ -20059,6 +19980,200 @@ typedef struct SidereonRinexObsWriteError {
      */
     bool has_detail;
 } SidereonRinexObsWriteError;
+
+/**
+ * Fixed-width outcome of one RINEX 2 downgrade attempt.
+ */
+typedef struct SidereonRinexObsDowngradeOutcome {
+    /**
+     * True when a fresh product is available to take exactly once.
+     */
+    bool is_ok;
+    /**
+     * OK on success, INVALID_ARGUMENT on a typed semantic refusal.
+     */
+    enum SidereonStatus status;
+    /**
+     * The complete typed refusal; kind is None on success.
+     */
+    struct SidereonRinexObsWriteError error;
+    /**
+     * Number of ordered top-level changes on success.
+     */
+    size_t change_count;
+} SidereonRinexObsDowngradeOutcome;
+
+/**
+ * One parsed RINEX observation epoch summary.
+ */
+typedef struct SidereonRinexObsEpoch {
+    /**
+     * Whether epoch carries a time. False for an event record whose epoch
+     * fields are blank, which RINEX 2.11 and 3.05 allow for an event without a
+     * significant epoch; an observation or cycle-slip epoch always has one.
+     */
+    bool has_epoch;
+    /**
+     * Civil epoch in the file's time scale when has_epoch is true. When it is
+     * false the integer fields are 0, which names no calendar date, and second
+     * is NaN.
+     */
+    struct SidereonCalendarEpoch epoch;
+    /**
+     * RINEX epoch flag.
+     */
+    uint8_t flag;
+    /**
+     * Number of satellites observed at this epoch.
+     */
+    size_t satellite_count;
+} SidereonRinexObsEpoch;
+
+/**
+ * Parsed RINEX observation header summary.
+ */
+typedef struct SidereonRinexObsHeader {
+    /**
+     * Full RINEX version.
+     */
+    double version;
+    /**
+     * Whether approx_position_m is present.
+     */
+    bool has_approx_position_m;
+    /**
+     * Surveyed a-priori receiver position, ECEF meters.
+     */
+    double approx_position_m[3];
+    /**
+     * Whether antenna_delta_hen_m is present.
+     */
+    bool has_antenna_delta_hen_m;
+    /**
+     * Antenna offset in RINEX height/east/north convention, meters.
+     */
+    double antenna_delta_hen_m[3];
+    /**
+     * Whether interval_s is present.
+     */
+    bool has_interval_s;
+    /**
+     * Nominal epoch spacing, seconds.
+     */
+    double interval_s;
+    /**
+     * Whether time_of_first_obs is present.
+     */
+    bool has_time_of_first_obs;
+    /**
+     * First observation epoch.
+     */
+    struct SidereonCalendarEpoch time_of_first_obs;
+    /**
+     * Time scale of time_of_first_obs as SidereonTimeScale.
+     */
+    uint32_t time_of_first_obs_scale;
+    /**
+     * Number of per-system observation-code rows.
+     */
+    size_t obs_code_count;
+    /**
+     * Number of phase-shift header rows.
+     */
+    size_t phase_shift_count;
+    /**
+     * Number of scale-factor header rows.
+     */
+    size_t scale_factor_count;
+    /**
+     * Number of GLONASS slot/channel rows.
+     */
+    size_t glonass_slot_count;
+    /**
+     * Whether marker_name is present.
+     */
+    bool has_marker_name;
+    /**
+     * Marker name, null-terminated when present.
+     */
+    char marker_name[RINEX_OBS_MARKER_C_BYTES];
+} SidereonRinexObsHeader;
+
+/**
+ * One detached header snapshot in a RINEX observation header timeline.
+ */
+typedef struct SidereonRinexObsHeaderSegment {
+    /**
+     * First epoch index for which this header is in effect.
+     */
+    size_t first_epoch_index;
+    /**
+     * A copied summary of the header in effect from first_epoch_index.
+     */
+    struct SidereonRinexObsHeader header;
+} SidereonRinexObsHeaderSegment;
+
+/**
+ * One selected single-frequency pseudorange row from a RINEX OBS epoch.
+ */
+typedef struct SidereonRinexObsPseudorange {
+    /**
+     * Satellite token.
+     */
+    struct SidereonSatelliteToken sat_id;
+    /**
+     * Selected code pseudorange, meters.
+     */
+    double pseudorange_m;
+} SidereonRinexObsPseudorange;
+
+/**
+ * One RINEX receiver-clock phase-deviation sample in seconds.
+ */
+typedef struct SidereonClockPhaseSample {
+    /**
+     * Whether phase_s carries a receiver-clock phase deviation.
+     */
+    bool has_phase_s;
+    /**
+     * Receiver-clock phase deviation, seconds, when present.
+     */
+    double phase_s;
+} SidereonClockPhaseSample;
+
+/**
+ * One labelled raw RINEX observation value.
+ */
+typedef struct SidereonRinexObsValue {
+    /**
+     * Satellite token.
+     */
+    struct SidereonSatelliteToken sat_id;
+    /**
+     * RINEX observation code.
+     */
+    char code[RINEX_OBS_CODE_C_BYTES];
+    /**
+     * Observation kind as SidereonRinexObsKind.
+     */
+    uint32_t kind;
+    /**
+     * Whether value is present. False means the field was blank.
+     */
+    bool has_value;
+    /**
+     * Parsed value when present.
+     */
+    double value;
+    /**
+     * Loss-of-lock indicator, or -1 when absent.
+     */
+    int32_t lli;
+    /**
+     * Signal-strength indicator, or -1 when absent.
+     */
+    int32_t ssi;
+} SidereonRinexObsValue;
 
 /**
  * The complete outcome of one RINEX observation write: the fixed-width part of
@@ -41489,6 +41604,102 @@ enum SidereonStatus sidereon_rinex_obs_codes(const struct SidereonRinexObs *obs,
                                              size_t *out_required);
 
 /**
+ * Release a downgrade result. Any fresh product not yet taken is released too.
+ */
+void sidereon_rinex_obs_downgrade_result_free(struct SidereonRinexObsDowngradeResult *result);
+
+/**
+ * Copy one fixed-width change descriptor. `depth=0` selects an ordered
+ * top-level change; each greater depth follows one InEventLists nested change.
+ */
+enum SidereonStatus sidereon_rinex_obs_downgrade_result_get_change(const struct SidereonRinexObsDowngradeResult *result,
+                                                                   size_t change_index,
+                                                                   size_t depth,
+                                                                   struct SidereonRinexObsDowngradeChange *out_change);
+
+/**
+ * Copy one string from a vector payload. list is a
+ * SidereonRinexObsDowngradeStringList value; item_index must be in the count
+ * reported by the fixed descriptor.
+ */
+enum SidereonStatus sidereon_rinex_obs_downgrade_result_get_change_list_item(const struct SidereonRinexObsDowngradeResult *result,
+                                                                             size_t change_index,
+                                                                             size_t depth,
+                                                                             uint32_t list,
+                                                                             size_t item_index,
+                                                                             uint8_t *out,
+                                                                             size_t len,
+                                                                             size_t *out_written,
+                                                                             size_t *out_required);
+
+/**
+ * Copy one scalar text payload from a downgrade change. field is a
+ * SidereonRinexObsDowngradeTextField value. An absent payload is an empty
+ * successful output; invalid field values are rejected.
+ */
+enum SidereonStatus sidereon_rinex_obs_downgrade_result_get_change_text(const struct SidereonRinexObsDowngradeResult *result,
+                                                                        size_t change_index,
+                                                                        size_t depth,
+                                                                        uint32_t field,
+                                                                        uint8_t *out,
+                                                                        size_t len,
+                                                                        size_t *out_written,
+                                                                        size_t *out_required);
+
+/**
+ * Copy the observation-code payload of a typed refusal, or empty text.
+ */
+enum SidereonStatus sidereon_rinex_obs_downgrade_result_get_code(const struct SidereonRinexObsDowngradeResult *result,
+                                                                 uint8_t *out,
+                                                                 size_t len,
+                                                                 size_t *out_written,
+                                                                 size_t *out_required);
+
+/**
+ * Copy the detail payload of a typed refusal, or empty text.
+ */
+enum SidereonStatus sidereon_rinex_obs_downgrade_result_get_detail(const struct SidereonRinexObsDowngradeResult *result,
+                                                                   uint8_t *out,
+                                                                   size_t len,
+                                                                   size_t *out_written,
+                                                                   size_t *out_required);
+
+/**
+ * Copy the route-prefixed typed refusal message, or empty text on success.
+ */
+enum SidereonStatus sidereon_rinex_obs_downgrade_result_get_message(const struct SidereonRinexObsDowngradeResult *result,
+                                                                    uint8_t *out,
+                                                                    size_t len,
+                                                                    size_t *out_written,
+                                                                    size_t *out_required);
+
+/**
+ * Copy the fixed-width outcome of a downgrade attempt.
+ */
+enum SidereonStatus sidereon_rinex_obs_downgrade_result_get_outcome(const struct SidereonRinexObsDowngradeResult *result,
+                                                                    struct SidereonRinexObsDowngradeOutcome *out_outcome);
+
+/**
+ * Transfer the fresh downgraded product out of a successful result exactly
+ * once. The product remains valid after the result and source are freed.
+ */
+enum SidereonStatus sidereon_rinex_obs_downgrade_result_take_obs(struct SidereonRinexObsDowngradeResult *result,
+                                                                 struct SidereonRinexObs **out_obs);
+
+/**
+ * Downgrade an observation product to a RINEX 2 version without mutating the
+ * source. A well-formed call always returns an owned result: either a fresh
+ * product plus every ordered change, or the complete typed write refusal.
+ *
+ * Safety: obs must be live; out_result points to one writable result pointer,
+ * initialized to NULL by this function. Free it with
+ * sidereon_rinex_obs_downgrade_result_free.
+ */
+enum SidereonStatus sidereon_rinex_obs_downgrade_to_rinex2(const struct SidereonRinexObs *obs,
+                                                           double version,
+                                                           struct SidereonRinexObsDowngradeResult **out_result);
+
+/**
  * Write the number of epoch records (file order, event records included) to
  * *out_count.
  *
@@ -41529,6 +41740,31 @@ void sidereon_rinex_obs_free(struct SidereonRinexObs *obs);
  */
 enum SidereonStatus sidereon_rinex_obs_header(const struct SidereonRinexObs *obs,
                                               struct SidereonRinexObsHeader *out_header);
+
+/**
+ * Copy the header in effect at one epoch. The returned value is detached from
+ * the observation handle. An index equal to the epoch count is rejected.
+ *
+ * Safety: obs must be a live handle; out_header must point to one writable
+ * SidereonRinexObsHeader.
+ */
+enum SidereonStatus sidereon_rinex_obs_header_at(const struct SidereonRinexObs *obs,
+                                                 size_t epoch_index,
+                                                 struct SidereonRinexObsHeader *out_header);
+
+/**
+ * Copy every detached header-timeline segment in file order. The first row is
+ * always `(0, file_header)`; later rows are effective event headers only.
+ * Uses the standard two-call variable-length output contract.
+ *
+ * Safety: obs must be live; out points to len writable segments or is NULL
+ * when len is zero; count outputs point to writable size_t values.
+ */
+enum SidereonStatus sidereon_rinex_obs_header_timeline(const struct SidereonRinexObs *obs,
+                                                       struct SidereonRinexObsHeaderSegment *out,
+                                                       size_t len,
+                                                       size_t *out_written,
+                                                       size_t *out_required);
 
 /**
  * Read and parse a RINEX observation file from a UTF-8 filesystem path. On
@@ -41604,6 +41840,14 @@ enum SidereonStatus sidereon_rinex_obs_receiver_clock_phase_deviations(const str
                                                                        size_t len,
                                                                        size_t *out_written,
                                                                        size_t *out_required);
+
+/**
+ * Copy how many input records the reader deliberately skipped.
+ *
+ * Safety: obs must be live; out_count points to writable size_t.
+ */
+enum SidereonStatus sidereon_rinex_obs_skipped_records(const struct SidereonRinexObs *obs,
+                                                       size_t *out_count);
 
 /**
  * Serialize a RINEX observation product back to RINEX text. The output is not

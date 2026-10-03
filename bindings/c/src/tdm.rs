@@ -1393,6 +1393,8 @@ mod tests {
             });
             assert_eq!(val["fields"]["kind"], name);
         }
+
+        assert_eq!(TdmError::NoSegments.to_string(), "missing TDM segment");
     }
 
     #[test]

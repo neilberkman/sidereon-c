@@ -8,6 +8,25 @@
 
 static int failures;
 
+static const char expected_snapshot[] =
+    "{\"ccsds_omm_vers\":\"2.0\",\"creation_date\":null,\"originator\":null,"
+    "\"object_name\":\"NAVSTAR 43 (USA 132)\",\"object_id\":\"1997-035A\","
+    "\"center_name\":\"EARTH\",\"ref_frame\":\"TEME\",\"time_system\":\"UTC\","
+    "\"mean_element_theory\":\"SGP/SGP4\",\"epoch\":{\"year\":2026,\"month\":6,"
+    "\"day\":16,\"hour\":4,\"minute\":54,\"second\":23,\"microsecond\":504544,"
+    "\"femtosecond\":0},\"mean_motion\":2.00563771,\"eccentricity\":0.0102442,"
+    "\"inclination_deg\":55.9944,\"ra_of_asc_node_deg\":98.6138,"
+    "\"arg_of_pericenter_deg\":56.9091,\"mean_anomaly_deg\":304.0464,"
+    "\"ephemeris_type\":0,\"classification_type\":\"U\",\"norad_cat_id\":24876,"
+    "\"element_set_no\":999,\"rev_at_epoch\":21193,\"bstar\":0.0,"
+    "\"mean_motion_dot\":-1.2e-7,\"mean_motion_ddot\":0.0,\"classification\":null,"
+    "\"message_id\":null,\"ref_frame_epoch\":null,\"semi_major_axis_km\":null,"
+    "\"gm_km3_s2\":null,\"spacecraft\":null,\"bterm_m2_kg\":null,"
+    "\"agom_m2_kg\":null,\"covariance\":null,\"user_defined\":[],"
+    "\"comments\":{\"header\":[],\"metadata\":[],\"mean_elements\":[],"
+    "\"tle_parameters\":[],\"user_defined\":[]},\"exact_sgp4_epoch\":null,"
+    "\"quantize_tle_derived_fields\":true}";
+
 static void check(int condition, const char *label) {
     if (!condition) {
         fprintf(stderr, "FAIL: %s\n", label);
@@ -90,15 +109,9 @@ int main(int argc, char **argv) {
                   written == required,
               "copy complete snapshot");
         snapshot[written] = 0;
-        check(strstr((const char *)snapshot, "\"exact_sgp4_epoch\":null") != NULL &&
-                  strstr((const char *)snapshot, "\"quantize_tle_derived_fields\":true") != NULL &&
-                  strstr((const char *)snapshot, "\"ccsds_omm_vers\":\"2.0\"") != NULL &&
-                  strstr((const char *)snapshot, "\"epoch\"") != NULL &&
-                  strstr((const char *)snapshot, "\"mean_motion\"") != NULL &&
-                  strstr((const char *)snapshot, "\"spacecraft\":null") != NULL &&
-                  strstr((const char *)snapshot, "\"comments\":{\"header\":[]") != NULL &&
-                  strstr((const char *)snapshot, "\"user_defined\":[]") != NULL,
-              "snapshot carries wire fields and non-wire bridge settings");
+        check(written == sizeof(expected_snapshot) - 1 &&
+                  memcmp(snapshot, expected_snapshot, sizeof(expected_snapshot) - 1) == 0,
+              "snapshot matches every exposed OMM field exactly");
         SidereonOmm *rebuilt = NULL;
         check(sidereon_omm_from_snapshot_json(snapshot, written, &rebuilt) == SIDEREON_STATUS_OK && rebuilt != NULL,
               "construct from complete detached snapshot");
