@@ -824,16 +824,15 @@ pub unsafe extern "C" fn sidereon_ssr_message_ura(
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct SidereonSsrOrbitCorrection {
+    /// Source tag: 0 is RTCM SSR, 1 is Galileo HAS, and 2 is IGS SSR.
     pub source: u32,
     pub provider_id: u16,
     pub solution_id: u8,
-    /// Whether the correction came from Galileo HAS and so carries the
-    /// navigation-message index its mask states. False for an RTCM SSR
-    /// correction.
+    /// True for Galileo HAS and IGS SSR; false for RTCM SSR.
     pub has_nav_message: bool,
-    /// The HAS navigation-message index NM as transmitted (0 is GPS LNAV or
-    /// Galileo I/NAV; 1..=7 are reserved, and such a correction is stored but
-    /// not applied). Zero when has_nav_message is false.
+    /// HAS navigation-message index NM when source is 1 (0 is GPS LNAV or
+    /// Galileo I/NAV; 1..=7 are reserved and not applied). Zero for RTCM and
+    /// IGS SSR; use source to distinguish its presence.
     pub has_nav_message_index: u8,
     pub iode: u32,
     pub iod_ssr: u8,
@@ -850,18 +849,38 @@ pub struct SidereonSsrOrbitCorrection {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonSsrOrbitBasis {
+    /// Velocity-aligned radial/along/cross axes.
+    VelocityAligned = 0,
+}
+
+/// Metadata omitted from the ABI-stable orbit correction struct.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonSsrOrbitMetadata {
+    /// Whether the source message carried an IOD CRC.
+    pub has_iod_crc: bool,
+    /// Native RTCM SBAS IOD CRC; zero when absent.
+    pub iod_crc: u32,
+    /// Basis used by the radial/along/cross components.
+    pub basis: SidereonSsrOrbitBasis,
+    /// Transmitted SSR epoch in J2000 seconds.
+    pub transmitted_epoch_j2000_s: f64,
+}
+
+#[repr(C)]
 #[derive(Clone, Copy)]
 pub struct SidereonSsrClockCorrection {
+    /// Source tag: 0 is RTCM SSR, 1 is Galileo HAS, and 2 is IGS SSR.
     pub source: u32,
     pub provider_id: u16,
     pub solution_id: u8,
-    /// Whether the correction came from Galileo HAS and so carries the
-    /// navigation-message index its mask states. False for an RTCM SSR
-    /// correction.
+    /// True for Galileo HAS and IGS SSR; false for RTCM SSR.
     pub has_nav_message: bool,
-    /// The HAS navigation-message index NM as transmitted (0 is GPS LNAV or
-    /// Galileo I/NAV; 1..=7 are reserved, and such a correction is stored but
-    /// not applied). Zero when has_nav_message is false.
+    /// HAS navigation-message index NM when source is 1 (0 is GPS LNAV or
+    /// Galileo I/NAV; 1..=7 are reserved and not applied). Zero for RTCM and
+    /// IGS SSR; use source to distinguish its presence.
     pub has_nav_message_index: u8,
     pub iod_ssr: u8,
     pub c0_m: f64,
@@ -873,6 +892,16 @@ pub struct SidereonSsrClockCorrection {
     pub high_rate_c0_m: f64,
     pub high_rate_ref_epoch_j2000_s: f64,
     pub high_rate_update_interval_s: f64,
+}
+
+/// Epochs omitted from the ABI-stable clock correction struct.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonSsrClockMetadata {
+    /// Transmitted clock epoch in J2000 seconds.
+    pub transmitted_epoch_j2000_s: f64,
+    /// Transmitted high-rate epoch in J2000 seconds; zero if absent.
+    pub high_rate_transmitted_epoch_j2000_s: f64,
 }
 
 #[no_mangle]
@@ -1155,6 +1184,91 @@ pub unsafe extern "C" fn sidereon_ssr_store_orbit(
     })
 }
 
+/// Reads the existing orbit projection and additive metadata in one store lookup.
+///
+/// The metadata reports optional IOD CRC presence/value, orbit basis, and the
+/// transmitted epoch separately from the orbit reference epoch.
+///
+/// # Safety
+/// store must be a live handle, sat_id a NUL-terminated satellite token, and
+/// all three output pointers must be writable and non-null.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ssr_store_orbit_full(
+    store: *const SidereonSsrCorrectionStore,
+    sat_id: *const c_char,
+    out_present: *mut bool,
+    out_orbit: *mut SidereonSsrOrbitCorrection,
+    out_metadata: *mut SidereonSsrOrbitMetadata,
+) -> SidereonStatus {
+    ssr_operation_boundary(
+        "sidereon_ssr_store_orbit_full",
+        SidereonStatus::Panic,
+        || {
+            let out_present = c_try!(require_out(
+                out_present,
+                "sidereon_ssr_store_orbit_full",
+                "out_present"
+            ));
+            *out_present = false;
+            let out_orbit = c_try!(require_out(
+                out_orbit,
+                "sidereon_ssr_store_orbit_full",
+                "out_orbit"
+            ));
+            *out_orbit = SidereonSsrOrbitCorrection {
+                source: 0,
+                provider_id: 0,
+                solution_id: 0,
+                has_nav_message: false,
+                has_nav_message_index: 0,
+                iode: 0,
+                iod_ssr: 0,
+                crs_regional: false,
+                reference_point: SidereonSsrReferencePoint::CenterOfMass,
+                radial_m: 0.0,
+                along_m: 0.0,
+                cross_m: 0.0,
+                radial_rate_m_s: 0.0,
+                along_rate_m_s: 0.0,
+                cross_rate_m_s: 0.0,
+                ref_epoch_j2000_s: 0.0,
+                update_interval_s: 0.0,
+            };
+            let out_metadata = c_try!(require_out(
+                out_metadata,
+                "sidereon_ssr_store_orbit_full",
+                "out_metadata"
+            ));
+            *out_metadata = SidereonSsrOrbitMetadata {
+                has_iod_crc: false,
+                iod_crc: 0,
+                basis: SidereonSsrOrbitBasis::VelocityAligned,
+                transmitted_epoch_j2000_s: 0.0,
+            };
+            let store = c_try!(require_ref(store, "sidereon_ssr_store_orbit_full", "store"));
+            let sat = c_try!(parse_satellite_token(
+                "sidereon_ssr_store_orbit_full",
+                sat_id
+            ));
+            if let Some(value) = store.inner.orbit(sat) {
+                *out_present = true;
+                *out_orbit = ssr_orbit_to_c(value);
+                *out_metadata = SidereonSsrOrbitMetadata {
+                    has_iod_crc: value.iod_crc.is_some(),
+                    iod_crc: value.iod_crc.unwrap_or(0),
+                    basis: match value.basis {
+                        sidereon_core::ssr::OrbitBasis::VelocityAligned => {
+                            SidereonSsrOrbitBasis::VelocityAligned
+                        }
+                    },
+                    transmitted_epoch_j2000_s: value.transmitted_epoch_j2000_s,
+                };
+            }
+            SidereonStatus::Ok
+        },
+    )
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_ssr_store_clock(
     store: *const SidereonSsrCorrectionStore,
@@ -1238,8 +1352,86 @@ pub unsafe extern "C" fn sidereon_ssr_store_ura_index(
     )
 }
 
-/// The latest code bias, metres, stored for satellite `sat_id` and the raw
-/// signal index `signal` its source transmitted. `source` is 0 for RTCM SSR
+/// Reads the existing clock projection and additive transmitted epochs in one
+/// store lookup. The main transmitted epoch is distinct from the correction's
+/// reference epoch; the high-rate value is zero when no high-rate correction is
+/// present.
+///
+/// # Safety
+/// store must be a live handle, sat_id a NUL-terminated satellite token, and
+/// all three output pointers must be writable and non-null.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ssr_store_clock_full(
+    store: *const SidereonSsrCorrectionStore,
+    sat_id: *const c_char,
+    out_present: *mut bool,
+    out_clock: *mut SidereonSsrClockCorrection,
+    out_metadata: *mut SidereonSsrClockMetadata,
+) -> SidereonStatus {
+    ssr_operation_boundary(
+        "sidereon_ssr_store_clock_full",
+        SidereonStatus::Panic,
+        || {
+            let out_present = c_try!(require_out(
+                out_present,
+                "sidereon_ssr_store_clock_full",
+                "out_present"
+            ));
+            *out_present = false;
+            let out_clock = c_try!(require_out(
+                out_clock,
+                "sidereon_ssr_store_clock_full",
+                "out_clock"
+            ));
+            *out_clock = SidereonSsrClockCorrection {
+                source: 0,
+                provider_id: 0,
+                solution_id: 0,
+                has_nav_message: false,
+                has_nav_message_index: 0,
+                iod_ssr: 0,
+                c0_m: 0.0,
+                c1_m_s: 0.0,
+                c2_m_s2: 0.0,
+                ref_epoch_j2000_s: 0.0,
+                update_interval_s: 0.0,
+                has_high_rate: false,
+                high_rate_c0_m: 0.0,
+                high_rate_ref_epoch_j2000_s: 0.0,
+                high_rate_update_interval_s: 0.0,
+            };
+            let out_metadata = c_try!(require_out(
+                out_metadata,
+                "sidereon_ssr_store_clock_full",
+                "out_metadata"
+            ));
+            *out_metadata = SidereonSsrClockMetadata {
+                transmitted_epoch_j2000_s: 0.0,
+                high_rate_transmitted_epoch_j2000_s: 0.0,
+            };
+            let store = c_try!(require_ref(store, "sidereon_ssr_store_clock_full", "store"));
+            let sat = c_try!(parse_satellite_token(
+                "sidereon_ssr_store_clock_full",
+                sat_id
+            ));
+            if let Some(value) = store.inner.clock(sat) {
+                *out_present = true;
+                *out_clock = ssr_clock_to_c(value);
+                *out_metadata = SidereonSsrClockMetadata {
+                    transmitted_epoch_j2000_s: value.transmitted_epoch_j2000_s,
+                    high_rate_transmitted_epoch_j2000_s: value
+                        .high_rate
+                        .map(|high_rate| high_rate.transmitted_epoch_j2000_s)
+                        .unwrap_or(0.0),
+                };
+            }
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// The latest code bias, metres, stored for satellite sat_id and the raw
+/// signal index signal its source transmitted. source is 0 for RTCM SSR
 /// (a signal and tracking mode identifier), 1 for Galileo HAS (HAS SIS ICD
 /// Table 20), or 2 for IGS SSR (IGS SSR signal identifiers); an index the
 /// source's table assigns to a physical signal is looked up as that signal, so
@@ -1247,8 +1439,9 @@ pub unsafe extern "C" fn sidereon_ssr_store_ura_index(
 /// This inspector ignores lifetime, staleness, do-not-use exclusion and phase
 /// continuity.
 ///
-/// Safety: store is a live handle; sat_id is a null-terminated token;
-/// out_present points to a bool; out_bias_m points to a double.
+/// # Safety
+/// store must be a live handle, sat_id a NUL-terminated token, and
+/// out_present and out_bias_m must be writable and non-null.
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_ssr_store_code_bias_m(
     store: *const SidereonSsrCorrectionStore,

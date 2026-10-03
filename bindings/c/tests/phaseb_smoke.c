@@ -793,11 +793,63 @@ static void test_ssr(void) {
                       present == W4_PB_SSR_G30_ORBIT_PRESENT,
                   "ssr store orbit");
             check_bits(orbit.radial_m, W4_PB_SSR_G30_RADIAL_BITS, "ssr store orbit radial");
+            SidereonSsrOrbitCorrection full_orbit;
+            SidereonSsrOrbitMetadata orbit_metadata;
+            bool full_present = false;
+            check(sidereon_ssr_store_orbit_full(store, "G30", &full_present, &full_orbit,
+                                                &orbit_metadata) == SIDEREON_STATUS_OK &&
+                      full_present == W4_PB_SSR_G30_ORBIT_PRESENT &&
+                      full_orbit.source == orbit.source &&
+                      full_orbit.provider_id == orbit.provider_id &&
+                      full_orbit.solution_id == orbit.solution_id &&
+                      full_orbit.has_nav_message == orbit.has_nav_message &&
+                      full_orbit.has_nav_message_index == orbit.has_nav_message_index &&
+                      full_orbit.iode == orbit.iode && full_orbit.iod_ssr == orbit.iod_ssr &&
+                      full_orbit.crs_regional == orbit.crs_regional &&
+                      full_orbit.reference_point == orbit.reference_point &&
+                      full_orbit.radial_m == orbit.radial_m &&
+                      full_orbit.along_m == orbit.along_m && full_orbit.cross_m == orbit.cross_m &&
+                      full_orbit.radial_rate_m_s == orbit.radial_rate_m_s &&
+                      full_orbit.along_rate_m_s == orbit.along_rate_m_s &&
+                      full_orbit.cross_rate_m_s == orbit.cross_rate_m_s &&
+                      full_orbit.ref_epoch_j2000_s == orbit.ref_epoch_j2000_s &&
+                      full_orbit.update_interval_s == orbit.update_interval_s &&
+                      !orbit_metadata.has_iod_crc && orbit_metadata.iod_crc == 0 &&
+                      orbit_metadata.basis == 0 &&
+                      fabs(orbit_metadata.transmitted_epoch_j2000_s -
+                           (full_orbit.ref_epoch_j2000_s - full_orbit.update_interval_s / 2.0)) <
+                          1e-9,
+                  "ssr store full orbit metadata");
             check(sidereon_ssr_store_clock(store, "G30", &present, &clock) ==
                       SIDEREON_STATUS_OK &&
                       present == W4_PB_SSR_G30_CLOCK_PRESENT,
                   "ssr store clock");
             check_bits(clock.c0_m, W4_PB_SSR_G30_C0_BITS, "ssr store clock c0");
+            SidereonSsrClockCorrection full_clock;
+            SidereonSsrClockMetadata clock_metadata;
+            bool full_clock_present = false;
+            check(sidereon_ssr_store_clock_full(store, "G30", &full_clock_present,
+                                                &full_clock, &clock_metadata) == SIDEREON_STATUS_OK &&
+                      full_clock_present == W4_PB_SSR_G30_CLOCK_PRESENT &&
+                      full_clock.source == clock.source &&
+                      full_clock.provider_id == clock.provider_id &&
+                      full_clock.solution_id == clock.solution_id &&
+                      full_clock.has_nav_message == clock.has_nav_message &&
+                      full_clock.has_nav_message_index == clock.has_nav_message_index &&
+                      full_clock.iod_ssr == clock.iod_ssr &&
+                      full_clock.c0_m == clock.c0_m && full_clock.c1_m_s == clock.c1_m_s &&
+                      full_clock.c2_m_s2 == clock.c2_m_s2 &&
+                      full_clock.ref_epoch_j2000_s == clock.ref_epoch_j2000_s &&
+                      full_clock.update_interval_s == clock.update_interval_s &&
+                      full_clock.has_high_rate == clock.has_high_rate &&
+                      full_clock.high_rate_c0_m == clock.high_rate_c0_m &&
+                      full_clock.high_rate_ref_epoch_j2000_s == clock.high_rate_ref_epoch_j2000_s &&
+                      full_clock.high_rate_update_interval_s == clock.high_rate_update_interval_s &&
+                      fabs(clock_metadata.transmitted_epoch_j2000_s -
+                           (full_clock.ref_epoch_j2000_s - full_clock.update_interval_s / 2.0)) <
+                          1e-9 &&
+                      clock_metadata.high_rate_transmitted_epoch_j2000_s == 0.0,
+                  "ssr store full clock metadata");
             sidereon_ssr_store_free(store);
         }
         SidereonSsrCorrectionStore *read_store = NULL;
@@ -840,7 +892,145 @@ static void test_ssr(void) {
                   SIDEREON_STATUS_OK &&
                   empty != NULL,
               "ssr empty store new");
+        if (empty) {
+            bool orbit_present = true;
+            SidereonSsrOrbitCorrection orbit;
+            SidereonSsrOrbitMetadata orbit_metadata;
+            memset(&orbit, 0xa5, sizeof(orbit));
+            memset(&orbit_metadata, 0xa5, sizeof(orbit_metadata));
+            check(sidereon_ssr_store_orbit_full(empty, "G01", &orbit_present, &orbit,
+                                                &orbit_metadata) == SIDEREON_STATUS_OK &&
+                      !orbit_present && orbit.source == 0 && orbit.provider_id == 0 &&
+                      orbit.solution_id == 0 && !orbit.has_nav_message &&
+                      orbit.has_nav_message_index == 0 && orbit.iode == 0 && orbit.iod_ssr == 0 &&
+                      !orbit.crs_regional &&
+                      orbit.reference_point == SIDEREON_SSR_REFERENCE_POINT_CENTER_OF_MASS &&
+                      orbit.radial_m == 0.0 && orbit.along_m == 0.0 && orbit.cross_m == 0.0 &&
+                      orbit.radial_rate_m_s == 0.0 && orbit.along_rate_m_s == 0.0 &&
+                      orbit.cross_rate_m_s == 0.0 && orbit.ref_epoch_j2000_s == 0.0 &&
+                      orbit.update_interval_s == 0.0 && !orbit_metadata.has_iod_crc &&
+                      orbit_metadata.iod_crc == 0 && orbit_metadata.basis == 0 &&
+                      orbit_metadata.transmitted_epoch_j2000_s == 0.0,
+                  "ssr empty full orbit outputs");
+            bool clock_present = true;
+            SidereonSsrClockCorrection clock;
+            SidereonSsrClockMetadata clock_metadata;
+            memset(&clock, 0xa5, sizeof(clock));
+            memset(&clock_metadata, 0xa5, sizeof(clock_metadata));
+            check(sidereon_ssr_store_clock_full(empty, "G01", &clock_present, &clock,
+                                                &clock_metadata) == SIDEREON_STATUS_OK &&
+                      !clock_present && clock.source == 0 && clock.provider_id == 0 &&
+                      clock.solution_id == 0 && !clock.has_nav_message &&
+                      clock.has_nav_message_index == 0 && clock.iod_ssr == 0 &&
+                      clock.c0_m == 0.0 && clock.c1_m_s == 0.0 && clock.c2_m_s2 == 0.0 &&
+                      clock.ref_epoch_j2000_s == 0.0 && clock.update_interval_s == 0.0 &&
+                      !clock.has_high_rate && clock.high_rate_c0_m == 0.0 &&
+                      clock.high_rate_ref_epoch_j2000_s == 0.0 &&
+                      clock.high_rate_update_interval_s == 0.0 &&
+                      clock_metadata.transmitted_epoch_j2000_s == 0.0 &&
+                      clock_metadata.high_rate_transmitted_epoch_j2000_s == 0.0,
+                  "ssr empty full clock outputs");
+        }
         sidereon_ssr_store_free(empty);
+
+        const uint8_t sbas_crc_frame[] = {
+            0xd3, 0x00, 0x1d, 0x4e, 0x4a, 0xbc, 0xde, 0x3e, 0x44, 0x8d,
+            0x10, 0x10, 0xea, 0xac, 0xa8, 0x64, 0x3f, 0xe7, 0xe3, 0x81,
+            0x81, 0xcf, 0xd2, 0x30, 0x7f, 0xec, 0xb8, 0x02, 0x69, 0x7f,
+            0x6d, 0x70, 0x41, 0x4f, 0xf7,
+        };
+        SidereonGnssWeekTow sbas_epoch = {SIDEREON_TIME_SCALE_GPST, 2400, 100000.0};
+        SidereonSsrCorrectionStore *sbas_store = NULL;
+        check(sidereon_ssr_store_from_rtcm(sbas_crc_frame, sizeof(sbas_crc_frame),
+                                            &sbas_epoch, &sbas_store) == SIDEREON_STATUS_OK &&
+                  sbas_store != NULL,
+              "ssr SBAS CRC fixture store");
+        if (sbas_store) {
+            bool sbas_present = false;
+            SidereonSsrOrbitCorrection sbas_orbit;
+            SidereonSsrOrbitMetadata sbas_metadata;
+            check(sidereon_ssr_store_orbit_full(sbas_store, "S22", &sbas_present,
+                                                &sbas_orbit, &sbas_metadata) == SIDEREON_STATUS_OK &&
+                      sbas_present && sbas_orbit.source == 0 &&
+                      sbas_orbit.provider_id == 0x1234 && sbas_orbit.solution_id == 4 &&
+                      sbas_orbit.iode == 0x155 && sbas_orbit.iod_ssr == 9 &&
+                      sbas_orbit.crs_regional && !sbas_orbit.has_nav_message &&
+                      sbas_metadata.has_iod_crc && sbas_metadata.iod_crc == 0x654321 &&
+                      sbas_metadata.basis == 0 &&
+                      fabs(sbas_orbit.radial_m - 1.2345) < 1e-12 &&
+                      fabs(sbas_orbit.along_m + 4.938) < 1e-12 &&
+                      fabs(sbas_orbit.cross_m - 9.3824) < 1e-12 &&
+                      fabs(sbas_metadata.transmitted_epoch_j2000_s - 820855710.0) < 1e-9 &&
+                      fabs(sbas_orbit.ref_epoch_j2000_s - 820855715.0) < 1e-9 &&
+                      sbas_orbit.update_interval_s == 10.0,
+                  "ssr SBAS full orbit metadata");
+        }
+        sidereon_ssr_store_free(sbas_store);
+
+        const uint8_t igs_4076_base_frame[] = {
+            0xd3, 0x00, 0x24, 0xfe, 0xc2, 0x2e, 0x30, 0xd4, 0x00, 0x60, 0x12,
+            0x37, 0x02, 0x08, 0x8f, 0xff, 0xff, 0xa0, 0x00, 0x09, 0xff, 0xff,
+            0x60, 0x00, 0x06, 0xff, 0xff, 0x20, 0x00, 0x23, 0xff, 0xff, 0x60,
+            0x00, 0x0a, 0x7f, 0xff, 0xfe, 0x20, 0x48, 0x21, 0x65,
+        };
+        const uint8_t igs_4076_high_rate_frame[] = {
+            0xd3, 0x00, 0x0e, 0xfe, 0xc2, 0x30, 0x30, 0xd4, 0x00, 0x60,
+            0x12, 0x37, 0x04, 0x10, 0x00, 0x13, 0x40, 0x49, 0x58, 0x67,
+        };
+        uint8_t igs_4076_frames[sizeof(igs_4076_base_frame) +
+                                sizeof(igs_4076_high_rate_frame)];
+        memcpy(igs_4076_frames, igs_4076_base_frame, sizeof(igs_4076_base_frame));
+        memcpy(igs_4076_frames + sizeof(igs_4076_base_frame),
+               igs_4076_high_rate_frame, sizeof(igs_4076_high_rate_frame));
+        SidereonGnssWeekTow igs_epoch = {SIDEREON_TIME_SCALE_GPST, 2400, 100000.0};
+        SidereonSsrCorrectionStore *igs_store = NULL;
+        check(sidereon_ssr_store_from_rtcm(igs_4076_frames, sizeof(igs_4076_frames),
+                                           &igs_epoch, &igs_store) == SIDEREON_STATUS_OK &&
+                  igs_store != NULL,
+              "ssr 4076 IGS store from public RTCM frames");
+        if (igs_store) {
+            bool orbit_present = false;
+            SidereonSsrOrbitCorrection orbit;
+            SidereonSsrOrbitMetadata orbit_metadata;
+            check(sidereon_ssr_store_orbit_full(igs_store, "G01", &orbit_present,
+                                                &orbit, &orbit_metadata) == SIDEREON_STATUS_OK &&
+                      orbit_present && orbit.source == 2 && orbit.provider_id == 0x123 &&
+                      orbit.solution_id == 7 && orbit.has_nav_message &&
+                      orbit.has_nav_message_index == 0 && orbit.iode == 17 && orbit.iod_ssr == 6 &&
+                      !orbit.crs_regional &&
+                      orbit.reference_point == SIDEREON_SSR_REFERENCE_POINT_ANTENNA_PHASE_CENTER &&
+                      fabs(orbit.radial_m - 0.0003) < 1e-15 &&
+                      fabs(orbit.along_m + 0.0016) < 1e-15 &&
+                      fabs(orbit.cross_m - 0.002) < 1e-15 &&
+                      fabs(orbit.radial_rate_m_s + 0.000006) < 1e-15 &&
+                      fabs(orbit.along_rate_m_s - 0.000028) < 1e-15 &&
+                      fabs(orbit.cross_rate_m_s + 0.000032) < 1e-15 &&
+                      orbit.ref_epoch_j2000_s == 820856800.0 &&
+                      orbit.update_interval_s == 1.0 &&
+                      !orbit_metadata.has_iod_crc && orbit_metadata.iod_crc == 0 &&
+                      orbit_metadata.basis == 0 &&
+                      orbit_metadata.transmitted_epoch_j2000_s == 820856800.0,
+                  "ssr 4076 IGS full orbit");
+            bool clock_present = false;
+            SidereonSsrClockCorrection clock;
+            SidereonSsrClockMetadata clock_metadata;
+            check(sidereon_ssr_store_clock_full(igs_store, "G01", &clock_present,
+                                                &clock, &clock_metadata) == SIDEREON_STATUS_OK &&
+                      clock_present && clock.source == 2 && clock.provider_id == 0x123 &&
+                      clock.solution_id == 7 && clock.has_nav_message &&
+                      clock.has_nav_message_index == 0 && clock.iod_ssr == 6 &&
+                      fabs(clock.c0_m + 0.001) < 1e-15 &&
+                      fabs(clock.c1_m_s - 0.00002) < 1e-15 &&
+                      fabs(clock.c2_m_s2 + 0.0000006) < 1e-15 &&
+                      clock.ref_epoch_j2000_s == 820856800.0 && clock.update_interval_s == 1.0 &&
+                      clock.has_high_rate && fabs(clock.high_rate_c0_m - 0.0077) < 1e-15 &&
+                      clock.high_rate_ref_epoch_j2000_s == 820856800.0 &&
+                      clock.high_rate_update_interval_s == 1.0 &&
+                      clock_metadata.transmitted_epoch_j2000_s == 820856800.0 &&
+                      clock_metadata.high_rate_transmitted_epoch_j2000_s == 820856800.0,
+                  "ssr 4076 IGS full clock and attached high-rate");
+        }
+        sidereon_ssr_store_free(igs_store);
         sidereon_rtcm_messages_free(messages);
     }
 }

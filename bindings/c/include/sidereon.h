@@ -3203,6 +3203,13 @@ typedef enum SidereonSsrReferencePoint {
     SIDEREON_SSR_REFERENCE_POINT_CENTER_OF_MASS = 1,
 } SidereonSsrReferencePoint;
 
+typedef enum SidereonSsrOrbitBasis {
+    /**
+     * Velocity-aligned radial/along/cross axes.
+     */
+    SIDEREON_SSR_ORBIT_BASIS_VELOCITY_ALIGNED = 0,
+} SidereonSsrOrbitBasis;
+
 /**
  * Status for a leave-one-out diagnostic solve.
  */
@@ -26616,19 +26623,20 @@ typedef struct SidereonSsrCorrectedStateResult {
 } SidereonSsrCorrectedStateResult;
 
 typedef struct SidereonSsrClockCorrection {
+    /**
+     * Source tag: 0 is RTCM SSR, 1 is Galileo HAS, and 2 is IGS SSR.
+     */
     uint32_t source;
     uint16_t provider_id;
     uint8_t solution_id;
     /**
-     * Whether the correction came from Galileo HAS and so carries the
-     * navigation-message index its mask states. False for an RTCM SSR
-     * correction.
+     * True for Galileo HAS and IGS SSR; false for RTCM SSR.
      */
     bool has_nav_message;
     /**
-     * The HAS navigation-message index NM as transmitted (0 is GPS LNAV or
-     * Galileo I/NAV; 1..=7 are reserved, and such a correction is stored but
-     * not applied). Zero when has_nav_message is false.
+     * HAS navigation-message index NM when source is 1 (0 is GPS LNAV or
+     * Galileo I/NAV; 1..=7 are reserved and not applied). Zero for RTCM and
+     * IGS SSR; use source to distinguish its presence.
      */
     uint8_t has_nav_message_index;
     uint8_t iod_ssr;
@@ -26642,6 +26650,20 @@ typedef struct SidereonSsrClockCorrection {
     double high_rate_ref_epoch_j2000_s;
     double high_rate_update_interval_s;
 } SidereonSsrClockCorrection;
+
+/**
+ * Epochs omitted from the ABI-stable clock correction struct.
+ */
+typedef struct SidereonSsrClockMetadata {
+    /**
+     * Transmitted clock epoch in J2000 seconds.
+     */
+    double transmitted_epoch_j2000_s;
+    /**
+     * Transmitted high-rate epoch in J2000 seconds; zero if absent.
+     */
+    double high_rate_transmitted_epoch_j2000_s;
+} SidereonSsrClockMetadata;
 
 typedef struct SidereonSsrVtecQueryResult {
     enum SidereonSsrVtecQueryKind kind;
@@ -26664,19 +26686,20 @@ typedef struct SidereonSsrVtecLayerEvaluation {
 } SidereonSsrVtecLayerEvaluation;
 
 typedef struct SidereonSsrOrbitCorrection {
+    /**
+     * Source tag: 0 is RTCM SSR, 1 is Galileo HAS, and 2 is IGS SSR.
+     */
     uint32_t source;
     uint16_t provider_id;
     uint8_t solution_id;
     /**
-     * Whether the correction came from Galileo HAS and so carries the
-     * navigation-message index its mask states. False for an RTCM SSR
-     * correction.
+     * True for Galileo HAS and IGS SSR; false for RTCM SSR.
      */
     bool has_nav_message;
     /**
-     * The HAS navigation-message index NM as transmitted (0 is GPS LNAV or
-     * Galileo I/NAV; 1..=7 are reserved, and such a correction is stored but
-     * not applied). Zero when has_nav_message is false.
+     * HAS navigation-message index NM when source is 1 (0 is GPS LNAV or
+     * Galileo I/NAV; 1..=7 are reserved and not applied). Zero for RTCM and
+     * IGS SSR; use source to distinguish its presence.
      */
     uint8_t has_nav_message_index;
     uint32_t iode;
@@ -26692,6 +26715,28 @@ typedef struct SidereonSsrOrbitCorrection {
     double ref_epoch_j2000_s;
     double update_interval_s;
 } SidereonSsrOrbitCorrection;
+
+/**
+ * Metadata omitted from the ABI-stable orbit correction struct.
+ */
+typedef struct SidereonSsrOrbitMetadata {
+    /**
+     * Whether the source message carried an IOD CRC.
+     */
+    bool has_iod_crc;
+    /**
+     * Native RTCM SBAS IOD CRC; zero when absent.
+     */
+    uint32_t iod_crc;
+    /**
+     * Basis used by the radial/along/cross components.
+     */
+    enum SidereonSsrOrbitBasis basis;
+    /**
+     * Transmitted SSR epoch in J2000 seconds.
+     */
+    double transmitted_epoch_j2000_s;
+} SidereonSsrOrbitMetadata;
 
 /**
  * One solved epoch-local receiver clock.
@@ -49521,8 +49566,24 @@ enum SidereonStatus sidereon_ssr_store_clock(const struct SidereonSsrCorrectionS
                                              struct SidereonSsrClockCorrection *out_clock);
 
 /**
- * The latest code bias, metres, stored for satellite `sat_id` and the raw
- * signal index `signal` its source transmitted. `source` is 0 for RTCM SSR
+ * Reads the existing clock projection and additive transmitted epochs in one
+ * store lookup. The main transmitted epoch is distinct from the correction's
+ * reference epoch; the high-rate value is zero when no high-rate correction is
+ * present.
+ *
+ * # Safety
+ * store must be a live handle, sat_id a NUL-terminated satellite token, and
+ * all three output pointers must be writable and non-null.
+ */
+enum SidereonStatus sidereon_ssr_store_clock_full(const struct SidereonSsrCorrectionStore *store,
+                                                  const char *sat_id,
+                                                  bool *out_present,
+                                                  struct SidereonSsrClockCorrection *out_clock,
+                                                  struct SidereonSsrClockMetadata *out_metadata);
+
+/**
+ * The latest code bias, metres, stored for satellite sat_id and the raw
+ * signal index signal its source transmitted. source is 0 for RTCM SSR
  * (a signal and tracking mode identifier), 1 for Galileo HAS (HAS SIS ICD
  * Table 20), or 2 for IGS SSR (IGS SSR signal identifiers); an index the
  * source's table assigns to a physical signal is looked up as that signal, so
@@ -49530,8 +49591,9 @@ enum SidereonStatus sidereon_ssr_store_clock(const struct SidereonSsrCorrectionS
  * This inspector ignores lifetime, staleness, do-not-use exclusion and phase
  * continuity.
  *
- * Safety: store is a live handle; sat_id is a null-terminated token;
- * out_present points to a bool; out_bias_m points to a double.
+ * # Safety
+ * store must be a live handle, sat_id a NUL-terminated token, and
+ * out_present and out_bias_m must be writable and non-null.
  */
 enum SidereonStatus sidereon_ssr_store_code_bias_m(const struct SidereonSsrCorrectionStore *store,
                                                    const char *sat_id,
@@ -49600,6 +49662,22 @@ enum SidereonStatus sidereon_ssr_store_orbit(const struct SidereonSsrCorrectionS
                                              const char *sat_id,
                                              bool *out_present,
                                              struct SidereonSsrOrbitCorrection *out_orbit);
+
+/**
+ * Reads the existing orbit projection and additive metadata in one store lookup.
+ *
+ * The metadata reports optional IOD CRC presence/value, orbit basis, and the
+ * transmitted epoch separately from the orbit reference epoch.
+ *
+ * # Safety
+ * store must be a live handle, sat_id a NUL-terminated satellite token, and
+ * all three output pointers must be writable and non-null.
+ */
+enum SidereonStatus sidereon_ssr_store_orbit_full(const struct SidereonSsrCorrectionStore *store,
+                                                  const char *sat_id,
+                                                  bool *out_present,
+                                                  struct SidereonSsrOrbitCorrection *out_orbit,
+                                                  struct SidereonSsrOrbitMetadata *out_metadata);
 
 /**
  * The latest phase bias, metres, stored for satellite `sat_id` and the raw
