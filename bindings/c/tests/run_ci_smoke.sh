@@ -158,7 +158,11 @@ cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -o "${target_dir}/rinex_qc_finding_details_smoke_ci"
 "${target_dir}/rinex_qc_finding_details_smoke_ci" \
     "${here}/fixtures/obs/algo0010_2015001_v1_trim.rnx" \
-    "${here}/fixtures/obs/ESBC00DNK_R_20201770000_01D_30S_MO_trim.rnx"
+    "${here}/fixtures/obs/ESBC00DNK_R_20201770000_01D_30S_MO_trim.rnx" \
+    "${here}/fixtures/obs/rinex211_table_a7_example.rnx" \
+    "${here}/fixtures/obs/crinex_event_clocks_v3.rnx" \
+    "${here}/fixtures/nav/BRD400DLR_S_20261800000_01H_MN_trim.rnx" \
+    "${here}/fixtures/nav/BRDC00GOP_R_20210010000_01D_MN.rnx"
 
 cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -I"${binding_root}/include" \

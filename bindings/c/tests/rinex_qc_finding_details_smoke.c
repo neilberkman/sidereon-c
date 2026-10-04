@@ -114,8 +114,98 @@ static void check_header_mutations(const char *fixture) {
         "OBS-H07", 1, true, "TIME OF FIRST OBS",
         "{\"kind\":\"ObsTimeOfFirstMismatch\",\"spec_ref\":\"RINEX 3.05 Table A2\",\"details\":{\"declared\":{\"year\":2015,\"month\":1,\"day\":2,\"hour\":0,\"minute\":0,\"second\":0.0},\"declared_scale\":\"GPST\",\"observed\":{\"year\":2015,\"month\":1,\"day\":1,\"hour\":0,\"minute\":0,\"second\":0.0},\"observed_scale\":\"GPST\"}}");
 }
+
+static void check_fixture_finding(const char *path, bool nav, const char *code,
+                                 uint32_t severity, bool repairable, bool has_epoch,
+                                 size_t epoch, bool has_field, const char *field,
+                                 const char *expected_json) {
+    size_t len = 0, written = 0, required = 0;
+    uint8_t *bytes = read_file(path, &len);
+    SidereonRinexLintReport *report = NULL;
+    SidereonStatus status = nav ? sidereon_rinex_lint_nav(bytes, len, &report)
+                                : sidereon_rinex_lint_obs(bytes, len, &report);
+    free(bytes);
+    require(status == SIDEREON_STATUS_OK && report != NULL, "lint additional fixture");
+    require(sidereon_rinex_lint_findings(report, NULL, 0, &written, &required) == SIDEREON_STATUS_OK && required > 0, "query additional findings");
+    SidereonRinexLintFinding *findings = (SidereonRinexLintFinding *)calloc(required, sizeof(*findings));
+    require(findings != NULL, "allocate additional findings");
+    require(sidereon_rinex_lint_findings(report, findings, required, &written, &required) == SIDEREON_STATUS_OK, "copy additional findings");
+    size_t index = required;
+    for (size_t i = 0; i < required; ++i) {
+        if (strcmp(findings[i].code, code) != 0) continue;
+        if (has_epoch && (!findings[i].has_epoch_index || findings[i].epoch_index != epoch)) continue;
+        char *candidate = details_json(report, i);
+        bool match = strcmp(candidate, expected_json) == 0;
+        free(candidate);
+        if (match) { index = i; break; }
+    }
+    require(index < required, "find exact additional finding payload");
+    require(findings[index].severity == severity && findings[index].repairable == repairable, "additional finding severity/repairability");
+    require(findings[index].has_epoch_index == has_epoch && (!has_epoch || findings[index].epoch_index == epoch), "additional finding epoch location");
+    require(findings[index].has_field == has_field && (!has_field || strcmp(findings[index].field, field) == 0), "additional finding field location");
+    require(!findings[index].has_satellite, "additional finding has no satellite location");
+    char *candidate = details_json(report, index);
+    require(strcmp(candidate, expected_json) == 0, "exact additional finding payload");
+    free(candidate);
+    free(findings);
+    sidereon_rinex_lint_report_free(report);
+}
+static void check_mutated_nav_finding(const char *path, const char *old_text,
+                                      const char *new_text, const char *code,
+                                      uint32_t severity, const char *field,
+                                      const char *expected_json) {
+    size_t len = 0, written = 0, required = 0;
+    uint8_t *bytes = read_file(path, &len);
+    replace_once(bytes, len, old_text, new_text);
+    SidereonRinexLintReport *report = NULL;
+    require(sidereon_rinex_lint_nav(bytes, len, &report) == SIDEREON_STATUS_OK && report != NULL, "lint mutated NAV header");
+    free(bytes);
+    require(sidereon_rinex_lint_findings(report, NULL, 0, &written, &required) == SIDEREON_STATUS_OK && required > 0, "query mutated NAV header findings");
+    SidereonRinexLintFinding *findings = (SidereonRinexLintFinding *)calloc(required, sizeof(*findings));
+    require(findings != NULL, "allocate mutated NAV header findings");
+    require(sidereon_rinex_lint_findings(report, findings, required, &written, &required) == SIDEREON_STATUS_OK, "copy mutated NAV header findings");
+    size_t index = required;
+    for (size_t i = 0; i < required; ++i) {
+        if (strcmp(findings[i].code, code) != 0) continue;
+        char *json = details_json(report, i);
+        bool match = strcmp(json, expected_json) == 0;
+        free(json);
+        if (match) { index = i; break; }
+    }
+    require(index < required && findings[index].severity == severity && !findings[index].repairable, "exact mutated NAV header identity");
+    require(findings[index].has_field && strcmp(findings[index].field, field) == 0, "mutated NAV header field location");
+    char *json = details_json(report, index);
+    require(strcmp(json, expected_json) == 0, "exact mutated NAV header payload");
+    free(json);
+    free(findings);
+    sidereon_rinex_lint_report_free(report);
+}
+
+static void check_additional_fixtures(char **argv) {
+    check_fixture_finding(argv[2], false, "OBS-H08", 1, true, false, 0, true, "TIME OF LAST OBS",
+        "{\"kind\":\"ObsTimeOfLastMismatch\",\"spec_ref\":\"RINEX 3.05 Table A2, TIME OF LAST OBS\",\"details\":{\"declared\":{\"year\":2020,\"month\":6,\"day\":25,\"hour\":23,\"minute\":59,\"second\":30.0},\"declared_scale\":\"GPST\",\"observed\":{\"year\":2020,\"month\":6,\"day\":25,\"hour\":0,\"minute\":0,\"second\":30.0},\"observed_scale\":\"GPST\"}}");
+    check_fixture_finding(argv[3], false, "OBS-B07", 3, false, true, 1, false, "",
+        "{\"kind\":\"ObsEventEpoch\",\"spec_ref\":\"RINEX 3.05 Table A3\",\"details\":{\"flag\":4}}");
+    check_fixture_finding(argv[3], false, "OBS-B09", 3, false, true, 4, false, "",
+        "{\"kind\":\"ObsEpochGap\",\"spec_ref\":\"RINEX QC policy\",\"details\":{\"gap_s\":54.0,\"interval_s\":18.0}}");
+    check_fixture_finding(argv[4], false, "OBS-H03", 1, false, false, 0, true, "MARKER NAME",
+        "{\"kind\":\"ObsMissingHeader\",\"spec_ref\":\"RINEX 3.05/4.02 Table A2\",\"details\":{\"label\":\"MARKER NAME\"}}");
+    check_fixture_finding(argv[4], false, "OBS-B07", 3, false, true, 1, false, "",
+        "{\"kind\":\"ObsEventEpoch\",\"spec_ref\":\"RINEX 3.05 Table A3\",\"details\":{\"flag\":5}}");
+    check_fixture_finding(argv[5], true, "NAV-B03", 3, true, false, 0, false, "",
+        "{\"kind\":\"NavUnsortedRecords\",\"spec_ref\":\"RINEX QC policy\",\"details\":{}}");
+    check_fixture_finding(argv[5], true, "NAV-B05", 3, false, false, 0, false, "",
+        "{\"kind\":\"NavUnhealthyRecords\",\"spec_ref\":\"RINEX 3.05 broadcast record layout\",\"details\":{\"system\":\"GPS\",\"count\":2}}");
+    check_fixture_finding(argv[5], true, "NAV-B06", 3, false, false, 0, false, "",
+        "{\"kind\":\"NavOutOfScopeRecords\",\"spec_ref\":\"RINEX QC parse-scope disclosure\",\"details\":{\"class\":\"unsupported message CNAV\",\"count\":2}}");
+    check_mutated_nav_finding(argv[6], "LEAP SECONDS", "COMMENT     ", "NAV-H02", 3, "LEAP SECONDS",
+        "{\"kind\":\"NavLeapSecondsAbsent\",\"spec_ref\":\"RINEX 3.05 Table A5\",\"details\":{}}");
+    check_mutated_nav_finding(argv[6], "7.4506e-09", "not_a_flt!", "NAV-H03", 2, "IONOSPHERIC CORR",
+        "{\"kind\":\"NavIonoMalformed\",\"spec_ref\":\"RINEX 3.05 Table A5\",\"details\":{\"message\":\"bad/missing ionospheric correction field in navigation header\"}}");
+}
+
 int main(int argc, char **argv) {
-    require(argc == 3, "expected two OBS fixture paths"); size_t len = 0; uint8_t *bytes = read_file(argv[1], &len);
+    require(argc == 7, "expected observation and navigation fixture paths"); size_t len = 0; uint8_t *bytes = read_file(argv[1], &len);
     SidereonRinexLintReport *report = NULL; require(sidereon_rinex_lint_obs(bytes, len, &report) == SIDEREON_STATUS_OK && report != NULL, "lint fixture"); free(bytes);
     SidereonRinexLintSummary summary; require(sidereon_rinex_lint_summary(report, &summary) == SIDEREON_STATUS_OK && summary.finding_count == 9, "expect nine findings");
     const char *satellites[] = {"R05", "R06", "R07", "R09", "R15", "R16", "R17", "R24"};
@@ -139,5 +229,6 @@ int main(int argc, char **argv) {
     sidereon_rinex_lint_report_free(report);
     check_header_mutations(argv[1]);
     check_epoch_order(argv[2]);
+    check_additional_fixtures(argv);
     puts("rinex_qc_finding_details_smoke: OK"); return 0;
 }
