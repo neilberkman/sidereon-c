@@ -78,8 +78,13 @@ int main(int argc, char **argv) {
         }
         free(json);
     }
-    size_t written = 0, required = 0;
-    require(sidereon_rinex_lint_finding_details_json(report, summary.finding_count, NULL, 0, &written, &required) == SIDEREON_STATUS_INVALID_ARGUMENT, "reject out-of-range index");
+    size_t written = 9, required = 9;
+    require(sidereon_rinex_lint_finding_details_json(report, summary.finding_count, NULL, 0, &written, &required) == SIDEREON_STATUS_INVALID_ARGUMENT && written == 0 && required == 0, "reject out-of-range index and clear counts");
+    written = 0; required = 0;
+    require(sidereon_rinex_lint_finding_details_json(report, 0, NULL, 0, &written, &required) == SIDEREON_STATUS_OK && required > 1, "query short-buffer size");
+    uint8_t short_buffer[1] = {0xA5};
+    size_t short_capacity = sizeof(short_buffer);
+    require(sidereon_rinex_lint_finding_details_json(report, 0, short_buffer, short_capacity, &written, &required) == SIDEREON_STATUS_INVALID_ARGUMENT && written == 0 && required > short_capacity && short_buffer[0] == 0xA5, "short buffer reports required size without writing");
     sidereon_rinex_lint_report_free(report);
     check_epoch_order(argv[2]);
     puts("rinex_qc_finding_details_smoke: OK"); return 0;

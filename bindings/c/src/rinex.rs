@@ -3349,6 +3349,11 @@ pub unsafe extern "C" fn sidereon_rinex_lint_finding_details_json(
         "sidereon_rinex_lint_finding_details_json",
         SidereonStatus::Panic,
         || {
+            c_try!(init_copy_counts(
+                "sidereon_rinex_lint_finding_details_json",
+                out_written,
+                out_required,
+            ));
             let report = c_try!(require_ref(
                 report,
                 "sidereon_rinex_lint_finding_details_json",
