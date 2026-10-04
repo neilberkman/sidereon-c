@@ -2,9 +2,11 @@
 
 ## Unreleased
 
+## 3.0.0 - 2026-10-04
+
 ### Changed
 
-- Engine update: sidereon-core 3.0.0 at 23736446 (core revision `2373644611953e1833c0deb94057acc34bcec973`). Every breaking engine change below reaches the C surface.
+- Engine update: sidereon-core 3.0.0 at e2fb3df (core revision `e2fb3dfdc392d23087ed8aa1ee028a0056b4021b`). Every breaking engine change below reaches the C surface.
 - **Breaking.** `SidereonStatus` gains `SIDEREON_STATUS_UT1_OUTSIDE_COVERAGE`, returned where an entry point reads UT1 outside the UT1 table and the UT1 policy refuses it: pass searches, frame transforms, SPP, DGNSS, the static solve, ARAIM and reliability, SBAS protection levels, fusion, orbit fits, scenario synthesis and the RTK RINEX arc. `SidereonSbasPlError` gains `UT1_OUTSIDE_COVERAGE` (4) and `SidereonStaticPositionErrorKind` gains `UT1_OUTSIDE_COVERAGE` (9). An orbit fit whose orientation or propagation provider states another UT1 policy fails with `SIDEREON_STATUS_INVALID_ARGUMENT`.
 - **Breaking.** `SidereonTimeScales` gains `ut1_degraded` (`SidereonUt1Degradation`), set when UT1 lies outside the UT1 table and was taken from the long-term delta-T curve; the frame transforms refuse time scales so marked. `SidereonSppMetadata` and `SidereonStaticPositionMetadata` gain `ut1_degraded`, the departure a permissive source accepted.
 - **Breaking.** `SidereonSppInputs` gains `pseudorange_code` (`SidereonPseudorangeCode`, zero for single-frequency code). The broadcast group delay applies to single-frequency code only, as RTKLIB `prange` applies it; an ionosphere-free code takes none. Any other value is refused. Zero-initialized inputs keep single-frequency behaviour; callers that fill the struct field by field must set it.
