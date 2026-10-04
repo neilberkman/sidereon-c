@@ -1,4 +1,9 @@
 use super::*;
+use crate::engine_error::{
+    engine_error_operation_boundary, record_engine_error, trls_error_value,
+    SidereonEngineErrorFamily,
+};
+use serde_json::{json, Value};
 
 const MAX_GEODETIC_STATION_ID_BYTES: usize = 64;
 const GEODETIC_STATION_ID_C_BYTES: usize = MAX_GEODETIC_STATION_ID_BYTES + 1;
@@ -365,7 +370,7 @@ pub unsafe extern "C" fn sidereon_geodetic_velocity_midas(
     options: *const SidereonMidasOptions,
     out_velocity: *mut SidereonMidasVelocity,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_geodetic_velocity_midas",
         SidereonStatus::Panic,
         || {
@@ -447,7 +452,7 @@ pub unsafe extern "C" fn sidereon_geodetic_fit_trajectory(
     options: *const SidereonGeodeticTrajectoryFitOptions,
     out_trajectory: *mut *mut SidereonGeodeticTrajectory,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_geodetic_fit_trajectory",
         SidereonStatus::Panic,
         || {
@@ -744,7 +749,7 @@ pub unsafe extern "C" fn sidereon_geodetic_detect_steps(
     out_written: *mut usize,
     out_required: *mut usize,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_geodetic_detect_steps",
         SidereonStatus::Panic,
         || {
@@ -781,7 +786,7 @@ pub unsafe extern "C" fn sidereon_geodetic_detect_steps(
                         return map_geodetic_time_series_error(
                             "sidereon_geodetic_detect_steps",
                             err,
-                        )
+                        );
                     }
                 };
             let values: Vec<_> = candidates.iter().map(step_candidate_to_c).collect();
@@ -810,7 +815,7 @@ pub unsafe extern "C" fn sidereon_geodetic_network_field(
     frame: SidereonGeodeticNetworkFrame,
     out_field: *mut *mut SidereonGeodeticMotionField,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_geodetic_network_field",
         SidereonStatus::Panic,
         || {
@@ -1357,10 +1362,550 @@ fn mat3_from_row_major(values: [f64; 9]) -> [[f64; 3]; 3] {
     ]
 }
 
-fn map_geodetic_time_series_error(
+fn geodetic_time_series_node(kind: &str, fields: Value) -> Value {
+    json!({"kind": kind, "fields": fields})
+}
+
+pub(crate) fn geodetic_time_series_error_value(
+    error: &sidereon_core::geodetic_time_series::GeodeticTimeSeriesError,
+) -> Value {
+    use sidereon_core::geodetic_time_series::GeodeticTimeSeriesError as E;
+    match error {
+        E::InvalidInput { field, reason } => {
+            geodetic_time_series_node("invalid_input", json!({"field": field, "reason": reason}))
+        }
+        E::TooFewSamples { samples, needed } => geodetic_time_series_node(
+            "too_few_samples",
+            json!({"samples": samples, "needed": needed}),
+        ),
+        E::InsufficientPairs { pairs, needed } => geodetic_time_series_node(
+            "insufficient_pairs",
+            json!({"pairs": pairs, "needed": needed}),
+        ),
+        E::SingularTrajectory => geodetic_time_series_node("singular_trajectory", json!({})),
+        E::DidNotConverge { status } => {
+            geodetic_time_series_node("did_not_converge", json!({"status": status}))
+        }
+        E::Solver(err) => {
+            geodetic_time_series_node("solver", json!({"cause": trls_error_value(err)}))
+        }
+    }
+}
+
+fn map_geodetic_time_series_error_retaining(
     fn_name: &str,
     err: sidereon_core::geodetic_time_series::GeodeticTimeSeriesError,
 ) -> SidereonStatus {
     set_last_error(format!("{fn_name}: {err}"));
     SidereonStatus::InvalidArgument
+}
+
+fn map_geodetic_time_series_error(
+    fn_name: &str,
+    err: sidereon_core::geodetic_time_series::GeodeticTimeSeriesError,
+) -> SidereonStatus {
+    record_engine_error(
+        SidereonEngineErrorFamily::GeodeticTimeSeries,
+        fn_name,
+        geodetic_time_series_error_value(&err),
+    );
+    map_geodetic_time_series_error_retaining(fn_name, err)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine_error::{
+        clear_engine_error, sidereon_last_engine_error_info, sidereon_last_engine_error_payload,
+        SidereonEngineErrorFamily, SidereonEngineErrorInfo,
+    };
+    use sidereon_core::geodetic_time_series::GeodeticTimeSeriesError;
+    use std::mem::MaybeUninit;
+    use std::ptr;
+    use trust_region_least_squares::trf::{BackendError, TrfError};
+
+    #[test]
+    fn table_driven_geodetic_time_series_error_mapping() {
+        let cases: Vec<(GeodeticTimeSeriesError, &'static str)> = vec![
+            (
+                GeodeticTimeSeriesError::InvalidInput {
+                    field: "samples",
+                    reason: "non-monotonic",
+                },
+                "invalid_input",
+            ),
+            (
+                GeodeticTimeSeriesError::TooFewSamples {
+                    samples: 2,
+                    needed: 5,
+                },
+                "too_few_samples",
+            ),
+            (
+                GeodeticTimeSeriesError::InsufficientPairs {
+                    pairs: 1,
+                    needed: 4,
+                },
+                "insufficient_pairs",
+            ),
+            (
+                GeodeticTimeSeriesError::SingularTrajectory,
+                "singular_trajectory",
+            ),
+            (
+                GeodeticTimeSeriesError::DidNotConverge { status: -2 },
+                "did_not_converge",
+            ),
+            (
+                GeodeticTimeSeriesError::Solver(TrfError::EmptyResidual),
+                "solver",
+            ),
+            (
+                GeodeticTimeSeriesError::Solver(TrfError::InsufficientRows { m: 1, n: 3 }),
+                "solver",
+            ),
+            (
+                GeodeticTimeSeriesError::Solver(TrfError::Backend(BackendError::Failed(
+                    "trf diverged".into(),
+                ))),
+                "solver",
+            ),
+        ];
+
+        for (err, expected_kind) in cases {
+            let val = geodetic_time_series_error_value(&err);
+            assert_eq!(val["kind"], expected_kind);
+            match &err {
+                GeodeticTimeSeriesError::InvalidInput { field, reason } => {
+                    assert_eq!(val["fields"]["field"], *field);
+                    assert_eq!(val["fields"]["reason"], *reason);
+                }
+                GeodeticTimeSeriesError::TooFewSamples { samples, needed } => {
+                    assert_eq!(val["fields"]["samples"], *samples);
+                    assert_eq!(val["fields"]["needed"], *needed);
+                }
+                GeodeticTimeSeriesError::InsufficientPairs { pairs, needed } => {
+                    assert_eq!(val["fields"]["pairs"], *pairs);
+                    assert_eq!(val["fields"]["needed"], *needed);
+                }
+                GeodeticTimeSeriesError::SingularTrajectory => {
+                    assert_eq!(val["fields"], json!({}));
+                }
+                GeodeticTimeSeriesError::DidNotConverge { status } => {
+                    assert_eq!(val["fields"]["status"], *status);
+                }
+                GeodeticTimeSeriesError::Solver(trf_err) => match trf_err {
+                    TrfError::EmptyResidual => {
+                        assert_eq!(val["fields"]["cause"]["kind"], "empty_residual");
+                    }
+                    TrfError::InsufficientRows { m, n } => {
+                        assert_eq!(val["fields"]["cause"]["kind"], "insufficient_rows");
+                        assert_eq!(val["fields"]["cause"]["fields"]["m"], *m);
+                        assert_eq!(val["fields"]["cause"]["fields"]["n"], *n);
+                    }
+                    TrfError::Backend(_) => {
+                        assert_eq!(val["fields"]["cause"]["kind"], "backend");
+                    }
+                    _ => {}
+                },
+            }
+        }
+    }
+
+    fn sample_points(count: usize) -> Vec<SidereonGeodeticPositionSample> {
+        (0..count)
+            .map(|i| SidereonGeodeticPositionSample {
+                epoch_year: 2020.0 + i as f64 * 0.1,
+                position_m: [i as f64 * 0.01, i as f64 * 0.02, 0.0],
+                has_covariance_m2: false,
+                covariance_m2: [0.0; 9],
+            })
+            .collect()
+    }
+
+    #[test]
+    fn geodetic_time_series_public_producer_control_and_refusals() {
+        clear_engine_error();
+
+        let samples = sample_points(10);
+        let series = SidereonGeodeticPositionSeries {
+            frame: SidereonGeodeticTimeSeriesFrame::Enu as u32,
+            reference: SidereonGeodetic {
+                lat_rad: 0.0,
+                lon_rad: 0.0,
+                height_m: 0.0,
+            },
+            samples: samples.as_ptr(),
+            sample_count: samples.len(),
+        };
+
+        let model = SidereonGeodeticTrajectoryModel {
+            has_reference_epoch_year: true,
+            reference_epoch_year: 2020.0,
+            include_annual: false,
+            include_semiannual: false,
+            offset_epochs_year: ptr::null(),
+            offset_count: 0,
+        };
+
+        let mut fit_options = MaybeUninit::uninit();
+        unsafe {
+            assert_eq!(
+                sidereon_geodetic_trajectory_fit_options_init(fit_options.as_mut_ptr()),
+                SidereonStatus::Ok
+            );
+        }
+        let fit_options = unsafe { fit_options.assume_init() };
+
+        // 1. Valid producer control: trajectory fit
+        let mut trajectory = ptr::null_mut();
+        unsafe {
+            assert_eq!(
+                sidereon_geodetic_fit_trajectory(&series, &model, &fit_options, &mut trajectory),
+                SidereonStatus::Ok
+            );
+            assert!(!trajectory.is_null());
+
+            let mut info = SidereonEngineErrorInfo {
+                family: SidereonEngineErrorFamily::GeodeticTimeSeries,
+                payload_len: 123,
+            };
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+            assert_eq!(info.payload_len, 0);
+
+            sidereon_geodetic_trajectory_free(trajectory);
+        }
+
+        // 2. Real public refusal: single sample for MIDAS velocity (requires >= 2)
+        let single_sample = sample_points(1);
+        let short_series = SidereonGeodeticPositionSeries {
+            frame: SidereonGeodeticTimeSeriesFrame::Enu as u32,
+            reference: SidereonGeodetic {
+                lat_rad: 0.0,
+                lon_rad: 0.0,
+                height_m: 0.0,
+            },
+            samples: single_sample.as_ptr(),
+            sample_count: single_sample.len(),
+        };
+
+        let mut midas_opts = MaybeUninit::uninit();
+        unsafe {
+            assert_eq!(
+                sidereon_geodetic_midas_options_init(midas_opts.as_mut_ptr()),
+                SidereonStatus::Ok
+            );
+        }
+        let midas_opts = unsafe { midas_opts.assume_init() };
+
+        let mut out_vel = MaybeUninit::uninit();
+        unsafe {
+            assert_eq!(
+                sidereon_geodetic_velocity_midas(&short_series, &midas_opts, out_vel.as_mut_ptr()),
+                SidereonStatus::InvalidArgument
+            );
+
+            let mut info = SidereonEngineErrorInfo {
+                family: SidereonEngineErrorFamily::None,
+                payload_len: 0,
+            };
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::GeodeticTimeSeries);
+            assert!(info.payload_len > 0);
+
+            let mut written = 0;
+            let mut required = 0;
+            let mut buf = vec![0u8; info.payload_len];
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    buf.as_mut_ptr(),
+                    buf.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, info.payload_len);
+            let payload: Value = serde_json::from_slice(&buf).expect("valid JSON payload");
+            assert_eq!(payload["schema_version"], 1);
+            assert_eq!(payload["family"], "geodetic_time_series");
+            assert_eq!(payload["operation"], "sidereon_geodetic_velocity_midas");
+            assert_eq!(payload["error"]["kind"], "too_few_samples");
+            assert_eq!(payload["error"]["fields"]["samples"], 1);
+            assert_eq!(payload["error"]["fields"]["needed"], 2);
+        }
+    }
+
+    #[test]
+    fn geodetic_time_series_producer_early_clearing_and_retention() {
+        clear_engine_error();
+
+        let single_sample = sample_points(1);
+        let short_series = SidereonGeodeticPositionSeries {
+            frame: SidereonGeodeticTimeSeriesFrame::Enu as u32,
+            reference: SidereonGeodetic {
+                lat_rad: 0.0,
+                lon_rad: 0.0,
+                height_m: 0.0,
+            },
+            samples: single_sample.as_ptr(),
+            sample_count: single_sample.len(),
+        };
+
+        let mut midas_opts = MaybeUninit::uninit();
+        unsafe {
+            assert_eq!(
+                sidereon_geodetic_midas_options_init(midas_opts.as_mut_ptr()),
+                SidereonStatus::Ok
+            );
+        }
+        let midas_opts = unsafe { midas_opts.assume_init() };
+
+        unsafe {
+            // Seed retained engine error with actual refusal
+            let mut out_vel = MaybeUninit::uninit();
+            assert_eq!(
+                sidereon_geodetic_velocity_midas(&short_series, &midas_opts, out_vel.as_mut_ptr()),
+                SidereonStatus::InvalidArgument
+            );
+
+            let mut info = SidereonEngineErrorInfo {
+                family: SidereonEngineErrorFamily::None,
+                payload_len: 0,
+            };
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::GeodeticTimeSeries);
+            let expected_len = info.payload_len;
+            assert!(expected_len > 0);
+
+            // Free retains
+            sidereon_geodetic_trajectory_free(ptr::null_mut());
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::GeodeticTimeSeries);
+            assert_eq!(info.payload_len, expected_len);
+
+            // Pass 1: query length retains
+            let mut written = 999;
+            let mut required = 0;
+            assert_eq!(
+                sidereon_last_engine_error_payload(ptr::null_mut(), 0, &mut written, &mut required),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, 0);
+            assert_eq!(required, expected_len);
+
+            // Short buffer query returns InvalidArgument, writes 0, retains
+            let mut short_buf = vec![0u8; expected_len - 1];
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    short_buf.as_mut_ptr(),
+                    short_buf.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::InvalidArgument
+            );
+            assert_eq!(written, 0);
+            assert_eq!(required, expected_len);
+
+            // Pass 2: Exact buffer query succeeds and retains
+            let mut buf = vec![0u8; expected_len];
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    buf.as_mut_ptr(),
+                    buf.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, expected_len);
+            assert_eq!(required, expected_len);
+
+            // Retained after read
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::GeodeticTimeSeries);
+
+            // Create a valid trajectory handle to test live handle retention
+            let valid_samples = sample_points(10);
+            let valid_series = SidereonGeodeticPositionSeries {
+                frame: SidereonGeodeticTimeSeriesFrame::Enu as u32,
+                reference: SidereonGeodetic {
+                    lat_rad: 0.0,
+                    lon_rad: 0.0,
+                    height_m: 0.0,
+                },
+                samples: valid_samples.as_ptr(),
+                sample_count: valid_samples.len(),
+            };
+
+            let model = SidereonGeodeticTrajectoryModel {
+                has_reference_epoch_year: true,
+                reference_epoch_year: 2020.0,
+                include_annual: false,
+                include_semiannual: false,
+                offset_epochs_year: ptr::null(),
+                offset_count: 0,
+            };
+
+            let mut fit_options = MaybeUninit::uninit();
+            assert_eq!(
+                sidereon_geodetic_trajectory_fit_options_init(fit_options.as_mut_ptr()),
+                SidereonStatus::Ok
+            );
+            let fit_options = fit_options.assume_init();
+
+            let mut valid_trajectory = ptr::null_mut();
+            assert_eq!(
+                sidereon_geodetic_fit_trajectory(
+                    &valid_series,
+                    &model,
+                    &fit_options,
+                    &mut valid_trajectory
+                ),
+                SidereonStatus::Ok
+            );
+            assert!(!valid_trajectory.is_null());
+
+            // Successful producer reset verified
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+            assert_eq!(info.payload_len, 0);
+
+            // Now seed a new real refusal while valid_trajectory is live
+            assert_eq!(
+                sidereon_geodetic_velocity_midas(&short_series, &midas_opts, out_vel.as_mut_ptr()),
+                SidereonStatus::InvalidArgument
+            );
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::GeodeticTimeSeries);
+            let active_len = info.payload_len;
+
+            // Capture payload before calling getters
+            let mut payload_before = vec![0u8; active_len];
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    payload_before.as_mut_ptr(),
+                    payload_before.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+
+            // Call inspectors on live handle: summary, components, terms, offsets, covariance
+            let mut summary = MaybeUninit::uninit();
+            assert_eq!(
+                sidereon_geodetic_trajectory_summary(valid_trajectory, summary.as_mut_ptr()),
+                SidereonStatus::Ok
+            );
+
+            let mut components = MaybeUninit::<[SidereonGeodeticTrajectoryComponent; 3]>::uninit();
+            assert_eq!(
+                sidereon_geodetic_trajectory_components(
+                    valid_trajectory,
+                    components.as_mut_ptr() as *mut SidereonGeodeticTrajectoryComponent,
+                ),
+                SidereonStatus::Ok
+            );
+            let components = components.assume_init();
+            assert!(components[0].position_m.is_finite());
+
+            let mut terms_written = 0;
+            let mut terms_required = 0;
+            assert_eq!(
+                sidereon_geodetic_trajectory_terms(
+                    valid_trajectory,
+                    ptr::null_mut(),
+                    0,
+                    &mut terms_written,
+                    &mut terms_required,
+                ),
+                SidereonStatus::Ok
+            );
+
+            let mut offsets_written = 0;
+            let mut offsets_required = 0;
+            assert_eq!(
+                sidereon_geodetic_trajectory_offsets(
+                    valid_trajectory,
+                    0,
+                    ptr::null_mut(),
+                    0,
+                    &mut offsets_written,
+                    &mut offsets_required,
+                ),
+                SidereonStatus::Ok
+            );
+
+            let mut cov_written = 0;
+            let mut cov_required = 0;
+            assert_eq!(
+                sidereon_geodetic_trajectory_parameter_covariance(
+                    valid_trajectory,
+                    ptr::null_mut(),
+                    0,
+                    &mut cov_written,
+                    &mut cov_required,
+                ),
+                SidereonStatus::Ok
+            );
+
+            // Verify payload is retained after getters
+            let mut payload_after = vec![0u8; active_len];
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    payload_after.as_mut_ptr(),
+                    payload_after.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(payload_before, payload_after);
+
+            // Free valid trajectory and verify retention
+            sidereon_geodetic_trajectory_free(valid_trajectory);
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::GeodeticTimeSeries);
+            assert_eq!(info.payload_len, active_len);
+
+            // Producer early null reset
+            assert_eq!(
+                sidereon_geodetic_velocity_midas(&valid_series, &midas_opts, ptr::null_mut()),
+                SidereonStatus::NullPointer
+            );
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+            assert_eq!(info.payload_len, 0);
+        }
+    }
 }

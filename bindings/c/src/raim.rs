@@ -2,6 +2,21 @@ use super::*;
 
 // --- Standalone RAIM (sidereon_core::quality) --------------------------------
 
+/// Which weights the RAIM statistic uses (sidereon_core::quality::RaimWeights).
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonRaimWeightsMode {
+    /// The variances the estimator weighted each residual by (the default):
+    /// the statistic is sum (r / sigma)^2, as RTKLIB demo5 valsol forms it.
+    /// Residuals without variances are refused.
+    Solution = 0,
+    /// Unit weights, sigma = 1 m for every satellite.
+    Unit = 1,
+    /// Per-satellite inverse-variance weights from the weights array; a
+    /// satellite absent from it has unit weight.
+    BySatellite = 2,
+}
+
 /// A RAIM integrity result, mirroring sidereon_core::quality::RaimResult. The
 /// worst_sat token is null-terminated and valid only when has_worst_sat is true.
 #[repr(C)]
@@ -48,39 +63,44 @@ pub struct SidereonRaimNormalizedResidual {
 }
 
 /// Run the RAIM chi-square test over used satellites and their residuals.
-/// weights/unit_weights/n_systems mirror SidereonFdeOptions. Weights must be
-/// inverse variances derived from per-satellite residual variances; unit
-/// weights on metre-scale residuals make fault_detected saturate near 100%.
-/// Delegates to sidereon_core::quality::raim.
+/// weights_mode is a SidereonRaimWeightsMode value; weights/n_systems mirror
+/// SidereonFdeOptions. Under Solution (the engine default) the statistic reads
+/// variances_m2, the variance each residual was weighted by; unit weights on
+/// metre-scale residuals make fault_detected saturate near 100%. Delegates to
+/// sidereon_core::quality::raim.
 ///
 /// Safety: used_sat_ids points to count null-terminated tokens; residuals_m
-/// points to count doubles; weights points to weight_count SidereonFdeRaimWeight
-/// when unit_weights is false; out points to a SidereonRaimResult.
+/// points to count doubles; variances_m2 points to count doubles or is NULL
+/// (no variances); weights points to weight_count SidereonFdeRaimWeight when
+/// weights_mode is BySatellite; out points to a SidereonRaimResult.
 #[no_mangle]
+#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn sidereon_raim(
     used_sat_ids: *const *const c_char,
     residuals_m: *const f64,
+    variances_m2: *const f64,
     count: usize,
     p_fa: f64,
-    unit_weights: bool,
+    weights_mode: u32,
     weights: *const SidereonFdeRaimWeight,
     weight_count: usize,
     n_systems_enabled: bool,
     n_systems: i64,
     out: *mut SidereonRaimResult,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_raim", SidereonStatus::Panic, || {
+    quality_operation_boundary("sidereon_raim", SidereonStatus::Panic, || {
         let out = c_try!(require_out(out, "sidereon_raim", "out"));
         *out = empty_raim_result();
         let (input, residuals) = c_try!(raim_input_from_c(
             "sidereon_raim",
             used_sat_ids,
             residuals_m,
+            variances_m2,
             count
         ));
         let raim_weights = c_try!(raim_weights_from_c(
             "sidereon_raim",
-            unit_weights,
+            weights_mode,
             weights,
             weight_count
         ));
@@ -93,7 +113,10 @@ pub unsafe extern "C" fn sidereon_raim(
                 *out = raim_result_to_c(&result, &residuals);
                 SidereonStatus::Ok
             }
-            Err(err) => extra_invalid_arg("sidereon_raim", err),
+            Err(err) => {
+                record_quality_error_kind(err);
+                extra_invalid_arg("sidereon_raim", err)
+            }
         }
     })
 }
@@ -105,12 +128,14 @@ pub unsafe extern "C" fn sidereon_raim(
 /// SidereonRaimNormalizedResidual entries or NULL when len is 0; out_written
 /// and out_required point to size_t.
 #[no_mangle]
+#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn sidereon_raim_normalized_residuals(
     used_sat_ids: *const *const c_char,
     residuals_m: *const f64,
+    variances_m2: *const f64,
     count: usize,
     p_fa: f64,
-    unit_weights: bool,
+    weights_mode: u32,
     weights: *const SidereonFdeRaimWeight,
     weight_count: usize,
     n_systems_enabled: bool,
@@ -120,7 +145,7 @@ pub unsafe extern "C" fn sidereon_raim_normalized_residuals(
     out_written: *mut usize,
     out_required: *mut usize,
 ) -> SidereonStatus {
-    ffi_boundary(
+    quality_operation_boundary(
         "sidereon_raim_normalized_residuals",
         SidereonStatus::Panic,
         || {
@@ -133,11 +158,12 @@ pub unsafe extern "C" fn sidereon_raim_normalized_residuals(
                 "sidereon_raim_normalized_residuals",
                 used_sat_ids,
                 residuals_m,
+                variances_m2,
                 count
             ));
             let raim_weights = c_try!(raim_weights_from_c(
                 "sidereon_raim_normalized_residuals",
-                unit_weights,
+                weights_mode,
                 weights,
                 weight_count
             ));
@@ -159,31 +185,36 @@ pub unsafe extern "C" fn sidereon_raim_normalized_residuals(
                     ));
                     SidereonStatus::Ok
                 }
-                Err(err) => extra_invalid_arg("sidereon_raim_normalized_residuals", err),
+                Err(err) => {
+                    record_quality_error_kind(err);
+                    extra_invalid_arg("sidereon_raim_normalized_residuals", err)
+                }
             }
         },
     )
 }
 
-/// Run RAIM over an SPP receiver solution handle (used satellites + post-fit
-/// residuals come from the solution). weights/unit_weights/n_systems mirror
-/// sidereon_raim. Delegates to sidereon_core::quality::raim_for_solution.
+/// Run RAIM over an SPP receiver solution handle: the used satellites, post-fit
+/// residuals, their pseudorange variances and the solve's clock count come from
+/// the solution. weights_mode/weights/n_systems mirror sidereon_raim; an
+/// explicit n_systems overrides the solution's clock count. Delegates to
+/// sidereon_core::quality::raim_for_solution.
 ///
 /// Safety: solution is a live SPP-solution handle; weights points to
-/// weight_count SidereonFdeRaimWeight when unit_weights is false; out points to a
-/// SidereonRaimResult.
+/// weight_count SidereonFdeRaimWeight when weights_mode is BySatellite; out
+/// points to a SidereonRaimResult.
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_raim_for_solution(
     solution: *const SidereonSppSolution,
     p_fa: f64,
-    unit_weights: bool,
+    weights_mode: u32,
     weights: *const SidereonFdeRaimWeight,
     weight_count: usize,
     n_systems_enabled: bool,
     n_systems: i64,
     out: *mut SidereonRaimResult,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_raim_for_solution", SidereonStatus::Panic, || {
+    quality_operation_boundary("sidereon_raim_for_solution", SidereonStatus::Panic, || {
         let out = c_try!(require_out(out, "sidereon_raim_for_solution", "out"));
         *out = empty_raim_result();
         let solution = c_try!(require_ref(
@@ -193,7 +224,7 @@ pub unsafe extern "C" fn sidereon_raim_for_solution(
         ));
         let raim_weights = c_try!(raim_weights_from_c(
             "sidereon_raim_for_solution",
-            unit_weights,
+            weights_mode,
             weights,
             weight_count
         ));
@@ -206,7 +237,10 @@ pub unsafe extern "C" fn sidereon_raim_for_solution(
                 *out = raim_result_to_c(&result, &solution.inner.residuals_m);
                 SidereonStatus::Ok
             }
-            Err(err) => extra_invalid_arg("sidereon_raim_for_solution", err),
+            Err(err) => {
+                record_quality_error_kind(err);
+                extra_invalid_arg("sidereon_raim_for_solution", err)
+            }
         }
     })
 }
@@ -226,7 +260,7 @@ pub unsafe extern "C" fn sidereon_raim_fde_design(
     options: *const SidereonRangeFdeOptions,
     out_result: *mut *mut SidereonRangeFdeResult,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_raim_fde_design", SidereonStatus::Panic, || {
+    quality_operation_boundary("sidereon_raim_fde_design", SidereonStatus::Panic, || {
         let out_result = c_try!(require_out(
             out_result,
             "sidereon_raim_fde_design",
@@ -243,6 +277,7 @@ pub unsafe extern "C" fn sidereon_raim_fde_design(
         core_options.p_fa = options.p_fa;
         core_options.max_exclusions = options.max_exclusions;
         core_options.min_redundancy = options.min_redundancy;
+        core_options.max_exclusion_rms_m = options.max_exclusion_rms_m;
         match raim_fde_design(&rows, &core_options) {
             Ok(inner) => {
                 write_boxed_handle(out_result, SidereonRangeFdeResult { inner });
@@ -253,22 +288,22 @@ pub unsafe extern "C" fn sidereon_raim_fde_design(
     })
 }
 
-fn map_quality_error(fn_name: &str, err: QualityError) -> SidereonStatus {
-    set_last_error(format!("{fn_name}: {err}"));
-    match err {
-        QualityError::SingularGeometry => SidereonStatus::Solve,
-        _ => SidereonStatus::InvalidArgument,
-    }
-}
-
 unsafe fn raim_input_from_c(
     fn_name: &str,
     used_sat_ids: *const *const c_char,
     residuals_m: *const f64,
+    variances_m2: *const f64,
     count: usize,
 ) -> Result<(sidereon_core::quality::RaimInput, Vec<f64>), SidereonStatus> {
     let id_ptrs = require_slice(used_sat_ids, count, fn_name, "used_sat_ids")?;
     let residuals = require_slice(residuals_m, count, fn_name, "residuals_m")?;
+    // NULL states no variances; the engine refuses their absence only under
+    // the Solution weights, the mode that reads them.
+    let variances = if variances_m2.is_null() {
+        None
+    } else {
+        Some(require_slice(variances_m2, count, fn_name, "variances_m2")?.to_vec())
+    };
     let mut used_sats = Vec::with_capacity(count);
     for ptr in id_ptrs {
         let sat = parse_satellite_token(fn_name, *ptr)?;
@@ -279,30 +314,40 @@ unsafe fn raim_input_from_c(
         sidereon_core::quality::RaimInput {
             used_sats,
             residuals_m: residuals.clone(),
+            variances_m2: variances,
         },
         residuals,
     ))
 }
 
-unsafe fn raim_weights_from_c(
+pub(crate) unsafe fn raim_weights_from_c(
     fn_name: &str,
-    unit_weights: bool,
+    weights_mode: u32,
     weights: *const SidereonFdeRaimWeight,
     weight_count: usize,
 ) -> Result<RaimWeights, SidereonStatus> {
-    if unit_weights {
-        return Ok(RaimWeights::Unit);
+    match weights_mode {
+        v if v == SidereonRaimWeightsMode::Solution as u32 => Ok(RaimWeights::Solution),
+        v if v == SidereonRaimWeightsMode::Unit as u32 => Ok(RaimWeights::Unit),
+        v if v == SidereonRaimWeightsMode::BySatellite as u32 => {
+            // Each token is canonicalized by the parser the SPP observations
+            // use, so the keys match the solution's used-satellite tokens.
+            let rows = require_slice(weights, weight_count, fn_name, "weights")?;
+            let mut map = BTreeMap::new();
+            for row in rows {
+                let sat = parse_satellite_token(fn_name, row.sat_id)?;
+                map.insert(sat.to_string(), row.weight);
+            }
+            Ok(RaimWeights::BySatellite(map))
+        }
+        other => {
+            set_last_error(format!("{fn_name}: invalid weights_mode {other}"));
+            Err(SidereonStatus::InvalidArgument)
+        }
     }
-    let rows = require_slice(weights, weight_count, fn_name, "weights")?;
-    let mut map = BTreeMap::new();
-    for row in rows {
-        let sat = parse_satellite_token(fn_name, row.sat_id)?;
-        map.insert(sat.to_string(), row.weight);
-    }
-    Ok(RaimWeights::BySatellite(map))
 }
 
-fn empty_raim_result() -> SidereonRaimResult {
+pub(crate) fn empty_raim_result() -> SidereonRaimResult {
     SidereonRaimResult {
         fault_detected: false,
         test_statistic: 0.0,
@@ -319,7 +364,7 @@ fn empty_raim_result() -> SidereonRaimResult {
     }
 }
 
-fn raim_result_to_c(
+pub(crate) fn raim_result_to_c(
     value: &sidereon_core::quality::RaimResult,
     residuals_m: &[f64],
 ) -> SidereonRaimResult {
@@ -351,7 +396,7 @@ fn raim_result_to_c(
     out
 }
 
-fn raim_normalized_residuals_to_c(
+pub(crate) fn raim_normalized_residuals_to_c(
     value: &sidereon_core::quality::RaimResult,
 ) -> Vec<SidereonRaimNormalizedResidual> {
     value

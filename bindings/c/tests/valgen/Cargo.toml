@@ -1,0 +1,33 @@
+# Fixture generators for the engine values the C smoke programs check. Not
+# part of the binding workspace (own empty [workspace] table), so a plain
+# `cargo build` / `cargo test` of the binding never pulls it in.
+#
+# Each binary under src/bin writes one header, tests/<name>_pins.h, holding the
+# values one group of smoke programs compares against: sidereon-core's results
+# for the same inputs, as exact IEEE-754 bit patterns, counts, enum names and
+# texts. tests/run_generators.sh runs every binary from the binding root:
+#
+#     cargo run --release --quiet --manifest-path tests/valgen/Cargo.toml \
+#         --bin <name> > tests/<name>_pins.h
+#
+# src/lib.rs holds what the binaries share: the core revision, the core
+# fixture directory and the C literal helpers.
+[package]
+name = "valgen"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+# The sidereon-core revision tests/CORE_REVISION names; tests/run_generators.sh
+# checks that every generator pins the same one.
+sidereon-core = { version = "=3.0.0" }
+serde_json = "1"
+# The trust-region least-squares crate and the nalgebra pin sidereon-core
+# builds against, for the solver checks whose inputs are those crates' types.
+trust-region-least-squares = { version = "=0.11.0" }
+nalgebra = "=0.33.3"
+# The gzip reader for the compressed Bias-SINEX fixture.
+flate2 = "1"

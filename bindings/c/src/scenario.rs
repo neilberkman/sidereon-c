@@ -1,4 +1,8 @@
 use super::*;
+use crate::engine_error::{
+    engine_error_operation_boundary, record_engine_error, scenario_error_value,
+    SidereonEngineErrorFamily,
+};
 
 /// Synthetic scenario simulation output. Create with
 /// sidereon_scenario_simulate_json and release with
@@ -134,7 +138,7 @@ pub unsafe extern "C" fn sidereon_scenario_simulate_json(
     len: usize,
     out_simulation: *mut *mut SidereonScenarioSimulation,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_scenario_simulate_json",
         SidereonStatus::Panic,
         || {
@@ -186,7 +190,7 @@ pub unsafe extern "C" fn sidereon_scenario_simulate_json_with_ionex(
     ionex: *const SidereonIonex,
     out_simulation: *mut *mut SidereonScenarioSimulation,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_scenario_simulate_json_with_ionex",
         SidereonStatus::Panic,
         || {
@@ -220,7 +224,7 @@ pub unsafe extern "C" fn sidereon_scenario_simulate_json_with_ionex(
                         return map_scenario_error(
                             "sidereon_scenario_simulate_json_with_ionex",
                             err,
-                        )
+                        );
                     }
                 };
             c_try!(write_scenario_simulation(
@@ -247,7 +251,7 @@ pub unsafe extern "C" fn sidereon_scenario_simulate_json_with_sp3(
     sp3: *const SidereonSp3,
     out_simulation: *mut *mut SidereonScenarioSimulation,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_scenario_simulate_json_with_sp3",
         SidereonStatus::Panic,
         || {
@@ -296,7 +300,7 @@ pub unsafe extern "C" fn sidereon_scenario_simulate_json_with_sp3_and_ionex(
     ionex: *const SidereonIonex,
     out_simulation: *mut *mut SidereonScenarioSimulation,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_scenario_simulate_json_with_sp3_and_ionex",
         SidereonStatus::Panic,
         || {
@@ -358,7 +362,7 @@ pub unsafe extern "C" fn sidereon_scenario_simulate_json_with_broadcast(
     broadcast: *const SidereonBroadcastEphemeris,
     out_simulation: *mut *mut SidereonScenarioSimulation,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_scenario_simulate_json_with_broadcast",
         SidereonStatus::Panic,
         || {
@@ -407,7 +411,7 @@ pub unsafe extern "C" fn sidereon_scenario_simulate_json_with_broadcast_and_ione
     ionex: *const SidereonIonex,
     out_simulation: *mut *mut SidereonScenarioSimulation,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_scenario_simulate_json_with_broadcast_and_ionex",
         SidereonStatus::Panic,
         || {
@@ -807,12 +811,16 @@ unsafe fn scenario_from_json(
     }
 }
 
-fn write_scenario_simulation(
+/// Store a newly owned scenario simulation in a validated output slot.
+///
+/// # Safety
+/// `out_simulation` must point to writable handle-pointer storage.
+unsafe fn write_scenario_simulation(
     fn_name: &str,
     out_simulation: *mut *mut SidereonScenarioSimulation,
     inner: sidereon_core::scenario::SyntheticObservationSet,
 ) -> Result<(), SidereonStatus> {
-    let out_simulation = unsafe { require_out(out_simulation, fn_name, "out_simulation")? };
+    let out_simulation = require_out(out_simulation, fn_name, "out_simulation")?;
     let json = match serde_json::to_vec(&inner) {
         Ok(json) => json,
         Err(err) => {
@@ -897,6 +905,11 @@ fn map_scenario_error(
     fn_name: &str,
     err: sidereon_core::scenario::ScenarioError,
 ) -> SidereonStatus {
+    record_engine_error(
+        SidereonEngineErrorFamily::Scenario,
+        fn_name,
+        scenario_error_value(&err),
+    );
     set_last_error(format!("{fn_name}: {err}"));
     match err {
         sidereon_core::scenario::ScenarioError::NoEphemeris { .. }
@@ -907,5 +920,448 @@ fn map_scenario_error(
         | sidereon_core::scenario::ScenarioError::ExternalIonosphereRequired
         | sidereon_core::scenario::ScenarioError::Ionosphere(_)
         | sidereon_core::scenario::ScenarioError::Frame(_) => SidereonStatus::InvalidArgument,
+        sidereon_core::scenario::ScenarioError::Ut1OutsideCoverage { .. } => {
+            SidereonStatus::Ut1OutsideCoverage
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine_error::{
+        clear_engine_error, sidereon_last_engine_error_info, sidereon_last_engine_error_payload,
+        SidereonEngineErrorInfo,
+    };
+    use sidereon_core::astro::time::DegradeReason;
+    use sidereon_core::observables::{ObservablesError, ObservablesInputErrorKind};
+    use sidereon_core::scenario::*;
+    use sidereon_core::{GnssSatelliteId, GnssSystem};
+
+    fn get_last_error_string() -> String {
+        unsafe {
+            let len = sidereon_last_error_message(ptr::null_mut(), 0);
+            if len == 0 {
+                return String::new();
+            }
+            let mut buf = vec![0 as c_char; len + 1];
+            sidereon_last_error_message(buf.as_mut_ptr(), buf.len());
+            CStr::from_ptr(buf.as_ptr()).to_string_lossy().into_owned()
+        }
+    }
+
+    fn get_last_engine_error_two_pass() -> (SidereonEngineErrorInfo, String) {
+        unsafe {
+            let mut info = SidereonEngineErrorInfo {
+                family: SidereonEngineErrorFamily::None,
+                payload_len: 0,
+            };
+            let status = sidereon_last_engine_error_info(&mut info);
+            assert_eq!(status, SidereonStatus::Ok);
+
+            let mut written = 0usize;
+            let mut required = 0usize;
+            let status =
+                sidereon_last_engine_error_payload(ptr::null_mut(), 0, &mut written, &mut required);
+            assert_eq!(status, SidereonStatus::Ok);
+            assert_eq!(written, 0);
+            assert_eq!(required, info.payload_len);
+
+            if required == 0 {
+                return (info, String::new());
+            }
+
+            let mut buf = vec![0u8; required];
+            let status = sidereon_last_engine_error_payload(
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut written,
+                &mut required,
+            );
+            assert_eq!(status, SidereonStatus::Ok);
+            assert_eq!(written, required);
+            let payload = String::from_utf8(buf).expect("valid utf-8 payload");
+            (info, payload)
+        }
+    }
+
+    fn make_valid_scenario() -> Scenario {
+        let a = 26_560_000.0;
+        Scenario {
+            schema_version: SCENARIO_SCHEMA_VERSION,
+            seed: DEFAULT_SCENARIO_SEED,
+            epochs: ScenarioEpochRange {
+                start_j2000_s: 0.0,
+                count: 1,
+                cadence_s: 30.0,
+            },
+            receiver: ScenarioReceiver::StaticGeodetic {
+                position: ScenarioGeodeticPosition {
+                    lat_rad: 0.0,
+                    lon_rad: 0.0,
+                    height_m: 0.0,
+                },
+            },
+            constellation: ScenarioConstellation::SyntheticKeplerian {
+                satellites: vec![SyntheticKeplerOrbit {
+                    satellite_id: GnssSatelliteId::new(GnssSystem::Gps, 1).expect("valid PRN"),
+                    semi_major_axis_m: a,
+                    eccentricity: 0.0,
+                    inclination_rad: 0.0,
+                    raan_rad: 0.0,
+                    arg_perigee_rad: 0.0,
+                    mean_anomaly_rad: 0.0,
+                    epoch_j2000_s: 0.0,
+                    clock_bias_s: 0.0,
+                    clock_drift_s_s: 0.0,
+                }],
+            },
+            signals: vec![ScenarioSignal::l1_ca(GnssSystem::Gps)],
+            error_budget: ScenarioErrorBudget {
+                elevation_mask_deg: -90.0,
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn test_scenario_map_error_all_nine_variants() {
+        clear_engine_error();
+
+        let cases = [
+            (
+                ScenarioError::InvalidInput {
+                    field: "schema_version",
+                    reason: "unsupported schema version",
+                },
+                SidereonStatus::InvalidArgument,
+                "invalid_input",
+            ),
+            (
+                ScenarioError::ExternalSourceRequired,
+                SidereonStatus::InvalidArgument,
+                "external_source_required",
+            ),
+            (
+                ScenarioError::ExternalSourceMismatch {
+                    field: "constellation",
+                    expected: "exp_src".to_string(),
+                    actual: "act_src".to_string(),
+                },
+                SidereonStatus::InvalidArgument,
+                "external_source_mismatch",
+            ),
+            (
+                ScenarioError::ExternalIonosphereRequired,
+                SidereonStatus::InvalidArgument,
+                "external_ionosphere_required",
+            ),
+            (
+                ScenarioError::Ionosphere("grid interpolation failed".to_string()),
+                SidereonStatus::InvalidArgument,
+                "ionosphere",
+            ),
+            (
+                ScenarioError::NoEphemeris {
+                    satellite: GnssSatelliteId::new(GnssSystem::Gps, 1).unwrap(),
+                },
+                SidereonStatus::Solve,
+                "no_ephemeris",
+            ),
+            (
+                ScenarioError::Ut1OutsideCoverage {
+                    satellite: GnssSatelliteId::new(GnssSystem::Gps, 2).unwrap(),
+                    reason: DegradeReason::AfterCoverage,
+                },
+                SidereonStatus::Ut1OutsideCoverage,
+                "ut1_outside_coverage",
+            ),
+            (
+                ScenarioError::Observable(ObservablesError::InvalidInput {
+                    field: "t_tx",
+                    kind: ObservablesInputErrorKind::Negative,
+                }),
+                SidereonStatus::Solve,
+                "observable",
+            ),
+            (
+                ScenarioError::Frame("frame transform failed".to_string()),
+                SidereonStatus::InvalidArgument,
+                "frame",
+            ),
+        ];
+
+        for (err, expected_status, expected_kind) in cases {
+            clear_engine_error();
+            let status = map_scenario_error("test_scenario_op", err);
+            assert_eq!(status, expected_status);
+
+            let (info, payload) = get_last_engine_error_two_pass();
+            assert_eq!(info.family, SidereonEngineErrorFamily::Scenario);
+            let parsed: serde_json::Value =
+                serde_json::from_str(&payload).expect("valid json payload");
+            assert_eq!(parsed["schema_version"], 1);
+            assert_eq!(parsed["family"], "scenario");
+            assert_eq!(parsed["operation"], "test_scenario_op");
+            assert_eq!(parsed["error"]["kind"], expected_kind);
+        }
+
+        clear_engine_error();
+    }
+
+    #[test]
+    fn test_scenario_public_refusal_valid_control_undersize_and_retention() {
+        clear_engine_error();
+
+        let valid_scenario = make_valid_scenario();
+        let valid_json = serde_json::to_string(&valid_scenario).expect("valid json");
+
+        let mut invalid_scenario = make_valid_scenario();
+        invalid_scenario.schema_version = 9999;
+        let invalid_json = serde_json::to_string(&invalid_scenario).expect("valid json");
+
+        // 1. Create one valid owned result first
+        let mut live_sim: *mut SidereonScenarioSimulation = ptr::null_mut();
+        let status = unsafe {
+            sidereon_scenario_simulate_json(valid_json.as_ptr(), valid_json.len(), &mut live_sim)
+        };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert!(!live_sim.is_null());
+
+        // 2. Real public refusal into separate refusal pointer: schema_version = 9999
+        let mut out_sim_refusal: *mut SidereonScenarioSimulation = ptr::null_mut();
+        let status = unsafe {
+            sidereon_scenario_simulate_json(
+                invalid_json.as_ptr(),
+                invalid_json.len(),
+                &mut out_sim_refusal,
+            )
+        };
+        assert_eq!(status, SidereonStatus::InvalidArgument);
+        assert!(out_sim_refusal.is_null());
+
+        let msg = get_last_error_string();
+        assert!(msg.contains("schema_version"));
+
+        let (info, payload_str) = get_last_engine_error_two_pass();
+        assert_eq!(info.family, SidereonEngineErrorFamily::Scenario);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&payload_str).expect("valid json payload");
+        assert_eq!(parsed["schema_version"], 1);
+        assert_eq!(parsed["family"], "scenario");
+        assert_eq!(parsed["operation"], "sidereon_scenario_simulate_json");
+        assert_eq!(parsed["error"]["kind"], "invalid_input");
+        assert_eq!(parsed["error"]["fields"]["field"], "schema_version");
+        assert_eq!(
+            parsed["error"]["fields"]["reason"],
+            "unsupported schema version"
+        );
+
+        // 3. Undersize buffer contract: InvalidArgument, 0 written, full required, no copy
+        let expected_len = info.payload_len;
+        let mut written = 999;
+        let mut required = 0;
+        let status = unsafe {
+            sidereon_last_engine_error_payload(ptr::null_mut(), 0, &mut written, &mut required)
+        };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert_eq!(written, 0);
+        assert_eq!(required, expected_len);
+
+        let mut short_buf = vec![0u8; expected_len - 1];
+        let status = unsafe {
+            sidereon_last_engine_error_payload(
+                short_buf.as_mut_ptr(),
+                short_buf.len(),
+                &mut written,
+                &mut required,
+            )
+        };
+        assert_eq!(status, SidereonStatus::InvalidArgument);
+        assert_eq!(written, 0);
+        assert_eq!(required, expected_len);
+        assert!(short_buf.iter().all(|&b| b == 0));
+
+        let mut full_buf = vec![0u8; expected_len];
+        let status = unsafe {
+            sidereon_last_engine_error_payload(
+                full_buf.as_mut_ptr(),
+                full_buf.len(),
+                &mut written,
+                &mut required,
+            )
+        };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert_eq!(written, expected_len);
+        assert_eq!(required, expected_len);
+        assert_eq!(full_buf, payload_str.as_bytes());
+
+        // 4. Error retained through live getters and live free of valid simulation handle
+        let mut summary: SidereonScenarioSummary = unsafe { std::mem::zeroed() };
+        let status = unsafe { sidereon_scenario_simulation_summary(live_sim, &mut summary) };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert_eq!(summary.schema_version, 1);
+        assert_eq!(summary.receiver_truth_count, 1);
+
+        let (info_retained, payload_retained) = get_last_engine_error_two_pass();
+        assert_eq!(info_retained.family, SidereonEngineErrorFamily::Scenario);
+        assert_eq!(info_retained.payload_len, expected_len);
+        assert_eq!(payload_retained, payload_str);
+
+        unsafe { sidereon_scenario_simulation_free(live_sim) };
+
+        let (info_retained2, payload_retained2) = get_last_engine_error_two_pass();
+        assert_eq!(info_retained2.family, SidereonEngineErrorFamily::Scenario);
+        assert_eq!(payload_retained2, payload_str);
+
+        clear_engine_error();
+    }
+
+    #[test]
+    fn test_scenario_real_refusal_clearing_and_early_arg_reset() {
+        clear_engine_error();
+
+        let valid_scenario = make_valid_scenario();
+        let valid_json = serde_json::to_string(&valid_scenario).expect("valid json");
+
+        let mut invalid_scenario = make_valid_scenario();
+        invalid_scenario.schema_version = 9999;
+        let invalid_json = serde_json::to_string(&invalid_scenario).expect("valid json");
+
+        let trigger_real_refusal = || {
+            let mut out = ptr::null_mut();
+            let status = unsafe {
+                sidereon_scenario_simulate_json(invalid_json.as_ptr(), invalid_json.len(), &mut out)
+            };
+            assert_eq!(status, SidereonStatus::InvalidArgument);
+            assert!(out.is_null());
+            let (info, _) = get_last_engine_error_two_pass();
+            assert_eq!(info.family, SidereonEngineErrorFamily::Scenario);
+            assert!(info.payload_len > 0);
+        };
+
+        // 1. Early argument check: null data with len > 0
+        trigger_real_refusal();
+        let mut out_sim: *mut SidereonScenarioSimulation = ptr::null_mut();
+        let status =
+            unsafe { sidereon_scenario_simulate_json(ptr::null(), valid_json.len(), &mut out_sim) };
+        assert_eq!(status, SidereonStatus::NullPointer);
+        let (info, payload) = get_last_engine_error_two_pass();
+        assert_eq!(info.family, SidereonEngineErrorFamily::None);
+        assert_eq!(info.payload_len, 0);
+        assert!(payload.is_empty());
+
+        // 2. Early argument check: null out_simulation
+        trigger_real_refusal();
+        let status = unsafe {
+            sidereon_scenario_simulate_json(valid_json.as_ptr(), valid_json.len(), ptr::null_mut())
+        };
+        assert_eq!(status, SidereonStatus::NullPointer);
+        let (info, payload) = get_last_engine_error_two_pass();
+        assert_eq!(info.family, SidereonEngineErrorFamily::None);
+        assert_eq!(info.payload_len, 0);
+        assert!(payload.is_empty());
+
+        // 3. Table covering all 6 scenario simulation producers with null args:
+        // Producer 1: sidereon_scenario_simulate_json
+        trigger_real_refusal();
+        let status = unsafe { sidereon_scenario_simulate_json(ptr::null(), 0, ptr::null_mut()) };
+        assert_eq!(status, SidereonStatus::NullPointer);
+        let (info, payload) = get_last_engine_error_two_pass();
+        assert_eq!(info.family, SidereonEngineErrorFamily::None);
+        assert_eq!(info.payload_len, 0);
+        assert!(payload.is_empty());
+
+        // Producer 2: sidereon_scenario_simulate_json_with_sp3
+        trigger_real_refusal();
+        let status = unsafe {
+            sidereon_scenario_simulate_json_with_sp3(ptr::null(), 0, ptr::null(), ptr::null_mut())
+        };
+        assert_eq!(status, SidereonStatus::NullPointer);
+        let (info, payload) = get_last_engine_error_two_pass();
+        assert_eq!(info.family, SidereonEngineErrorFamily::None);
+        assert_eq!(info.payload_len, 0);
+        assert!(payload.is_empty());
+
+        // Producer 3: sidereon_scenario_simulate_json_with_broadcast
+        trigger_real_refusal();
+        let status = unsafe {
+            sidereon_scenario_simulate_json_with_broadcast(
+                ptr::null(),
+                0,
+                ptr::null(),
+                ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, SidereonStatus::NullPointer);
+        let (info, payload) = get_last_engine_error_two_pass();
+        assert_eq!(info.family, SidereonEngineErrorFamily::None);
+        assert_eq!(info.payload_len, 0);
+        assert!(payload.is_empty());
+
+        // Producer 4: sidereon_scenario_simulate_json_with_ionex
+        trigger_real_refusal();
+        let status = unsafe {
+            sidereon_scenario_simulate_json_with_ionex(ptr::null(), 0, ptr::null(), ptr::null_mut())
+        };
+        assert_eq!(status, SidereonStatus::NullPointer);
+        let (info, payload) = get_last_engine_error_two_pass();
+        assert_eq!(info.family, SidereonEngineErrorFamily::None);
+        assert_eq!(info.payload_len, 0);
+        assert!(payload.is_empty());
+
+        // Producer 5: sidereon_scenario_simulate_json_with_sp3_and_ionex
+        trigger_real_refusal();
+        let status = unsafe {
+            sidereon_scenario_simulate_json_with_sp3_and_ionex(
+                ptr::null(),
+                0,
+                ptr::null(),
+                ptr::null(),
+                ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, SidereonStatus::NullPointer);
+        let (info, payload) = get_last_engine_error_two_pass();
+        assert_eq!(info.family, SidereonEngineErrorFamily::None);
+        assert_eq!(info.payload_len, 0);
+        assert!(payload.is_empty());
+
+        // Producer 6: sidereon_scenario_simulate_json_with_broadcast_and_ionex
+        trigger_real_refusal();
+        let status = unsafe {
+            sidereon_scenario_simulate_json_with_broadcast_and_ionex(
+                ptr::null(),
+                0,
+                ptr::null(),
+                ptr::null(),
+                ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, SidereonStatus::NullPointer);
+        let (info, payload) = get_last_engine_error_two_pass();
+        assert_eq!(info.family, SidereonEngineErrorFamily::None);
+        assert_eq!(info.payload_len, 0);
+        assert!(payload.is_empty());
+
+        // 4. Success reset after real producing refusal
+        trigger_real_refusal();
+        let mut out_sim_succ: *mut SidereonScenarioSimulation = ptr::null_mut();
+        let status = unsafe {
+            sidereon_scenario_simulate_json(
+                valid_json.as_ptr(),
+                valid_json.len(),
+                &mut out_sim_succ,
+            )
+        };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert!(!out_sim_succ.is_null());
+        let (info, payload) = get_last_engine_error_two_pass();
+        assert_eq!(info.family, SidereonEngineErrorFamily::None);
+        assert_eq!(info.payload_len, 0);
+        assert!(payload.is_empty());
+
+        unsafe { sidereon_scenario_simulation_free(out_sim_succ) };
+        clear_engine_error();
     }
 }

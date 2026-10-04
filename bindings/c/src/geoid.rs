@@ -2,6 +2,109 @@ use super::*;
 
 // --- Geoid undulation / orthometric height (sidereon_core::geoid) -------------
 
+/// Stable kind of the most recent geoid construction or parsing error.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonGeoidErrorKind {
+    /// No geoid error is recorded for this thread.
+    None = 0,
+    /// The supplied grid dimensions and sample count disagree.
+    InvalidDimensions = 1,
+    /// A grid origin or spacing is invalid.
+    InvalidSpacing = 2,
+    /// A row-major sample is not finite.
+    NonFiniteValue = 3,
+    /// A text, DAC, GTX or raster input could not be parsed.
+    Parse = 4,
+    /// A geoid error added by a later engine version.
+    Unknown = 999,
+}
+
+/// Typed detail for the latest standalone or nested geoid construction error.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SidereonGeoidError {
+    /// Error selector as SidereonGeoidErrorKind.
+    pub kind: u32,
+    /// Expected sample count for InvalidDimensions.
+    pub expected: usize,
+    /// Supplied sample count for InvalidDimensions.
+    pub found: usize,
+    /// Row-major sample index for NonFiniteValue.
+    pub index: usize,
+}
+
+thread_local! {
+    static LAST_GEOID_ERROR: RefCell<Option<SidereonGeoidError>> = const { RefCell::new(None) };
+}
+
+pub(crate) fn no_geoid_error() -> SidereonGeoidError {
+    SidereonGeoidError {
+        kind: SidereonGeoidErrorKind::None as u32,
+        expected: 0,
+        found: 0,
+        index: 0,
+    }
+}
+
+pub(crate) fn reset_geoid_error() {
+    LAST_GEOID_ERROR.with(|slot| *slot.borrow_mut() = None);
+    record_terrain_error_texts(SidereonTerrainErrorFamily::Geoid, Vec::new());
+}
+
+pub(crate) fn record_geoid_error(err: &GeoidError) -> SidereonGeoidError {
+    let (typed, texts) = geoid_error_to_c(err);
+    LAST_GEOID_ERROR.with(|slot| *slot.borrow_mut() = Some(typed));
+    record_terrain_error_texts(SidereonTerrainErrorFamily::Geoid, texts);
+    typed
+}
+
+pub(crate) fn geoid_error_to_c(err: &GeoidError) -> (SidereonGeoidError, Vec<(u32, String)>) {
+    let mut out = no_geoid_error();
+    let mut texts = Vec::new();
+    match err {
+        GeoidError::InvalidDimensions { expected, found } => {
+            out.kind = SidereonGeoidErrorKind::InvalidDimensions as u32;
+            out.expected = *expected;
+            out.found = *found;
+        }
+        GeoidError::InvalidSpacing { field } => {
+            out.kind = SidereonGeoidErrorKind::InvalidSpacing as u32;
+            texts.push((SidereonTerrainErrorText::Field as u32, (*field).to_owned()));
+        }
+        GeoidError::NonFiniteValue { index } => {
+            out.kind = SidereonGeoidErrorKind::NonFiniteValue as u32;
+            out.index = *index;
+        }
+        GeoidError::Parse { reason } => {
+            out.kind = SidereonGeoidErrorKind::Parse as u32;
+            texts.push((SidereonTerrainErrorText::Reason as u32, reason.clone()));
+        }
+    }
+    (out, texts)
+}
+
+/// Copy the last typed geoid construction error on this thread. Text details
+/// are read with sidereon_last_terrain_error_text using the Geoid family.
+///
+/// Safety: out_error must point to a SidereonGeoidError.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_last_geoid_error(
+    out_error: *mut SidereonGeoidError,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_last_geoid_error", SidereonStatus::Panic, || {
+        let out = c_try!(require_out(
+            out_error,
+            "sidereon_last_geoid_error",
+            "out_error"
+        ));
+        *out = LAST_GEOID_ERROR
+            .with(|slot| *slot.borrow())
+            .unwrap_or_else(no_geoid_error);
+        SidereonStatus::Ok
+    })
+}
+
 /// A loaded geoid undulation grid. Opaque to C. Create with a
 /// sidereon_geoid_grid_* constructor; release with sidereon_geoid_grid_free.
 pub struct SidereonGeoidGrid {
@@ -170,6 +273,7 @@ pub unsafe extern "C" fn sidereon_geoid_grid_from_text(
         "sidereon_geoid_grid_from_text",
         SidereonStatus::Panic,
         || {
+            reset_geoid_error();
             let out_grid = c_try!(require_out(
                 out_grid,
                 "sidereon_geoid_grid_from_text",
@@ -218,6 +322,7 @@ pub unsafe extern "C" fn sidereon_geoid_grid_from_proj_egm96_gtx(
         "sidereon_geoid_grid_from_proj_egm96_gtx",
         SidereonStatus::Panic,
         || {
+            reset_geoid_error();
             let out_grid = c_try!(require_out(
                 out_grid,
                 "sidereon_geoid_grid_from_proj_egm96_gtx",
@@ -261,6 +366,7 @@ pub unsafe extern "C" fn sidereon_geoid_grid_new(
     out_grid: *mut *mut SidereonGeoidGrid,
 ) -> SidereonStatus {
     ffi_boundary("sidereon_geoid_grid_new", SidereonStatus::Panic, || {
+        reset_geoid_error();
         let out_grid = c_try!(require_out(out_grid, "sidereon_geoid_grid_new", "out_grid"));
         *out_grid = ptr::null_mut();
         let values = c_try!(require_slice(
@@ -438,6 +544,7 @@ pub unsafe extern "C" fn sidereon_egm96_15m_geoid_from_ww15mgh_dac_bytes(
         "sidereon_egm96_15m_geoid_from_ww15mgh_dac_bytes",
         SidereonStatus::Panic,
         || {
+            reset_geoid_error();
             let out = c_try!(require_out(
                 out_geoid,
                 "sidereon_egm96_15m_geoid_from_ww15mgh_dac_bytes",
@@ -479,6 +586,7 @@ pub unsafe extern "C" fn sidereon_egm96_15m_geoid_from_ww15mgh_dac_path(
         "sidereon_egm96_15m_geoid_from_ww15mgh_dac_path",
         SidereonStatus::Panic,
         || {
+            reset_geoid_error();
             let out = c_try!(require_out(
                 out_geoid,
                 "sidereon_egm96_15m_geoid_from_ww15mgh_dac_path",
@@ -753,6 +861,7 @@ pub unsafe extern "C" fn sidereon_geoid_grid_from_egm96_dac(
         "sidereon_geoid_grid_from_egm96_dac",
         SidereonStatus::Panic,
         || {
+            reset_geoid_error();
             let out_grid = c_try!(require_out(
                 out_grid,
                 "sidereon_geoid_grid_from_egm96_dac",
@@ -791,6 +900,7 @@ pub unsafe extern "C" fn sidereon_geoid_grid_from_egm2008_raster(
         "sidereon_geoid_grid_from_egm2008_raster",
         SidereonStatus::Panic,
         || {
+            reset_geoid_error();
             let out_grid = c_try!(require_out(
                 out_grid,
                 "sidereon_geoid_grid_from_egm2008_raster",
@@ -834,6 +944,7 @@ pub unsafe extern "C" fn sidereon_geoid_grid_from_egm2008_raster_window(
         "sidereon_geoid_grid_from_egm2008_raster_window",
         SidereonStatus::Panic,
         || {
+            reset_geoid_error();
             let out_grid = c_try!(require_out(
                 out_grid,
                 "sidereon_geoid_grid_from_egm2008_raster_window",
@@ -1011,6 +1122,7 @@ pub unsafe extern "C" fn sidereon_geoid_grid_ellipsoidal_height_rad(
 }
 
 fn map_geoid_error(fn_name: &str, err: GeoidError) -> SidereonStatus {
+    record_geoid_error(&err);
     set_last_error(format!("{fn_name}: {err}"));
     SidereonStatus::InvalidArgument
 }
@@ -1100,10 +1212,7 @@ fn egm2008_window_from_c(
         window.n_lat,
         window.n_lon,
     )
-    .map_err(|err| {
-        set_last_error(format!("{fn_name}: {err}"));
-        SidereonStatus::InvalidArgument
-    })
+    .map_err(|err| map_geoid_error(fn_name, err))
 }
 
 fn geoid_points_from_c(
@@ -1169,14 +1278,17 @@ mod tests {
         };
         assert_eq!(load_status, SidereonStatus::Ok);
         assert!(!grid.is_null());
+        // sidereon-core's own grid of the same bytes.
+        let core = GeoidGrid::from_proj_egm96_gtx(&bytes).expect("core loads the grid");
+        let (lat, lon) = (-89.875_f64.to_radians(), -179.875_f64.to_radians());
 
         let mut detail = proj_vgridshift_no_error();
         let mut value = 0.0;
         let status = unsafe {
             sidereon_geoid_grid_undulation_proj_rad(
                 grid,
-                -89.875_f64.to_radians(),
-                -179.875_f64.to_radians(),
+                lat,
+                lon,
                 SidereonProjVgridshiftArithmetic::FusedMultiplyAdd as u32,
                 &mut detail,
                 &mut value,
@@ -1184,7 +1296,12 @@ mod tests {
         };
         assert_eq!(status, SidereonStatus::Ok);
         assert_eq!(detail.kind, SidereonProjVgridshiftErrorKind::None as u32);
-        assert!((value - 2.5).abs() < 1.0e-12);
+        assert_eq!(
+            value.to_bits(),
+            core.undulation_proj_rad(lat, lon, ProjVgridshiftArithmetic::FusedMultiplyAdd)
+                .expect("core undulation")
+                .to_bits()
+        );
 
         let status = unsafe {
             sidereon_geoid_grid_undulation_proj_rad(
@@ -1196,6 +1313,12 @@ mod tests {
                 &mut value,
             )
         };
+        // sidereon-core refuses the NaN latitude; map_proj_vgridshift_error
+        // types that refusal.
+        assert!(matches!(
+            core.undulation_proj_rad(f64::NAN, 0.0, ProjVgridshiftArithmetic::SeparateMultiplyAdd),
+            Err(ProjVgridshiftError::NonFiniteCoordinate { field: "latitude" })
+        ));
         assert_eq!(status, SidereonStatus::InvalidArgument);
         assert_eq!(
             detail.kind,
@@ -1208,5 +1331,219 @@ mod tests {
         assert_eq!(value, 0.0);
 
         unsafe { sidereon_geoid_grid_free(grid) };
+    }
+
+    #[test]
+    fn geoid_construction_errors_keep_typed_fields_and_reset_by_operation() {
+        let mut grid = ptr::null_mut();
+        let short_values = [1.0_f64];
+        assert_eq!(
+            unsafe {
+                sidereon_geoid_grid_new(
+                    0.0,
+                    0.0,
+                    1.0,
+                    1.0,
+                    0,
+                    1,
+                    short_values.as_ptr(),
+                    0,
+                    &mut grid,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+        let mut error = no_geoid_error();
+        assert_eq!(
+            unsafe { sidereon_last_geoid_error(&mut error) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(error.kind, SidereonGeoidErrorKind::InvalidDimensions as u32);
+        assert_eq!((error.expected, error.found), (1, 0));
+
+        assert_eq!(
+            unsafe {
+                sidereon_geoid_grid_new(
+                    0.0,
+                    0.0,
+                    1.0,
+                    1.0,
+                    2,
+                    2,
+                    short_values.as_ptr(),
+                    short_values.len(),
+                    &mut grid,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+        assert_eq!(
+            unsafe { sidereon_last_geoid_error(&mut error) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(error.kind, SidereonGeoidErrorKind::InvalidDimensions as u32);
+        assert_eq!((error.expected, error.found), (4, 1));
+
+        assert_eq!(
+            unsafe {
+                sidereon_geoid_grid_new(
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0,
+                    1,
+                    1,
+                    short_values.as_ptr(),
+                    1,
+                    &mut grid,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+        assert_eq!(
+            unsafe { sidereon_last_geoid_error(&mut error) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(error.kind, SidereonGeoidErrorKind::InvalidSpacing as u32);
+        assert_eq!(terrain_text(SidereonTerrainErrorText::Field), "dlat");
+
+        let nonfinite = [f64::NAN];
+        assert_eq!(
+            unsafe {
+                sidereon_geoid_grid_new(0.0, 0.0, 1.0, 1.0, 1, 1, nonfinite.as_ptr(), 1, &mut grid)
+            },
+            SidereonStatus::InvalidArgument
+        );
+        assert_eq!(
+            unsafe { sidereon_last_geoid_error(&mut error) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(error.kind, SidereonGeoidErrorKind::NonFiniteValue as u32);
+        assert_eq!(error.index, 0);
+
+        let malformed = b"not a geoid grid";
+        assert_eq!(
+            unsafe {
+                sidereon_geoid_grid_from_text(malformed.as_ptr(), malformed.len(), &mut grid)
+            },
+            SidereonStatus::InvalidArgument
+        );
+        assert_eq!(
+            unsafe { sidereon_last_geoid_error(&mut error) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(error.kind, SidereonGeoidErrorKind::Parse as u32);
+        assert!(!terrain_text(SidereonTerrainErrorText::Reason).is_empty());
+
+        assert_eq!(
+            unsafe {
+                sidereon_geoid_grid_new(0.0, 0.0, 1.0, 1.0, 1, 1, ptr::null(), 1, ptr::null_mut())
+            },
+            SidereonStatus::NullPointer
+        );
+        assert_eq!(
+            unsafe { sidereon_last_geoid_error(&mut error) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(error.kind, SidereonGeoidErrorKind::None as u32);
+        assert!(terrain_text(SidereonTerrainErrorText::Reason).is_empty());
+
+        let valid = [3.0_f64];
+        assert_eq!(
+            unsafe {
+                sidereon_geoid_grid_new(0.0, 0.0, 1.0, 1.0, 1, 1, valid.as_ptr(), 1, &mut grid)
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(
+            unsafe { sidereon_last_geoid_error(&mut error) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(error.kind, SidereonGeoidErrorKind::None as u32);
+        unsafe { sidereon_geoid_grid_free(grid) };
+
+        let empty = [];
+        let invalid_window = SidereonEgm2008RasterWindow {
+            spacing: SidereonEgm2008GridSpacing::OneMinute as u32,
+            lat_min_deg: -90.0,
+            lon_min_deg: 0.0,
+            n_lat: 0,
+            n_lon: 1,
+        };
+        assert_eq!(
+            unsafe {
+                sidereon_geoid_grid_from_egm2008_raster_window(
+                    empty.as_ptr(),
+                    empty.len(),
+                    &invalid_window,
+                    &mut grid,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+        assert_eq!(
+            unsafe { sidereon_last_geoid_error(&mut error) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(error.kind, SidereonGeoidErrorKind::InvalidDimensions as u32);
+        assert_eq!((error.expected, error.found), (1, 0));
+    }
+
+    #[test]
+    fn malformed_dac_reports_nested_geoid_details() {
+        let empty = [];
+        let mut geoid = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_egm96_15m_geoid_from_ww15mgh_dac_bytes(
+                    empty.as_ptr(),
+                    empty.len(),
+                    &mut geoid,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+        let mut datum = unsafe { std::mem::zeroed::<SidereonTerrainDatumError>() };
+        assert_eq!(
+            unsafe { sidereon_last_terrain_datum_error(&mut datum) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(datum.kind, SidereonTerrainDatumErrorKind::Geoid as u32);
+        assert_eq!(datum.geoid.kind, SidereonGeoidErrorKind::Parse as u32);
+        assert!(!terrain_text(SidereonTerrainErrorText::Reason).is_empty());
+    }
+
+    fn terrain_text(part: SidereonTerrainErrorText) -> String {
+        let mut written = 0usize;
+        let mut required = 0usize;
+        assert_eq!(
+            unsafe {
+                sidereon_last_terrain_error_text(
+                    SidereonTerrainErrorFamily::Geoid as u32,
+                    part as u32,
+                    ptr::null_mut(),
+                    0,
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        let mut bytes = vec![0; required];
+        assert_eq!(
+            unsafe {
+                sidereon_last_terrain_error_text(
+                    SidereonTerrainErrorFamily::Geoid as u32,
+                    part as u32,
+                    bytes.as_mut_ptr(),
+                    bytes.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(written, required);
+        String::from_utf8(bytes).expect("geoid error detail is UTF-8")
     }
 }

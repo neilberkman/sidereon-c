@@ -1,0 +1,33 @@
+[package]
+name = "sidereon-core-registry-fixture-harness"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+sidereon-core = "=3.0.0"
+serde_json = "1"
+nalgebra = "=0.33.3"
+libm = "0.2"
+
+[[test]]
+name = "tle_python_fixture"
+path = "tests/tle_python_fixture.rs"
+
+[[test]]
+name = "sgp4_topocentric_arc"
+path = "tests/sgp4_topocentric_arc.rs"
+
+[[test]]
+name = "pass_finder_arc"
+path = "tests/pass_finder_arc.rs"
+
+[[test]]
+name = "numerical_propagation"
+path = "tests/numerical_propagation.rs"
+
+[[test]]
+name = "sp3_bodies_python_fixture"
+path = "tests/sp3_bodies_python_fixture.rs"

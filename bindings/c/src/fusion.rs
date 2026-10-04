@@ -1,4 +1,9 @@
 use super::*;
+use crate::engine_error::{
+    degrade_reason_name, engine_error_operation_boundary, record_engine_error,
+    SidereonEngineErrorFamily,
+};
+use serde_json::{json, Value};
 
 /// Error-state update algorithm used by a GNSS/INS fusion filter.
 #[repr(C)]
@@ -820,7 +825,7 @@ pub unsafe extern "C" fn sidereon_fusion_filter_create(
     config: *const SidereonFusionFilterConfig,
     out_filter: *mut *mut SidereonFusionFilter,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_fusion_filter_create",
         SidereonStatus::Panic,
         || {
@@ -976,7 +981,7 @@ pub unsafe extern "C" fn sidereon_fusion_filter_propagate(
     filter: *mut SidereonFusionFilter,
     sample: *const SidereonFusionImuSample,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_fusion_filter_propagate",
         SidereonStatus::Panic,
         || {
@@ -1012,7 +1017,7 @@ pub unsafe extern "C" fn sidereon_fusion_filter_propagate_recorded(
     sample: *const SidereonFusionImuSample,
     history: *mut SidereonFusionRtsHistoryBuilder,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_fusion_filter_propagate_recorded",
         SidereonStatus::Panic,
         || {
@@ -1054,7 +1059,7 @@ pub unsafe extern "C" fn sidereon_fusion_filter_update_loose(
     measurement: *const SidereonFusionLooseMeasurement,
     out_update: *mut SidereonFusionUpdate,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_fusion_filter_update_loose",
         SidereonStatus::Panic,
         || {
@@ -1096,7 +1101,7 @@ pub unsafe extern "C" fn sidereon_fusion_filter_update_loose_recorded(
     history: *mut SidereonFusionRtsHistoryBuilder,
     out_update: *mut SidereonFusionUpdate,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_fusion_filter_update_loose_recorded",
         SidereonStatus::Panic,
         || {
@@ -1146,7 +1151,7 @@ pub unsafe extern "C" fn sidereon_fusion_filter_update_loose_time_sync(
     measurement: *const SidereonFusionLooseMeasurement,
     out_update: *mut SidereonFusionTimeSyncUpdate,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_fusion_filter_update_loose_time_sync",
         SidereonStatus::Panic,
         || {
@@ -1180,17 +1185,23 @@ pub unsafe extern "C" fn sidereon_fusion_filter_update_loose_time_sync(
 /// applied, out_present is false and out_update is zeroed.
 ///
 /// Safety: filter must be a live handle; out_update must point to a
-/// SidereonFusionUpdate; out_present must point to a bool.
+/// SidereonFusionUpdate; out_present must point to a bool; the output ranges
+/// must be disjoint.
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_fusion_filter_update_stationary(
     filter: *mut SidereonFusionFilter,
     out_update: *mut SidereonFusionUpdate,
     out_present: *mut bool,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_fusion_filter_update_stationary",
         SidereonStatus::Panic,
         || {
+            c_try!(preflight_fusion_update_outputs(
+                "sidereon_fusion_filter_update_stationary",
+                out_update,
+                out_present
+            ));
             let filter = c_try!(require_mut(
                 filter,
                 "sidereon_fusion_filter_update_stationary",
@@ -1225,7 +1236,8 @@ pub unsafe extern "C" fn sidereon_fusion_filter_update_stationary(
 /// When no update is applied, out_present is false and out_update is zeroed.
 ///
 /// Safety: filter and history must be live handles; out_update must point to a
-/// SidereonFusionUpdate; out_present must point to a bool.
+/// SidereonFusionUpdate; out_present must point to a bool, and the output
+/// ranges must be disjoint.
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_fusion_filter_update_stationary_recorded(
     filter: *mut SidereonFusionFilter,
@@ -1233,10 +1245,15 @@ pub unsafe extern "C" fn sidereon_fusion_filter_update_stationary_recorded(
     out_update: *mut SidereonFusionUpdate,
     out_present: *mut bool,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_fusion_filter_update_stationary_recorded",
         SidereonStatus::Panic,
         || {
+            c_try!(preflight_fusion_update_outputs(
+                "sidereon_fusion_filter_update_stationary_recorded",
+                out_update,
+                out_present
+            ));
             let filter = c_try!(require_mut(
                 filter,
                 "sidereon_fusion_filter_update_stationary_recorded",
@@ -1278,17 +1295,23 @@ pub unsafe extern "C" fn sidereon_fusion_filter_update_stationary_recorded(
 /// update is applied, out_present is false and out_update is zeroed.
 ///
 /// Safety: filter must be a live handle; out_update must point to a
-/// SidereonFusionUpdate; out_present must point to a bool.
+/// SidereonFusionUpdate; out_present must point to a bool, and the output
+/// ranges must be disjoint.
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_fusion_filter_update_non_holonomic(
     filter: *mut SidereonFusionFilter,
     out_update: *mut SidereonFusionUpdate,
     out_present: *mut bool,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_fusion_filter_update_non_holonomic",
         SidereonStatus::Panic,
         || {
+            c_try!(preflight_fusion_update_outputs(
+                "sidereon_fusion_filter_update_non_holonomic",
+                out_update,
+                out_present
+            ));
             let filter = c_try!(require_mut(
                 filter,
                 "sidereon_fusion_filter_update_non_holonomic",
@@ -1324,7 +1347,8 @@ pub unsafe extern "C" fn sidereon_fusion_filter_update_non_holonomic(
 /// zeroed.
 ///
 /// Safety: filter and history must be live handles; out_update must point to a
-/// SidereonFusionUpdate; out_present must point to a bool.
+/// SidereonFusionUpdate; out_present must point to a bool, and the output
+/// ranges must be disjoint.
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_fusion_filter_update_non_holonomic_recorded(
     filter: *mut SidereonFusionFilter,
@@ -1332,10 +1356,15 @@ pub unsafe extern "C" fn sidereon_fusion_filter_update_non_holonomic_recorded(
     out_update: *mut SidereonFusionUpdate,
     out_present: *mut bool,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_fusion_filter_update_non_holonomic_recorded",
         SidereonStatus::Panic,
         || {
+            c_try!(preflight_fusion_update_outputs(
+                "sidereon_fusion_filter_update_non_holonomic_recorded",
+                out_update,
+                out_present
+            ));
             let filter = c_try!(require_mut(
                 filter,
                 "sidereon_fusion_filter_update_non_holonomic_recorded",
@@ -1387,7 +1416,7 @@ pub unsafe extern "C" fn sidereon_fusion_filter_update_tight_sp3(
     epoch: *const SidereonFusionTightEpoch,
     out_update: *mut SidereonFusionUpdate,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_fusion_filter_update_tight_sp3",
         SidereonStatus::Panic,
         || {
@@ -1434,7 +1463,7 @@ pub unsafe extern "C" fn sidereon_fusion_filter_update_tight_broadcast(
     epoch: *const SidereonFusionTightEpoch,
     out_update: *mut SidereonFusionUpdate,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_fusion_filter_update_tight_broadcast",
         SidereonStatus::Panic,
         || {
@@ -1482,7 +1511,7 @@ pub unsafe extern "C" fn sidereon_fusion_filter_update_tight_sp3_recorded(
     history: *mut SidereonFusionRtsHistoryBuilder,
     out_update: *mut SidereonFusionUpdate,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_fusion_filter_update_tight_sp3_recorded",
         SidereonStatus::Panic,
         || {
@@ -1540,7 +1569,7 @@ pub unsafe extern "C" fn sidereon_fusion_filter_update_tight_broadcast_recorded(
     history: *mut SidereonFusionRtsHistoryBuilder,
     out_update: *mut SidereonFusionUpdate,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_fusion_filter_update_tight_broadcast_recorded",
         SidereonStatus::Panic,
         || {
@@ -1598,7 +1627,7 @@ pub unsafe extern "C" fn sidereon_fusion_filter_update_tight_sp3_time_sync(
     epoch: *const SidereonFusionTightEpoch,
     out_update: *mut SidereonFusionTimeSyncUpdate,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_fusion_filter_update_tight_sp3_time_sync",
         SidereonStatus::Panic,
         || {
@@ -1648,7 +1677,7 @@ pub unsafe extern "C" fn sidereon_fusion_filter_update_tight_broadcast_time_sync
     epoch: *const SidereonFusionTightEpoch,
     out_update: *mut SidereonFusionTimeSyncUpdate,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_fusion_filter_update_tight_broadcast_time_sync",
         SidereonStatus::Panic,
         || {
@@ -1698,7 +1727,7 @@ pub unsafe extern "C" fn sidereon_fusion_filter_configure_time_sync(
     imu_capacity: usize,
     checkpoint_capacity: usize,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_fusion_filter_configure_time_sync",
         SidereonStatus::Panic,
         || {
@@ -1761,7 +1790,7 @@ pub unsafe extern "C" fn sidereon_fusion_filter_encode_state(
     out_written: *mut usize,
     out_required: *mut usize,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_fusion_filter_encode_state",
         SidereonStatus::Panic,
         || {
@@ -1778,7 +1807,7 @@ pub unsafe extern "C" fn sidereon_fusion_filter_encode_state(
             let bytes = match filter.inner.encode_state() {
                 Ok(bytes) => bytes,
                 Err(err) => {
-                    return map_fusion_codec_error("sidereon_fusion_filter_encode_state", err)
+                    return map_fusion_codec_error("sidereon_fusion_filter_encode_state", err);
                 }
             };
             c_try!(copy_prefix_to_c(
@@ -1806,7 +1835,7 @@ pub unsafe extern "C" fn sidereon_fusion_filter_restore_state(
     data: *const u8,
     len: usize,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_fusion_filter_restore_state",
         SidereonStatus::Panic,
         || {
@@ -1867,7 +1896,7 @@ pub unsafe extern "C" fn sidereon_fusion_rts_history_builder_from_filter(
     filter: *const SidereonFusionFilter,
     out_history: *mut *mut SidereonFusionRtsHistoryBuilder,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_fusion_rts_history_builder_from_filter",
         SidereonStatus::Panic,
         || {
@@ -1889,7 +1918,7 @@ pub unsafe extern "C" fn sidereon_fusion_rts_history_builder_from_filter(
                         return map_fusion_error(
                             "sidereon_fusion_rts_history_builder_from_filter",
                             err,
-                        )
+                        );
                     }
                 };
             write_boxed_handle(out_history, SidereonFusionRtsHistoryBuilder { inner });
@@ -1907,7 +1936,7 @@ pub unsafe extern "C" fn sidereon_fusion_rts_history_builder_finish(
     history: *const SidereonFusionRtsHistoryBuilder,
     out_history: *mut *mut SidereonFusionRtsHistory,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_fusion_rts_history_builder_finish",
         SidereonStatus::Panic,
         || {
@@ -1925,7 +1954,7 @@ pub unsafe extern "C" fn sidereon_fusion_rts_history_builder_finish(
             let inner = match history.inner.clone().finish() {
                 Ok(inner) => inner,
                 Err(err) => {
-                    return map_fusion_error("sidereon_fusion_rts_history_builder_finish", err)
+                    return map_fusion_error("sidereon_fusion_rts_history_builder_finish", err);
                 }
             };
             write_boxed_handle(out_history, SidereonFusionRtsHistory { inner });
@@ -2173,7 +2202,7 @@ pub unsafe extern "C" fn sidereon_smooth_fusion_rts(
     history: *const SidereonFusionRtsHistory,
     out_smoothed: *mut *mut SidereonSmoothedFusionTrajectory,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_smooth_fusion_rts", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_smooth_fusion_rts", SidereonStatus::Panic, || {
         let out_smoothed = c_try!(require_out(
             out_smoothed,
             "sidereon_smooth_fusion_rts",
@@ -2214,7 +2243,7 @@ pub unsafe extern "C" fn sidereon_fusion_velocity_match_outage(
     out_required: *mut usize,
     out_trajectory: *mut SidereonFusionVelocityMatchedTrajectory,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_fusion_velocity_match_outage",
         SidereonStatus::Panic,
         || {
@@ -2243,7 +2272,7 @@ pub unsafe extern "C" fn sidereon_fusion_velocity_match_outage(
                 ) {
                     Ok(state) => core_states.push(state),
                     Err(err) => {
-                        return map_fusion_error("sidereon_fusion_velocity_match_outage", err)
+                        return map_fusion_error("sidereon_fusion_velocity_match_outage", err);
                     }
                 }
             }
@@ -3074,7 +3103,7 @@ fn fusion_state_to_c(
     let state = filter.state();
     let clock = match filter.tight_clock_state() {
         Ok(clock) => clock,
-        Err(err) => return Err(map_fusion_error(fn_name, err)),
+        Err(err) => return Err(map_fusion_error_retaining(fn_name, err)),
     };
     Ok(SidereonFusionState {
         t_j2000_s: state.nominal.t_j2000_s,
@@ -3096,6 +3125,27 @@ fn fusion_state_to_c(
             clock.covariance[1][1],
         ],
     })
+}
+
+fn preflight_fusion_update_outputs(
+    fn_name: &str,
+    out_update: *mut SidereonFusionUpdate,
+    out_present: *mut bool,
+) -> Result<(), SidereonStatus> {
+    if !out_update.is_null() && !out_present.is_null() {
+        let outputs = [
+            Some((
+                unsafe { super::checked_output_range(fn_name, out_update, 1, "out_update")? },
+                "out_update",
+            )),
+            Some((
+                unsafe { super::checked_output_range(fn_name, out_present, 1, "out_present")? },
+                "out_present",
+            )),
+        ];
+        super::reject_overlapping_optional_outputs(fn_name, &outputs)?;
+    }
+    Ok(())
 }
 
 fn zero_fusion_update() -> SidereonFusionUpdate {
@@ -3192,8 +3242,118 @@ fn smoothed_fusion_epoch<'a>(
     })
 }
 
-fn map_fusion_error(fn_name: &str, err: sidereon_core::fusion::FusionError) -> SidereonStatus {
-    set_last_error(format!("{fn_name}: {err}"));
+fn fusion_node(kind: &str, fields: Value) -> Value {
+    json!({
+        "kind": kind,
+        "fields": fields,
+    })
+}
+
+pub(crate) fn fusion_error_value(error: &sidereon_core::fusion::FusionError) -> Value {
+    use sidereon_core::fusion::FusionError as E;
+    match error {
+        E::InvalidInput { field, reason } => fusion_node(
+            "invalid_input",
+            json!({
+                "field": field,
+                "reason": reason,
+            }),
+        ),
+        E::DimensionMismatch {
+            field,
+            expected,
+            actual,
+        } => fusion_node(
+            "dimension_mismatch",
+            json!({
+                "field": field,
+                "expected": expected,
+                "actual": actual,
+            }),
+        ),
+        E::SingularInnovation => fusion_node("singular_innovation", json!({})),
+        E::NonPositiveSemidefinite { field } => fusion_node(
+            "non_positive_semidefinite",
+            json!({
+                "field": field,
+            }),
+        ),
+        E::NonPositiveDefinite { field } => fusion_node(
+            "non_positive_definite",
+            json!({
+                "field": field,
+            }),
+        ),
+        E::NominalState => fusion_node("nominal_state", json!({})),
+        E::Ut1OutsideCoverage(reason) => fusion_node(
+            "ut1_outside_coverage",
+            json!({
+                "reason": degrade_reason_name(*reason),
+            }),
+        ),
+    }
+}
+
+fn fusion_codec_node(kind: &str, fields: Value) -> Value {
+    json!({
+        "kind": kind,
+        "fields": fields,
+    })
+}
+
+pub(crate) fn fusion_state_codec_error_value(
+    error: &sidereon_core::fusion::FusionStateCodecError,
+) -> Value {
+    use sidereon_core::fusion::FusionStateCodecError as E;
+    match error {
+        E::InvalidMagic => fusion_codec_node("invalid_magic", json!({})),
+        E::UnsupportedVersion { version } => fusion_codec_node(
+            "unsupported_version",
+            json!({
+                "version": version,
+            }),
+        ),
+        E::Truncated {
+            offset,
+            needed,
+            actual,
+        } => fusion_codec_node(
+            "truncated",
+            json!({
+                "offset": offset,
+                "needed": needed,
+                "actual": actual,
+            }),
+        ),
+        E::Checksum { expected, found } => fusion_codec_node(
+            "checksum",
+            json!({
+                "expected": expected,
+                "found": found,
+            }),
+        ),
+        E::TrailingBytes { remaining } => fusion_codec_node(
+            "trailing_bytes",
+            json!({
+                "remaining": remaining,
+            }),
+        ),
+        E::InvalidState { reason } => fusion_codec_node(
+            "invalid_state",
+            json!({
+                "reason": reason,
+            }),
+        ),
+        E::Json { message } => fusion_codec_node(
+            "json",
+            json!({
+                "message": message,
+            }),
+        ),
+    }
+}
+
+fn fusion_error_to_status(err: &sidereon_core::fusion::FusionError) -> SidereonStatus {
     match err {
         sidereon_core::fusion::FusionError::SingularInnovation
         | sidereon_core::fusion::FusionError::NonPositiveSemidefinite { .. }
@@ -3201,13 +3361,774 @@ fn map_fusion_error(fn_name: &str, err: sidereon_core::fusion::FusionError) -> S
         sidereon_core::fusion::FusionError::InvalidInput { .. }
         | sidereon_core::fusion::FusionError::DimensionMismatch { .. }
         | sidereon_core::fusion::FusionError::NominalState => SidereonStatus::InvalidArgument,
+        sidereon_core::fusion::FusionError::Ut1OutsideCoverage(_) => {
+            SidereonStatus::Ut1OutsideCoverage
+        }
     }
+}
+
+fn map_fusion_error_retaining(
+    fn_name: &str,
+    err: sidereon_core::fusion::FusionError,
+) -> SidereonStatus {
+    set_last_error(format!("{fn_name}: {err}"));
+    fusion_error_to_status(&err)
+}
+
+fn map_fusion_error(fn_name: &str, err: sidereon_core::fusion::FusionError) -> SidereonStatus {
+    record_engine_error(
+        SidereonEngineErrorFamily::Fusion,
+        fn_name,
+        fusion_error_value(&err),
+    );
+    map_fusion_error_retaining(fn_name, err)
 }
 
 fn map_fusion_codec_error(
     fn_name: &str,
     err: sidereon_core::fusion::FusionStateCodecError,
 ) -> SidereonStatus {
+    record_engine_error(
+        SidereonEngineErrorFamily::FusionStateCodec,
+        fn_name,
+        fusion_state_codec_error_value(&err),
+    );
     set_last_error(format!("{fn_name}: {err}"));
     SidereonStatus::InvalidArgument
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine_error::{
+        clear_engine_error, sidereon_last_engine_error_info, sidereon_last_engine_error_payload,
+        SidereonEngineErrorFamily, SidereonEngineErrorInfo,
+    };
+    use sidereon_core::astro::time::DegradeReason;
+    use sidereon_core::fusion::{FusionError, FusionStateCodecError};
+    use std::ptr;
+
+    #[test]
+    fn table_driven_fusion_error_mapping() {
+        let cases: Vec<(FusionError, &'static str)> = vec![
+            (
+                FusionError::InvalidInput {
+                    field: "lever_arm",
+                    reason: "must be finite",
+                },
+                "invalid_input",
+            ),
+            (
+                FusionError::DimensionMismatch {
+                    field: "covariance",
+                    expected: 15,
+                    actual: 16,
+                },
+                "dimension_mismatch",
+            ),
+            (FusionError::SingularInnovation, "singular_innovation"),
+            (
+                FusionError::NonPositiveSemidefinite {
+                    field: "process_noise",
+                },
+                "non_positive_semidefinite",
+            ),
+            (
+                FusionError::NonPositiveDefinite {
+                    field: "measurement_covariance",
+                },
+                "non_positive_definite",
+            ),
+            (FusionError::NominalState, "nominal_state"),
+            (
+                FusionError::Ut1OutsideCoverage(DegradeReason::BeforeCoverage),
+                "ut1_outside_coverage",
+            ),
+            (
+                FusionError::Ut1OutsideCoverage(DegradeReason::AfterCoverage),
+                "ut1_outside_coverage",
+            ),
+        ];
+
+        for (err, expected_kind) in cases {
+            let val = fusion_error_value(&err);
+            assert_eq!(val["kind"], expected_kind);
+            match &err {
+                FusionError::InvalidInput { field, reason } => {
+                    assert_eq!(val["fields"]["field"], *field);
+                    assert_eq!(val["fields"]["reason"], *reason);
+                }
+                FusionError::DimensionMismatch {
+                    field,
+                    expected,
+                    actual,
+                } => {
+                    assert_eq!(val["fields"]["field"], *field);
+                    assert_eq!(val["fields"]["expected"], *expected);
+                    assert_eq!(val["fields"]["actual"], *actual);
+                }
+                FusionError::SingularInnovation | FusionError::NominalState => {
+                    assert_eq!(val["fields"], json!({}));
+                }
+                FusionError::NonPositiveSemidefinite { field }
+                | FusionError::NonPositiveDefinite { field } => {
+                    assert_eq!(val["fields"]["field"], *field);
+                }
+                FusionError::Ut1OutsideCoverage(reason) => {
+                    let expected_reason = match reason {
+                        DegradeReason::BeforeCoverage => "before_coverage",
+                        DegradeReason::AfterCoverage => "after_coverage",
+                    };
+                    assert_eq!(val["fields"]["reason"], expected_reason);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn table_driven_fusion_state_codec_error_mapping() {
+        let cases: Vec<(FusionStateCodecError, &'static str)> = vec![
+            (FusionStateCodecError::InvalidMagic, "invalid_magic"),
+            (
+                FusionStateCodecError::UnsupportedVersion { version: 42 },
+                "unsupported_version",
+            ),
+            (
+                FusionStateCodecError::Truncated {
+                    offset: 10,
+                    needed: 32,
+                    actual: 8,
+                },
+                "truncated",
+            ),
+            (
+                FusionStateCodecError::Checksum {
+                    expected: 0x1234_5678_9abc_def0,
+                    found: 0xfeed_beef_cafe_babe,
+                },
+                "checksum",
+            ),
+            (
+                FusionStateCodecError::TrailingBytes { remaining: 5 },
+                "trailing_bytes",
+            ),
+            (
+                FusionStateCodecError::InvalidState {
+                    reason: "corrupted matrix".into(),
+                },
+                "invalid_state",
+            ),
+            (
+                FusionStateCodecError::Json {
+                    message: "syntax error".into(),
+                },
+                "json",
+            ),
+        ];
+
+        for (err, expected_kind) in cases {
+            let val = fusion_state_codec_error_value(&err);
+            assert_eq!(val["kind"], expected_kind);
+            match &err {
+                FusionStateCodecError::InvalidMagic => {
+                    assert_eq!(val["fields"], json!({}));
+                }
+                FusionStateCodecError::UnsupportedVersion { version } => {
+                    assert_eq!(val["fields"]["version"], *version);
+                }
+                FusionStateCodecError::Truncated {
+                    offset,
+                    needed,
+                    actual,
+                } => {
+                    assert_eq!(val["fields"]["offset"], *offset);
+                    assert_eq!(val["fields"]["needed"], *needed);
+                    assert_eq!(val["fields"]["actual"], *actual);
+                }
+                FusionStateCodecError::Checksum { expected, found } => {
+                    assert_eq!(val["fields"]["expected"], *expected);
+                    assert_eq!(val["fields"]["found"], *found);
+                }
+                FusionStateCodecError::TrailingBytes { remaining } => {
+                    assert_eq!(val["fields"]["remaining"], *remaining);
+                }
+                FusionStateCodecError::InvalidState { reason } => {
+                    assert_eq!(val["fields"]["reason"], reason.as_str());
+                }
+                FusionStateCodecError::Json { message } => {
+                    assert_eq!(val["fields"]["message"], message.as_str());
+                }
+            }
+        }
+    }
+
+    fn sample_valid_nav_state() -> SidereonFusionNavState {
+        SidereonFusionNavState {
+            t_j2000_s: 0.0,
+            position_ecef_m: [6378137.0, 0.0, 0.0],
+            velocity_ecef_mps: [0.0, 0.0, 0.0],
+            attitude_body_to_ecef: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            accel_bias_mps2: [0.0; 3],
+            gyro_bias_rps: [0.0; 3],
+            accel_scale_factor: [0.0; 3],
+            gyro_scale_factor: [0.0; 3],
+        }
+    }
+
+    #[test]
+    fn fusion_filter_and_codec_public_producer_control_and_refusals() {
+        clear_engine_error();
+
+        let mut config = SidereonFusionFilterConfig {
+            filter_kind: 0,
+            error_state_layout: 0,
+            imu_spec: SidereonFusionImuSpec {
+                accel_vrw_mps_sqrt_s: 0.0,
+                gyro_arw_rad_sqrt_s: 0.0,
+                accel_bias_instab_mps2: 0.0,
+                gyro_bias_instab_rps: 0.0,
+                accel_bias_tau_s: 0.0,
+                gyro_bias_tau_s: 0.0,
+                has_accel_scale_instab_ppm: false,
+                accel_scale_instab_ppm: 0.0,
+                has_gyro_scale_instab_ppm: false,
+                gyro_scale_instab_ppm: 0.0,
+            },
+            imu_bias_accel_mps2: [0.0; 3],
+            imu_bias_gyro_rps: [0.0; 3],
+            imu_accel_scale_misalignment: [0.0; 9],
+            imu_gyro_scale_misalignment: [0.0; 9],
+            imu_to_body_dcm: [0.0; 9],
+            mechanization: SidereonFusionMechanizationConfig {
+                coning_correction: 0,
+            },
+            loose_lever_arm_body_m: [0.0; 3],
+            loose_fix_status_weighting: SidereonFusionFixStatusWeighting {
+                single_sigma_multiplier: 0.0,
+                float_sigma_multiplier: 0.0,
+                fixed_sigma_multiplier: 0.0,
+            },
+            has_loose_innovation_gate: false,
+            loose_innovation_gate: zero_fusion_innovation_gate(),
+            has_loose_measurement_reweighting: false,
+            loose_measurement_reweighting: SidereonFusionIggIiiMeasurementReweighting {
+                k0_sigma: 0.0,
+                k1_sigma: 0.0,
+            },
+            has_loose_prediction_adaptation: false,
+            loose_prediction_adaptation: SidereonFusionYangPredictionAdaptiveFactor {
+                threshold: 0.0,
+                outlier_gate_probability: 0.0,
+            },
+            has_loose_stationary_updates: false,
+            loose_stationary_updates: zero_stationary_update_config(),
+            has_loose_non_holonomic: false,
+            loose_non_holonomic: zero_non_holonomic_config(),
+            tight_lever_arm_body_m: [0.0; 3],
+            tight_light_time: false,
+            tight_sagnac: false,
+            tight_initial_clock_bias_variance_m2: 0.0,
+            tight_initial_clock_drift_variance_m2_s2: 0.0,
+            tight_clock_bias_random_walk_m2_s: 0.0,
+            tight_clock_drift_random_walk_m2_s3: 0.0,
+            has_tight_innovation_gate: false,
+            tight_innovation_gate: zero_fusion_innovation_gate(),
+            ukf_alpha: 0.0,
+            ukf_beta: 0.0,
+            ukf_kappa: 0.0,
+            has_ukf_innovation_gate: false,
+            ukf_innovation_gate: zero_fusion_innovation_gate(),
+            time_sync_imu_capacity: 0,
+            time_sync_checkpoint_capacity: 0,
+        };
+        unsafe {
+            assert_eq!(
+                sidereon_fusion_filter_config_init(&mut config),
+                SidereonStatus::Ok
+            );
+        }
+
+        let initial = sample_valid_nav_state();
+        let diag15 = [1.0f64; 15];
+
+        // 1. Valid Fusion producer control: sidereon_fusion_filter_create
+        let mut filter: *mut SidereonFusionFilter = ptr::null_mut();
+        unsafe {
+            assert_eq!(
+                sidereon_fusion_filter_create(&initial, diag15.as_ptr(), 15, &config, &mut filter,),
+                SidereonStatus::Ok
+            );
+            assert!(!filter.is_null());
+
+            let mut info = SidereonEngineErrorInfo {
+                family: SidereonEngineErrorFamily::Fusion,
+                payload_len: 123,
+            };
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+            assert_eq!(info.payload_len, 0);
+
+            // 2. Valid Codec producer control: encode then restore state
+            let mut written = 0usize;
+            let mut required = 0usize;
+            assert_eq!(
+                sidereon_fusion_filter_encode_state(
+                    filter,
+                    ptr::null_mut(),
+                    0,
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, 0);
+            assert!(required > 0);
+            let encoded_len = required;
+
+            let mut encoded_buf = vec![0u8; encoded_len];
+            assert_eq!(
+                sidereon_fusion_filter_encode_state(
+                    filter,
+                    encoded_buf.as_mut_ptr(),
+                    encoded_buf.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, encoded_len);
+
+            // Valid encode clears/keeps clean TLS
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+
+            // Valid restore state clears/keeps clean TLS
+            assert_eq!(
+                sidereon_fusion_filter_restore_state(
+                    filter,
+                    encoded_buf.as_ptr(),
+                    encoded_buf.len(),
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+
+            // Retaining inspectors: filter_state, filter_covariance, filter_free retain
+            let mut out_state: SidereonFusionState = std::mem::zeroed();
+            assert_eq!(
+                sidereon_fusion_filter_state(filter, &mut out_state),
+                SidereonStatus::Ok
+            );
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+
+            sidereon_fusion_filter_free(filter);
+        }
+
+        // 3. Actual Fusion producer refusal: dimension mismatch from covariance_diagonal length
+        unsafe {
+            let mut bad_filter: *mut SidereonFusionFilter = ptr::null_mut();
+            assert_eq!(
+                sidereon_fusion_filter_create(
+                    &initial,
+                    diag15.as_ptr(),
+                    14,
+                    &config,
+                    &mut bad_filter,
+                ),
+                SidereonStatus::InvalidArgument
+            );
+            assert!(bad_filter.is_null());
+
+            let mut info = SidereonEngineErrorInfo {
+                family: SidereonEngineErrorFamily::None,
+                payload_len: 0,
+            };
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::Fusion);
+            assert!(info.payload_len > 0);
+
+            let mut written = 0;
+            let mut required = 0;
+            let mut buf = vec![0u8; info.payload_len];
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    buf.as_mut_ptr(),
+                    buf.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, info.payload_len);
+            let payload: Value = serde_json::from_slice(&buf).expect("valid JSON payload");
+            assert_eq!(payload["schema_version"], 1);
+            assert_eq!(payload["family"], "fusion");
+            assert_eq!(payload["operation"], "sidereon_fusion_filter_create");
+            assert_eq!(payload["error"]["kind"], "dimension_mismatch");
+            assert_eq!(payload["error"]["fields"]["field"], "covariance_diagonal");
+            assert_eq!(payload["error"]["fields"]["expected"], 15);
+            assert_eq!(payload["error"]["fields"]["actual"], 14);
+        }
+
+        // 4. Actual Codec producer refusal: corrupted magic bytes in restore_state
+        unsafe {
+            let mut filter: *mut SidereonFusionFilter = ptr::null_mut();
+            assert_eq!(
+                sidereon_fusion_filter_create(&initial, diag15.as_ptr(), 15, &config, &mut filter,),
+                SidereonStatus::Ok
+            );
+
+            let malformed_bytes = b"BAD_FUSION_MAGIC_HEADER_BYTES";
+            assert_eq!(
+                sidereon_fusion_filter_restore_state(
+                    filter,
+                    malformed_bytes.as_ptr(),
+                    malformed_bytes.len(),
+                ),
+                SidereonStatus::InvalidArgument
+            );
+
+            let mut info = SidereonEngineErrorInfo {
+                family: SidereonEngineErrorFamily::None,
+                payload_len: 0,
+            };
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::FusionStateCodec);
+            assert!(info.payload_len > 0);
+
+            let mut written = 0;
+            let mut required = 0;
+            let mut buf = vec![0u8; info.payload_len];
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    buf.as_mut_ptr(),
+                    buf.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, info.payload_len);
+            let payload: Value = serde_json::from_slice(&buf).expect("valid JSON payload");
+            assert_eq!(payload["schema_version"], 1);
+            assert_eq!(payload["family"], "fusion_state_codec");
+            assert_eq!(payload["operation"], "sidereon_fusion_filter_restore_state");
+            assert_eq!(payload["error"]["kind"], "invalid_magic");
+
+            sidereon_fusion_filter_free(filter);
+        }
+    }
+
+    #[test]
+    fn fusion_producer_early_clearing_and_retention() {
+        clear_engine_error();
+
+        let initial = sample_valid_nav_state();
+        let diag15 = [1.0f64; 15];
+        let mut config = SidereonFusionFilterConfig {
+            filter_kind: 0,
+            error_state_layout: 0,
+            imu_spec: SidereonFusionImuSpec {
+                accel_vrw_mps_sqrt_s: 0.0,
+                gyro_arw_rad_sqrt_s: 0.0,
+                accel_bias_instab_mps2: 0.0,
+                gyro_bias_instab_rps: 0.0,
+                accel_bias_tau_s: 0.0,
+                gyro_bias_tau_s: 0.0,
+                has_accel_scale_instab_ppm: false,
+                accel_scale_instab_ppm: 0.0,
+                has_gyro_scale_instab_ppm: false,
+                gyro_scale_instab_ppm: 0.0,
+            },
+            imu_bias_accel_mps2: [0.0; 3],
+            imu_bias_gyro_rps: [0.0; 3],
+            imu_accel_scale_misalignment: [0.0; 9],
+            imu_gyro_scale_misalignment: [0.0; 9],
+            imu_to_body_dcm: [0.0; 9],
+            mechanization: SidereonFusionMechanizationConfig {
+                coning_correction: 0,
+            },
+            loose_lever_arm_body_m: [0.0; 3],
+            loose_fix_status_weighting: SidereonFusionFixStatusWeighting {
+                single_sigma_multiplier: 0.0,
+                float_sigma_multiplier: 0.0,
+                fixed_sigma_multiplier: 0.0,
+            },
+            has_loose_innovation_gate: false,
+            loose_innovation_gate: zero_fusion_innovation_gate(),
+            has_loose_measurement_reweighting: false,
+            loose_measurement_reweighting: SidereonFusionIggIiiMeasurementReweighting {
+                k0_sigma: 0.0,
+                k1_sigma: 0.0,
+            },
+            has_loose_prediction_adaptation: false,
+            loose_prediction_adaptation: SidereonFusionYangPredictionAdaptiveFactor {
+                threshold: 0.0,
+                outlier_gate_probability: 0.0,
+            },
+            has_loose_stationary_updates: false,
+            loose_stationary_updates: zero_stationary_update_config(),
+            has_loose_non_holonomic: false,
+            loose_non_holonomic: zero_non_holonomic_config(),
+            tight_lever_arm_body_m: [0.0; 3],
+            tight_light_time: false,
+            tight_sagnac: false,
+            tight_initial_clock_bias_variance_m2: 0.0,
+            tight_initial_clock_drift_variance_m2_s2: 0.0,
+            tight_clock_bias_random_walk_m2_s: 0.0,
+            tight_clock_drift_random_walk_m2_s3: 0.0,
+            has_tight_innovation_gate: false,
+            tight_innovation_gate: zero_fusion_innovation_gate(),
+            ukf_alpha: 0.0,
+            ukf_beta: 0.0,
+            ukf_kappa: 0.0,
+            has_ukf_innovation_gate: false,
+            ukf_innovation_gate: zero_fusion_innovation_gate(),
+            time_sync_imu_capacity: 0,
+            time_sync_checkpoint_capacity: 0,
+        };
+        unsafe {
+            assert_eq!(
+                sidereon_fusion_filter_config_init(&mut config),
+                SidereonStatus::Ok
+            );
+        }
+
+        unsafe {
+            // Seed retained engine error with actual refusal
+            let mut bad_filter: *mut SidereonFusionFilter = ptr::null_mut();
+            assert_eq!(
+                sidereon_fusion_filter_create(
+                    &initial,
+                    diag15.as_ptr(),
+                    14,
+                    &config,
+                    &mut bad_filter,
+                ),
+                SidereonStatus::InvalidArgument
+            );
+
+            let mut info = SidereonEngineErrorInfo {
+                family: SidereonEngineErrorFamily::None,
+                payload_len: 0,
+            };
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::Fusion);
+            let expected_len = info.payload_len;
+            assert!(expected_len > 0);
+
+            // Free retains
+            sidereon_fusion_filter_free(ptr::null_mut());
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::Fusion);
+            assert_eq!(info.payload_len, expected_len);
+
+            // Pass 1: query length retains
+            let mut written = 999;
+            let mut required = 0;
+            assert_eq!(
+                sidereon_last_engine_error_payload(ptr::null_mut(), 0, &mut written, &mut required),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, 0);
+            assert_eq!(required, expected_len);
+
+            // Short buffer query returns InvalidArgument and retains
+            let mut short_buf = vec![0u8; expected_len - 1];
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    short_buf.as_mut_ptr(),
+                    short_buf.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::InvalidArgument
+            );
+            assert_eq!(written, 0);
+            assert_eq!(required, expected_len);
+
+            // Pass 2: Exact buffer query succeeds and retains
+            let mut buf = vec![0u8; expected_len];
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    buf.as_mut_ptr(),
+                    buf.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, expected_len);
+            assert_eq!(required, expected_len);
+
+            // Retained after read
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::Fusion);
+
+            // Successful producer resets
+            let mut valid_filter: *mut SidereonFusionFilter = ptr::null_mut();
+            assert_eq!(
+                sidereon_fusion_filter_create(
+                    &initial,
+                    diag15.as_ptr(),
+                    15,
+                    &config,
+                    &mut valid_filter,
+                ),
+                SidereonStatus::Ok
+            );
+            assert!(!valid_filter.is_null());
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+            assert_eq!(info.payload_len, 0);
+
+            // Reader retains clean state
+            let mut state: SidereonFusionState = std::mem::zeroed();
+            assert_eq!(
+                sidereon_fusion_filter_state(valid_filter, &mut state),
+                SidereonStatus::Ok
+            );
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+
+            // Active-slot live handle reader retention:
+            // Seed a real domain refusal while valid_filter is a live reference handle
+            assert_eq!(
+                sidereon_fusion_filter_create(
+                    &initial,
+                    diag15.as_ptr(),
+                    14,
+                    &config,
+                    &mut bad_filter,
+                ),
+                SidereonStatus::InvalidArgument
+            );
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::Fusion);
+            let active_len = info.payload_len;
+            assert!(active_len > 0);
+
+            // Read owned payload before getter
+            let mut payload_before = vec![0u8; active_len];
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    payload_before.as_mut_ptr(),
+                    payload_before.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, active_len);
+
+            // Call getter on live reference handle
+            assert_eq!(
+                sidereon_fusion_filter_state(valid_filter, &mut state),
+                SidereonStatus::Ok
+            );
+
+            // Also retaining copies control: covariance getter
+            let mut cov = [0.0f64; 15 * 15];
+            let mut cov_written = 0;
+            let mut cov_required = 0;
+            assert_eq!(
+                sidereon_fusion_filter_covariance(
+                    valid_filter,
+                    cov.as_mut_ptr(),
+                    cov.len(),
+                    &mut cov_written,
+                    &mut cov_required,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(cov_written, 15 * 15);
+
+            // Retained info is preserved!
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::Fusion);
+            assert_eq!(info.payload_len, active_len);
+
+            // Compare payload exactly
+            let mut payload_after = vec![0u8; active_len];
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    payload_after.as_mut_ptr(),
+                    payload_after.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, active_len);
+            assert_eq!(payload_before, payload_after);
+
+            // Free live handle: retaining control
+            sidereon_fusion_filter_free(valid_filter);
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::Fusion);
+            assert_eq!(info.payload_len, active_len);
+
+            // Producer early-argument clearing (null out pointer)
+            assert_eq!(
+                sidereon_fusion_filter_create(
+                    &initial,
+                    diag15.as_ptr(),
+                    15,
+                    &config,
+                    ptr::null_mut(),
+                ),
+                SidereonStatus::NullPointer
+            );
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+            assert_eq!(info.payload_len, 0);
+        }
+    }
 }

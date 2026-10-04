@@ -1,5 +1,6 @@
 /* Compiled ABI coverage for SP3 interpolation policy and gap threshold factor. */
 #include "sidereon.h"
+#include "w6_sp3_interpolation_pins.h"
 
 #include <math.h>
 #include <stdint.h>
@@ -36,6 +37,17 @@ static uint8_t *read_file(const char *path, size_t *out_len) {
     return bytes;
 }
 
+static uint64_t f64_bits(double value) {
+    uint64_t bits = 0;
+    memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+static int same_position(const double pos[3], const uint64_t expected[3]) {
+    return f64_bits(pos[0]) == expected[0] && f64_bits(pos[1]) == expected[1] &&
+           f64_bits(pos[2]) == expected[2];
+}
+
 static int fail(const char *context) {
     char message[512] = {0};
     sidereon_last_error_message(message, sizeof(message));
@@ -55,17 +67,21 @@ int main(int argc, char **argv) {
         return fail("read gapped fixture");
     }
 
+    /* Every expected value below is sidereon-core's own result for the gapped
+     * product, from tests/valgen (w6_sp3_interpolation). A factor the core
+     * refuses maps to the status interpolation_options_from_c gives
+     * (bindings/c/src/sp3.rs). */
     const double hole_midpoint_j2000_s = 646260300.0;
     struct SidereonSp3 *sp3 = NULL;
 
-    /* 1. Invalid gap threshold factor (1.0) fails with INVALID_ARGUMENT */
+    /* 1. Gap threshold factor 1.0 */
     if (sidereon_sp3_load_with_gap_threshold_factor(
-            data, data_len, 1.0, &sp3) != SIDEREON_STATUS_INVALID_ARGUMENT) {
+            data, data_len, 1.0, &sp3) != W6_SP3I_FACTOR_ONE_STATUS) {
         free(data);
         return fail("load with invalid factor (1.0) must fail");
     }
 
-    /* 2. Default factor (0.0): loads, factor is 1.5, refuses hole midpoint for G01 */
+    /* 2. Default factor (0.0): loads with the default factor; G01 at the hole midpoint */
     if (sidereon_sp3_load_with_gap_threshold_factor(
             data, data_len, 0.0, &sp3) != SIDEREON_STATUS_OK || sp3 == NULL) {
         free(data);
@@ -73,10 +89,10 @@ int main(int argc, char **argv) {
     }
     double factor = 0.0;
     if (sidereon_sp3_gap_threshold_factor(sp3, &factor) != SIDEREON_STATUS_OK ||
-        fabs(factor - 1.5) > 1e-9) {
+        f64_bits(factor) != W6_SP3I_DEFAULT_FACTOR_BITS) {
         sidereon_sp3_free(sp3);
         free(data);
-        return fail("default factor must be 1.5");
+        return fail("default factor");
     }
 
     double query_epochs[1] = {hole_midpoint_j2000_s};
@@ -84,10 +100,11 @@ int main(int argc, char **argv) {
     double clk = 0.0;
     size_t written = 0;
     if (sidereon_sp3_interpolate(
-            sp3, "G01", query_epochs, 1, pos, 3, &clk, 1, &written) != SIDEREON_STATUS_SOLVE) {
+            sp3, "G01", query_epochs, 1, pos, 3, &clk, 1, &written) !=
+        W6_SP3I_DEFAULT_HOLE_STATUS) {
         sidereon_sp3_free(sp3);
         free(data);
-        return fail("default factor must refuse hole midpoint");
+        return fail("default factor hole midpoint status");
     }
 
     /* 3. Check continuity with default vs wide factor */
@@ -97,7 +114,7 @@ int main(int argc, char **argv) {
     size_t skipped = 0;
     if (sidereon_sp3_check_continuity_with_gap_threshold_factor(
             sp3, -1, 1.0, 1.0, &default_defects, &checked, &skipped) !=
-        SIDEREON_STATUS_INVALID_ARGUMENT) {
+        W6_SP3I_FACTOR_ONE_STATUS) {
         sidereon_sp3_free(sp3);
         free(data);
         return fail("check continuity with factor 1.0 must fail");
@@ -114,7 +131,8 @@ int main(int argc, char **argv) {
         free(data);
         return fail("check continuity with factor 13.0");
     }
-    if (wide_defects >= default_defects) {
+    if (default_defects != W6_SP3I_DEFAULT_DEFECTS || wide_defects != W6_SP3I_WIDE_DEFECTS ||
+        wide_defects >= default_defects) {
         sidereon_sp3_free(sp3);
         free(data);
         return fail("factor 13.0 must have fewer hold-out defects than default");
@@ -126,7 +144,7 @@ int main(int argc, char **argv) {
     if (sidereon_sp3_continuity_verdict_json_with_gap_threshold_factor(
             sp3, -1, 1.0, 1.0,
             hole_midpoint_j2000_s - 100.0, hole_midpoint_j2000_s + 100.0,
-            NULL, 0, &json_written, &json_required) != SIDEREON_STATUS_INVALID_ARGUMENT) {
+            NULL, 0, &json_written, &json_required) != W6_SP3I_FACTOR_ONE_STATUS) {
         sidereon_sp3_free(sp3);
         free(data);
         return fail("verdict json with factor 1.0 must fail");
@@ -135,17 +153,31 @@ int main(int argc, char **argv) {
             sp3, -1, 1.0, 13.0,
             hole_midpoint_j2000_s - 100.0, hole_midpoint_j2000_s + 100.0,
             NULL, 0, &json_written, &json_required) != SIDEREON_STATUS_OK ||
-        json_required == 0) {
+        json_required != strlen(W6_SP3I_WIDE_VERDICT_JSON)) {
         sidereon_sp3_free(sp3);
         free(data);
         return fail("verdict json with factor 13.0");
+    }
+    {
+        char verdict[sizeof(W6_SP3I_WIDE_VERDICT_JSON)];
+        if (sidereon_sp3_continuity_verdict_json_with_gap_threshold_factor(
+                sp3, -1, 1.0, 13.0,
+                hole_midpoint_j2000_s - 100.0, hole_midpoint_j2000_s + 100.0,
+                (uint8_t *)verdict, sizeof(verdict), &json_written, &json_required) !=
+                SIDEREON_STATUS_OK ||
+            json_written != json_required ||
+            memcmp(verdict, W6_SP3I_WIDE_VERDICT_JSON, json_written) != 0) {
+            sidereon_sp3_free(sp3);
+            free(data);
+            return fail("verdict json with factor 13.0 content");
+        }
     }
 
     /* Extract canonical samples for subsequent sample/interpolant tests */
     size_t sample_count = 0;
     if (sidereon_sp3_precise_ephemeris_samples(
             sp3, NULL, 0, &written, &sample_count) != SIDEREON_STATUS_OK ||
-        sample_count == 0) {
+        sample_count != W6_SP3I_SAMPLE_COUNT) {
         sidereon_sp3_free(sp3);
         free(data);
         return fail("get sample count");
@@ -168,7 +200,7 @@ int main(int argc, char **argv) {
     sidereon_sp3_free(sp3);
     sp3 = NULL;
 
-    /* 5. Factor 13.0: loads, factor is 13.0, serves hole midpoint for G01 */
+    /* 5. Factor 13.0: loads with factor 13; G01 at the hole midpoint */
     if (sidereon_sp3_load_with_gap_threshold_factor(
             data, data_len, 13.0, &sp3) != SIDEREON_STATUS_OK || sp3 == NULL) {
         free(samples);
@@ -176,19 +208,20 @@ int main(int argc, char **argv) {
         return fail("load with factor 13.0");
     }
     if (sidereon_sp3_gap_threshold_factor(sp3, &factor) != SIDEREON_STATUS_OK ||
-        fabs(factor - 13.0) > 1e-9) {
+        f64_bits(factor) != W6_SP3I_WIDE_FACTOR_BITS) {
         sidereon_sp3_free(sp3);
         free(samples);
         free(data);
-        return fail("wide factor must be 13.0");
+        return fail("wide factor");
     }
     if (sidereon_sp3_interpolate(
-            sp3, "G01", query_epochs, 1, pos, 3, &clk, 1, &written) != SIDEREON_STATUS_OK ||
-        written != 1 || !isfinite(pos[0])) {
+            sp3, "G01", query_epochs, 1, pos, 3, &clk, 1, &written) !=
+            W6_SP3I_WIDE_HOLE_STATUS ||
+        written != 1 || !same_position(pos, W6_SP3I_WIDE_HOLE_POSITION_BITS)) {
         sidereon_sp3_free(sp3);
         free(samples);
         free(data);
-        return fail("factor 13.0 must serve hole midpoint");
+        return fail("factor 13.0 hole midpoint");
     }
 
     /* 6. Precise interpolant store artifact serialization and header inspection */
@@ -197,7 +230,7 @@ int main(int argc, char **argv) {
     size_t art_len = 0;
     if (sidereon_sp3_precise_interpolant_artifact_bytes(
             sp3, &art_err, NULL, 0, &written, &art_len) != SIDEREON_STATUS_OK ||
-        art_len == 0) {
+        art_len != W6_SP3I_ARTIFACT_LEN) {
         sidereon_sp3_free(sp3);
         free(samples);
         free(data);
@@ -234,12 +267,12 @@ int main(int argc, char **argv) {
     double art_factor = 0.0;
     if (sidereon_precise_interpolant_artifact_gap_threshold_factor(
             artifact, &art_factor) != SIDEREON_STATUS_OK ||
-        fabs(art_factor - 13.0) > 1e-9) {
+        f64_bits(art_factor) != W6_SP3I_ARTIFACT_FACTOR_BITS) {
         sidereon_precise_interpolant_artifact_free(artifact);
         free(art_bytes);
         free(samples);
         free(data);
-        return fail("artifact header factor must be 13.0");
+        return fail("artifact header factor");
     }
     sidereon_precise_interpolant_artifact_free(artifact);
     free(art_bytes);
@@ -247,7 +280,7 @@ int main(int argc, char **argv) {
     /* 7. PreciseEphemerisSamples with factor */
     struct SidereonPreciseEphemerisSamples *samples_handle = NULL;
     if (sidereon_precise_ephemeris_samples_from_samples_with_gap_threshold_factor(
-            samples, sample_count, 1.0, &samples_handle) != SIDEREON_STATUS_INVALID_ARGUMENT) {
+            samples, sample_count, 1.0, &samples_handle) != W6_SP3I_FACTOR_ONE_STATUS) {
         free(samples);
         free(data);
         return fail("samples with factor 1.0 must fail");
@@ -262,11 +295,11 @@ int main(int argc, char **argv) {
     double samples_factor = 0.0;
     if (sidereon_precise_ephemeris_samples_gap_threshold_factor(
             samples_handle, &samples_factor) != SIDEREON_STATUS_OK ||
-        fabs(samples_factor - 1.5) > 1e-9) {
+        f64_bits(samples_factor) != W6_SP3I_SAMPLES_DEFAULT_FACTOR_BITS) {
         sidereon_precise_ephemeris_samples_free(samples_handle);
         free(samples);
         free(data);
-        return fail("default samples factor must be 1.5");
+        return fail("default samples factor");
     }
     const char *sats[1] = {"G01"};
     bool has_clk = false;
@@ -275,11 +308,12 @@ int main(int argc, char **argv) {
     if (sidereon_precise_ephemeris_samples_observable_states_at_shared_j2000_s(
             samples_handle, sats, 1, hole_midpoint_j2000_s,
             pos, &clk, &has_clk, &elem_status, &res_status) != SIDEREON_STATUS_OK ||
-        elem_status != SIDEREON_OBSERVABLE_STATE_ELEMENT_STATUS_GAP) {
+        elem_status != W6_SP3I_SAMPLES_DEFAULT_ELEMENT_STATUS ||
+        !same_position(pos, W6_SP3I_SAMPLES_DEFAULT_POSITION_BITS)) {
         sidereon_precise_ephemeris_samples_free(samples_handle);
         free(samples);
         free(data);
-        return fail("default samples query at hole midpoint must be Gap");
+        return fail("default samples query at hole midpoint");
     }
     sidereon_precise_ephemeris_samples_free(samples_handle);
 
@@ -292,27 +326,28 @@ int main(int argc, char **argv) {
     }
     if (sidereon_precise_ephemeris_samples_gap_threshold_factor(
             samples_handle, &samples_factor) != SIDEREON_STATUS_OK ||
-        fabs(samples_factor - 13.0) > 1e-9) {
+        f64_bits(samples_factor) != W6_SP3I_SAMPLES_WIDE_FACTOR_BITS) {
         sidereon_precise_ephemeris_samples_free(samples_handle);
         free(samples);
         free(data);
-        return fail("wide samples factor must be 13.0");
+        return fail("wide samples factor");
     }
     if (sidereon_precise_ephemeris_samples_observable_states_at_shared_j2000_s(
             samples_handle, sats, 1, hole_midpoint_j2000_s,
             pos, &clk, &has_clk, &elem_status, &res_status) != SIDEREON_STATUS_OK ||
-        elem_status != SIDEREON_OBSERVABLE_STATE_ELEMENT_STATUS_VALID || !isfinite(pos[0])) {
+        elem_status != W6_SP3I_SAMPLES_WIDE_ELEMENT_STATUS ||
+        !same_position(pos, W6_SP3I_SAMPLES_WIDE_POSITION_BITS)) {
         sidereon_precise_ephemeris_samples_free(samples_handle);
         free(samples);
         free(data);
-        return fail("wide samples query at hole midpoint must be Valid");
+        return fail("wide samples query at hole midpoint");
     }
     sidereon_precise_ephemeris_samples_free(samples_handle);
 
     /* 8. PreciseEphemerisInterpolant with factor */
     struct SidereonPreciseEphemerisInterpolant *interp_handle = NULL;
     if (sidereon_precise_ephemeris_interpolant_from_samples_with_gap_threshold_factor(
-            samples, sample_count, 1.0, &interp_handle) != SIDEREON_STATUS_INVALID_ARGUMENT) {
+            samples, sample_count, 1.0, &interp_handle) != W6_SP3I_FACTOR_ONE_STATUS) {
         free(samples);
         free(data);
         return fail("interpolant with factor 1.0 must fail");
@@ -327,20 +362,21 @@ int main(int argc, char **argv) {
     double interp_factor = 0.0;
     if (sidereon_precise_ephemeris_interpolant_gap_threshold_factor(
             interp_handle, &interp_factor) != SIDEREON_STATUS_OK ||
-        fabs(interp_factor - 1.5) > 1e-9) {
+        f64_bits(interp_factor) != W6_SP3I_INTERPOLANT_DEFAULT_FACTOR_BITS) {
         sidereon_precise_ephemeris_interpolant_free(interp_handle);
         free(samples);
         free(data);
-        return fail("default interpolant factor must be 1.5");
+        return fail("default interpolant factor");
     }
     if (sidereon_precise_ephemeris_interpolant_observable_states_at_shared_j2000_s(
             interp_handle, sats, 1, hole_midpoint_j2000_s,
             pos, &clk, &has_clk, &elem_status, &res_status) != SIDEREON_STATUS_OK ||
-        elem_status != SIDEREON_OBSERVABLE_STATE_ELEMENT_STATUS_GAP) {
+        elem_status != W6_SP3I_INTERPOLANT_DEFAULT_ELEMENT_STATUS ||
+        !same_position(pos, W6_SP3I_INTERPOLANT_DEFAULT_POSITION_BITS)) {
         sidereon_precise_ephemeris_interpolant_free(interp_handle);
         free(samples);
         free(data);
-        return fail("default interpolant query at hole midpoint must be Gap");
+        return fail("default interpolant query at hole midpoint");
     }
     sidereon_precise_ephemeris_interpolant_free(interp_handle);
 
@@ -353,20 +389,21 @@ int main(int argc, char **argv) {
     }
     if (sidereon_precise_ephemeris_interpolant_gap_threshold_factor(
             interp_handle, &interp_factor) != SIDEREON_STATUS_OK ||
-        fabs(interp_factor - 13.0) > 1e-9) {
+        f64_bits(interp_factor) != W6_SP3I_INTERPOLANT_WIDE_FACTOR_BITS) {
         sidereon_precise_ephemeris_interpolant_free(interp_handle);
         free(samples);
         free(data);
-        return fail("wide interpolant factor must be 13.0");
+        return fail("wide interpolant factor");
     }
     if (sidereon_precise_ephemeris_interpolant_observable_states_at_shared_j2000_s(
             interp_handle, sats, 1, hole_midpoint_j2000_s,
             pos, &clk, &has_clk, &elem_status, &res_status) != SIDEREON_STATUS_OK ||
-        elem_status != SIDEREON_OBSERVABLE_STATE_ELEMENT_STATUS_VALID || !isfinite(pos[0])) {
+        elem_status != W6_SP3I_INTERPOLANT_WIDE_ELEMENT_STATUS ||
+        !same_position(pos, W6_SP3I_INTERPOLANT_WIDE_POSITION_BITS)) {
         sidereon_precise_ephemeris_interpolant_free(interp_handle);
         free(samples);
         free(data);
-        return fail("wide interpolant query at hole midpoint must be Valid");
+        return fail("wide interpolant query at hole midpoint");
     }
     sidereon_precise_ephemeris_interpolant_free(interp_handle);
 

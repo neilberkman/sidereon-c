@@ -1,4 +1,5 @@
 use super::*;
+use serde_json::json;
 
 /// The result of an SPP solve. Opaque to C. Create with sidereon_solve_spp or
 /// sidereon_solve_spp_v2 and release with sidereon_spp_solution_free.
@@ -14,6 +15,7 @@ pub struct SidereonSppDopplerSolution {
     pub(crate) receiver: ReceiverSolution,
     pub(crate) velocity: Option<VelocitySolution>,
     pub(crate) velocity_error: Option<VelocityError>,
+    pub(crate) velocity_error_detail: Option<SppBatchRowError>,
 }
 
 /// Caller-populated inputs for a single SPP solve. Mirrors the engine solve
@@ -49,6 +51,54 @@ pub struct SidereonSppInputs {
     pub relative_humidity: f64,
     /// Also recover the geodetic (lat/lon/height) form of the position.
     pub with_geodetic: bool,
+    /// Which code the pseudoranges are. The broadcast single-frequency group
+    /// delay (TGD, BGD) applies to single-frequency code only, as RTKLIB
+    /// `prange` applies it to P1 and none under IFLC. A SidereonPseudorangeCode
+    /// value; zero-initialized inputs read as
+    /// SIDEREON_PSEUDORANGE_CODE_SINGLE_FREQUENCY, and any other value is
+    /// refused with SIDEREON_STATUS_INVALID_ARGUMENT.
+    pub pseudorange_code: u32,
+}
+
+/// Which code an SPP solve's pseudoranges are. Mirrors
+/// sidereon_core::positioning::PseudorangeCode.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonPseudorangeCode {
+    /// A single-frequency code (L1 C/A, E1, B1I): the broadcast group delay
+    /// applies.
+    SingleFrequency = 0,
+    /// The ionosphere-free combination: no broadcast group delay applies.
+    IonosphereFree = 1,
+}
+
+pub(crate) fn pseudorange_code_from_c(
+    fn_name: &str,
+    code: u32,
+) -> Result<sidereon_core::positioning::PseudorangeCode, SidereonStatus> {
+    match code {
+        x if x == SidereonPseudorangeCode::SingleFrequency as u32 => {
+            Ok(sidereon_core::positioning::PseudorangeCode::SingleFrequency)
+        }
+        x if x == SidereonPseudorangeCode::IonosphereFree as u32 => {
+            Ok(sidereon_core::positioning::PseudorangeCode::IonosphereFree)
+        }
+        other => {
+            set_last_error(format!("{fn_name}: unknown pseudorange_code {other}"));
+            Err(SidereonStatus::InvalidArgument)
+        }
+    }
+}
+
+pub(crate) fn pseudorange_code_to_c(value: sidereon_core::positioning::PseudorangeCode) -> u32 {
+    match value {
+        sidereon_core::positioning::PseudorangeCode::SingleFrequency => {
+            SidereonPseudorangeCode::SingleFrequency as u32
+        }
+        sidereon_core::positioning::PseudorangeCode::IonosphereFree => {
+            SidereonPseudorangeCode::IonosphereFree as u32
+        }
+    }
 }
 
 /// Huber/IRLS robust reweighting controls for SPP V2 inputs. Used only when
@@ -60,7 +110,9 @@ pub struct SidereonSppRobustConfig {
     pub huber_k: f64,
     /// Minimum robust scale in meters.
     pub scale_floor_m: f64,
-    /// Maximum outer robust solves, including the warm start.
+    /// Maximum outer robust solves, including the warm start. The engine
+    /// default (DEFAULT_ROBUST_MAX_OUTER, 100) is a safeguard: the reweighting
+    /// ends when the position settles, when it cycles, or at this cap.
     pub max_outer: usize,
     /// Outer-loop position step tolerance in meters.
     pub outer_tol_m: f64,
@@ -120,15 +172,130 @@ pub struct SidereonSppInputsV2 {
     /// slot. Required for any GLONASS observation solved with the ionosphere
     /// correction: the per-satellite G1 carrier is resolved from this map to
     /// scale the L1 Klobuchar delay. NULL with a zero count means no channels,
-    /// which leaves every non-GLONASS solve bit-identical; a GLONASS observation
-    /// with the ionosphere correction but no matching (or out-of-range) channel
-    /// is rejected by the engine. Duplicate slots are rejected.
+    /// which leaves every non-GLONASS solve bit-identical. A GLONASS observation
+    /// solved with the ionosphere correction and no matching channel, or a
+    /// channel outside the -7..=6 FDMA allocation, is left out of the solve and
+    /// reported as a rejected satellite with
+    /// SIDEREON_SPP_REJECTION_REASON_IONOSPHERE_CARRIER_UNRESOLVED; the rest of
+    /// the epoch is solved. Duplicate slots are rejected.
     pub glonass_channels: *const SidereonGlonassChannel,
     /// Number of GLONASS channel entries pointed to by glonass_channels.
     pub glonass_channel_count: usize,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonQzssClock {
+    Gps = 0,
+    Separate = 1,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonTroposphereModel {
+    Rtklib = 0,
+    SaastamoinenNiell = 1,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonSppModelOptions {
+    pub qzss_clock: u32,
+    pub troposphere_model: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonSppBatchInputV2 {
+    pub inputs: SidereonSppInputsV2,
+    pub models: SidereonSppModelOptions,
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_spp_model_options_init(
+    out_options: *mut SidereonSppModelOptions,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_spp_model_options_init",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_options,
+                "sidereon_spp_model_options_init",
+                "out_options"
+            ));
+            *out = SidereonSppModelOptions {
+                qzss_clock: SidereonQzssClock::Gps as u32,
+                troposphere_model: SidereonTroposphereModel::Rtklib as u32,
+            };
+            SidereonStatus::Ok
+        },
+    )
+}
+
+pub(super) fn spp_model_options_from_c(
+    fn_name: &str,
+    options: &SidereonSppModelOptions,
+) -> Result<
+    (
+        sidereon_core::positioning::QzssClock,
+        sidereon_core::positioning::TroposphereModel,
+    ),
+    SidereonStatus,
+> {
+    let qzss_clock = match options.qzss_clock {
+        value if value == SidereonQzssClock::Gps as u32 => {
+            sidereon_core::positioning::QzssClock::Gps
+        }
+        value if value == SidereonQzssClock::Separate as u32 => {
+            sidereon_core::positioning::QzssClock::Separate
+        }
+        value => {
+            set_last_error(format!("{fn_name}: invalid QZSS clock selector {value}"));
+            return Err(SidereonStatus::InvalidArgument);
+        }
+    };
+    let troposphere_model = match options.troposphere_model {
+        value if value == SidereonTroposphereModel::Rtklib as u32 => {
+            sidereon_core::positioning::TroposphereModel::Rtklib
+        }
+        value if value == SidereonTroposphereModel::SaastamoinenNiell as u32 => {
+            sidereon_core::positioning::TroposphereModel::SaastamoinenNiell
+        }
+        value => {
+            set_last_error(format!("{fn_name}: invalid troposphere selector {value}"));
+            return Err(SidereonStatus::InvalidArgument);
+        }
+    };
+    Ok((qzss_clock, troposphere_model))
+}
+
+pub(super) unsafe fn build_spp_solve_inputs_with_models(
+    fn_name: &str,
+    inputs: &SidereonSppInputsV2,
+    options: *const SidereonSppModelOptions,
+) -> Result<SolveInputs, SidereonStatus> {
+    let mut solve_inputs = build_spp_solve_inputs(
+        fn_name,
+        &inputs.base,
+        beidou_klobuchar_from_c(inputs),
+        robust_config_from_c(inputs),
+        glonass_channels_from_c(fn_name, inputs)?,
+    )?;
+    if !options.is_null() {
+        let (qzss_clock, troposphere_model) = spp_model_options_from_c(fn_name, &*options)?;
+        solve_inputs.qzss_clock = qzss_clock;
+        solve_inputs.troposphere_model = troposphere_model;
+    }
+    Ok(solve_inputs)
+}
+
 /// Why an SPP observation was excluded from the final solve.
+///
+/// Selection reports the first reason in the core policy order: strict SSR
+/// correction-size refusal, NoEphemeris, LowElevation, SbasIonoUncovered, then
+/// IonosphereCarrierUnresolved. A satellite both below the mask and without a
+/// carrier is reported as LowElevation. SbasWithdrawn is not reported by SPP.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SidereonSppRejectionReason {
@@ -140,6 +307,17 @@ pub enum SidereonSppRejectionReason {
     SbasWithdrawn = 2,
     /// The SBAS ionosphere grid does not cover this line of sight.
     SbasIonoUncovered = 3,
+    /// The ionosphere correction was requested and the satellite has no
+    /// resolvable carrier frequency to scale the L1 delay to: a GLONASS
+    /// satellite with no channel in glonass_channels, or a channel outside the
+    /// -7..=6 FDMA allocation. GPS, QZSS, SBAS, Galileo, BeiDou and NavIC have
+    /// fixed carriers and are never reported with this reason. The satellite is
+    /// left out, as RTKLIB `rescode` leaves out a satellite whose `sat2freq` is
+    /// zero, and the rest of the epoch is solved.
+    IonosphereCarrierUnresolved = 4,
+    /// Strict SSR size policy refused the orbit/clock correction. Read the exact
+    /// magnitudes from the V2 rejected-satellite record.
+    SsrCorrectionExceedsLimit = 5,
 }
 
 /// A rejected satellite and the first reason it was excluded.
@@ -150,6 +328,23 @@ pub struct SidereonSppRejectedSat {
     pub sat_id: SidereonSatelliteToken,
     /// Rejection reason.
     pub reason: SidereonSppRejectionReason,
+}
+
+/// Rejected satellite with the exact SSR size payload when the rejection was
+/// caused by the strict correction-size policy.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonSppRejectedSatV2 {
+    /// Satellite token.
+    pub sat_id: SidereonSatelliteToken,
+    /// First rejection reason.
+    pub reason: SidereonSppRejectionReason,
+    /// Whether the reason carries SSR correction magnitudes.
+    pub has_size: bool,
+    /// Refused orbit correction magnitude in metres; zero when absent.
+    pub orbit_m: f64,
+    /// Refused clock correction in metres, preserving its sign; zero when absent.
+    pub clock_m: f64,
 }
 
 /// Receiver clock for one GNSS system.
@@ -224,17 +419,34 @@ pub enum SidereonSppSolveStatus {
     StepTolerance = 2,
     /// Maximum residual evaluations were reached.
     MaxEvaluations = 3,
+    /// The positioning solve ended with a least-squares step below its
+    /// tolerance at a satellite selection that held (RTKLIB `estpos`'s
+    /// `norm(dx) < 1E-4`), or a robust solve's position and selection
+    /// settled. The solve converged.
+    SelectionSettled = 4,
+    /// A robust-reweighted solve spent its outer solve budget before its
+    /// position and selection settled. The solve did not converge.
+    OuterBudgetExhausted = 5,
+    /// A robust reweighting returned within outer_tol_m of a state it reached
+    /// two or more solves earlier, at the same selection, by a step no smaller
+    /// than the one that led there: it was cycling (typically the robust scale
+    /// alternating between two medians) and stopped there. The solve did not
+    /// converge.
+    OuterOscillation = 6,
 }
 
 /// Iteration, convergence, correction, and validation metadata for SPP.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct SidereonSppMetadata {
-    /// Number of accepted solver iterations.
+    /// The trust-region iterations of every solve plus one per least-squares
+    /// step.
     pub iterations: usize,
-    /// Whether a convergence criterion was reached.
+    /// Whether the whole solve converged. A robust solve that spent its outer
+    /// budget reports false with OUTER_BUDGET_EXHAUSTED, and one that cycled
+    /// false with OUTER_OSCILLATION.
     pub converged: bool,
-    /// Solver termination status.
+    /// How the whole solve ended; a settled solve reports SELECTION_SETTLED.
     pub status: SidereonSppSolveStatus,
     /// Whether ionosphere correction was applied.
     pub ionosphere_applied: bool,
@@ -256,6 +468,10 @@ pub struct SidereonSppMetadata {
     pub raim_checkable: bool,
     /// Geometry observability and covariance-validation diagnostics.
     pub geometry_quality: SidereonGeometryQuality,
+    /// UT1 departure a permissive UT1 policy of the ephemeris source accepted
+    /// while forming the solve; SIDEREON_UT1_DEGRADATION_NONE when UT1 came
+    /// from the table or was not read.
+    pub ut1_degraded: SidereonUt1Degradation,
 }
 
 /// Initialize an SPP V2 input struct with engine defaults for optional controls.
@@ -628,6 +844,39 @@ pub unsafe extern "C" fn sidereon_spp_solution_rejected_sats(
     )
 }
 
+/// Copy rejected satellites with optional strict-SSR refusal magnitudes.
+/// Existing rejected-satellite records remain ABI-compatible through the V1
+/// accessor.
+///
+/// # Safety
+/// `sol` must be a live handle; output/count pointers must satisfy the standard
+/// variable-length buffer contract.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_spp_solution_rejected_sats_v2(
+    sol: *const SidereonSppSolution,
+    out: *mut SidereonSppRejectedSatV2,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_spp_solution_rejected_sats_v2";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(FN, out_written, out_required));
+        let sol = c_try!(require_ref(sol, FN, "solution"));
+        let values = rejected_sats_v2_to_c(&sol.inner.rejected_sats);
+        c_try!(copy_prefix_to_c(
+            FN,
+            "out",
+            &values,
+            out,
+            len,
+            out_written,
+            out_required
+        ));
+        SidereonStatus::Ok
+    })
+}
+
 /// Copy per-system receiver clocks. Uses the variable-length output contract
 /// documented at the top of the header.
 ///
@@ -780,6 +1029,96 @@ pub unsafe extern "C" fn sidereon_spp_solution_residuals(
     )
 }
 
+fn solution_pseudorange_variances(solution: &ReceiverSolution) -> &[f64] {
+    &solution.pseudorange_variances_m2
+}
+
+fn solution_weights(solution: &ReceiverSolution) -> &[f64] {
+    &solution.weights
+}
+
+unsafe fn copy_solution_f64s(
+    fn_name: &str,
+    sol: *const SidereonSppSolution,
+    select: fn(&ReceiverSolution) -> &[f64],
+    out: *mut f64,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    c_try!(init_copy_counts(fn_name, out_written, out_required));
+    let sol = c_try!(require_ref(sol, fn_name, "solution"));
+    c_try!(copy_prefix_to_c(
+        fn_name,
+        "out",
+        select(&sol.inner),
+        out,
+        len,
+        out_written,
+        out_required,
+    ));
+    SidereonStatus::Ok
+}
+
+/// Copy the pseudorange variance (square metres) of each used satellite, in
+/// used-satellite order: the RTKLIB rescode variance the solve weighted its
+/// residual by, which RAIM standardizes the residual with. Uses the
+/// variable-length output contract.
+///
+/// Safety: sol must be a live solution handle; out must point to at least len
+/// writable doubles or be NULL when len is 0; out_written and out_required must
+/// point to size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_spp_solution_pseudorange_variances(
+    sol: *const SidereonSppSolution,
+    out: *mut f64,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_spp_solution_pseudorange_variances";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        copy_solution_f64s(
+            FN_NAME,
+            sol,
+            solution_pseudorange_variances,
+            out,
+            len,
+            out_written,
+            out_required,
+        )
+    })
+}
+
+/// Copy the weight each used satellite carried in the reported solve, in
+/// used-satellite order: the inverse pseudorange variance, times the final
+/// Huber factor on the robust path. Uses the variable-length output contract.
+///
+/// Safety: sol must be a live solution handle; out must point to at least len
+/// writable doubles or be NULL when len is 0; out_written and out_required must
+/// point to size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_spp_solution_weights(
+    sol: *const SidereonSppSolution,
+    out: *mut f64,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_spp_solution_weights";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        copy_solution_f64s(
+            FN_NAME,
+            sol,
+            solution_weights,
+            out,
+            len,
+            out_written,
+            out_required,
+        )
+    })
+}
+
 /// Copy the DOP (geometry-covariance) scalars into *out_dop. Fails with
 /// SIDEREON_STATUS_INVALID_ARGUMENT if the converged geometry was rank-deficient
 /// (the engine produced no DOP).
@@ -792,26 +1131,30 @@ pub unsafe extern "C" fn sidereon_spp_solution_dop(
     out_dop: *mut SidereonDop,
 ) -> SidereonStatus {
     ffi_boundary("sidereon_spp_solution_dop", SidereonStatus::Panic, || {
-        let out_dop = c_try!(require_out(out_dop, "sidereon_spp_solution_dop", "out_dop"));
-        *out_dop = SidereonDop {
+        let out_dop = c_try!(require_uninit_out(
+            out_dop,
+            "sidereon_spp_solution_dop",
+            "out_dop"
+        ));
+        out_dop.write(SidereonDop {
             gdop: 0.0,
             pdop: 0.0,
             hdop: 0.0,
             vdop: 0.0,
             tdop: 0.0,
-        };
+        });
         let sol = c_try!(require_ref(sol, "sidereon_spp_solution_dop", "solution"));
         let Some(dop) = sol.inner.dop.as_ref() else {
             set_last_error("sidereon_spp_solution_dop: geometry is rank-deficient, no DOP");
             return SidereonStatus::InvalidArgument;
         };
-        *out_dop = SidereonDop {
+        out_dop.write(SidereonDop {
             gdop: dop.gdop,
             pdop: dop.pdop,
             hdop: dop.hdop,
             vdop: dop.vdop,
             tdop: dop.tdop,
-        };
+        });
         SidereonStatus::Ok
     })
 }
@@ -855,6 +1198,7 @@ pub unsafe extern "C" fn sidereon_spp_solution_metadata(
                 redundancy: metadata.redundancy as i64,
                 raim_checkable: metadata.raim_checkable,
                 geometry_quality: geometry_quality_to_c(&sol.inner.geometry_quality),
+                ut1_degraded: SidereonUt1Degradation::from_core(metadata.ut1_degraded),
             };
             SidereonStatus::Ok
         },
@@ -889,7 +1233,7 @@ pub unsafe extern "C" fn sidereon_solve_spp_with_doppler_velocity(
     doppler_count: usize,
     out_solution: *mut *mut SidereonSppDopplerSolution,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_solve_spp_with_doppler_velocity",
         SidereonStatus::Panic,
         || {
@@ -924,7 +1268,7 @@ pub unsafe extern "C" fn sidereon_solve_broadcast_with_doppler_velocity(
     doppler_count: usize,
     out_solution: *mut *mut SidereonSppDopplerSolution,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_solve_broadcast_with_doppler_velocity",
         SidereonStatus::Panic,
         || {
@@ -1086,6 +1430,62 @@ pub unsafe extern "C" fn sidereon_spp_doppler_solution_velocity_error_kind(
     )
 }
 
+/// Read the owned structured velocity-error summary retained by a combined
+/// SPP Doppler result. Successful or absent velocity results report None/0.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_spp_doppler_solution_velocity_error_info(
+    solution: *const SidereonSppDopplerSolution,
+    out_info: *mut SidereonEngineErrorInfo,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_spp_doppler_solution_velocity_error_info";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        let out_info = c_try!(require_out(out_info, FN, "out_info"));
+        *out_info = SidereonEngineErrorInfo {
+            family: SidereonEngineErrorFamily::None,
+            payload_len: 0,
+        };
+        let solution = c_try!(require_ref(solution, FN, "solution"));
+        if let Some(error) = solution.velocity_error_detail.as_ref() {
+            *out_info = SidereonEngineErrorInfo {
+                family: error.family,
+                payload_len: error.payload.len(),
+            };
+        }
+        SidereonStatus::Ok
+    })
+}
+
+/// Copy the complete owned velocity-error JSON payload retained by a combined
+/// SPP Doppler result.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_spp_doppler_solution_velocity_error_payload(
+    solution: *const SidereonSppDopplerSolution,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_spp_doppler_solution_velocity_error_payload";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(FN, out_written, out_required));
+        let solution = c_try!(require_ref(solution, FN, "solution"));
+        let payload = solution
+            .velocity_error_detail
+            .as_ref()
+            .map_or(&[][..], |error| error.payload.as_bytes());
+        c_try!(copy_prefix_to_c(
+            FN,
+            "out",
+            payload,
+            out,
+            len,
+            out_written,
+            out_required,
+        ));
+        SidereonStatus::Ok
+    })
+}
+
 /// Release a combined SPP Doppler solution handle. Passing NULL is a no-op.
 ///
 /// Safety: solution must be NULL or a live handle from a combined SPP Doppler
@@ -1157,7 +1557,7 @@ pub unsafe extern "C" fn sidereon_validate_receiver_solution(
     solution: *const SidereonSppSolution,
     options: *const SidereonSolutionValidationOptions,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_validate_receiver_solution",
         SidereonStatus::Panic,
         || {
@@ -1178,7 +1578,15 @@ pub unsafe extern "C" fn sidereon_validate_receiver_solution(
             opts.max_converged_residual_rms_m = options.max_converged_residual_rms_m;
             match validate_receiver_solution(&solution.inner, opts) {
                 Ok(()) => SidereonStatus::Ok,
-                Err(err) => extra_invalid_arg("sidereon_validate_receiver_solution", err),
+                Err(err) => {
+                    set_last_error(format!("sidereon_validate_receiver_solution: {err}"));
+                    crate::engine_error::record_engine_error(
+                        crate::engine_error::SidereonEngineErrorFamily::SolutionValidation,
+                        "sidereon_validate_receiver_solution",
+                        crate::engine_error::solution_validation_error_value(&err),
+                    );
+                    SidereonStatus::InvalidArgument
+                }
             }
         },
     )
@@ -1186,7 +1594,48 @@ pub unsafe extern "C" fn sidereon_validate_receiver_solution(
 
 // ============================================================================
 
-// --- Batch SPP (sidereon_core::spp::solve_spp_batch_serial / _parallel) ------
+// --- Batch SPP (sidereon_core::positioning::solve_spp_batch_serial / _parallel) ------
+
+/// Structured per-row failure recorded for an epoch solve in an SPP batch.
+#[derive(Clone, Debug)]
+pub(crate) struct SppBatchRowError {
+    pub(crate) message: String,
+    pub(crate) family: SidereonEngineErrorFamily,
+    pub(crate) payload: String,
+}
+
+pub(crate) fn spp_batch_row_error_from_facade(
+    row_fn: &str,
+    err: sidereon::Error,
+) -> SppBatchRowError {
+    let message = err.to_string();
+    let (family, error_node) = match &err {
+        sidereon::Error::Spp(sidereon_core::positioning::SolvePolicyError::Solve(spp_err)) => (
+            SidereonEngineErrorFamily::Spp,
+            crate::engine_error::spp_error_value(spp_err),
+        ),
+        sidereon::Error::Spp(policy_err) => (
+            SidereonEngineErrorFamily::SppPolicy,
+            crate::engine_error::solve_policy_error_value(policy_err),
+        ),
+        _ => (
+            SidereonEngineErrorFamily::Facade,
+            crate::engine_error::facade_error_value(&err),
+        ),
+    };
+    let payload = json!({
+        "schema_version": 1,
+        "family": family.name(),
+        "operation": row_fn,
+        "error": error_node,
+    })
+    .to_string();
+    SppBatchRowError {
+        message,
+        family,
+        payload,
+    }
+}
 
 /// A batch of independent SPP epoch solves over one shared ephemeris. Opaque to
 /// C. Create with sidereon_solve_spp_batch_serial or
@@ -1195,7 +1644,7 @@ pub unsafe extern "C" fn sidereon_validate_receiver_solution(
 /// i is the solve of input i; a per-epoch solve failure is recorded for that
 /// element and does not fail the batch.
 pub struct SidereonSppBatch {
-    pub(crate) inner: Vec<Result<ReceiverSolution, String>>,
+    pub(crate) inner: Vec<Result<ReceiverSolution, SppBatchRowError>>,
 }
 
 /// Options for assembling RINEX OBS epochs into SPP inputs. Initialize with
@@ -1293,7 +1742,7 @@ pub unsafe extern "C" fn sidereon_spp_inputs_from_rinex_obs(
     options: *const SidereonRinexSppOptions,
     out_inputs: *mut *mut SidereonRinexSppInputs,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_spp_inputs_from_rinex_obs",
         SidereonStatus::Panic,
         || {
@@ -1322,13 +1771,44 @@ pub unsafe extern "C" fn sidereon_spp_inputs_from_rinex_obs(
                 match sidereon::spp_inputs_from_rinex_obs(&obs.inner, &broadcast.inner, &options) {
                     Ok(inner) => inner,
                     Err(err) => {
-                        return map_rinex_spp_error("sidereon_spp_inputs_from_rinex_obs", err)
+                        return map_rinex_spp_error("sidereon_spp_inputs_from_rinex_obs", err);
                     }
                 };
             write_boxed_handle(out_inputs, SidereonRinexSppInputs::from_core(inner));
             SidereonStatus::Ok
         },
     )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_spp_inputs_from_rinex_obs_with_models(
+    obs: *const SidereonRinexObs,
+    broadcast: *const SidereonBroadcastEphemeris,
+    options: *const SidereonRinexSppOptions,
+    models: *const SidereonSppModelOptions,
+    out_inputs: *mut *mut SidereonRinexSppInputs,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_spp_inputs_from_rinex_obs_with_models";
+    crate::engine_error::engine_error_operation_boundary(FN, SidereonStatus::Panic, || {
+        let out_inputs = c_try!(require_out(out_inputs, FN, "out_inputs"));
+        *out_inputs = ptr::null_mut();
+        let obs = c_try!(require_ref(obs, FN, "obs"));
+        let broadcast = c_try!(require_ref(broadcast, FN, "broadcast"));
+        let mut options = c_try!(rinex_spp_options_from_c(FN, obs, options));
+        if !models.is_null() {
+            let (qzss_clock, troposphere_model) =
+                c_try!(crate::spp::spp_model_options_from_c(FN, &*models));
+            options.qzss_clock = qzss_clock;
+            options.troposphere_model = troposphere_model;
+        }
+        let inner =
+            match sidereon::spp_inputs_from_rinex_obs(&obs.inner, &broadcast.inner, &options) {
+                Ok(inner) => inner,
+                Err(err) => return map_rinex_spp_error(FN, err),
+            };
+        write_boxed_handle(out_inputs, SidereonRinexSppInputs::from_core(inner));
+        SidereonStatus::Ok
+    })
 }
 
 /// Solve every usable RINEX OBS epoch serially against a broadcast NAV source.
@@ -1349,7 +1829,7 @@ pub unsafe extern "C" fn sidereon_solve_spp_from_rinex_obs(
     policy: *const SidereonSppSolvePolicy,
     out_solutions: *mut *mut SidereonRinexSppSolutions,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_solve_spp_from_rinex_obs",
         SidereonStatus::Panic,
         || {
@@ -1394,6 +1874,49 @@ pub unsafe extern "C" fn sidereon_solve_spp_from_rinex_obs(
             SidereonStatus::Ok
         },
     )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_solve_spp_from_rinex_obs_with_models(
+    broadcast: *const SidereonBroadcastEphemeris,
+    obs: *const SidereonRinexObs,
+    options: *const SidereonRinexSppOptions,
+    models: *const SidereonSppModelOptions,
+    with_geodetic: bool,
+    policy: *const SidereonSppSolvePolicy,
+    out_solutions: *mut *mut SidereonRinexSppSolutions,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_solve_spp_from_rinex_obs_with_models";
+    crate::engine_error::engine_error_operation_boundary(FN, SidereonStatus::Panic, || {
+        let out_solutions = c_try!(require_out(out_solutions, FN, "out_solutions"));
+        *out_solutions = ptr::null_mut();
+        let broadcast = c_try!(require_ref(broadcast, FN, "broadcast"));
+        let obs = c_try!(require_ref(obs, FN, "obs"));
+        let mut options = c_try!(rinex_spp_options_from_c(FN, obs, options));
+        if !models.is_null() {
+            let (qzss_clock, troposphere_model) =
+                c_try!(crate::spp::spp_model_options_from_c(FN, &*models));
+            options.qzss_clock = qzss_clock;
+            options.troposphere_model = troposphere_model;
+        }
+        let policy = if policy.is_null() {
+            SolvePolicy::default()
+        } else {
+            c_try!(crate::solve::solve_policy_from_c(FN, &*policy))
+        };
+        let inner = match sidereon::solve_spp_from_rinex_obs(
+            &broadcast.inner,
+            &obs.inner,
+            &options,
+            with_geodetic,
+            policy,
+        ) {
+            Ok(inner) => inner,
+            Err(err) => return map_rinex_spp_error(FN, err),
+        };
+        write_boxed_handle(out_solutions, SidereonRinexSppSolutions { inner });
+        SidereonStatus::Ok
+    })
 }
 
 /// Write the number of assembled RINEX-SPP epochs to *out_count.
@@ -1713,6 +2236,82 @@ pub unsafe extern "C" fn sidereon_rinex_spp_solution_error(
     )
 }
 
+/// Read the typed engine-error family and required JSON payload size for one
+/// RINEX-SPP epoch. A successful epoch reports family None and payload_len 0.
+/// The payload bytes can be copied with sidereon_rinex_spp_solution_error_payload.
+///
+/// Safety: solutions is a live handle; out_info points to a
+/// SidereonEngineErrorInfo.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rinex_spp_solution_error_info(
+    solutions: *const SidereonRinexSppSolutions,
+    index: usize,
+    out_info: *mut SidereonEngineErrorInfo,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_rinex_spp_solution_error_info";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let out_info = c_try!(require_out(out_info, FN_NAME, "out_info"));
+        *out_info = SidereonEngineErrorInfo {
+            family: SidereonEngineErrorFamily::None,
+            payload_len: 0,
+        };
+        let solutions = c_try!(require_ref(solutions, FN_NAME, "solutions"));
+        let epoch = c_try!(rinex_spp_solution_at(FN_NAME, &solutions.inner, index));
+        if let Err(error) = &epoch.solution {
+            let row_error = rinex_spp_row_error(error);
+            *out_info = SidereonEngineErrorInfo {
+                family: row_error.family,
+                payload_len: row_error.payload.len(),
+            };
+        }
+        SidereonStatus::Ok
+    })
+}
+
+/// Copy the owned-schema JSON details for a failed RINEX-SPP epoch. The
+/// legacy sidereon_rinex_spp_solution_error continues to return its diagnostic
+/// string. A successful epoch copies zero bytes.
+///
+/// Safety: solutions is a live handle; out points to len writable bytes or
+/// NULL when len is zero; out_written and out_required point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rinex_spp_solution_error_payload(
+    solutions: *const SidereonRinexSppSolutions,
+    index: usize,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_rinex_spp_solution_error_payload";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(FN_NAME, out_written, out_required));
+        let solutions = c_try!(require_ref(solutions, FN_NAME, "solutions"));
+        let epoch = c_try!(rinex_spp_solution_at(FN_NAME, &solutions.inner, index));
+        let payload = match &epoch.solution {
+            Ok(_) => String::new(),
+            Err(error) => rinex_spp_row_error(error).payload,
+        };
+        c_try!(copy_prefix_to_c(
+            FN_NAME,
+            "out",
+            payload.as_bytes(),
+            out,
+            len,
+            out_written,
+            out_required,
+        ));
+        SidereonStatus::Ok
+    })
+}
+
+fn rinex_spp_row_error(error: &sidereon_core::positioning::SolvePolicyError) -> SppBatchRowError {
+    spp_batch_row_error_from_facade(
+        "sidereon_rinex_spp_solution_error_payload",
+        sidereon::Error::Spp(error.clone()),
+    )
+}
+
 /// Release RINEX-SPP solve results. Passing NULL is a no-op.
 ///
 /// Safety: solutions must be NULL or a live handle from
@@ -1814,9 +2413,10 @@ pub unsafe extern "C" fn sidereon_spp_batch_solution(
                 );
                 SidereonStatus::Ok
             }
-            Err(message) => {
+            Err(row_err) => {
                 set_last_error(format!(
-                    "sidereon_spp_batch_solution: epoch {index} did not solve: {message}"
+                    "sidereon_spp_batch_solution: epoch {index} did not solve: {}",
+                    row_err.message
                 ));
                 SidereonStatus::Solve
             }
@@ -1858,12 +2458,105 @@ pub unsafe extern "C" fn sidereon_spp_batch_error(
         };
         let message = match entry {
             Ok(_) => "",
-            Err(message) => message.as_str(),
+            Err(row_err) => row_err.message.as_str(),
         };
         c_try!(copy_prefix_to_c(
             "sidereon_spp_batch_error",
             "out",
             message.as_bytes(),
+            out,
+            len,
+            out_written,
+            out_required,
+        ));
+        SidereonStatus::Ok
+    })
+}
+
+/// Read the structured error summary for epoch `index` in an SPP batch.
+/// An epoch that solved reports SidereonEngineErrorFamily::None and payload_len 0.
+///
+/// Safety: batch is a live handle; out_info points to a SidereonEngineErrorInfo.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_spp_batch_error_info(
+    batch: *const SidereonSppBatch,
+    index: usize,
+    out_info: *mut SidereonEngineErrorInfo,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_spp_batch_error_info";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let out_info = c_try!(require_out(out_info, FN_NAME, "out_info"));
+        *out_info = SidereonEngineErrorInfo {
+            family: SidereonEngineErrorFamily::None,
+            payload_len: 0,
+        };
+        let batch = c_try!(require_ref(batch, FN_NAME, "batch"));
+        let entry = match batch.inner.get(index) {
+            Some(entry) => entry,
+            None => {
+                set_last_error(format!(
+                    "{FN_NAME}: index {index} out of range ({} results)",
+                    batch.inner.len()
+                ));
+                return SidereonStatus::InvalidArgument;
+            }
+        };
+        match entry {
+            Ok(_) => {
+                *out_info = SidereonEngineErrorInfo {
+                    family: SidereonEngineErrorFamily::None,
+                    payload_len: 0,
+                };
+                SidereonStatus::Ok
+            }
+            Err(row_err) => {
+                *out_info = SidereonEngineErrorInfo {
+                    family: row_err.family,
+                    payload_len: row_err.payload.len(),
+                };
+                SidereonStatus::Ok
+            }
+        }
+    })
+}
+
+/// Copy the owned Schema 1 UTF-8 JSON payload for epoch `index` in an SPP batch.
+/// Follows standard variable-length copy semantics. An epoch that solved reports
+/// *out_written 0 and *out_required 0.
+///
+/// Safety: batch is a live handle; out points to len writable bytes or NULL when
+/// len is 0; out_written and out_required point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_spp_batch_error_payload(
+    batch: *const SidereonSppBatch,
+    index: usize,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_spp_batch_error_payload";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(FN_NAME, out_written, out_required));
+        let batch = c_try!(require_ref(batch, FN_NAME, "batch"));
+        let entry = match batch.inner.get(index) {
+            Some(entry) => entry,
+            None => {
+                set_last_error(format!(
+                    "{FN_NAME}: index {index} out of range ({} results)",
+                    batch.inner.len()
+                ));
+                return SidereonStatus::InvalidArgument;
+            }
+        };
+        let payload = match entry {
+            Ok(_) => "",
+            Err(row_err) => row_err.payload.as_str(),
+        };
+        c_try!(copy_prefix_to_c(
+            FN_NAME,
+            "out",
+            payload.as_bytes(),
             out,
             len,
             out_written,
@@ -1879,6 +2572,45 @@ pub unsafe extern "C" fn sidereon_spp_batch_error(
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_spp_batch_free(batch: *mut SidereonSppBatch) {
     free_boxed(batch);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_solve_spp_batch_v2_serial(
+    sp3: *const SidereonSp3,
+    epochs: *const SidereonSppBatchInputV2,
+    epoch_count: usize,
+    out_batch: *mut *mut SidereonSppBatch,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_solve_spp_batch_v2_serial";
+    engine_error_operation_boundary(FN, SidereonStatus::Panic, || {
+        let out_batch = c_try!(require_out(out_batch, FN, "out_batch"));
+        *out_batch = ptr::null_mut();
+        let sp3 = c_try!(require_ref(sp3, FN, "sp3"));
+        let epochs = c_try!(require_slice(epochs, epoch_count, FN, "epochs"));
+        let mut results = Vec::with_capacity(epochs.len());
+        for (index, epoch) in epochs.iter().enumerate() {
+            let row_fn = format!("{FN} epoch {index}");
+            let solve_inputs =
+                match build_spp_solve_inputs_with_models(&row_fn, &epoch.inputs, &epoch.models) {
+                    Ok(inputs) => inputs,
+                    Err(status) => return status,
+                };
+            let policy = match crate::solve::solve_policy_from_c(&row_fn, &epoch.inputs.policy) {
+                Ok(policy) => policy,
+                Err(status) => return status,
+            };
+            let result = sidereon::solve_spp(
+                &sp3.inner,
+                &solve_inputs,
+                epoch.inputs.base.with_geodetic,
+                policy,
+            )
+            .map_err(|error| spp_batch_row_error_from_facade(&row_fn, error));
+            results.push(result);
+        }
+        write_boxed_handle(out_batch, SidereonSppBatch { inner: results });
+        SidereonStatus::Ok
+    })
 }
 
 impl SidereonRinexSppInputs {
@@ -1973,6 +2705,8 @@ unsafe fn rinex_spp_options_from_c(
         ionosphere: options.ionosphere,
         troposphere: options.troposphere,
     };
+    out.qzss_clock = sidereon_core::positioning::QzssClock::Gps;
+    out.troposphere_model = sidereon_core::positioning::TroposphereModel::Rtklib;
     if options.initial_guess_enabled {
         out.initial_guess = Some(options.initial_guess);
     }
@@ -2014,6 +2748,7 @@ fn rinex_spp_solve_inputs_to_c_row(
             temperature_k: inputs.met.temperature_k,
             relative_humidity: inputs.met.relative_humidity,
             with_geodetic: false,
+            pseudorange_code: pseudorange_code_to_c(inputs.pseudorange_code),
         },
         beidou_klobuchar_enabled: inputs.beidou_klobuchar.is_some(),
         beidou_klobuchar_alpha: inputs
@@ -2103,7 +2838,25 @@ fn rinex_spp_solution_at<'a>(
 
 fn map_rinex_spp_error(fn_name: &str, err: RinexSppError) -> SidereonStatus {
     set_last_error(format!("{fn_name}: {err}"));
-    SidereonStatus::InvalidArgument
+    crate::engine_error::record_engine_error(
+        crate::engine_error::SidereonEngineErrorFamily::RinexSpp,
+        fn_name,
+        crate::engine_error::rinex_spp_error_value(&err),
+    );
+    match &err {
+        RinexSppError::Observation(CoreError::Ut1OutsideCoverage(_)) => {
+            SidereonStatus::Ut1OutsideCoverage
+        }
+        RinexSppError::Observation(_) | RinexSppError::MissingApproxPosition => {
+            SidereonStatus::InvalidArgument
+        }
+        // `RinexSppError` is non-exhaustive: a failure a later engine adds
+        // keeps the engine's text, variant name included, in the message.
+        other => {
+            set_last_error(format!("{fn_name}: {other} ({other:?})"));
+            SidereonStatus::InvalidArgument
+        }
+    }
 }
 
 fn rejection_reason_to_c(
@@ -2122,7 +2875,37 @@ fn rejection_reason_to_c(
         sidereon_core::positioning::RejectionReason::SbasIonoUncovered => {
             SidereonSppRejectionReason::SbasIonoUncovered
         }
+        sidereon_core::positioning::RejectionReason::IonosphereCarrierUnresolved => {
+            SidereonSppRejectionReason::IonosphereCarrierUnresolved
+        }
+        sidereon_core::positioning::RejectionReason::SsrCorrectionExceedsLimit(_) => {
+            SidereonSppRejectionReason::SsrCorrectionExceedsLimit
+        }
     }
+}
+
+pub(super) fn rejected_sats_v2_to_c(
+    values: &[sidereon_core::positioning::RejectedSat],
+) -> Vec<SidereonSppRejectedSatV2> {
+    values
+        .iter()
+        .map(|value| {
+            let (reason, size) = match value.reason {
+                sidereon_core::positioning::RejectionReason::SsrCorrectionExceedsLimit(size) => (
+                    SidereonSppRejectionReason::SsrCorrectionExceedsLimit,
+                    Some(size),
+                ),
+                other => (rejection_reason_to_c(other), None),
+            };
+            SidereonSppRejectedSatV2 {
+                sat_id: satellite_token(value.satellite_id),
+                reason,
+                has_size: size.is_some(),
+                orbit_m: size.map_or(0.0, |size| size.orbit_m),
+                clock_m: size.map_or(0.0, |size| size.clock_m),
+            }
+        })
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2160,18 +2943,23 @@ where
         inputs.base.with_geodetic,
     ) {
         Ok(solution) => {
+            let velocity_error_detail = solution.velocity_error.as_ref().map(|error| {
+                spp_batch_row_error_from_facade(fn_name, sidereon::Error::Velocity(*error))
+            });
             write_boxed_handle(
                 out_solution,
                 SidereonSppDopplerSolution {
                     receiver: solution.receiver,
                     velocity: solution.velocity,
                     velocity_error: solution.velocity_error,
+                    velocity_error_detail,
                 },
             );
             SidereonStatus::Ok
         }
         Err(err) => {
             set_last_error(format!("{fn_name}: {err}"));
+            crate::engine_error::RecordEngineError::record_engine_error(fn_name, &err);
             SidereonStatus::Solve
         }
     }
@@ -2236,6 +3024,9 @@ fn solve_status_to_c(status: Status) -> SidereonSppSolveStatus {
         Status::CostTolerance => SidereonSppSolveStatus::CostTolerance,
         Status::StepTolerance => SidereonSppSolveStatus::StepTolerance,
         Status::MaxEvaluations => SidereonSppSolveStatus::MaxEvaluations,
+        Status::SelectionSettled => SidereonSppSolveStatus::SelectionSettled,
+        Status::OuterBudgetExhausted => SidereonSppSolveStatus::OuterBudgetExhausted,
+        Status::OuterOscillation => SidereonSppSolveStatus::OuterOscillation,
     }
 }
 
@@ -2254,6 +3045,7 @@ fn empty_metadata() -> SidereonSppMetadata {
         redundancy: 0,
         raim_checkable: false,
         geometry_quality: empty_geometry_quality(),
+        ut1_degraded: SidereonUt1Degradation::None,
     }
 }
 
@@ -2264,6 +3056,98 @@ mod tests {
     use std::mem::MaybeUninit;
     use std::path::PathBuf;
 
+    #[test]
+    fn rinex_spp_epoch_error_retains_policy_family_and_typed_payload() {
+        let error = sidereon_core::positioning::SolvePolicyError::NoCoarseSolution;
+        let retained = rinex_spp_row_error(&error);
+        assert_eq!(retained.family, SidereonEngineErrorFamily::SppPolicy);
+        let value: serde_json::Value =
+            serde_json::from_str(&retained.payload).expect("valid retained row JSON");
+        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["family"], "spp_policy");
+        assert_eq!(
+            value["operation"],
+            "sidereon_rinex_spp_solution_error_payload"
+        );
+        assert_eq!(value["error"]["kind"], "no_coarse_solution");
+
+        let nested = sidereon_core::positioning::SolvePolicyError::Solve(
+            sidereon_core::positioning::SppError::TooFewSatellites {
+                used: 2,
+                required: 4,
+            },
+        );
+        let retained = rinex_spp_row_error(&nested);
+        assert_eq!(retained.family, SidereonEngineErrorFamily::Spp);
+        let value: serde_json::Value =
+            serde_json::from_str(&retained.payload).expect("valid nested row JSON");
+        assert_eq!(value["family"], "spp");
+        assert_eq!(value["error"]["kind"], "too_few_satellites");
+        assert_eq!(value["error"]["fields"]["used"], 2);
+        assert_eq!(value["error"]["fields"]["required"], 4);
+    }
+
+    #[test]
+    fn rinex_spp_epoch_error_accessors_report_and_copy_row_owned_payload() {
+        let handle = SidereonRinexSppSolutions {
+            inner: vec![RinexSppEpochSolution {
+                epoch_index: 0,
+                epoch: sidereon_core::rinex::observations::ObsEpochTime {
+                    year: 2024,
+                    month: 1,
+                    day: 1,
+                    hour: 0,
+                    minute: 0,
+                    second: 0.0,
+                },
+                solution: Err(sidereon_core::positioning::SolvePolicyError::NoCoarseSolution),
+            }],
+        };
+        let mut info = SidereonEngineErrorInfo {
+            family: SidereonEngineErrorFamily::None,
+            payload_len: 0,
+        };
+        unsafe {
+            assert_eq!(
+                sidereon_rinex_spp_solution_error_info(&handle, 0, &mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::SppPolicy);
+            assert!(info.payload_len > 0);
+            let mut written = usize::MAX;
+            let mut required = 0;
+            assert_eq!(
+                sidereon_rinex_spp_solution_error_payload(
+                    &handle,
+                    0,
+                    ptr::null_mut(),
+                    0,
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, 0);
+            assert_eq!(required, info.payload_len);
+            let mut payload = vec![0u8; required];
+            assert_eq!(
+                sidereon_rinex_spp_solution_error_payload(
+                    &handle,
+                    0,
+                    payload.as_mut_ptr(),
+                    payload.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, payload.len());
+            let value: serde_json::Value =
+                serde_json::from_slice(&payload).expect("valid row payload");
+            assert_eq!(value["error"]["kind"], "no_coarse_solution");
+        }
+    }
+
     const T_RX_J2000_S: f64 = 646_272_000.0;
     const T_RX_SOD_S: f64 = 43_200.0;
     const DAY_OF_YEAR: f64 = 176.5;
@@ -2271,6 +3155,82 @@ mod tests {
     const RECEIVER_VELOCITY: [f64; 3] = [12.0, -7.0, 3.0];
     const CLOCK_BIAS_M: f64 = 8.0;
     const CLOCK_DRIFT_S_S: f64 = 1.0e-9;
+
+    #[test]
+    fn rejected_satellite_v2_retains_size_payload_and_variable_buffer_values() {
+        let (converted, legacy_reason) = {
+            let rejected = [sidereon_core::positioning::RejectedSat {
+                satellite_id: GnssSatelliteId {
+                    system: GnssSystem::Gps,
+                    prn: 7,
+                },
+                reason: sidereon_core::positioning::RejectionReason::SsrCorrectionExceedsLimit(
+                    sidereon_core::ssr::SsrCorrectionSize {
+                        orbit_m: 130.25,
+                        clock_m: -55.5,
+                    },
+                ),
+            }];
+            (
+                rejected_sats_v2_to_c(&rejected),
+                rejection_reason_to_c(rejected[0].reason),
+            )
+        };
+        assert_eq!(converted.len(), 1);
+        assert_eq!(
+            legacy_reason,
+            SidereonSppRejectionReason::SsrCorrectionExceedsLimit
+        );
+        assert_eq!(
+            converted[0].reason,
+            SidereonSppRejectionReason::SsrCorrectionExceedsLimit
+        );
+        assert!(converted[0].has_size);
+        assert_eq!(converted[0].orbit_m, 130.25);
+        assert_eq!(converted[0].clock_m, -55.5);
+
+        let mut output = [SidereonSppRejectedSatV2 {
+            sat_id: satellite_token(GnssSatelliteId {
+                system: GnssSystem::Gps,
+                prn: 1,
+            }),
+            reason: SidereonSppRejectionReason::NoEphemeris,
+            has_size: false,
+            orbit_m: 9.0,
+            clock_m: 9.0,
+        }];
+        let mut written = 0;
+        let mut required = 0;
+        unsafe {
+            copy_prefix_to_c(
+                "test",
+                "out",
+                &converted,
+                ptr::null_mut(),
+                0,
+                &mut written,
+                &mut required,
+            )
+        }
+        .unwrap();
+        assert_eq!((written, required), (0, 1));
+        unsafe {
+            copy_prefix_to_c(
+                "test",
+                "out",
+                &converted,
+                output.as_mut_ptr(),
+                output.len(),
+                &mut written,
+                &mut required,
+            )
+        }
+        .unwrap();
+        assert_eq!((written, required), (1, 1));
+        assert_eq!(output[0].sat_id.bytes, converted[0].sat_id.bytes);
+        assert_eq!(output[0].orbit_m.to_bits(), 130.25f64.to_bits());
+        assert_eq!(output[0].clock_m.to_bits(), (-55.5f64).to_bits());
+    }
 
     fn fixture_sp3() -> Sp3 {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -2362,6 +3322,9 @@ mod tests {
                 glonass_channels: BTreeMap::new(),
                 met: SurfaceMet::default(),
                 robust: None,
+                pseudorange_code: sidereon_core::positioning::PseudorangeCode::SingleFrequency,
+                troposphere_model: sidereon_core::positioning::TroposphereModel::Rtklib,
+                qzss_clock: sidereon_core::positioning::QzssClock::Gps,
             },
             doppler_observations,
         )
@@ -2415,15 +3378,482 @@ mod tests {
             temperature_k: SurfaceMet::default().temperature_k,
             relative_humidity: SurfaceMet::default().relative_humidity,
             with_geodetic: true,
+            pseudorange_code: SidereonPseudorangeCode::SingleFrequency as u32,
         };
         (observations, c_doppler, c_inputs)
     }
 
-    fn assert_close(got: f64, want: f64, tol: f64) {
-        assert!(
-            (got - want).abs() <= tol,
-            "got {got:e}, want {want:e}, tol {tol:e}"
+    fn assert_same_bits(got: f64, want: f64) {
+        assert_eq!(got.to_bits(), want.to_bits(), "got {got:e}, want {want:e}");
+    }
+
+    fn assert_engine_error_snapshot_eq(
+        expected: &(crate::engine_error::SidereonEngineErrorInfo, String),
+    ) {
+        let actual = crate::engine_error::snapshot_engine_error_for_test()
+            .expect("engine error snapshot remains populated");
+        assert_eq!(actual.0.family, expected.0.family);
+        assert_eq!(actual.0.payload_len, expected.0.payload_len);
+        assert_eq!(actual.1, expected.1);
+    }
+
+    #[test]
+    fn rinex_spp_mapper_retains_both_typed_error_variants() {
+        crate::engine_error::clear_engine_error();
+        assert_eq!(
+            map_rinex_spp_error(
+                "sidereon_spp_inputs_from_rinex_obs",
+                RinexSppError::MissingApproxPosition,
+            ),
+            SidereonStatus::InvalidArgument
         );
+        let (info, payload) = crate::engine_error::snapshot_engine_error_for_test()
+            .expect("missing approximate position is typed");
+        assert_eq!(info.family, SidereonEngineErrorFamily::RinexSpp);
+        let value: serde_json::Value = serde_json::from_str(&payload).expect("JSON payload");
+        assert_eq!(value["operation"], "sidereon_spp_inputs_from_rinex_obs");
+        assert_eq!(value["error"]["kind"], "missing_approx_position");
+        assert_eq!(value["error"]["fields"], serde_json::json!({}));
+
+        crate::engine_error::clear_engine_error();
+        assert_eq!(
+            map_rinex_spp_error(
+                "sidereon_solve_spp_from_rinex_obs",
+                RinexSppError::Observation(sidereon_core::Error::InvalidInput(
+                    "bad epoch value".into(),
+                )),
+            ),
+            SidereonStatus::InvalidArgument
+        );
+        let (info, payload) = crate::engine_error::snapshot_engine_error_for_test()
+            .expect("observation cause is typed");
+        assert_eq!(info.family, SidereonEngineErrorFamily::RinexSpp);
+        let value: serde_json::Value = serde_json::from_str(&payload).expect("JSON payload");
+        assert_eq!(value["operation"], "sidereon_solve_spp_from_rinex_obs");
+        assert_eq!(value["error"]["kind"], "observation");
+        assert_eq!(value["error"]["fields"]["cause"]["kind"], "invalid_input");
+        assert_eq!(
+            value["error"]["fields"]["cause"]["fields"]["message"],
+            "bad epoch value"
+        );
+
+        let operation = "sidereon_solve_spp_from_rinex_obs";
+        assert_eq!(
+            map_rinex_spp_error(
+                operation,
+                RinexSppError::Observation(sidereon_core::Error::Ut1OutsideCoverage(
+                    sidereon_core::astro::time::DegradeReason::AfterCoverage,
+                )),
+            ),
+            SidereonStatus::Ut1OutsideCoverage
+        );
+        let (info, payload) =
+            crate::engine_error::snapshot_engine_error_for_test().expect("UT1 typed detail");
+        assert_eq!(info.family, SidereonEngineErrorFamily::RinexSpp);
+        let value: serde_json::Value = serde_json::from_str(&payload).expect("JSON payload");
+        assert_eq!(value["error"]["kind"], "observation");
+        assert_eq!(
+            value["error"]["fields"]["cause"]["kind"],
+            "ut1_outside_coverage"
+        );
+        assert_eq!(
+            value["error"]["fields"]["cause"]["fields"]["reason"],
+            "after_coverage"
+        );
+        let mut legacy = vec![0 as std::os::raw::c_char; 256];
+        let needed =
+            unsafe { crate::sidereon_last_error_message(legacy.as_mut_ptr(), legacy.len()) };
+        assert!(needed > 0);
+        let legacy = unsafe { CStr::from_ptr(legacy.as_ptr()) }
+            .to_str()
+            .expect("legacy UTF-8");
+        assert_eq!(
+            legacy,
+            "sidereon_solve_spp_from_rinex_obs: RINEX SPP observation assembly failed: UT1 outside the table: instant follows the UT1 table coverage"
+        );
+        crate::engine_error::clear_engine_error();
+    }
+
+    #[test]
+    fn rinex_spp_missing_position_records_real_producer_error() {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/obs/ESBC00DNK_R_20201770000_01D_30S_MO_trim.rnx");
+        let source = fs::read_to_string(fixture).expect("read RINEX OBS fixture");
+        let mut removed = 0;
+        let mutated = source
+            .lines()
+            .filter(|line| {
+                let is_approx = line.contains("APPROX POSITION XYZ");
+                removed += usize::from(is_approx);
+                !is_approx
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(removed, 1, "mutate only the fixture's approximate position");
+        let obs = SidereonRinexObs {
+            inner: RinexObs::parse(&mutated).expect("mutated observation file remains parseable"),
+        };
+        assert!(obs.inner.header().approx_position_m.is_none());
+
+        let nav_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/nav/ESBC00DNK_R_20201770000_01D_MN.rnx");
+        let nav = fs::read(nav_path).expect("read broadcast NAV fixture");
+        let mut broadcast = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_broadcast_ephemeris_parse_nav(nav.as_ptr(), nav.len(), &mut broadcast)
+            },
+            SidereonStatus::Ok
+        );
+        assert!(!broadcast.is_null());
+
+        let mut assembled = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_spp_inputs_from_rinex_obs(&obs, broadcast, ptr::null(), &mut assembled)
+            },
+            SidereonStatus::InvalidArgument
+        );
+        assert!(assembled.is_null());
+        let (info, payload) = crate::engine_error::snapshot_engine_error_for_test()
+            .expect("public producer retained its typed failure");
+        assert_eq!(info.family, SidereonEngineErrorFamily::RinexSpp);
+        let value: serde_json::Value = serde_json::from_str(&payload).expect("JSON payload");
+        assert_eq!(value["operation"], "sidereon_spp_inputs_from_rinex_obs");
+        assert_eq!(value["error"]["kind"], "missing_approx_position");
+        assert_eq!(value["error"]["fields"], serde_json::json!({}));
+
+        let mut assembled_with_models = ptr::null_mut();
+        crate::engine_error::clear_engine_error();
+        assert_eq!(
+            unsafe {
+                sidereon_spp_inputs_from_rinex_obs_with_models(
+                    &obs,
+                    broadcast,
+                    ptr::null(),
+                    ptr::null(),
+                    &mut assembled_with_models,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+        assert!(assembled_with_models.is_null());
+        let (_, model_payload) = crate::engine_error::snapshot_engine_error_for_test()
+            .expect("model route records missing position");
+        let model_json: serde_json::Value = serde_json::from_str(&model_payload).expect("JSON");
+        assert_eq!(
+            model_json["operation"],
+            "sidereon_spp_inputs_from_rinex_obs_with_models"
+        );
+        assert_eq!(model_json["error"]["kind"], "missing_approx_position");
+
+        let mut solutions = ptr::null_mut();
+        crate::engine_error::clear_engine_error();
+        assert_eq!(
+            unsafe {
+                sidereon_solve_spp_from_rinex_obs(
+                    broadcast,
+                    &obs,
+                    ptr::null(),
+                    true,
+                    ptr::null(),
+                    &mut solutions,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+        assert!(solutions.is_null());
+        let (_, solve_payload) = crate::engine_error::snapshot_engine_error_for_test()
+            .expect("solve route records missing position");
+        let solve_json: serde_json::Value = serde_json::from_str(&solve_payload).expect("JSON");
+        assert_eq!(solve_json["operation"], "sidereon_solve_spp_from_rinex_obs");
+        assert_eq!(solve_json["error"]["kind"], "missing_approx_position");
+
+        let mut solutions_with_models = ptr::null_mut();
+        crate::engine_error::clear_engine_error();
+        assert_eq!(
+            unsafe {
+                sidereon_solve_spp_from_rinex_obs_with_models(
+                    broadcast,
+                    &obs,
+                    ptr::null(),
+                    ptr::null(),
+                    true,
+                    ptr::null(),
+                    &mut solutions_with_models,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+        assert!(solutions_with_models.is_null());
+        let (_, solve_models_payload) = crate::engine_error::snapshot_engine_error_for_test()
+            .expect("model solve route records missing position");
+        let solve_models_json: serde_json::Value =
+            serde_json::from_str(&solve_models_payload).expect("JSON");
+        assert_eq!(
+            solve_models_json["operation"],
+            "sidereon_solve_spp_from_rinex_obs_with_models"
+        );
+        assert_eq!(
+            solve_models_json["error"]["kind"],
+            "missing_approx_position"
+        );
+
+        assert_eq!(
+            unsafe {
+                sidereon_spp_inputs_from_rinex_obs(
+                    ptr::null(),
+                    broadcast,
+                    ptr::null(),
+                    &mut assembled,
+                )
+            },
+            SidereonStatus::NullPointer
+        );
+        assert!(assembled.is_null());
+        assert!(crate::engine_error::snapshot_engine_error_for_test().is_none());
+
+        crate::engine_error::clear_engine_error();
+        assert_eq!(
+            unsafe {
+                sidereon_spp_inputs_from_rinex_obs(&obs, broadcast, ptr::null(), &mut assembled)
+            },
+            SidereonStatus::InvalidArgument
+        );
+        assert!(crate::engine_error::snapshot_engine_error_for_test().is_some());
+        let valid_obs = SidereonRinexObs {
+            inner: RinexObs::parse(&source).expect("original observation fixture parses"),
+        };
+        assert_eq!(
+            unsafe {
+                sidereon_spp_inputs_from_rinex_obs(
+                    &valid_obs,
+                    broadcast,
+                    ptr::null(),
+                    &mut assembled,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert!(!assembled.is_null());
+        assert!(crate::engine_error::snapshot_engine_error_for_test().is_none());
+
+        crate::engine_error::clear_engine_error();
+        assert_eq!(
+            unsafe {
+                sidereon_spp_inputs_from_rinex_obs(
+                    &obs,
+                    broadcast,
+                    ptr::null(),
+                    &mut assembled_with_models,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+        let retained = crate::engine_error::snapshot_engine_error_for_test()
+            .expect("live input reader retention seed");
+        let mut count = usize::MAX;
+        assert_eq!(
+            unsafe { sidereon_rinex_spp_inputs_count(assembled, &mut count) },
+            SidereonStatus::Ok
+        );
+        assert!(count > 0);
+        let mut epoch = MaybeUninit::<SidereonRinexSppEpoch>::uninit();
+        assert_eq!(
+            unsafe { sidereon_rinex_spp_inputs_epoch(assembled, 0, epoch.as_mut_ptr()) },
+            SidereonStatus::Ok
+        );
+        let epoch = unsafe { epoch.assume_init() };
+        assert!(epoch.observation_count > 0);
+        let mut row_inputs = MaybeUninit::<SidereonSppInputsV2>::uninit();
+        assert_eq!(
+            unsafe {
+                sidereon_rinex_spp_inputs_epoch_inputs(assembled, 0, row_inputs.as_mut_ptr())
+            },
+            SidereonStatus::Ok
+        );
+        let row_inputs = unsafe { row_inputs.assume_init() };
+        assert!(row_inputs.base.observation_count > 0);
+        assert_engine_error_snapshot_eq(&retained);
+        unsafe { sidereon_rinex_spp_inputs_free(assembled) };
+        assert_engine_error_snapshot_eq(&retained);
+
+        let mut valid_assembled_with_models = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_spp_inputs_from_rinex_obs_with_models(
+                    &valid_obs,
+                    broadcast,
+                    ptr::null(),
+                    ptr::null(),
+                    &mut valid_assembled_with_models,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert!(!valid_assembled_with_models.is_null());
+        assert!(crate::engine_error::snapshot_engine_error_for_test().is_none());
+        unsafe { sidereon_rinex_spp_inputs_free(valid_assembled_with_models) };
+
+        let mut refusal_seed = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_spp_inputs_from_rinex_obs(&obs, broadcast, ptr::null(), &mut refusal_seed)
+            },
+            SidereonStatus::InvalidArgument
+        );
+        assert!(crate::engine_error::snapshot_engine_error_for_test().is_some());
+        let mut valid_solutions = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_solve_spp_from_rinex_obs(
+                    broadcast,
+                    &valid_obs,
+                    ptr::null(),
+                    true,
+                    ptr::null(),
+                    &mut valid_solutions,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert!(!valid_solutions.is_null());
+        assert!(crate::engine_error::snapshot_engine_error_for_test().is_none());
+        unsafe { sidereon_rinex_spp_solutions_free(valid_solutions) };
+
+        assert_eq!(
+            unsafe {
+                sidereon_spp_inputs_from_rinex_obs(&obs, broadcast, ptr::null(), &mut refusal_seed)
+            },
+            SidereonStatus::InvalidArgument
+        );
+        assert!(crate::engine_error::snapshot_engine_error_for_test().is_some());
+        let mut valid_solutions_with_models = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_solve_spp_from_rinex_obs_with_models(
+                    broadcast,
+                    &valid_obs,
+                    ptr::null(),
+                    ptr::null(),
+                    true,
+                    ptr::null(),
+                    &mut valid_solutions_with_models,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert!(!valid_solutions_with_models.is_null());
+        assert!(crate::engine_error::snapshot_engine_error_for_test().is_none());
+        unsafe { sidereon_rinex_spp_solutions_free(valid_solutions_with_models) };
+        unsafe { sidereon_broadcast_ephemeris_free(broadcast) };
+    }
+
+    #[test]
+    fn rinex_spp_real_event_timeline_error_retains_nested_core_cause() {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/obs/ESBC00DNK_R_20201770000_01D_30S_MO_trim.rnx");
+        let source = fs::read_to_string(fixture).expect("read RINEX OBS fixture");
+        let approx = source
+            .lines()
+            .find(|line| line.contains("APPROX POSITION XYZ"))
+            .expect("fixture approximate position")
+            .to_string();
+        let last_epoch = source
+            .lines()
+            .rev()
+            .find(|line| line.starts_with('>'))
+            .expect("fixture epoch");
+        let mut epoch_fields = last_epoch
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        assert_eq!(epoch_fields.first().map(String::as_str), Some(">"));
+        assert!(epoch_fields.len() >= 9);
+        epoch_fields[7] = "3".to_string();
+        epoch_fields[8] = "1".to_string();
+        let event_line = epoch_fields.join(" ");
+        let event_input = format!("{}\n{}\n{}", source.trim_end(), event_line, approx);
+        assert!(event_input.contains(&format!("\n{event_line}\n{approx}")));
+
+        // Parsing accepts the valid fixture-derived event. Replacing its owned
+        // header record afterward mirrors the core's post-parse timeline guard.
+        let mut parsed = RinexObs::parse(&event_input).expect("fixture plus valid event parses");
+        let last = parsed.epochs.last_mut().expect("event epoch");
+        assert_eq!(last.flag, 3);
+        assert_eq!(last.special_records, vec![approx.clone()]);
+        let mut malformed = approx.clone();
+        malformed.replace_range(..60, &format!("{:<60}", "not a position"));
+        assert_ne!(malformed, approx);
+        last.special_records[0] = malformed.clone();
+        assert!(parsed.header_timeline().is_err());
+        let obs = SidereonRinexObs { inner: parsed };
+
+        let nav_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/nav/ESBC00DNK_R_20201770000_01D_MN.rnx");
+        let nav = fs::read(nav_path).expect("read broadcast NAV fixture");
+        let mut broadcast = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_broadcast_ephemeris_parse_nav(nav.as_ptr(), nav.len(), &mut broadcast)
+            },
+            SidereonStatus::Ok
+        );
+        let mut assembled = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_spp_inputs_from_rinex_obs(&obs, broadcast, ptr::null(), &mut assembled)
+            },
+            SidereonStatus::InvalidArgument
+        );
+        assert!(assembled.is_null());
+        let (info, payload) = crate::engine_error::snapshot_engine_error_for_test()
+            .expect("event timeline failure is typed");
+        assert_eq!(info.family, SidereonEngineErrorFamily::RinexSpp);
+        let value: serde_json::Value = serde_json::from_str(&payload).expect("JSON");
+        assert_eq!(value["operation"], "sidereon_spp_inputs_from_rinex_obs");
+        assert_eq!(value["error"]["kind"], "observation");
+        assert_eq!(value["error"]["fields"]["cause"]["kind"], "parse");
+        let message = value["error"]["fields"]["cause"]["fields"]["message"]
+            .as_str()
+            .expect("parse cause message");
+        assert!(message.contains("event records"), "{message}");
+        assert!(message.contains("not a position"), "{message}");
+
+        let mut solutions = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_solve_spp_from_rinex_obs(
+                    broadcast,
+                    &obs,
+                    ptr::null(),
+                    true,
+                    ptr::null(),
+                    &mut solutions,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+        assert!(solutions.is_null());
+        let (solve_info, solve_payload) = crate::engine_error::snapshot_engine_error_for_test()
+            .expect("event timeline solve failure is typed");
+        assert_eq!(solve_info.family, SidereonEngineErrorFamily::RinexSpp);
+        assert_eq!(solve_info.payload_len, solve_payload.len());
+        let solve_value: serde_json::Value = serde_json::from_str(&solve_payload).expect("JSON");
+        assert_eq!(
+            solve_value["operation"],
+            "sidereon_solve_spp_from_rinex_obs"
+        );
+        assert_eq!(solve_value["error"]["kind"], "observation");
+        assert_eq!(solve_value["error"]["fields"]["cause"]["kind"], "parse");
+        let solve_message = solve_value["error"]["fields"]["cause"]["fields"]["message"]
+            .as_str()
+            .expect("solve parse cause message");
+        assert_eq!(solve_message, message);
+        assert!(solve_message.contains("event records"), "{solve_message}");
+        assert!(solve_message.contains("not a position"), "{solve_message}");
+        unsafe { sidereon_broadcast_ephemeris_free(broadcast) };
+        crate::engine_error::clear_engine_error();
     }
 
     #[test]
@@ -2461,7 +3891,7 @@ mod tests {
         let status =
             unsafe { sidereon_spp_doppler_solution_has_velocity(solution, &mut has_velocity) };
         assert_eq!(status, SidereonStatus::Ok);
-        assert!(has_velocity);
+        assert_eq!(has_velocity, expected.velocity.is_some());
 
         let mut velocity_error = SidereonSppDopplerVelocityErrorKind::InvalidInput;
         let status = unsafe {
@@ -2469,17 +3899,92 @@ mod tests {
         };
         assert_eq!(status, SidereonStatus::Ok);
         assert_eq!(velocity_error, SidereonSppDopplerVelocityErrorKind::None);
+        let mut error_info = SidereonEngineErrorInfo {
+            family: SidereonEngineErrorFamily::Spp,
+            payload_len: 99,
+        };
+        assert_eq!(
+            unsafe { sidereon_spp_doppler_solution_velocity_error_info(solution, &mut error_info) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(error_info.family, SidereonEngineErrorFamily::None);
+        assert_eq!(error_info.payload_len, 0);
+        let mut error_written = 99;
+        let mut error_required = 99;
+        assert_eq!(
+            unsafe {
+                sidereon_spp_doppler_solution_velocity_error_payload(
+                    solution,
+                    ptr::null_mut(),
+                    0,
+                    &mut error_written,
+                    &mut error_required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!((error_written, error_required), (0, 0));
 
         let mut receiver = ptr::null_mut();
         let status = unsafe { sidereon_spp_doppler_solution_receiver(solution, &mut receiver) };
         assert_eq!(status, SidereonStatus::Ok);
         assert!(!receiver.is_null());
 
+        let mut validation = MaybeUninit::<SidereonSolutionValidationOptions>::uninit();
+        assert_eq!(
+            unsafe { sidereon_solution_validation_options_init(validation.as_mut_ptr()) },
+            SidereonStatus::Ok
+        );
+        let mut validation = unsafe { validation.assume_init() };
+        validation.min_plausible_radius_m = 1.0e99;
+        validation.max_plausible_radius_m = 1.0e100;
+        assert_eq!(
+            unsafe { sidereon_validate_receiver_solution(receiver, &validation) },
+            SidereonStatus::InvalidArgument
+        );
+        let (validation_info, validation_payload) =
+            crate::engine_error::snapshot_engine_error_for_test()
+                .expect("validation detail retained");
+        assert_eq!(
+            validation_info.family,
+            SidereonEngineErrorFamily::SolutionValidation
+        );
+        let validation_json: serde_json::Value =
+            serde_json::from_str(&validation_payload).expect("valid JSON");
+        assert_eq!(
+            validation_json["operation"],
+            "sidereon_validate_receiver_solution"
+        );
+        let radius = expected
+            .receiver
+            .position
+            .as_array()
+            .iter()
+            .map(|component| component * component)
+            .sum::<f64>()
+            .sqrt();
+        assert_eq!(validation_json["error"]["kind"], "implausible_position");
+        assert_eq!(
+            validation_json["error"]["fields"]["radius_m"]["decimal"],
+            radius.to_string()
+        );
+        assert_eq!(
+            validation_json["error"]["fields"]["radius_m"]["bits_hex"],
+            format!("{:016x}", radius.to_bits())
+        );
+        validation.min_plausible_radius_m = 1.0;
+        validation.max_plausible_radius_m = 1.0e8;
+        assert_eq!(
+            unsafe { sidereon_validate_receiver_solution(receiver, &validation) },
+            SidereonStatus::Ok
+        );
+        assert!(crate::engine_error::snapshot_engine_error_for_test().is_none());
+
         let mut position = [0.0; 3];
         let status = unsafe { sidereon_spp_solution_position(receiver, position.as_mut_ptr(), 3) };
         assert_eq!(status, SidereonStatus::Ok);
         for (got, want) in position.iter().zip(expected.receiver.position.as_array()) {
-            assert_close(*got, want, 1.0e-8);
+            assert_same_bits(*got, want);
         }
 
         let mut drift_present = false;
@@ -2489,10 +3994,9 @@ mod tests {
         };
         assert_eq!(status, SidereonStatus::Ok);
         assert!(drift_present);
-        assert_close(
+        assert_same_bits(
             drift,
             expected.receiver.rx_clock_drift_s_s.expect("clock drift"),
-            1.0e-18,
         );
 
         let mut covariance = [0.0; 9];
@@ -2503,7 +4007,7 @@ mod tests {
         for (got, want) in covariance.iter().zip(flatten_spp_mat3(
             expected.receiver.position_covariance.ecef_m2,
         )) {
-            assert_close(*got, want, 1.0e-12);
+            assert_same_bits(*got, want);
         }
 
         let mut velocity = ptr::null_mut();
@@ -2517,7 +4021,7 @@ mod tests {
         assert_eq!(status, SidereonStatus::Ok);
         let expected_velocity = expected.velocity.as_ref().expect("velocity");
         for (got, want) in velocity_xyz.iter().zip(expected_velocity.velocity_m_s) {
-            assert_close(*got, want, 1.0e-9);
+            assert_same_bits(*got, want);
         }
 
         unsafe {
@@ -2525,5 +4029,1290 @@ mod tests {
             sidereon_spp_solution_free(receiver);
             sidereon_spp_doppler_solution_free(solution);
         }
+    }
+
+    #[test]
+    fn spp_doppler_retains_typed_velocity_error_payload_on_owned_handle() {
+        let sp3 = fixture_sp3();
+        let sats = visible_gps(&sp3);
+        assert!(sats.len() >= 4);
+        let (inputs, doppler_observations) = core_inputs(&sp3, &sats);
+        let expected =
+            core_solve_with_doppler_velocity(&sp3, &inputs, &doppler_observations[..1], true)
+                .expect("position solve keeps underdetermined Doppler as owned velocity error");
+        assert!(expected.velocity.is_none());
+        assert!(expected.velocity_error.is_some());
+
+        let tokens = sats
+            .iter()
+            .map(|sat| CString::new(sat.to_string()).expect("sat token"))
+            .collect::<Vec<_>>();
+        let (_observations, c_doppler, c_inputs) =
+            c_inputs(&inputs, &doppler_observations, &tokens);
+        let sp3_handle = SidereonSp3 { inner: sp3 };
+        let mut solution = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_solve_spp_with_doppler_velocity(
+                    &sp3_handle,
+                    &c_inputs,
+                    c_doppler.as_ptr(),
+                    1,
+                    &mut solution,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert!(!solution.is_null());
+        // `c_inputs.base.observations` borrows this vector for the C calls below.
+
+        let mut info = SidereonEngineErrorInfo {
+            family: SidereonEngineErrorFamily::None,
+            payload_len: 0,
+        };
+        assert_eq!(
+            unsafe { sidereon_spp_doppler_solution_velocity_error_info(solution, &mut info) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(info.family, SidereonEngineErrorFamily::Facade);
+        assert!(info.payload_len > 0);
+        let mut velocity_kind = SidereonSppDopplerVelocityErrorKind::None;
+        assert_eq!(
+            unsafe {
+                sidereon_spp_doppler_solution_velocity_error_kind(solution, &mut velocity_kind)
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(
+            velocity_kind,
+            spp_doppler_velocity_error_to_c(
+                expected.velocity_error.as_ref().expect("expected error")
+            )
+        );
+
+        let mut written = usize::MAX;
+        let mut required = 0;
+        assert_eq!(
+            unsafe {
+                sidereon_spp_doppler_solution_velocity_error_payload(
+                    solution,
+                    ptr::null_mut(),
+                    0,
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(written, 0);
+        assert_eq!(required, info.payload_len);
+        let mut short = vec![0xa5; required.saturating_sub(1)];
+        assert_eq!(
+            unsafe {
+                sidereon_spp_doppler_solution_velocity_error_payload(
+                    solution,
+                    short.as_mut_ptr(),
+                    short.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+        assert_eq!(written, 0);
+        assert!(short.iter().all(|byte| *byte == 0xa5));
+
+        let mut payload = vec![0; required];
+        assert_eq!(
+            unsafe {
+                sidereon_spp_doppler_solution_velocity_error_payload(
+                    solution,
+                    payload.as_mut_ptr(),
+                    payload.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(written, payload.len());
+        assert_eq!(info.payload_len, written);
+        let original = payload.clone();
+        let json: serde_json::Value = serde_json::from_slice(&payload).expect("payload JSON");
+        assert_eq!(json["schema_version"], 1);
+        assert_eq!(json["family"], "facade");
+        assert_eq!(
+            json["operation"],
+            "sidereon_solve_spp_with_doppler_velocity"
+        );
+        assert_eq!(json["error"]["kind"], "velocity");
+        let expected_error = expected
+            .velocity_error
+            .as_ref()
+            .expect("core velocity error");
+        assert_eq!(
+            json["error"]["fields"]["cause"],
+            crate::engine_error::velocity_error_value(expected_error)
+        );
+        let (used, required_satellites) = match expected_error {
+            VelocityError::TooFewSatellites { used, required } => (*used, *required),
+            other => panic!("expected selected-row velocity refusal, got {other:?}"),
+        };
+        assert!(used < required_satellites);
+        assert_eq!(
+            json["error"]["fields"]["cause"]["kind"],
+            "too_few_satellites"
+        );
+        assert_eq!(json["error"]["fields"]["cause"]["fields"]["used"], used);
+        assert_eq!(
+            json["error"]["fields"]["cause"]["fields"]["required"],
+            required_satellites
+        );
+
+        let mut succeeding_solution = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_solve_spp_with_doppler_velocity(
+                    &sp3_handle,
+                    &c_inputs,
+                    c_doppler.as_ptr(),
+                    c_doppler.len(),
+                    &mut succeeding_solution,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert!(!succeeding_solution.is_null());
+        unsafe { sidereon_spp_doppler_solution_free(succeeding_solution) };
+
+        // The owned handle remains the source of its full JSON bytes after a
+        // later successful producer has cleared/replaced generic TLS state.
+        let mut reread_info = SidereonEngineErrorInfo {
+            family: SidereonEngineErrorFamily::None,
+            payload_len: 0,
+        };
+        assert_eq!(
+            unsafe {
+                sidereon_spp_doppler_solution_velocity_error_info(solution, &mut reread_info)
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(reread_info.family, info.family);
+        assert_eq!(reread_info.payload_len, original.len());
+        let mut reread = vec![0; reread_info.payload_len];
+        assert_eq!(
+            unsafe {
+                sidereon_spp_doppler_solution_velocity_error_payload(
+                    solution,
+                    reread.as_mut_ptr(),
+                    reread.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(reread, original);
+
+        // Seed independent TLS with a genuine public core SPP refusal while the
+        // owned velocity-error handle stays live.
+        let mut empty_inputs = inputs.clone();
+        empty_inputs.observations.clear();
+        let expected_spp_error =
+            core_solve_with_doppler_velocity(&sp3_handle.inner, &empty_inputs, &[], true)
+                .expect_err("empty receiver observation set must refuse");
+        let mut invalid_c_inputs = c_inputs;
+        invalid_c_inputs.base.observations = ptr::null();
+        invalid_c_inputs.base.observation_count = 0;
+        let mut failed_solution = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_solve_spp_with_doppler_velocity(
+                    &sp3_handle,
+                    &invalid_c_inputs,
+                    ptr::null(),
+                    0,
+                    &mut failed_solution,
+                )
+            },
+            SidereonStatus::Solve
+        );
+        assert!(failed_solution.is_null());
+        let retained_tls = crate::engine_error::snapshot_engine_error_for_test()
+            .expect("genuine SPP producer refusal seeds TLS");
+        assert_eq!(retained_tls.0.family, SidereonEngineErrorFamily::Spp);
+        assert_eq!(retained_tls.0.payload_len, retained_tls.1.len());
+        let tls_json: serde_json::Value = serde_json::from_str(&retained_tls.1).expect("JSON");
+        assert_eq!(
+            tls_json["operation"],
+            "sidereon_solve_spp_with_doppler_velocity"
+        );
+        assert_eq!(tls_json["family"], "spp");
+        assert_eq!(
+            tls_json["error"],
+            crate::engine_error::spp_error_value(&expected_spp_error)
+        );
+
+        let mut retained_info = SidereonEngineErrorInfo {
+            family: SidereonEngineErrorFamily::None,
+            payload_len: 0,
+        };
+        assert_eq!(
+            unsafe {
+                sidereon_spp_doppler_solution_velocity_error_info(solution, &mut retained_info)
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(retained_info.family, info.family);
+        assert_eq!(retained_info.payload_len, info.payload_len);
+        assert_engine_error_snapshot_eq(&retained_tls);
+        let mut retained_payload = vec![0; retained_info.payload_len];
+        assert_eq!(
+            unsafe {
+                sidereon_spp_doppler_solution_velocity_error_payload(
+                    solution,
+                    retained_payload.as_mut_ptr(),
+                    retained_payload.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(retained_payload, original);
+        assert_engine_error_snapshot_eq(&retained_tls);
+
+        let mut null_info = SidereonEngineErrorInfo {
+            family: SidereonEngineErrorFamily::Spp,
+            payload_len: usize::MAX,
+        };
+        assert_eq!(
+            unsafe {
+                sidereon_spp_doppler_solution_velocity_error_info(ptr::null(), &mut null_info)
+            },
+            SidereonStatus::NullPointer
+        );
+        assert_eq!(null_info.family, SidereonEngineErrorFamily::None);
+        assert_eq!(null_info.payload_len, 0);
+        assert_engine_error_snapshot_eq(&retained_tls);
+        written = usize::MAX;
+        required = usize::MAX;
+        assert_eq!(
+            unsafe {
+                sidereon_spp_doppler_solution_velocity_error_payload(
+                    ptr::null(),
+                    ptr::null_mut(),
+                    0,
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::NullPointer
+        );
+        assert_eq!((written, required), (0, 0));
+        assert_engine_error_snapshot_eq(&retained_tls);
+
+        // Reader failure on a short output buffer is non-destructive and keeps
+        // the complete independent producer error in generic TLS.
+        let mut short_for_retention = vec![0x5a; original.len() - 1];
+        assert_eq!(
+            unsafe {
+                sidereon_spp_doppler_solution_velocity_error_payload(
+                    solution,
+                    short_for_retention.as_mut_ptr(),
+                    short_for_retention.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+        assert_eq!(written, 0);
+        assert_eq!(required, original.len());
+        assert!(short_for_retention.iter().all(|byte| *byte == 0x5a));
+        assert_engine_error_snapshot_eq(&retained_tls);
+        unsafe { sidereon_spp_doppler_solution_free(solution) };
+        assert_engine_error_snapshot_eq(&retained_tls);
+        assert_eq!(payload, original);
+    }
+
+    #[test]
+    fn both_combined_producers_record_real_spp_refusals_and_reset_on_success() {
+        let sp3 = fixture_sp3();
+        let mut empty_v2 = MaybeUninit::<SidereonSppInputsV2>::uninit();
+        assert_eq!(
+            unsafe { sidereon_spp_inputs_v2_init(empty_v2.as_mut_ptr()) },
+            SidereonStatus::Ok
+        );
+        let mut empty_v2 = unsafe { empty_v2.assume_init() };
+        empty_v2.base.observations = ptr::null();
+        empty_v2.base.observation_count = 0;
+        let empty_inputs = unsafe {
+            build_spp_solve_inputs_with_models("test_empty_combined_inputs", &empty_v2, ptr::null())
+        }
+        .expect("initialized empty inputs parse");
+        let expected_sp3 = core_solve_with_doppler_velocity(&sp3, &empty_inputs, &[], true)
+            .expect_err("real SP3 producer has no usable observations");
+
+        let nav_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/nav/ESBC00DNK_R_20201770000_01D_MN.rnx");
+        let nav = fs::read(nav_path).expect("read broadcast NAV fixture");
+        let mut broadcast = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_broadcast_ephemeris_parse_nav(nav.as_ptr(), nav.len(), &mut broadcast)
+            },
+            SidereonStatus::Ok
+        );
+        let expected_broadcast = core_solve_with_doppler_velocity(
+            unsafe { &(*broadcast).inner },
+            &empty_inputs,
+            &[],
+            true,
+        )
+        .expect_err("real broadcast producer has no usable observations");
+
+        let sp3_handle = SidereonSp3 { inner: sp3 };
+        let mut failed = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_solve_spp_with_doppler_velocity(
+                    &sp3_handle,
+                    &empty_v2,
+                    ptr::null(),
+                    0,
+                    &mut failed,
+                )
+            },
+            SidereonStatus::Solve
+        );
+        assert!(failed.is_null());
+        let (sp3_info, sp3_payload) = crate::engine_error::snapshot_engine_error_for_test()
+            .expect("SP3 combined producer records SppError");
+        assert_eq!(sp3_info.family, SidereonEngineErrorFamily::Spp);
+        let sp3_json: serde_json::Value = serde_json::from_str(&sp3_payload).expect("JSON");
+        assert_eq!(
+            sp3_json["operation"],
+            "sidereon_solve_spp_with_doppler_velocity"
+        );
+        assert_eq!(
+            sp3_json["error"],
+            crate::engine_error::spp_error_value(&expected_sp3)
+        );
+
+        let mut failed_broadcast = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_solve_broadcast_with_doppler_velocity(
+                    broadcast,
+                    &empty_v2,
+                    ptr::null(),
+                    0,
+                    &mut failed_broadcast,
+                )
+            },
+            SidereonStatus::Solve
+        );
+        assert!(failed_broadcast.is_null());
+        let (broadcast_info, broadcast_payload) =
+            crate::engine_error::snapshot_engine_error_for_test()
+                .expect("broadcast combined producer records SppError");
+        assert_eq!(broadcast_info.family, SidereonEngineErrorFamily::Spp);
+        let broadcast_json: serde_json::Value =
+            serde_json::from_str(&broadcast_payload).expect("JSON");
+        assert_eq!(
+            broadcast_json["operation"],
+            "sidereon_solve_broadcast_with_doppler_velocity"
+        );
+        assert_eq!(
+            broadcast_json["error"],
+            crate::engine_error::spp_error_value(&expected_broadcast)
+        );
+
+        let mut early_output = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_solve_spp_with_doppler_velocity(
+                    ptr::null(),
+                    &empty_v2,
+                    ptr::null(),
+                    0,
+                    &mut early_output,
+                )
+            },
+            SidereonStatus::NullPointer
+        );
+        assert!(crate::engine_error::snapshot_engine_error_for_test().is_none());
+        let mut seed_broadcast = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_solve_broadcast_with_doppler_velocity(
+                    broadcast,
+                    &empty_v2,
+                    ptr::null(),
+                    0,
+                    &mut seed_broadcast,
+                )
+            },
+            SidereonStatus::Solve
+        );
+        assert!(seed_broadcast.is_null());
+        let (seed_info, seed_payload) = crate::engine_error::snapshot_engine_error_for_test()
+            .expect("broadcast refusal populates TLS before early-null reset");
+        assert_eq!(seed_info.family, SidereonEngineErrorFamily::Spp);
+        assert_eq!(seed_info.payload_len, seed_payload.len());
+        assert_eq!(
+            unsafe {
+                sidereon_solve_broadcast_with_doppler_velocity(
+                    ptr::null(),
+                    &empty_v2,
+                    ptr::null(),
+                    0,
+                    &mut early_output,
+                )
+            },
+            SidereonStatus::NullPointer
+        );
+        assert!(crate::engine_error::snapshot_engine_error_for_test().is_none());
+
+        let sats = visible_gps(&sp3_handle.inner);
+        assert!(sats.len() >= 4);
+        let (inputs, doppler_observations) = core_inputs(&sp3_handle.inner, &sats);
+        let tokens = sats
+            .iter()
+            .map(|sat| CString::new(sat.to_string()).expect("sat token"))
+            .collect::<Vec<_>>();
+        let (observations, c_doppler, c_inputs) = c_inputs(&inputs, &doppler_observations, &tokens);
+        let mut reset_seed = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_solve_spp_with_doppler_velocity(
+                    &sp3_handle,
+                    &empty_v2,
+                    ptr::null(),
+                    0,
+                    &mut reset_seed,
+                )
+            },
+            SidereonStatus::Solve
+        );
+        assert!(crate::engine_error::snapshot_engine_error_for_test().is_some());
+        let mut sp3_success = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_solve_spp_with_doppler_velocity(
+                    &sp3_handle,
+                    &c_inputs,
+                    c_doppler.as_ptr(),
+                    c_doppler.len(),
+                    &mut sp3_success,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert!(!sp3_success.is_null());
+        assert!(crate::engine_error::snapshot_engine_error_for_test().is_none());
+        unsafe { sidereon_spp_doppler_solution_free(sp3_success) };
+        drop(observations);
+
+        let obs_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/obs/ESBC00DNK_R_20201770000_01D_30S_MO_trim.rnx");
+        let obs_text = fs::read_to_string(obs_path).expect("read matching OBS fixture");
+        let obs = SidereonRinexObs {
+            inner: RinexObs::parse(&obs_text).expect("parse matching OBS fixture"),
+        };
+        let mut assembled = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_spp_inputs_from_rinex_obs(&obs, broadcast, ptr::null(), &mut assembled)
+            },
+            SidereonStatus::Ok
+        );
+        let mut row = MaybeUninit::<SidereonSppInputsV2>::uninit();
+        assert_eq!(
+            unsafe { sidereon_rinex_spp_inputs_epoch_inputs(assembled, 0, row.as_mut_ptr()) },
+            SidereonStatus::Ok
+        );
+        let row = unsafe { row.assume_init() };
+        assert!(row.base.observation_count >= 4);
+        let first = unsafe { &*row.base.observations };
+        let doppler = [SidereonSppDopplerObservation {
+            sat_id: first.sat_id,
+            doppler_hz: 0.0,
+            carrier_hz: sidereon_core::constants::F_L1_HZ,
+            sat_clock_drift_s_s: 0.0,
+        }];
+        assert_eq!(
+            unsafe {
+                sidereon_solve_broadcast_with_doppler_velocity(
+                    broadcast,
+                    &empty_v2,
+                    ptr::null(),
+                    0,
+                    &mut failed_broadcast,
+                )
+            },
+            SidereonStatus::Solve
+        );
+        assert!(crate::engine_error::snapshot_engine_error_for_test().is_some());
+        let mut broadcast_success = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_solve_broadcast_with_doppler_velocity(
+                    broadcast,
+                    &row,
+                    doppler.as_ptr(),
+                    doppler.len(),
+                    &mut broadcast_success,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert!(!broadcast_success.is_null());
+        assert!(crate::engine_error::snapshot_engine_error_for_test().is_none());
+        let mut retained_velocity_info = SidereonEngineErrorInfo {
+            family: SidereonEngineErrorFamily::None,
+            payload_len: 0,
+        };
+        assert_eq!(
+            unsafe {
+                sidereon_spp_doppler_solution_velocity_error_info(
+                    broadcast_success,
+                    &mut retained_velocity_info,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(
+            retained_velocity_info.family,
+            SidereonEngineErrorFamily::Facade
+        );
+        assert!(retained_velocity_info.payload_len > 0);
+        unsafe {
+            sidereon_spp_doppler_solution_free(broadcast_success);
+            sidereon_rinex_spp_inputs_free(assembled);
+            sidereon_broadcast_ephemeris_free(broadcast);
+        }
+    }
+
+    #[test]
+    fn spp_batch_owned_error_info_and_payload_accessors_and_retention() {
+        use crate::engine_error::{
+            sidereon_last_engine_error_info, sidereon_last_engine_error_payload,
+            SidereonEngineErrorFamily, SidereonEngineErrorInfo,
+        };
+        use crate::solve::{
+            sidereon_solve_spp, sidereon_solve_spp_batch_parallel, sidereon_solve_spp_batch_serial,
+        };
+        use serde_json::Value;
+
+        let sp3 = fixture_sp3();
+        let sats = visible_gps(&sp3);
+        assert!(sats.len() >= 4);
+
+        // Epoch 0: all visible satellites (at least 4) -> success
+        let (inputs0, doppler0) = core_inputs(&sp3, &sats);
+        let tokens0: Vec<CString> = sats
+            .iter()
+            .map(|sat| CString::new(sat.to_string()).unwrap())
+            .collect();
+        let (obs0, _, c_inputs0) = c_inputs(&inputs0, &doppler0, &tokens0);
+
+        // Epoch 1 supplies two satellites, but core selection uses only one at
+        // the initial state, so the real refusal is TooFewSatellites { used: 1,
+        // required: 4 }. Confirm that direct core outcome before checking C's
+        // copied error payload and legacy text.
+        let (inputs1, doppler1) = core_inputs(&sp3, &sats[..2]);
+        let direct_error = sidereon::solve_spp(
+            &sp3,
+            &inputs1,
+            true,
+            sidereon_core::positioning::SolvePolicy::default(),
+        )
+        .expect_err("two supplied satellites leave only one usable at core selection");
+        assert!(matches!(
+            direct_error,
+            sidereon::Error::Spp(sidereon_core::positioning::SolvePolicyError::Solve(
+                sidereon_core::positioning::SppError::TooFewSatellites {
+                    used: 1,
+                    required: 4,
+                }
+            ))
+        ));
+        let tokens1: Vec<CString> = sats[..2]
+            .iter()
+            .map(|sat| CString::new(sat.to_string()).unwrap())
+            .collect();
+        let (obs1, _, c_inputs1) = c_inputs(&inputs1, &doppler1, &tokens1);
+
+        let test_policy = SidereonSppSolvePolicy {
+            use_validation_options: false,
+            validation: SidereonSppValidationOptions {
+                max_pdop_enabled: false,
+                max_pdop: 0.0,
+                min_plausible_radius_m: 0.0,
+                max_plausible_radius_m: 0.0,
+                max_converged_residual_rms_m: 0.0,
+            },
+            coarse_search_enabled: false,
+            coarse_search_seeds: 0,
+        };
+
+        let sp3_handle = SidereonSp3 { inner: sp3 };
+        let inputs_v2 = [c_inputs0, c_inputs1];
+
+        unsafe fn run_batch_checks(
+            batch_ptr: *mut SidereonSppBatch,
+            sp3_handle: &SidereonSp3,
+            c_inputs1: &SidereonSppInputsV2,
+        ) -> (Vec<u8>, Vec<u8>) {
+            // Seed generic TLS with real public refusal FIRST
+            let mut seed_sol = ptr::null_mut();
+            let status = sidereon_solve_spp(sp3_handle, &c_inputs1.base, &mut seed_sol);
+            assert_eq!(status, SidereonStatus::Solve);
+            assert!(seed_sol.is_null());
+
+            let mut seed_info = SidereonEngineErrorInfo {
+                family: SidereonEngineErrorFamily::None,
+                payload_len: 0,
+            };
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut seed_info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(seed_info.family, SidereonEngineErrorFamily::Facade);
+            assert!(seed_info.payload_len > 0);
+            let mut seed_buf = vec![0u8; seed_info.payload_len];
+            let mut seed_written = 0;
+            let mut seed_req = 0;
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    seed_buf.as_mut_ptr(),
+                    seed_buf.len(),
+                    &mut seed_written,
+                    &mut seed_req,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(seed_written, seed_info.payload_len);
+
+            let verify_generic_tls_intact = || {
+                let mut cur_info = SidereonEngineErrorInfo {
+                    family: SidereonEngineErrorFamily::None,
+                    payload_len: 0,
+                };
+                assert_eq!(
+                    sidereon_last_engine_error_info(&mut cur_info),
+                    SidereonStatus::Ok
+                );
+                assert_eq!(cur_info.family, SidereonEngineErrorFamily::Facade);
+                assert_eq!(cur_info.payload_len, seed_info.payload_len);
+                let mut cur_buf = vec![0u8; cur_info.payload_len];
+                let mut w = 0;
+                let mut r = 0;
+                assert_eq!(
+                    sidereon_last_engine_error_payload(
+                        cur_buf.as_mut_ptr(),
+                        cur_buf.len(),
+                        &mut w,
+                        &mut r,
+                    ),
+                    SidereonStatus::Ok
+                );
+                assert_eq!(cur_buf, seed_buf);
+            };
+
+            // Count
+            let mut count = 0;
+            assert_eq!(
+                sidereon_spp_batch_count(batch_ptr, &mut count),
+                SidereonStatus::Ok
+            );
+            assert_eq!(count, 2);
+            verify_generic_tls_intact();
+
+            // Epoch ok
+            let mut ok = false;
+            assert_eq!(
+                sidereon_spp_batch_epoch_ok(batch_ptr, 0, &mut ok),
+                SidereonStatus::Ok
+            );
+            assert!(ok);
+            verify_generic_tls_intact();
+
+            assert_eq!(
+                sidereon_spp_batch_epoch_ok(batch_ptr, 1, &mut ok),
+                SidereonStatus::Ok
+            );
+            assert!(!ok);
+            verify_generic_tls_intact();
+
+            assert_eq!(
+                sidereon_spp_batch_epoch_ok(batch_ptr, 2, &mut ok),
+                SidereonStatus::InvalidArgument
+            );
+            verify_generic_tls_intact();
+
+            // Solution getter on epoch 0 (success)
+            let mut sol_handle = ptr::null_mut();
+            assert_eq!(
+                sidereon_spp_batch_solution(batch_ptr, 0, &mut sol_handle),
+                SidereonStatus::Ok
+            );
+            assert!(!sol_handle.is_null());
+            verify_generic_tls_intact();
+
+            sidereon_spp_solution_free(sol_handle);
+            verify_generic_tls_intact();
+
+            // Epoch 0 error info (empty)
+            let mut info0 = SidereonEngineErrorInfo {
+                family: SidereonEngineErrorFamily::Spp,
+                payload_len: 999,
+            };
+            assert_eq!(
+                sidereon_spp_batch_error_info(batch_ptr, 0, &mut info0),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info0.family, SidereonEngineErrorFamily::None);
+            assert_eq!(info0.payload_len, 0);
+            verify_generic_tls_intact();
+
+            // Epoch 0 error payload (empty)
+            let mut written = 999;
+            let mut required = 999;
+            let mut dummy = [0u8; 16];
+            assert_eq!(
+                sidereon_spp_batch_error_payload(
+                    batch_ptr,
+                    0,
+                    dummy.as_mut_ptr(),
+                    dummy.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, 0);
+            assert_eq!(required, 0);
+            verify_generic_tls_intact();
+
+            // Epoch 0 legacy error (empty)
+            assert_eq!(
+                sidereon_spp_batch_error(
+                    batch_ptr,
+                    0,
+                    dummy.as_mut_ptr(),
+                    dummy.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, 0);
+            assert_eq!(required, 0);
+            verify_generic_tls_intact();
+
+            // Solution getter on failing epoch 1
+            let mut sol_fail = ptr::null_mut();
+            let status = sidereon_spp_batch_solution(batch_ptr, 1, &mut sol_fail);
+            assert_eq!(status, SidereonStatus::Solve);
+            assert!(sol_fail.is_null());
+
+            // Assert documented failed-solution diagnostic
+            let mut legacy_diag_buf = vec![0 as std::os::raw::c_char; 512];
+            let diag_needed = crate::sidereon_last_error_message(
+                legacy_diag_buf.as_mut_ptr(),
+                legacy_diag_buf.len(),
+            );
+            assert!(diag_needed > 0);
+            let legacy_diag_str = std::ffi::CStr::from_ptr(legacy_diag_buf.as_ptr())
+                .to_str()
+                .unwrap();
+            assert_eq!(
+                legacy_diag_str,
+                "sidereon_spp_batch_solution: epoch 1 did not solve: SPP solve failed: only 1 usable satellites; need at least 4 (3 position + 1 clock per GNSS)"
+            );
+            verify_generic_tls_intact();
+
+            // Error info getter on epoch 1
+            let mut row1_info = SidereonEngineErrorInfo {
+                family: SidereonEngineErrorFamily::None,
+                payload_len: 0,
+            };
+            assert_eq!(
+                sidereon_spp_batch_error_info(batch_ptr, 1, &mut row1_info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(row1_info.family, SidereonEngineErrorFamily::Spp);
+            assert!(row1_info.payload_len > 0);
+            let row1_len = row1_info.payload_len;
+            verify_generic_tls_intact();
+
+            // Sizing query on epoch 1
+            let mut written = 999;
+            let mut required = 0;
+            assert_eq!(
+                sidereon_spp_batch_error_payload(
+                    batch_ptr,
+                    1,
+                    ptr::null_mut(),
+                    0,
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, 0);
+            assert_eq!(required, row1_len);
+            verify_generic_tls_intact();
+
+            // Short buffer with sentinel 0xA5 (must remain completely untouched)
+            let mut short_buf = vec![0xA5u8; row1_len - 1];
+            assert_eq!(
+                sidereon_spp_batch_error_payload(
+                    batch_ptr,
+                    1,
+                    short_buf.as_mut_ptr(),
+                    short_buf.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::InvalidArgument
+            );
+            assert_eq!(written, 0);
+            assert_eq!(required, row1_len);
+            assert!(
+                short_buf.iter().all(|&b| b == 0xA5),
+                "short buffer must remain untouched"
+            );
+            verify_generic_tls_intact();
+
+            // Full buffer on epoch 1
+            let mut full_buf1 = vec![0u8; row1_len];
+            assert_eq!(
+                sidereon_spp_batch_error_payload(
+                    batch_ptr,
+                    1,
+                    full_buf1.as_mut_ptr(),
+                    full_buf1.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, row1_len);
+            assert_eq!(required, row1_len);
+            verify_generic_tls_intact();
+
+            let v1: Value = serde_json::from_slice(&full_buf1).expect("valid JSON");
+            assert_eq!(v1["schema_version"], 1);
+            assert_eq!(v1["family"], "spp");
+            assert!(v1["operation"].as_str().unwrap().contains("epoch 1"));
+            assert_eq!(v1["error"]["kind"], "too_few_satellites");
+            assert_eq!(v1["error"]["fields"]["used"], 1);
+            assert_eq!(v1["error"]["fields"]["required"], 4);
+
+            // Legacy error getter on epoch 1
+            let mut legacy_buf = vec![0u8; 256];
+            assert_eq!(
+                sidereon_spp_batch_error(
+                    batch_ptr,
+                    1,
+                    legacy_buf.as_mut_ptr(),
+                    legacy_buf.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            assert!(written > 0);
+            let legacy_msg = std::str::from_utf8(&legacy_buf[..written]).unwrap();
+            assert_eq!(
+                legacy_msg,
+                "SPP solve failed: only 1 usable satellites; need at least 4 (3 position + 1 clock per GNSS)"
+            );
+            verify_generic_tls_intact();
+
+            // Null checks and invalid index
+            assert_eq!(
+                sidereon_spp_batch_error_info(ptr::null(), 0, &mut row1_info),
+                SidereonStatus::NullPointer
+            );
+            assert_eq!(
+                sidereon_spp_batch_error_info(batch_ptr, 0, ptr::null_mut()),
+                SidereonStatus::NullPointer
+            );
+            assert_eq!(
+                sidereon_spp_batch_error_info(batch_ptr, 99, &mut row1_info),
+                SidereonStatus::InvalidArgument
+            );
+
+            assert_eq!(
+                sidereon_spp_batch_error_payload(
+                    ptr::null(),
+                    1,
+                    full_buf1.as_mut_ptr(),
+                    full_buf1.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::NullPointer
+            );
+            assert_eq!(
+                sidereon_spp_batch_error_payload(
+                    batch_ptr,
+                    1,
+                    ptr::null_mut(),
+                    10,
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::NullPointer
+            );
+            assert_eq!(
+                sidereon_spp_batch_error_payload(
+                    batch_ptr,
+                    99,
+                    full_buf1.as_mut_ptr(),
+                    full_buf1.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::InvalidArgument
+            );
+
+            assert_eq!(
+                sidereon_spp_batch_error(
+                    ptr::null(),
+                    1,
+                    legacy_buf.as_mut_ptr(),
+                    legacy_buf.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::NullPointer
+            );
+            assert_eq!(
+                sidereon_spp_batch_error(
+                    batch_ptr,
+                    1,
+                    ptr::null_mut(),
+                    10,
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::NullPointer
+            );
+            assert_eq!(
+                sidereon_spp_batch_error(
+                    batch_ptr,
+                    99,
+                    legacy_buf.as_mut_ptr(),
+                    legacy_buf.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::InvalidArgument
+            );
+
+            verify_generic_tls_intact();
+
+            (full_buf1, seed_buf)
+        }
+
+        unsafe {
+            // 1. Real public serial batch producer
+            let mut batch_serial = ptr::null_mut();
+            let status = sidereon_solve_spp_batch_serial(
+                &sp3_handle,
+                inputs_v2.as_ptr(),
+                inputs_v2.len(),
+                true,
+                &test_policy,
+                &mut batch_serial,
+            );
+            assert_eq!(status, SidereonStatus::Ok);
+            assert!(!batch_serial.is_null());
+
+            let (full_buf_serial, seed_buf_serial) =
+                run_batch_checks(batch_serial, &sp3_handle, &c_inputs1);
+            let full_buf_serial_original = full_buf_serial.clone();
+            let serial_value: Value = serde_json::from_slice(&full_buf_serial).expect("valid JSON");
+            assert_eq!(
+                serial_value["operation"],
+                "sidereon_solve_spp_batch_serial epoch 1"
+            );
+
+            // Free retains generic TLS
+            sidereon_spp_batch_free(batch_serial);
+
+            let mut cur_info = SidereonEngineErrorInfo {
+                family: SidereonEngineErrorFamily::None,
+                payload_len: 0,
+            };
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut cur_info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(cur_info.family, SidereonEngineErrorFamily::Facade);
+            assert_eq!(cur_info.payload_len, seed_buf_serial.len());
+            let mut cur_buf = vec![0u8; cur_info.payload_len];
+            let mut w = 0;
+            let mut r = 0;
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    cur_buf.as_mut_ptr(),
+                    cur_buf.len(),
+                    &mut w,
+                    &mut r,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(cur_buf, seed_buf_serial);
+
+            // Actual unrelated successful producer reset
+            let mut success_sol = ptr::null_mut();
+            let status = sidereon_solve_spp(&sp3_handle, &c_inputs0.base, &mut success_sol);
+            assert_eq!(status, SidereonStatus::Ok);
+            assert!(!success_sol.is_null());
+            sidereon_spp_solution_free(success_sol);
+
+            let mut reset_info = SidereonEngineErrorInfo {
+                family: SidereonEngineErrorFamily::Spp,
+                payload_len: 999,
+            };
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut reset_info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(reset_info.family, SidereonEngineErrorFamily::None);
+            assert_eq!(reset_info.payload_len, 0);
+
+            // Owned row bytes unchanged throughout
+            let v_after: Value = serde_json::from_slice(&full_buf_serial).expect("valid JSON");
+            assert_eq!(v_after["schema_version"], 1);
+            assert_eq!(v_after["family"], "spp");
+            assert_eq!(
+                v_after["operation"],
+                "sidereon_solve_spp_batch_serial epoch 1"
+            );
+            assert_eq!(v_after["error"], serial_value["error"]);
+            assert_eq!(v_after["error"]["kind"], "too_few_satellites");
+            assert_eq!(full_buf_serial, full_buf_serial_original);
+            assert_eq!(v_after["error"]["fields"]["used"], 1);
+            assert_eq!(v_after["error"]["fields"]["required"], 4);
+
+            // 2. Real public parallel batch producer
+            let mut batch_parallel = ptr::null_mut();
+            let status = sidereon_solve_spp_batch_parallel(
+                &sp3_handle,
+                inputs_v2.as_ptr(),
+                inputs_v2.len(),
+                true,
+                &test_policy,
+                &mut batch_parallel,
+            );
+            assert_eq!(status, SidereonStatus::Ok);
+            assert!(!batch_parallel.is_null());
+
+            let (full_buf_parallel, seed_buf_parallel) =
+                run_batch_checks(batch_parallel, &sp3_handle, &c_inputs1);
+            let full_buf_parallel_original = full_buf_parallel.clone();
+            let parallel_value: Value =
+                serde_json::from_slice(&full_buf_parallel).expect("valid JSON");
+            assert_eq!(
+                parallel_value["operation"],
+                "sidereon_solve_spp_batch_parallel epoch 1"
+            );
+            assert_eq!(
+                parallel_value["schema_version"],
+                serial_value["schema_version"]
+            );
+            assert_eq!(parallel_value["family"], serial_value["family"]);
+            assert_eq!(parallel_value["error"], serial_value["error"]);
+
+            sidereon_spp_batch_free(batch_parallel);
+
+            let mut cur_info = SidereonEngineErrorInfo {
+                family: SidereonEngineErrorFamily::None,
+                payload_len: 0,
+            };
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut cur_info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(cur_info.family, SidereonEngineErrorFamily::Facade);
+            assert_eq!(cur_info.payload_len, seed_buf_parallel.len());
+            let mut cur_buf = vec![0u8; cur_info.payload_len];
+            let mut w = 0;
+            let mut r = 0;
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    cur_buf.as_mut_ptr(),
+                    cur_buf.len(),
+                    &mut w,
+                    &mut r,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(cur_buf, seed_buf_parallel);
+
+            // Actual unrelated successful producer reset
+            let mut success_sol2 = ptr::null_mut();
+            let status = sidereon_solve_spp(&sp3_handle, &c_inputs0.base, &mut success_sol2);
+            assert_eq!(status, SidereonStatus::Ok);
+            assert!(!success_sol2.is_null());
+            sidereon_spp_solution_free(success_sol2);
+
+            let mut reset_info2 = SidereonEngineErrorInfo {
+                family: SidereonEngineErrorFamily::Spp,
+                payload_len: 999,
+            };
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut reset_info2),
+                SidereonStatus::Ok
+            );
+            assert_eq!(reset_info2.family, SidereonEngineErrorFamily::None);
+            assert_eq!(reset_info2.payload_len, 0);
+
+            // This producer's complete owned row bytes survive reset.
+            assert_eq!(full_buf_parallel, full_buf_parallel_original);
+
+            // 3. Real public v2 serial batch producer
+            let mut model_opts = MaybeUninit::<SidereonSppModelOptions>::uninit();
+            assert_eq!(
+                sidereon_spp_model_options_init(model_opts.as_mut_ptr()),
+                SidereonStatus::Ok
+            );
+            let model_opts = model_opts.assume_init();
+
+            let batch_v2_inputs = [
+                SidereonSppBatchInputV2 {
+                    inputs: c_inputs0,
+                    models: model_opts,
+                },
+                SidereonSppBatchInputV2 {
+                    inputs: c_inputs1,
+                    models: model_opts,
+                },
+            ];
+
+            let mut batch_v2 = ptr::null_mut();
+            let status = sidereon_solve_spp_batch_v2_serial(
+                &sp3_handle,
+                batch_v2_inputs.as_ptr(),
+                batch_v2_inputs.len(),
+                &mut batch_v2,
+            );
+            assert_eq!(status, SidereonStatus::Ok);
+            assert!(!batch_v2.is_null());
+
+            let (full_buf_v2, seed_buf_v2) = run_batch_checks(batch_v2, &sp3_handle, &c_inputs1);
+            let full_buf_v2_original = full_buf_v2.clone();
+            let v2_value: Value = serde_json::from_slice(&full_buf_v2).expect("valid JSON");
+            assert_eq!(
+                v2_value["operation"],
+                "sidereon_solve_spp_batch_v2_serial epoch 1"
+            );
+            assert_eq!(v2_value["schema_version"], serial_value["schema_version"]);
+            assert_eq!(v2_value["family"], serial_value["family"]);
+            assert_eq!(v2_value["error"], serial_value["error"]);
+
+            sidereon_spp_batch_free(batch_v2);
+
+            let mut cur_info = SidereonEngineErrorInfo {
+                family: SidereonEngineErrorFamily::None,
+                payload_len: 0,
+            };
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut cur_info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(cur_info.family, SidereonEngineErrorFamily::Facade);
+            assert_eq!(cur_info.payload_len, seed_buf_v2.len());
+            let mut cur_buf = vec![0u8; cur_info.payload_len];
+            let mut w = 0;
+            let mut r = 0;
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    cur_buf.as_mut_ptr(),
+                    cur_buf.len(),
+                    &mut w,
+                    &mut r,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(cur_buf, seed_buf_v2);
+
+            // Actual unrelated successful producer reset
+            let mut success_sol3 = ptr::null_mut();
+            let status = sidereon_solve_spp(&sp3_handle, &c_inputs0.base, &mut success_sol3);
+            assert_eq!(status, SidereonStatus::Ok);
+            assert!(!success_sol3.is_null());
+            sidereon_spp_solution_free(success_sol3);
+
+            let mut reset_info3 = SidereonEngineErrorInfo {
+                family: SidereonEngineErrorFamily::Spp,
+                payload_len: 999,
+            };
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut reset_info3),
+                SidereonStatus::Ok
+            );
+            assert_eq!(reset_info3.family, SidereonEngineErrorFamily::None);
+            assert_eq!(reset_info3.payload_len, 0);
+
+            // This producer's complete owned row bytes survive reset.
+            assert_eq!(full_buf_v2, full_buf_v2_original);
+
+            // 4. Pure mapping control for policy branch (NoCoarseSolution)
+            let policy_err = spp_batch_row_error_from_facade(
+                "test_policy epoch 0",
+                sidereon::Error::Spp(
+                    sidereon_core::positioning::SolvePolicyError::NoCoarseSolution,
+                ),
+            );
+            let policy_batch = Box::into_raw(Box::new(SidereonSppBatch {
+                inner: vec![Err(policy_err)],
+            }));
+
+            let mut policy_info = SidereonEngineErrorInfo {
+                family: SidereonEngineErrorFamily::None,
+                payload_len: 0,
+            };
+            assert_eq!(
+                sidereon_spp_batch_error_info(policy_batch, 0, &mut policy_info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(policy_info.family, SidereonEngineErrorFamily::SppPolicy);
+            assert!(policy_info.payload_len > 0);
+
+            let mut policy_buf = vec![0u8; policy_info.payload_len];
+            let mut written = 0;
+            let mut required = 0;
+            assert_eq!(
+                sidereon_spp_batch_error_payload(
+                    policy_batch,
+                    0,
+                    policy_buf.as_mut_ptr(),
+                    policy_buf.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, policy_info.payload_len);
+            let v_pol: Value = serde_json::from_slice(&policy_buf).expect("valid JSON");
+            assert_eq!(v_pol["schema_version"], 1);
+            assert_eq!(v_pol["family"], "spp_policy");
+            assert_eq!(v_pol["operation"], "test_policy epoch 0");
+            assert_eq!(v_pol["error"]["kind"], "no_coarse_solution");
+
+            sidereon_spp_batch_free(policy_batch);
+        }
+
+        drop(obs0);
+        drop(obs1);
     }
 }

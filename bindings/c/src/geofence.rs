@@ -172,35 +172,39 @@ pub unsafe extern "C" fn sidereon_geofence_create(
     out_error: *mut SidereonGeofenceErrorKind,
     out_fence: *mut *mut SidereonGeofence,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_geofence_create", SidereonStatus::Panic, || {
-        c_try!(init_geofence_error(
-            out_error,
-            SidereonGeofenceErrorKind::None
-        ));
-        let out_fence = c_try!(geofence_validation(
-            out_error,
-            require_out(out_fence, "sidereon_geofence_create", "out_fence")
-        ));
-        *out_fence = ptr::null_mut();
-        let raw = c_try!(geofence_validation(
-            out_error,
-            require_slice(vertices, count, "sidereon_geofence_create", "vertices")
-        ));
-        let mut parsed = Vec::with_capacity(raw.len());
-        for vertex in raw {
-            parsed.push(c_try!(geofence_validation(
+    crate::engine_error::engine_error_operation_boundary(
+        "sidereon_geofence_create",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_geofence_error(
                 out_error,
-                geodetic_to_wgs84("sidereon_geofence_create", "vertices", *vertex)
-            )));
-        }
-        match CoreGeofence::new(parsed) {
-            Ok(inner) => {
-                write_boxed_handle(out_fence, SidereonGeofence { inner });
-                SidereonStatus::Ok
+                SidereonGeofenceErrorKind::None
+            ));
+            let out_fence = c_try!(geofence_validation(
+                out_error,
+                require_out(out_fence, "sidereon_geofence_create", "out_fence")
+            ));
+            *out_fence = ptr::null_mut();
+            let raw = c_try!(geofence_validation(
+                out_error,
+                require_slice(vertices, count, "sidereon_geofence_create", "vertices")
+            ));
+            let mut parsed = Vec::with_capacity(raw.len());
+            for vertex in raw {
+                parsed.push(c_try!(geofence_validation(
+                    out_error,
+                    geodetic_to_wgs84("sidereon_geofence_create", "vertices", *vertex)
+                )));
             }
-            Err(err) => map_geofence_error("sidereon_geofence_create", err, out_error),
-        }
-    })
+            match CoreGeofence::new(parsed) {
+                Ok(inner) => {
+                    write_boxed_handle(out_fence, SidereonGeofence { inner });
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_geofence_error("sidereon_geofence_create", err, out_error),
+            }
+        },
+    )
 }
 
 /// Write whether position is inside fence to *out_contains.
@@ -214,32 +218,36 @@ pub unsafe extern "C" fn sidereon_geofence_contains(
     out_error: *mut SidereonGeofenceErrorKind,
     out_contains: *mut bool,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_geofence_contains", SidereonStatus::Panic, || {
-        c_try!(init_geofence_error(
-            out_error,
-            SidereonGeofenceErrorKind::None
-        ));
-        let out_contains = c_try!(geofence_validation(
-            out_error,
-            require_out(out_contains, "sidereon_geofence_contains", "out_contains")
-        ));
-        *out_contains = false;
-        let fence = c_try!(geofence_validation(
-            out_error,
-            require_ref(fence, "sidereon_geofence_contains", "fence")
-        ));
-        let position = c_try!(geofence_validation(
-            out_error,
-            geodetic_to_wgs84("sidereon_geofence_contains", "position", position)
-        ));
-        match geofence_containment(position, &fence.inner) {
-            Ok(value) => {
-                *out_contains = value;
-                SidereonStatus::Ok
+    crate::engine_error::engine_error_operation_boundary(
+        "sidereon_geofence_contains",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_geofence_error(
+                out_error,
+                SidereonGeofenceErrorKind::None
+            ));
+            let out_contains = c_try!(geofence_validation(
+                out_error,
+                require_out(out_contains, "sidereon_geofence_contains", "out_contains")
+            ));
+            *out_contains = false;
+            let fence = c_try!(geofence_validation(
+                out_error,
+                require_ref(fence, "sidereon_geofence_contains", "fence")
+            ));
+            let position = c_try!(geofence_validation(
+                out_error,
+                geodetic_to_wgs84("sidereon_geofence_contains", "position", position)
+            ));
+            match geofence_containment(position, &fence.inner) {
+                Ok(value) => {
+                    *out_contains = value;
+                    SidereonStatus::Ok
+                }
+                Err(err) => map_geofence_error("sidereon_geofence_contains", err, out_error),
             }
-            Err(err) => map_geofence_error("sidereon_geofence_contains", err, out_error),
-        }
-    })
+        },
+    )
 }
 
 /// Write signed distance to the fence boundary in meters to *out_distance_m.
@@ -254,7 +262,7 @@ pub unsafe extern "C" fn sidereon_geofence_distance_to_boundary(
     out_error: *mut SidereonGeofenceErrorKind,
     out_distance_m: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_geofence_distance_to_boundary",
         SidereonStatus::Panic,
         || {
@@ -308,7 +316,7 @@ pub unsafe extern "C" fn sidereon_geofence_containment_probability(
     out_error: *mut SidereonGeofenceErrorKind,
     out_probability: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_geofence_containment_probability",
         SidereonStatus::Panic,
         || {
@@ -371,7 +379,7 @@ pub unsafe extern "C" fn sidereon_geofence_containment_probability_with_options(
     out_error: *mut SidereonGeofenceErrorKind,
     out_probability: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_geofence_containment_probability_with_options",
         SidereonStatus::Panic,
         || {
@@ -451,7 +459,7 @@ pub unsafe extern "C" fn sidereon_geofence_crossing_probability(
     out_written: *mut usize,
     out_required: *mut usize,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_geofence_crossing_probability",
         SidereonStatus::Panic,
         || {
@@ -492,7 +500,7 @@ pub unsafe extern "C" fn sidereon_geofence_crossing_probability_with_options(
     out_written: *mut usize,
     out_required: *mut usize,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::engine_error_operation_boundary(
         "sidereon_geofence_crossing_probability_with_options",
         SidereonStatus::Panic,
         || {
@@ -559,6 +567,11 @@ unsafe fn map_geofence_error(
 ) -> SidereonStatus {
     let kind = geofence_error_kind(&err);
     let _ = init_geofence_error(out_error, kind);
+    crate::engine_error::record_engine_error(
+        crate::engine_error::SidereonEngineErrorFamily::Geofence,
+        fn_name,
+        crate::engine_error::geofence_error_value(&err),
+    );
     set_last_error(format!("{fn_name}: {err}"));
     SidereonStatus::InvalidArgument
 }
@@ -622,14 +635,13 @@ unsafe fn geofence_probability_options_from_c(
 unsafe fn geofence_hysteresis_from_c(
     fn_name: &str,
     hysteresis: *const SidereonGeofenceHysteresis,
+    out_error: *mut SidereonGeofenceErrorKind,
 ) -> Result<CoreGeofenceHysteresis, SidereonStatus> {
     let hysteresis = require_ref(hysteresis, fn_name, "hysteresis")?;
-    CoreGeofenceHysteresis::new(hysteresis.enter_confidence, hysteresis.leave_confidence).map_err(
-        |err| {
-            set_last_error(format!("{fn_name}: {err}"));
-            SidereonStatus::InvalidArgument
-        },
-    )
+    match CoreGeofenceHysteresis::new(hysteresis.enter_confidence, hysteresis.leave_confidence) {
+        Ok(value) => Ok(value),
+        Err(err) => Err(map_geofence_error(fn_name, err, out_error)),
+    }
 }
 
 unsafe fn geofence_estimates_from_c(
@@ -691,7 +703,7 @@ unsafe fn geofence_crossing_probability_common(
     ));
     let hysteresis = c_try!(geofence_validation(
         out_error,
-        geofence_hysteresis_from_c(fn_name, hysteresis)
+        geofence_hysteresis_from_c(fn_name, hysteresis, out_error)
     ));
     let result = if options.is_null() {
         geofence_crossing_probability(&samples, &fence.inner, hysteresis)
@@ -773,14 +785,17 @@ mod tests {
         let mut contains = false;
         let status = unsafe { sidereon_geofence_contains(fence, query, &mut error, &mut contains) };
         assert_eq!(status, SidereonStatus::Ok);
-        assert!(contains);
+        assert_eq!(
+            contains,
+            geofence_containment(query_core, &core_fence).expect("core containment")
+        );
 
         let mut distance = 0.0;
         let status = unsafe {
             sidereon_geofence_distance_to_boundary(fence, query, &mut error, &mut distance)
         };
         assert_eq!(status, SidereonStatus::Ok);
-        assert!((distance - expected_distance).abs() < 1.0e-9);
+        assert_eq!(distance.to_bits(), expected_distance.to_bits());
 
         let mut probability = 0.0;
         let status = unsafe {
@@ -793,7 +808,7 @@ mod tests {
             )
         };
         assert_eq!(status, SidereonStatus::Ok);
-        assert!((probability - expected_probability).abs() < 1.0e-15);
+        assert_eq!(probability.to_bits(), expected_probability.to_bits());
 
         let invalid_uncertainty = SidereonGeofenceUncertainty {
             kind: 999,
@@ -829,5 +844,487 @@ mod tests {
         assert_eq!(error, SidereonGeofenceErrorKind::InvalidInput);
 
         unsafe { sidereon_geofence_free(fence) };
+    }
+}
+
+#[cfg(test)]
+mod geofence_engine_error_tests {
+    use super::*;
+    use crate::engine_error::{clear_engine_error, snapshot_engine_error_for_test};
+
+    fn point(lat: f64, lon: f64) -> SidereonGeodetic {
+        SidereonGeodetic {
+            lat_rad: lat.to_radians(),
+            lon_rad: lon.to_radians(),
+            height_m: 0.0,
+        }
+    }
+
+    fn vertices() -> [SidereonGeodetic; 4] {
+        [
+            point(37.0, -122.0),
+            point(37.0, -121.99),
+            point(37.01, -121.99),
+            point(37.01, -122.0),
+        ]
+    }
+
+    fn seed_real_refusal() {
+        let short = [point(37.0, -122.0), point(37.0, -121.99)];
+        let mut error = SidereonGeofenceErrorKind::None;
+        let mut fence = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_geofence_create(short.as_ptr(), short.len(), &mut error, &mut fence)
+            },
+            SidereonStatus::InvalidArgument
+        );
+        assert_eq!(error, SidereonGeofenceErrorKind::TooFewVertices);
+        assert!(fence.is_null());
+        assert!(snapshot_engine_error_for_test().is_some());
+    }
+
+    fn assert_early_null_clears(call: impl FnOnce() -> SidereonStatus) {
+        seed_real_refusal();
+        assert_eq!(call(), SidereonStatus::NullPointer);
+        assert!(snapshot_engine_error_for_test().is_none());
+    }
+
+    fn assert_snapshot_eq(expected: &(crate::SidereonEngineErrorInfo, String)) {
+        let (actual_info, actual_payload) =
+            snapshot_engine_error_for_test().expect("retained geofence detail");
+        assert_eq!(actual_info.family, expected.0.family);
+        assert_eq!(actual_info.payload_len, expected.0.payload_len);
+        assert_eq!(actual_payload, expected.1);
+    }
+
+    fn assert_geofence_error(operation: &str, kind: &str, fields: serde_json::Value, legacy: &str) {
+        let (info, payload) = snapshot_engine_error_for_test().expect("typed geofence detail");
+        assert_eq!(
+            info.family,
+            crate::engine_error::SidereonEngineErrorFamily::Geofence
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&payload).expect("geofence JSON"),
+            serde_json::json!({
+                "schema_version": 1,
+                "family": "geofence",
+                "operation": operation,
+                "error": {"kind": kind, "fields": fields},
+            })
+        );
+        let required = unsafe { crate::sidereon_last_error_message(ptr::null_mut(), 0) };
+        let mut message = vec![0 as std::ffi::c_char; required + 1];
+        unsafe { crate::sidereon_last_error_message(message.as_mut_ptr(), message.len()) };
+        assert_eq!(
+            unsafe { std::ffi::CStr::from_ptr(message.as_ptr()) }
+                .to_str()
+                .expect("legacy utf-8"),
+            legacy
+        );
+    }
+
+    #[test]
+    fn geofence_public_failures_record_full_core_variants() {
+        clear_engine_error();
+        let short = [point(37.0, -122.0), point(37.0, -121.99)];
+        let mut error = SidereonGeofenceErrorKind::None;
+        let mut fence = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_geofence_create(short.as_ptr(), short.len(), &mut error, &mut fence)
+            },
+            SidereonStatus::InvalidArgument
+        );
+        assert_eq!(error, SidereonGeofenceErrorKind::TooFewVertices);
+        assert!(fence.is_null());
+        assert_geofence_error(
+            "sidereon_geofence_create",
+            "too_few_vertices",
+            serde_json::json!({}),
+            "sidereon_geofence_create: geofence needs at least three vertices",
+        );
+
+        let vertices = vertices();
+        assert_eq!(
+            unsafe {
+                sidereon_geofence_create(vertices.as_ptr(), vertices.len(), &mut error, &mut fence)
+            },
+            SidereonStatus::Ok
+        );
+        unsafe { sidereon_geofence_free(fence) };
+        fence = ptr::null_mut();
+        let repeated = [vertices[0], vertices[1], vertices[1], vertices[2]];
+        assert_eq!(
+            unsafe {
+                sidereon_geofence_create(repeated.as_ptr(), repeated.len(), &mut error, &mut fence)
+            },
+            SidereonStatus::InvalidArgument
+        );
+        assert_eq!(error, SidereonGeofenceErrorKind::InvalidInput);
+        assert!(fence.is_null());
+        assert_geofence_error(
+            "sidereon_geofence_create",
+            "invalid_input",
+            serde_json::json!({"field":"vertices","reason":"vertices must be distinct"}),
+            "sidereon_geofence_create: invalid geofence input vertices: vertices must be distinct",
+        );
+        assert_eq!(
+            unsafe {
+                sidereon_geofence_create(vertices.as_ptr(), vertices.len(), &mut error, &mut fence)
+            },
+            SidereonStatus::Ok
+        );
+        let query = point(37.005, -121.995);
+        let non_psd = SidereonGeofenceUncertainty {
+            kind: SidereonGeofenceUncertaintyKind::EnuCovarianceM2 as u32,
+            covariance_m2: [1.0, 2.0, 0.0, 2.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+            radius_m: 0.0,
+        };
+        let nonfinite_enu = SidereonGeofenceUncertainty {
+            kind: SidereonGeofenceUncertaintyKind::EnuCovarianceM2 as u32,
+            covariance_m2: [f64::NAN; 9],
+            radius_m: 0.0,
+        };
+        let mut probability = 0.0;
+        assert_eq!(
+            unsafe {
+                sidereon_geofence_containment_probability(
+                    fence,
+                    query,
+                    &nonfinite_enu,
+                    &mut error,
+                    &mut probability,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+        assert_eq!(error, SidereonGeofenceErrorKind::ErrorMetrics);
+        assert_geofence_error(
+            "sidereon_geofence_containment_probability",
+            "error_metrics",
+            serde_json::json!({"cause":{"kind":"non_finite","fields":{}}}),
+            "sidereon_geofence_containment_probability: uncertainty validation failed",
+        );
+        assert_eq!(
+            unsafe {
+                sidereon_geofence_containment_probability(
+                    fence,
+                    query,
+                    &non_psd,
+                    &mut error,
+                    &mut probability,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+        assert_eq!(error, SidereonGeofenceErrorKind::ErrorMetrics);
+        assert_geofence_error(
+            "sidereon_geofence_containment_probability",
+            "error_metrics",
+            serde_json::json!({"cause":{"kind":"not_positive_semidefinite","fields":{}}}),
+            "sidereon_geofence_containment_probability: uncertainty validation failed",
+        );
+
+        let ecef_nan = SidereonGeofenceUncertainty {
+            kind: SidereonGeofenceUncertaintyKind::EcefCovarianceM2 as u32,
+            covariance_m2: [f64::NAN; 9],
+            radius_m: 0.0,
+        };
+        let options = SidereonGeofenceProbabilityOptions {
+            method: SidereonGeofenceProbabilityMethod::BoundaryNormal as u32,
+        };
+        assert_eq!(
+            unsafe {
+                sidereon_geofence_containment_probability_with_options(
+                    fence,
+                    query,
+                    &ecef_nan,
+                    &options,
+                    &mut error,
+                    &mut probability,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+        assert_eq!(error, SidereonGeofenceErrorKind::Dop);
+        assert_geofence_error(
+            "sidereon_geofence_containment_probability_with_options",
+            "dop",
+            serde_json::json!({"cause":{"kind":"invalid_input","fields":{"field":"covariance_ecef_m2","reason":"not finite"}}}),
+            "sidereon_geofence_containment_probability_with_options: covariance rotation failed",
+        );
+
+        let sample = [SidereonGeofencePositionEstimate {
+            position: query,
+            uncertainty: non_psd,
+        }];
+        let hysteresis = SidereonGeofenceHysteresis {
+            enter_confidence: 0.95,
+            leave_confidence: 0.95,
+        };
+        let invalid_hysteresis = SidereonGeofenceHysteresis {
+            enter_confidence: 0.5,
+            leave_confidence: 0.95,
+        };
+        let mut written = 0;
+        let mut required = 0;
+        assert_eq!(
+            unsafe {
+                sidereon_geofence_crossing_probability(
+                    fence,
+                    ptr::null(),
+                    0,
+                    &invalid_hysteresis,
+                    &mut error,
+                    ptr::null_mut(),
+                    0,
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+        assert_eq!(error, SidereonGeofenceErrorKind::InvalidInput);
+        assert_geofence_error(
+            "sidereon_geofence_crossing_probability",
+            "invalid_input",
+            serde_json::json!({"field":"enter_confidence","reason":"must be in (0.5, 1)"}),
+            "sidereon_geofence_crossing_probability: invalid geofence input enter_confidence: must be in (0.5, 1)",
+        );
+        assert_eq!(
+            unsafe {
+                sidereon_geofence_crossing_probability(
+                    fence,
+                    sample.as_ptr(),
+                    sample.len(),
+                    &hysteresis,
+                    &mut error,
+                    ptr::null_mut(),
+                    0,
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+        assert_eq!(error, SidereonGeofenceErrorKind::ErrorMetrics);
+        assert_eq!((written, required), (0, 0));
+        assert_geofence_error(
+            "sidereon_geofence_crossing_probability",
+            "error_metrics",
+            serde_json::json!({"cause":{"kind":"not_positive_semidefinite","fields":{}}}),
+            "sidereon_geofence_crossing_probability: uncertainty validation failed",
+        );
+
+        assert_eq!(
+            unsafe {
+                sidereon_geofence_crossing_probability_with_options(
+                    fence,
+                    sample.as_ptr(),
+                    sample.len(),
+                    &hysteresis,
+                    &options,
+                    &mut error,
+                    ptr::null_mut(),
+                    0,
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+        assert_eq!(error, SidereonGeofenceErrorKind::ErrorMetrics);
+        assert_geofence_error(
+            "sidereon_geofence_crossing_probability_with_options",
+            "error_metrics",
+            serde_json::json!({"cause":{"kind":"not_positive_semidefinite","fields":{}}}),
+            "sidereon_geofence_crossing_probability_with_options: uncertainty validation failed",
+        );
+        let retained = snapshot_engine_error_for_test().expect("crossing refusal before free");
+        unsafe { sidereon_geofence_free(fence) };
+        assert_snapshot_eq(&retained);
+        clear_engine_error();
+    }
+
+    #[test]
+    fn geofence_producers_clear_real_errors_on_success_and_early_null() {
+        clear_engine_error();
+        let vertices = vertices();
+        let mut fence = ptr::null_mut();
+        let mut error = SidereonGeofenceErrorKind::None;
+        seed_real_refusal();
+        assert_eq!(
+            unsafe {
+                sidereon_geofence_create(vertices.as_ptr(), vertices.len(), &mut error, &mut fence)
+            },
+            SidereonStatus::Ok
+        );
+        assert!(snapshot_engine_error_for_test().is_none());
+
+        let query = point(37.005, -121.995);
+        let mut contains = false;
+        seed_real_refusal();
+        assert_eq!(
+            unsafe { sidereon_geofence_contains(fence, query, &mut error, &mut contains) },
+            SidereonStatus::Ok
+        );
+        assert!(snapshot_engine_error_for_test().is_none());
+
+        let mut distance = 0.0;
+        seed_real_refusal();
+        assert_eq!(
+            unsafe {
+                sidereon_geofence_distance_to_boundary(fence, query, &mut error, &mut distance)
+            },
+            SidereonStatus::Ok
+        );
+        assert!(snapshot_engine_error_for_test().is_none());
+
+        let uncertainty = SidereonGeofenceUncertainty {
+            kind: SidereonGeofenceUncertaintyKind::EnuCovarianceM2 as u32,
+            covariance_m2: [400.0, 0.0, 0.0, 0.0, 400.0, 0.0, 0.0, 0.0, 0.0],
+            radius_m: 0.0,
+        };
+        let mut probability = 0.0;
+        seed_real_refusal();
+        assert_eq!(
+            unsafe {
+                sidereon_geofence_containment_probability(
+                    fence,
+                    query,
+                    &uncertainty,
+                    &mut error,
+                    &mut probability,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert!(snapshot_engine_error_for_test().is_none());
+
+        let options = SidereonGeofenceProbabilityOptions {
+            method: SidereonGeofenceProbabilityMethod::BoundaryNormal as u32,
+        };
+        seed_real_refusal();
+        assert_eq!(
+            unsafe {
+                sidereon_geofence_containment_probability_with_options(
+                    fence,
+                    query,
+                    &uncertainty,
+                    &options,
+                    &mut error,
+                    &mut probability,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert!(snapshot_engine_error_for_test().is_none());
+
+        let hysteresis = SidereonGeofenceHysteresis {
+            enter_confidence: 0.95,
+            leave_confidence: 0.95,
+        };
+        let (mut written, mut required) = (0, 0);
+        seed_real_refusal();
+        assert_eq!(
+            unsafe {
+                sidereon_geofence_crossing_probability(
+                    fence,
+                    ptr::null(),
+                    0,
+                    &hysteresis,
+                    &mut error,
+                    ptr::null_mut(),
+                    0,
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert!(snapshot_engine_error_for_test().is_none());
+        seed_real_refusal();
+        assert_eq!(
+            unsafe {
+                sidereon_geofence_crossing_probability_with_options(
+                    fence,
+                    ptr::null(),
+                    0,
+                    &hysteresis,
+                    &options,
+                    &mut error,
+                    ptr::null_mut(),
+                    0,
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert!(snapshot_engine_error_for_test().is_none());
+
+        assert_early_null_clears(|| unsafe {
+            sidereon_geofence_contains(fence, query, &mut error, ptr::null_mut())
+        });
+        assert_early_null_clears(|| unsafe {
+            sidereon_geofence_distance_to_boundary(fence, query, &mut error, ptr::null_mut())
+        });
+        assert_early_null_clears(|| unsafe {
+            sidereon_geofence_containment_probability(
+                fence,
+                query,
+                &uncertainty,
+                &mut error,
+                ptr::null_mut(),
+            )
+        });
+        assert_early_null_clears(|| unsafe {
+            sidereon_geofence_containment_probability_with_options(
+                fence,
+                query,
+                &uncertainty,
+                &options,
+                &mut error,
+                ptr::null_mut(),
+            )
+        });
+        assert_early_null_clears(|| unsafe {
+            sidereon_geofence_crossing_probability(
+                fence,
+                ptr::null(),
+                0,
+                &hysteresis,
+                &mut error,
+                ptr::null_mut(),
+                0,
+                ptr::null_mut(),
+                &mut required,
+            )
+        });
+        assert_early_null_clears(|| unsafe {
+            sidereon_geofence_crossing_probability_with_options(
+                fence,
+                ptr::null(),
+                0,
+                &hysteresis,
+                &options,
+                &mut error,
+                ptr::null_mut(),
+                0,
+                &mut written,
+                ptr::null_mut(),
+            )
+        });
+        assert_early_null_clears(|| unsafe {
+            sidereon_geofence_create(
+                vertices.as_ptr(),
+                vertices.len(),
+                &mut error,
+                ptr::null_mut(),
+            )
+        });
+        unsafe { sidereon_geofence_free(fence) };
+        clear_engine_error();
     }
 }

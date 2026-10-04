@@ -17,6 +17,7 @@
 
 #include "sidereon.h"
 #include "spp_fixture.h"
+#include "w6_parity_gaps_pins.h"
 
 static int failures = 0;
 
@@ -149,10 +150,6 @@ static void test_spp_batch(const char *sp3_path) {
               parallel_count == 2,
           "spp_batch_count parallel");
 
-    double expected[3];
-    for (int i = 0; i < 3; i++) {
-        expected[i] = bits_to_f64(SPP_EXPECTED_X_BITS[i]);
-    }
     for (size_t idx = 0; idx < 2; idx++) {
         double s_pos[3], p_pos[3];
         batch_position(serial, idx, s_pos);
@@ -160,11 +157,13 @@ static void test_spp_batch(const char *sp3_path) {
         for (int i = 0; i < 3; i++) {
             check(s_pos[i] == p_pos[i], "spp_batch serial == parallel bit-for-bit");
         }
-        double dx = s_pos[0] - expected[0];
-        double dy = s_pos[1] - expected[1];
-        double dz = s_pos[2] - expected[2];
-        check(sqrt(dx * dx + dy * dy + dz * dz) < SPP_AGREEMENT_BOUND_M,
-              "spp_batch reproduces the SPP golden");
+        /* tests/sppgen solves the same inputs through the same engine
+         * path, so the bits agree exactly. */
+        for (int i = 0; i < 3; i++) {
+            uint64_t got = 0;
+            memcpy(&got, &s_pos[i], sizeof(got));
+            check(got == SPP_EXPECTED_X_BITS[i], "spp_batch reproduces the SPP golden");
+        }
     }
 
     sidereon_spp_batch_free(serial);
@@ -221,10 +220,13 @@ static void test_lnav(void) {
               SIDEREON_STATUS_OK,
           "lnav_encode");
 
-    /* Output is one 0/1 bit per byte, MSB first; the TLM preamble 0x8B opens it. */
-    int preamble_ok = sf1[0] == 1 && sf1[1] == 0 && sf1[2] == 0 && sf1[3] == 0 && sf1[4] == 1 &&
-                      sf1[5] == 0 && sf1[6] == 1 && sf1[7] == 1;
-    check(preamble_ok, "lnav_encode subframe 1 TLM preamble");
+    /* Output is one 0/1 bit per byte, MSB first. The three subframes are
+     * sidereon-core's own encoding of these parameters (tests/valgen,
+     * w6_parity_gaps), compared bit for bit. */
+    check(memcmp(sf1, W6_PG_LNAV_SF1, sizeof(sf1)) == 0 &&
+              memcmp(sf2, W6_PG_LNAV_SF2, sizeof(sf2)) == 0 &&
+              memcmp(sf3, W6_PG_LNAV_SF3, sizeof(sf3)) == 0,
+          "lnav_encode subframes");
 
     /* A too-small output buffer must be rejected, not truncate. */
     check(sidereon_lnav_encode(&params, &opts, sf1, sf2, sf3, SIDEREON_LNAV_SUBFRAME_LENGTH - 1) ==
@@ -237,17 +239,29 @@ static void test_lnav(void) {
                                &decoded) == SIDEREON_STATUS_OK,
           "lnav_decode");
 
-    check(decoded.week_number == 290, "lnav_decode week_number");
-    check(decoded.iodc == 0x2AB, "lnav_decode iodc");
-    check(decoded.iode == 0xAB, "lnav_decode iode");
-    check(decoded.toc == 504000, "lnav_decode toc");
-    check(decoded.toe == 504000, "lnav_decode toe");
+    /* sidereon-core's decoding of the subframes (tests/valgen); the LSB checks
+     * after them compare the decoded values with the encoded parameters. */
+    uint64_t crs_bits = 0, ecc_bits = 0, sqrt_a_bits = 0;
+    memcpy(&crs_bits, &decoded.crs, sizeof(crs_bits));
+    memcpy(&ecc_bits, &decoded.eccentricity, sizeof(ecc_bits));
+    memcpy(&sqrt_a_bits, &decoded.sqrt_a, sizeof(sqrt_a_bits));
+    check(decoded.week_number == W6_PG_LNAV_WEEK_NUMBER, "lnav_decode week_number");
+    check(decoded.iodc == W6_PG_LNAV_IODC, "lnav_decode iodc");
+    check(decoded.iode == W6_PG_LNAV_IODE, "lnav_decode iode");
+    check(decoded.toc == W6_PG_LNAV_TOC, "lnav_decode toc");
+    check(decoded.toe == W6_PG_LNAV_TOE, "lnav_decode toe");
+    check(crs_bits == W6_PG_LNAV_CRS_BITS && ecc_bits == W6_PG_LNAV_ECCENTRICITY_BITS &&
+              sqrt_a_bits == W6_PG_LNAV_SQRT_A_BITS,
+          "lnav_decode scaled fields");
     check(fabs(decoded.crs - params.crs) < 1.0, "lnav_decode crs within LSB");
     check(fabs(decoded.eccentricity - params.eccentricity) < 1e-6,
           "lnav_decode eccentricity within LSB");
     check(fabs(decoded.sqrt_a - params.sqrt_a) < 1e-3, "lnav_decode sqrt_a within LSB");
 
-    /* A flipped parity bit must be rejected. */
+    /* A flipped parity bit: sidereon-core refuses the subframe, which the
+     * binding reports as INVALID_ARGUMENT (sidereon_lnav_decode in
+     * bindings/c/src/broadcast.rs). */
+    check(W6_PG_LNAV_FLIPPED_PARITY_REFUSED, "sidereon-core decodes a flipped parity bit");
     sf1[29] ^= 1;
     check(sidereon_lnav_decode(sf1, SIDEREON_LNAV_SUBFRAME_LENGTH, sf2,
                                SIDEREON_LNAV_SUBFRAME_LENGTH, sf3, SIDEREON_LNAV_SUBFRAME_LENGTH,

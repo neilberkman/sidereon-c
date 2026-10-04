@@ -26,6 +26,197 @@ pub struct SidereonBroadcastEphemeris {
     pub(crate) leap_seconds: Option<f64>,
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_broadcast_state_at_epoch_queries(
+    broadcast: *const SidereonBroadcastEphemeris,
+    sat_id: *const c_char,
+    state_epoch: *const SidereonExactEpochQuery,
+    selection_epoch: *const SidereonExactEpochQuery,
+    out: *mut SidereonEphemerisSourceState,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_broadcast_state_at_epoch_queries";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out, FN_NAME, "out"));
+        *out = SidereonEphemerisSourceState::default();
+        record_degrade_reason(None);
+        let broadcast = c_try!(require_ref(broadcast, FN_NAME, "broadcast"));
+        let satellite = c_try!(parse_satellite_token(FN_NAME, sat_id));
+        let state_epoch = c_try!(require_ref(state_epoch, FN_NAME, "state_epoch"));
+        let selection_epoch = c_try!(require_ref(selection_epoch, FN_NAME, "selection_epoch"));
+        let state = c_try!(guard_core(
+            || {
+                sidereon_core::positioning::EphemerisSource::try_position_clock_group_delay_selected_at_epoch_query(
+                &broadcast.inner, satellite, &state_epoch.inner, &selection_epoch.inner,
+            )
+            },
+            |error| crate::precise::precise_source_error_to_status(FN_NAME, error),
+        ));
+        if let Some(state) = state {
+            record_degrade_reason(state.degraded);
+            *out = SidereonEphemerisSourceState {
+                has_state: true,
+                position_ecef_m: state.value.0,
+                clock_s: state.value.1,
+                has_group_delay: state.value.2.is_some(),
+                group_delay_s: state.value.2.unwrap_or_default(),
+                degraded: state.degraded.is_some(),
+            };
+        }
+        SidereonStatus::Ok
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_broadcast_transmit_epoch_clock_at_epoch_queries(
+    broadcast: *const SidereonBroadcastEphemeris,
+    sat_id: *const c_char,
+    transmit_epoch: *const SidereonExactEpochQuery,
+    selection_epoch: *const SidereonExactEpochQuery,
+    out_has_clock: *mut bool,
+    out_clock_s: *mut f64,
+    out_degraded: *mut bool,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_broadcast_transmit_epoch_clock_at_epoch_queries";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        if !out_has_clock.is_null() && !out_clock_s.is_null() && !out_degraded.is_null() {
+            let outputs = [
+                Some((
+                    c_try!(checked_output_range(
+                        FN_NAME,
+                        out_has_clock,
+                        1,
+                        "out_has_clock"
+                    )),
+                    "out_has_clock",
+                )),
+                Some((
+                    c_try!(checked_output_range(FN_NAME, out_clock_s, 1, "out_clock_s")),
+                    "out_clock_s",
+                )),
+                Some((
+                    c_try!(checked_output_range(
+                        FN_NAME,
+                        out_degraded,
+                        1,
+                        "out_degraded"
+                    )),
+                    "out_degraded",
+                )),
+            ];
+            c_try!(reject_overlapping_optional_outputs(FN_NAME, &outputs));
+        }
+        let out_has_clock = c_try!(require_out(out_has_clock, FN_NAME, "out_has_clock"));
+        let out_clock_s = c_try!(require_out(out_clock_s, FN_NAME, "out_clock_s"));
+        let out_degraded = c_try!(require_out(out_degraded, FN_NAME, "out_degraded"));
+        *out_has_clock = false;
+        *out_clock_s = 0.0;
+        *out_degraded = false;
+        record_degrade_reason(None);
+        let broadcast = c_try!(require_ref(broadcast, FN_NAME, "broadcast"));
+        let satellite = c_try!(parse_satellite_token(FN_NAME, sat_id));
+        let transmit_epoch = c_try!(require_ref(transmit_epoch, FN_NAME, "transmit_epoch"));
+        let selection_epoch = c_try!(require_ref(selection_epoch, FN_NAME, "selection_epoch"));
+        let clock = c_try!(guard_core(
+            || sidereon_core::positioning::EphemerisSource::try_transmit_epoch_clock_at_epoch_query(
+                &broadcast.inner,
+                satellite,
+                &transmit_epoch.inner,
+                &selection_epoch.inner,
+            ),
+            |error| crate::precise::precise_source_error_to_status(FN_NAME, error),
+        ));
+        if let Some(clock) = clock {
+            *out_has_clock = true;
+            *out_clock_s = clock.value;
+            record_degrade_reason(clock.degraded);
+            *out_degraded = clock.degraded.is_some();
+        }
+        SidereonStatus::Ok
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_broadcast_clock_relativity_at_epoch_query(
+    broadcast: *const SidereonBroadcastEphemeris,
+    sat_id: *const c_char,
+    epoch: *const SidereonExactEpochQuery,
+    position_ecef_m: *const f64,
+    out_kind: *mut SidereonClockRelativityKind,
+    out_term_s: *mut f64,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_broadcast_clock_relativity_at_epoch_query";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        if !out_kind.is_null() && !out_term_s.is_null() {
+            let outputs = [
+                Some((
+                    c_try!(checked_output_range(FN_NAME, out_kind, 1, "out_kind")),
+                    "out_kind",
+                )),
+                Some((
+                    c_try!(checked_output_range(FN_NAME, out_term_s, 1, "out_term_s")),
+                    "out_term_s",
+                )),
+            ];
+            c_try!(reject_overlapping_optional_outputs(FN_NAME, &outputs));
+        }
+        let out_kind = c_try!(require_out(out_kind, FN_NAME, "out_kind"));
+        let out_term_s = c_try!(require_out(out_term_s, FN_NAME, "out_term_s"));
+        *out_kind = SidereonClockRelativityKind::NotApplicable;
+        *out_term_s = 0.0;
+        let broadcast = c_try!(require_ref(broadcast, FN_NAME, "broadcast"));
+        let satellite = c_try!(parse_satellite_token(FN_NAME, sat_id));
+        let epoch = c_try!(require_ref(epoch, FN_NAME, "epoch"));
+        let position = c_try!(require_slice(
+            position_ecef_m,
+            3,
+            FN_NAME,
+            "position_ecef_m"
+        ));
+        match sidereon_core::positioning::EphemerisSource::clock_relativity_for_state_at_epoch_query(
+            &broadcast.inner,
+            satellite,
+            &epoch.inner,
+            [position[0], position[1], position[2]],
+        ) {
+            sidereon_core::positioning::ClockRelativity::NotApplicable => {}
+            sidereon_core::positioning::ClockRelativity::Term(term) => {
+                *out_kind = SidereonClockRelativityKind::Term;
+                *out_term_s = term;
+            }
+            sidereon_core::positioning::ClockRelativity::Unavailable => {
+                *out_kind = SidereonClockRelativityKind::Unavailable;
+            }
+        }
+        SidereonStatus::Ok
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_broadcast_ephemeris_variance_at_epoch_queries(
+    broadcast: *const SidereonBroadcastEphemeris,
+    sat_id: *const c_char,
+    state_epoch: *const SidereonExactEpochQuery,
+    selection_epoch: *const SidereonExactEpochQuery,
+    out_variance_m2: *mut f64,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_broadcast_ephemeris_variance_at_epoch_queries";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out_variance_m2, FN_NAME, "out_variance_m2"));
+        *out = 0.0;
+        let broadcast = c_try!(require_ref(broadcast, FN_NAME, "broadcast"));
+        let satellite = c_try!(parse_satellite_token(FN_NAME, sat_id));
+        let state_epoch = c_try!(require_ref(state_epoch, FN_NAME, "state_epoch"));
+        let selection_epoch = c_try!(require_ref(selection_epoch, FN_NAME, "selection_epoch"));
+        *out = sidereon_core::positioning::EphemerisSource::ephemeris_variance_at_epoch_query(
+            &broadcast.inner,
+            satellite,
+            &state_epoch.inner,
+            &selection_epoch.inner,
+        );
+        SidereonStatus::Ok
+    })
+}
+
 /// Parse a RINEX navigation file into a broadcast ephemeris source, keeping the
 /// records usable for single-frequency positioning (the engine's default
 /// usability policy). On success writes a newly owned handle to *out_broadcast.
@@ -195,7 +386,7 @@ pub unsafe extern "C" fn sidereon_broadcast_observables(
     options: *const SidereonObservablesOptions,
     out: *mut SidereonPredictedObservables,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::observables_error_operation_boundary(
         "sidereon_broadcast_observables",
         SidereonStatus::Panic,
         || {
@@ -255,6 +446,32 @@ pub unsafe extern "C" fn sidereon_broadcast_eccentric_anomaly(
         "sidereon_broadcast_eccentric_anomaly",
         SidereonStatus::Panic,
         || {
+            if !out_eccentric_anomaly_rad.is_null() && !out_iterations.is_null() {
+                let outputs = [
+                    Some((
+                        c_try!(checked_output_range(
+                            "sidereon_broadcast_eccentric_anomaly",
+                            out_eccentric_anomaly_rad,
+                            1,
+                            "out_eccentric_anomaly_rad",
+                        )),
+                        "out_eccentric_anomaly_rad",
+                    )),
+                    Some((
+                        c_try!(checked_output_range(
+                            "sidereon_broadcast_eccentric_anomaly",
+                            out_iterations,
+                            1,
+                            "out_iterations",
+                        )),
+                        "out_iterations",
+                    )),
+                ];
+                c_try!(reject_overlapping_optional_outputs(
+                    "sidereon_broadcast_eccentric_anomaly",
+                    &outputs
+                ));
+            }
             let out_value = c_try!(require_out(
                 out_eccentric_anomaly_rad,
                 "sidereon_broadcast_eccentric_anomaly",
@@ -300,7 +517,7 @@ pub unsafe extern "C" fn sidereon_broadcast_observable_state(
     out_clock_s: *mut f64,
     out_has_clock: *mut bool,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::observables_error_operation_boundary(
         "sidereon_broadcast_observable_state",
         SidereonStatus::Panic,
         || {
@@ -432,17 +649,26 @@ pub unsafe extern "C" fn sidereon_broadcast_comparison_compare(
                     e.precise_jd_whole,
                     e.precise_jd_fraction
                 )
-                .map_err(|err| extra_invalid_arg(fn_name, err)));
+                .map_err(|err| {
+                    let legacy_message = format!("{fn_name}: {err}");
+                    crate::engine_error::time_model_error(fn_name, err, legacy_message)
+                }));
                 let precise_plus = c_try!(sidereon_core::astro::time::JulianDateSplit::new(
                     e.precise_plus_jd_whole,
                     e.precise_plus_jd_fraction
                 )
-                .map_err(|err| extra_invalid_arg(fn_name, err)));
+                .map_err(|err| {
+                    let legacy_message = format!("{fn_name}: {err}");
+                    crate::engine_error::time_model_error(fn_name, err, legacy_message)
+                }));
                 let precise_minus = c_try!(sidereon_core::astro::time::JulianDateSplit::new(
                     e.precise_minus_jd_whole,
                     e.precise_minus_jd_fraction
                 )
-                .map_err(|err| extra_invalid_arg(fn_name, err)));
+                .map_err(|err| {
+                    let legacy_message = format!("{fn_name}: {err}");
+                    crate::engine_error::time_model_error(fn_name, err, legacy_message)
+                }));
                 epochs_vec.push(sidereon_core::broadcast_comparison::EpochInputs {
                     broadcast_t_j2000_s: e.broadcast_t_j2000_s,
                     precise,
@@ -923,10 +1149,12 @@ pub unsafe extern "C" fn sidereon_lnav_tow(
     out_tow: *mut u64,
 ) -> SidereonStatus {
     ffi_boundary("sidereon_lnav_tow", SidereonStatus::Panic, || {
+        let bits_result =
+            require_slice(bits, bits_len, "sidereon_lnav_tow", "bits").map(|bits| bits.to_vec());
         let out_tow = c_try!(require_out(out_tow, "sidereon_lnav_tow", "out_tow"));
         *out_tow = 0;
-        let bits = c_try!(require_slice(bits, bits_len, "sidereon_lnav_tow", "bits"));
-        match sidereon_core::navigation::lnav::tow(bits) {
+        let bits = c_try!(bits_result);
+        match sidereon_core::navigation::lnav::tow(&bits) {
             Some(value) => {
                 *out_tow = value;
                 SidereonStatus::Ok
@@ -954,19 +1182,16 @@ pub unsafe extern "C" fn sidereon_lnav_subframe_id(
     out_subframe_id: *mut u64,
 ) -> SidereonStatus {
     ffi_boundary("sidereon_lnav_subframe_id", SidereonStatus::Panic, || {
+        let bits_result = require_slice(bits, bits_len, "sidereon_lnav_subframe_id", "bits")
+            .map(|bits| bits.to_vec());
         let out_subframe_id = c_try!(require_out(
             out_subframe_id,
             "sidereon_lnav_subframe_id",
             "out_subframe_id"
         ));
         *out_subframe_id = 0;
-        let bits = c_try!(require_slice(
-            bits,
-            bits_len,
-            "sidereon_lnav_subframe_id",
-            "bits"
-        ));
-        match sidereon_core::navigation::lnav::subframe_id(bits) {
+        let bits = c_try!(bits_result);
+        match sidereon_core::navigation::lnav::subframe_id(&bits) {
             Some(value) => {
                 *out_subframe_id = value;
                 SidereonStatus::Ok
@@ -1011,17 +1236,17 @@ pub unsafe extern "C" fn sidereon_lnav_parity(
             "sidereon_lnav_parity",
             "out_parity"
         ));
-        let out_parity = slice::from_raw_parts_mut(out_parity, 6);
-        out_parity.fill(0);
-        let data24 = c_try!(require_slice(
-            data24,
-            data24_len,
-            "sidereon_lnav_parity",
-            "data24"
-        ));
-        match sidereon_core::navigation::lnav::parity(data24, d29_prev, d30_prev) {
+        let data_result = require_slice(data24, data24_len, "sidereon_lnav_parity", "data24")
+            .map(|data| data.to_vec());
+        for index in 0..6 {
+            out_parity.add(index).write(0);
+        }
+        let data24 = c_try!(data_result);
+        match sidereon_core::navigation::lnav::parity(&data24, d29_prev, d30_prev) {
             Ok(value) => {
-                out_parity.copy_from_slice(&value);
+                for (index, parity_bit) in value.into_iter().enumerate() {
+                    out_parity.add(index).write(parity_bit);
+                }
                 SidereonStatus::Ok
             }
             Err(err) => {
@@ -1048,18 +1273,15 @@ pub unsafe extern "C" fn sidereon_lnav_parity_valid(
     out_valid: *mut bool,
 ) -> SidereonStatus {
     ffi_boundary("sidereon_lnav_parity_valid", SidereonStatus::Panic, || {
+        let word_result = require_slice(word30, word30_len, "sidereon_lnav_parity_valid", "word30")
+            .map(|word| word.to_vec());
         let out_valid = c_try!(require_out(
             out_valid,
             "sidereon_lnav_parity_valid",
             "out_valid"
         ));
         *out_valid = false;
-        let word30 = c_try!(require_slice(
-            word30,
-            word30_len,
-            "sidereon_lnav_parity_valid",
-            "word30"
-        ));
+        let word30 = c_try!(word_result);
         if word30_len != sidereon_core::navigation::lnav::WORD_LENGTH {
             set_last_error(format!(
                 "sidereon_lnav_parity_valid: word30_len must be {}, got {word30_len}",
@@ -1067,7 +1289,7 @@ pub unsafe extern "C" fn sidereon_lnav_parity_valid(
             ));
             return SidereonStatus::InvalidArgument;
         }
-        *out_valid = sidereon_core::navigation::lnav::parity_valid(word30, d29_prev, d30_prev);
+        *out_valid = sidereon_core::navigation::lnav::parity_valid(&word30, d29_prev, d30_prev);
         SidereonStatus::Ok
     })
 }
@@ -1092,19 +1314,45 @@ pub unsafe extern "C" fn sidereon_lnav_encode(
 ) -> SidereonStatus {
     ffi_boundary("sidereon_lnav_encode", SidereonStatus::Panic, || {
         let fn_name = "sidereon_lnav_encode";
-        let params = c_try!(require_ref(params, fn_name, "params"));
-        let opts = c_try!(require_ref(opts, fn_name, "opts"));
+        // Copy inputs before any output processing so output buffers may safely
+        // overlap either input record.
+        let params = *c_try!(require_ref(params, fn_name, "params"));
+        let opts = *c_try!(require_ref(opts, fn_name, "opts"));
         if subframe_len < SIDEREON_LNAV_SUBFRAME_LENGTH {
             set_last_error(format!(
                 "{fn_name}: subframe_len must be at least {SIDEREON_LNAV_SUBFRAME_LENGTH}"
             ));
             return SidereonStatus::InvalidArgument;
         }
-        let out1 = c_try!(require_out(out_sf1, fn_name, "out_sf1"));
-        let out2 = c_try!(require_out(out_sf2, fn_name, "out_sf2"));
-        let out3 = c_try!(require_out(out_sf3, fn_name, "out_sf3"));
-        let core_params = lnav_params_from_c(params);
-        let core_opts = lnav_options_from_c(opts);
+        let range1 = c_try!(checked_output_range(
+            fn_name,
+            out_sf1,
+            SIDEREON_LNAV_SUBFRAME_LENGTH,
+            "out_sf1",
+        ));
+        let range2 = c_try!(checked_output_range(
+            fn_name,
+            out_sf2,
+            SIDEREON_LNAV_SUBFRAME_LENGTH,
+            "out_sf2",
+        ));
+        let range3 = c_try!(checked_output_range(
+            fn_name,
+            out_sf3,
+            SIDEREON_LNAV_SUBFRAME_LENGTH,
+            "out_sf3",
+        ));
+        c_try!(reject_overlapping_outputs(
+            fn_name, range1, range2, "out_sf1", "out_sf2"
+        ));
+        c_try!(reject_overlapping_outputs(
+            fn_name, range1, range3, "out_sf1", "out_sf3"
+        ));
+        c_try!(reject_overlapping_outputs(
+            fn_name, range2, range3, "out_sf2", "out_sf3"
+        ));
+        let core_params = lnav_params_from_c(&params);
+        let core_opts = lnav_options_from_c(&opts);
         let subframes = match sidereon_core::navigation::lnav::encode(&core_params, &core_opts) {
             Ok(subframes) => subframes,
             Err(err) => {
@@ -1112,7 +1360,10 @@ pub unsafe extern "C" fn sidereon_lnav_encode(
                 return SidereonStatus::InvalidArgument;
             }
         };
-        for (dst, sf) in [out1, out2, out3].into_iter().zip(subframes.iter()) {
+        for (dst, sf) in [out_sf1, out_sf2, out_sf3]
+            .into_iter()
+            .zip(subframes.iter())
+        {
             ptr::copy_nonoverlapping(sf.as_ptr(), dst, sf.len());
         }
         SidereonStatus::Ok
@@ -1138,13 +1389,18 @@ pub unsafe extern "C" fn sidereon_lnav_decode(
 ) -> SidereonStatus {
     ffi_boundary("sidereon_lnav_decode", SidereonStatus::Panic, || {
         let fn_name = "sidereon_lnav_decode";
-        let out = c_try!(require_out(out, fn_name, "out"));
-        let sf1 = c_try!(require_slice(sf1, sf1_len, fn_name, "sf1"));
-        let sf2 = c_try!(require_slice(sf2, sf2_len, fn_name, "sf2"));
-        let sf3 = c_try!(require_slice(sf3, sf3_len, fn_name, "sf3"));
-        match sidereon_core::navigation::lnav::decode(sf1, sf2, sf3) {
+        if out.is_null() {
+            set_last_error(format!("{fn_name}: null out"));
+            return SidereonStatus::NullPointer;
+        }
+        // Snapshot every readable input before writing the result, allowing the
+        // C result storage to share memory with any source subframe.
+        let sf1 = c_try!(require_slice(sf1, sf1_len, fn_name, "sf1")).to_vec();
+        let sf2 = c_try!(require_slice(sf2, sf2_len, fn_name, "sf2")).to_vec();
+        let sf3 = c_try!(require_slice(sf3, sf3_len, fn_name, "sf3")).to_vec();
+        match sidereon_core::navigation::lnav::decode(&sf1, &sf2, &sf3) {
             Ok(decoded) => {
-                *out = lnav_decoded_to_c(&decoded);
+                out.write(lnav_decoded_to_c(&decoded));
                 SidereonStatus::Ok
             }
             Err(err) => {
@@ -1220,7 +1476,10 @@ pub unsafe extern "C" fn sidereon_broadcast_comparison_compare_window(
                 window.precise_start_jd_whole,
                 window.precise_start_jd_fraction
             )
-            .map_err(|err| extra_invalid_arg(fn_name, err)));
+            .map_err(|err| {
+                let legacy_message = format!("{fn_name}: {err}");
+                crate::engine_error::time_model_error(fn_name, err, legacy_message)
+            }));
             let core_window = sidereon_core::broadcast_comparison::CompareWindow {
                 broadcast_window_j2000_s: (
                     window.broadcast_window_start_j2000_s,
@@ -1329,7 +1588,7 @@ pub unsafe extern "C" fn sidereon_broadcast_ephemeris_sample(
     out_written: *mut usize,
     out_required: *mut usize,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::observables_error_operation_boundary(
         "sidereon_broadcast_ephemeris_sample",
         SidereonStatus::Panic,
         || {
@@ -1373,7 +1632,7 @@ pub unsafe extern "C" fn sidereon_broadcast_observable_states_at_j2000_s(
     out_element_statuses: *mut SidereonObservableStateElementStatus,
     out_result_statuses: *mut SidereonStatus,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::observables_error_operation_boundary(
         "sidereon_broadcast_observable_states_at_j2000_s",
         SidereonStatus::Panic,
         || {
@@ -1414,7 +1673,7 @@ pub unsafe extern "C" fn sidereon_broadcast_observable_states_at_shared_j2000_s(
     out_element_statuses: *mut SidereonObservableStateElementStatus,
     out_result_statuses: *mut SidereonStatus,
 ) -> SidereonStatus {
-    ffi_boundary(
+    crate::engine_error::observables_error_operation_boundary(
         "sidereon_broadcast_observable_states_at_shared_j2000_s",
         SidereonStatus::Panic,
         || {
@@ -1441,6 +1700,9 @@ pub unsafe extern "C" fn sidereon_broadcast_observable_states_at_shared_j2000_s(
 
 // === Round-2 CNAV and RINEX-4 broadcast accessors ===========================
 
+/// Navigation message a broadcast record carries, as the `message` and
+/// `issue_message` fields of the broadcast record structs state it. Mirrors
+/// sidereon_core::rinex::nav::NavMessage.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SidereonNavMessage {
@@ -1454,6 +1716,11 @@ pub enum SidereonNavMessage {
     BeidouD1 = 7,
     BeidouD2 = 8,
     QzssLnav = 9,
+    /// A Galileo record whose data-source word names neither I/NAV nor F/NAV
+    /// alone.
+    GalileoUnclassified = 10,
+    /// NavIC (IRNSS) legacy navigation message.
+    NavicLnav = 11,
 }
 
 #[repr(C)]
@@ -1512,6 +1779,9 @@ pub struct SidereonCnavParameters {
 pub struct SidereonBroadcastRecordInfo {
     pub sat_id: SidereonSatelliteToken,
     pub message: u32,
+    /// Whether the record carries an issue of data. GPS/QZSS CNAV-family
+    /// records carry none, and then issue and issue_message are zero.
+    pub has_issue: bool,
     pub issue: u32,
     pub issue_message: u32,
     pub week: u32,
@@ -1520,6 +1790,9 @@ pub struct SidereonBroadcastRecordInfo {
     pub toc_week: u32,
     pub toc_tow_s: f64,
     pub sv_health: f64,
+    /// Whether sv_accuracy_m is present. CNAV URA_ED indices 15 and -16 carry
+    /// no accuracy prediction.
+    pub has_sv_accuracy_m: bool,
     pub sv_accuracy_m: f64,
     pub has_fit_interval_s: bool,
     pub fit_interval_s: f64,
@@ -1617,6 +1890,9 @@ pub struct SidereonBroadcastRecord {
     pub sat_id: SidereonSatelliteToken,
     /// Navigation message as SidereonNavMessage.
     pub message: u32,
+    /// Whether the record carries an issue of data. GPS/QZSS CNAV-family
+    /// records carry none; issue and issue_message are then zero and ignored.
+    pub has_issue: bool,
     /// Native issue-of-data value.
     pub issue: u32,
     /// Message carrying the issue value, as SidereonNavMessage.
@@ -1637,12 +1913,57 @@ pub struct SidereonBroadcastRecord {
     pub cnav: SidereonBroadcastCnavParameters,
     /// Satellite health word.
     pub sv_health: f64,
-    /// Signal-in-space accuracy, meters.
+    /// Whether `sv_accuracy_m` is present. CNAV URA_ED indices 15 and -16
+    /// carry no accuracy prediction.
+    pub has_sv_accuracy_m: bool,
+    /// Signal-in-space accuracy, meters, when present.
     pub sv_accuracy_m: f64,
     /// Whether `fit_interval_s` is present.
     pub has_fit_interval_s: bool,
     /// GPS curve-fit interval, seconds, when present.
     pub fit_interval_s: f64,
+    /// Record fields the orbit and clock models do not read, as stated.
+    pub stated: SidereonStatedNavFields,
+}
+
+/// Fields of a legacy broadcast record that the orbit and clock models do not
+/// read, as the record states them. Each `has_*` flag is false for a blank
+/// field or one the source does not carry. Mirrors
+/// sidereon_core::rinex::nav::StatedNavFields.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonStatedNavFields {
+    /// Whether `orbit5_field2` is present.
+    pub has_orbit5_field2: bool,
+    /// BROADCAST ORBIT-5 field 2: GPS/QZSS codes on L2, the Galileo data-source
+    /// word, spare for BeiDou and NavIC.
+    pub orbit5_field2: f64,
+    /// Whether `orbit5_field4` is present.
+    pub has_orbit5_field4: bool,
+    /// BROADCAST ORBIT-5 field 4: GPS/QZSS L2 P data flag, spare elsewhere.
+    pub orbit5_field4: f64,
+    /// Whether `orbit6_field4` is present.
+    pub has_orbit6_field4: bool,
+    /// BROADCAST ORBIT-6 field 4: GPS/QZSS IODC, NavIC spare.
+    pub orbit6_field4: f64,
+    /// Whether `transmission_time_sow` is present.
+    pub has_transmission_time_sow: bool,
+    /// BROADCAST ORBIT-7 field 1: transmission time of message, seconds of
+    /// week, as stated (including a `.9999E+09` not-known value).
+    pub transmission_time_sow: f64,
+    /// Whether `orbit7_field2` is present.
+    pub has_orbit7_field2: bool,
+    /// BROADCAST ORBIT-7 field 2: GPS fit interval, QZSS fit flag, BeiDou
+    /// AODC, spare for Galileo and NavIC, as stated.
+    pub orbit7_field2: f64,
+    /// Whether `orbit7_field3` is present.
+    pub has_orbit7_field3: bool,
+    /// BROADCAST ORBIT-7 field 3 (spare).
+    pub orbit7_field3: f64,
+    /// Whether `orbit7_field4` is present.
+    pub has_orbit7_field4: bool,
+    /// BROADCAST ORBIT-7 field 4 (spare).
+    pub orbit7_field4: f64,
 }
 
 /// One GLONASS RINEX state-vector broadcast record.
@@ -1665,8 +1986,40 @@ pub struct SidereonGlonassRecord {
     pub gamma_n: f64,
     /// Satellite health word.
     pub sv_health: f64,
-    /// FDMA frequency-channel number.
+    /// FDMA frequency-channel number. A stated value above 128 is read as that
+    /// value less 256, as RTKLIB `decode_geph` reads it.
     pub freq_channel: i32,
+    /// The record epoch as stated, seconds past J2000 in UTC.
+    pub epoch_utc_j2000_s: f64,
+    /// The frequency-channel field as stated, before a value above 128 is
+    /// folded into freq_channel.
+    pub stated_freq_channel: i32,
+    /// Whether `message_frame_time_s` is present.
+    pub has_message_frame_time_s: bool,
+    /// Message frame time as stated: seconds of the UTC week in RINEX 3 and 4,
+    /// seconds of the UTC day in RINEX 2.
+    pub message_frame_time_s: f64,
+    /// Whether `age_days` is present.
+    pub has_age_days: bool,
+    /// Age of operational information E_n, days.
+    pub age_days: f64,
+    /// Whether `status_flags` is present.
+    pub has_status_flags: bool,
+    /// Status flags (BROADCAST ORBIT-4 field 1) as stated.
+    pub status_flags: f64,
+    /// Whether `l1_l2_group_delay_field_s` is present.
+    pub has_l1_l2_group_delay_field_s: bool,
+    /// L1/L2 group delay difference field, seconds, as stated, including the
+    /// `.999999999999E+09` value for an unknown delay.
+    pub l1_l2_group_delay_field_s: f64,
+    /// Whether `urai` is present.
+    pub has_urai: bool,
+    /// Raw accuracy index URAI as stated.
+    pub urai: f64,
+    /// Whether `health_flags` is present.
+    pub has_health_flags: bool,
+    /// Health flags (BROADCAST ORBIT-4 field 4) as stated.
+    pub health_flags: f64,
 }
 
 /// One optional Klobuchar alpha/beta coefficient set.
@@ -1705,6 +2058,19 @@ pub struct SidereonIonoCorrections {
     pub beidou: SidereonKlobucharAlphaBeta,
     /// Galileo NeQuick-G coefficients.
     pub galileo: SidereonGalileoNequickCoeffs,
+    /// Whether `galileo_disturbance_flags` is present.
+    pub has_galileo_disturbance_flags: bool,
+    /// Galileo ionospheric disturbance flags (the fourth `GAL` value) as stated.
+    pub galileo_disturbance_flags: f64,
+    /// QZSS Klobuchar coefficients (`QZSA`/`QZSB`).
+    pub qzss: SidereonKlobucharAlphaBeta,
+    /// NavIC Klobuchar coefficients (`IRNA`/`IRNB`).
+    pub navic: SidereonKlobucharAlphaBeta,
+    /// Whether `beidou_bdgim` is present.
+    pub has_beidou_bdgim: bool,
+    /// BeiDou global ionospheric model coefficients alpha1..alpha9 from a
+    /// RINEX 4 `CNVX` ionosphere frame.
+    pub beidou_bdgim: [f64; 9],
 }
 
 /// One GLONASS slot-to-FDMA-channel entry from a broadcast store.
@@ -1955,6 +2321,32 @@ pub unsafe extern "C" fn sidereon_broadcast_ephemeris_leap_seconds(
         "sidereon_broadcast_ephemeris_leap_seconds",
         SidereonStatus::Panic,
         || {
+            if !out_leap_seconds.is_null() && !out_present.is_null() {
+                let outputs = [
+                    Some((
+                        c_try!(checked_output_range(
+                            "sidereon_broadcast_ephemeris_leap_seconds",
+                            out_leap_seconds,
+                            1,
+                            "out_leap_seconds",
+                        )),
+                        "out_leap_seconds",
+                    )),
+                    Some((
+                        c_try!(checked_output_range(
+                            "sidereon_broadcast_ephemeris_leap_seconds",
+                            out_present,
+                            1,
+                            "out_present",
+                        )),
+                        "out_present",
+                    )),
+                ];
+                c_try!(reject_overlapping_optional_outputs(
+                    "sidereon_broadcast_ephemeris_leap_seconds",
+                    &outputs
+                ));
+            }
             let out_value = c_try!(require_out(
                 out_leap_seconds,
                 "sidereon_broadcast_ephemeris_leap_seconds",
@@ -2065,7 +2457,7 @@ pub unsafe extern "C" fn sidereon_broadcast_ephemeris_set_nav_message_preference
         "sidereon_broadcast_ephemeris_set_nav_message_preference",
         SidereonStatus::Panic,
         || {
-            let broadcast = c_try!(require_out(
+            let broadcast = c_try!(require_mut(
                 broadcast,
                 "sidereon_broadcast_ephemeris_set_nav_message_preference",
                 "broadcast"
@@ -2465,6 +2857,7 @@ fn empty_broadcast_record_info() -> SidereonBroadcastRecordInfo {
             bytes: [0; SATELLITE_TOKEN_C_BYTES],
         },
         message: 0,
+        has_issue: false,
         issue: 0,
         issue_message: 0,
         week: 0,
@@ -2473,6 +2866,7 @@ fn empty_broadcast_record_info() -> SidereonBroadcastRecordInfo {
         toc_week: 0,
         toc_tow_s: 0.0,
         sv_health: 0.0,
+        has_sv_accuracy_m: false,
         sv_accuracy_m: 0.0,
         has_fit_interval_s: false,
         fit_interval_s: 0.0,
@@ -2485,6 +2879,7 @@ pub(crate) fn empty_broadcast_record() -> SidereonBroadcastRecord {
     SidereonBroadcastRecord {
         sat_id: satellite_token_from_text(""),
         message: 0,
+        has_issue: false,
         issue: 0,
         issue_message: 0,
         week: 0,
@@ -2525,9 +2920,11 @@ pub(crate) fn empty_broadcast_record() -> SidereonBroadcastRecord {
         group_delays: empty_broadcast_group_delays(),
         cnav: empty_broadcast_cnav_parameters(),
         sv_health: 0.0,
+        has_sv_accuracy_m: false,
         sv_accuracy_m: 0.0,
         has_fit_interval_s: false,
         fit_interval_s: 0.0,
+        stated: empty_stated_nav_fields(),
     }
 }
 
@@ -2542,6 +2939,20 @@ pub(crate) fn empty_glonass_record() -> SidereonGlonassRecord {
         gamma_n: 0.0,
         sv_health: 0.0,
         freq_channel: 0,
+        epoch_utc_j2000_s: 0.0,
+        stated_freq_channel: 0,
+        has_message_frame_time_s: false,
+        message_frame_time_s: 0.0,
+        has_age_days: false,
+        age_days: 0.0,
+        has_status_flags: false,
+        status_flags: 0.0,
+        has_l1_l2_group_delay_field_s: false,
+        l1_l2_group_delay_field_s: 0.0,
+        has_urai: false,
+        urai: 0.0,
+        has_health_flags: false,
+        health_flags: 0.0,
     }
 }
 
@@ -2561,6 +2972,8 @@ fn nav_message_from_c(
         x if x == SidereonNavMessage::GalileoFnav as u32 => Ok(M::GalileoFnav),
         x if x == SidereonNavMessage::BeidouD1 as u32 => Ok(M::BeidouD1),
         x if x == SidereonNavMessage::BeidouD2 as u32 => Ok(M::BeidouD2),
+        x if x == SidereonNavMessage::GalileoUnclassified as u32 => Ok(M::GalileoUnclassified),
+        x if x == SidereonNavMessage::NavicLnav as u32 => Ok(M::NavicLnav),
         _ => {
             set_last_error(format!("{fn_name}: invalid nav message {message}"));
             Err(SidereonStatus::InvalidArgument)
@@ -2617,15 +3030,19 @@ fn broadcast_record_to_c(
     SidereonBroadcastRecordInfo {
         sat_id: satellite_token(record.satellite_id),
         message: nav_message_to_c(record.message),
-        issue: record.issue_of_data.issue,
-        issue_message: nav_message_to_c(record.issue_of_data.message),
+        has_issue: record.issue_of_data.is_some(),
+        issue: record.issue_of_data.map_or(0, |issue| issue.issue),
+        issue_message: record
+            .issue_of_data
+            .map_or(0, |issue| nav_message_to_c(issue.message)),
         week: record.week,
         toe_week: record.toe.week,
         toe_tow_s: record.toe.tow_s,
         toc_week: record.toc.week,
         toc_tow_s: record.toc.tow_s,
         sv_health: record.sv_health,
-        sv_accuracy_m: record.sv_accuracy_m,
+        has_sv_accuracy_m: record.sv_accuracy_m.is_some(),
+        sv_accuracy_m: record.sv_accuracy_m.unwrap_or(0.0),
         has_fit_interval_s: record.fit_interval_s.is_some(),
         fit_interval_s: record.fit_interval_s.unwrap_or(0.0),
         default_group_delay_s: record.broadcast_clock_group_delay_s(),
@@ -2646,6 +3063,8 @@ fn nav_message_to_c(message: sidereon_core::rinex::nav::NavMessage) -> u32 {
         M::GalileoFnav => SidereonNavMessage::GalileoFnav as u32,
         M::BeidouD1 => SidereonNavMessage::BeidouD1 as u32,
         M::BeidouD2 => SidereonNavMessage::BeidouD2 as u32,
+        M::GalileoUnclassified => SidereonNavMessage::GalileoUnclassified as u32,
+        M::NavicLnav => SidereonNavMessage::NavicLnav as u32,
     }
 }
 
@@ -2732,8 +3151,11 @@ pub(crate) fn broadcast_record_to_c_full(
     SidereonBroadcastRecord {
         sat_id: satellite_token(record.satellite_id),
         message: nav_message_to_c(record.message),
-        issue: record.issue_of_data.issue,
-        issue_message: nav_message_to_c(record.issue_of_data.message),
+        has_issue: record.issue_of_data.is_some(),
+        issue: record.issue_of_data.map_or(0, |issue| issue.issue),
+        issue_message: record
+            .issue_of_data
+            .map_or(0, |issue| nav_message_to_c(issue.message)),
         week: record.week,
         toe: SidereonGnssWeekTow {
             system: time_scale_to_c_code(record.toe.system),
@@ -2772,10 +3194,53 @@ pub(crate) fn broadcast_record_to_c_full(
         group_delays: broadcast_group_delays_to_c(&record.group_delays),
         cnav: broadcast_cnav_parameters_to_c(record.cnav),
         sv_health: record.sv_health,
-        sv_accuracy_m: record.sv_accuracy_m,
+        has_sv_accuracy_m: record.sv_accuracy_m.is_some(),
+        sv_accuracy_m: record.sv_accuracy_m.unwrap_or(0.0),
         has_fit_interval_s: record.fit_interval_s.is_some(),
         fit_interval_s: record.fit_interval_s.unwrap_or(0.0),
+        stated: stated_nav_fields_to_c(&record.stated),
     }
+}
+
+fn stated_nav_fields_to_c(
+    stated: &sidereon_core::rinex::nav::StatedNavFields,
+) -> SidereonStatedNavFields {
+    SidereonStatedNavFields {
+        has_orbit5_field2: stated.orbit5_field2.is_some(),
+        orbit5_field2: stated.orbit5_field2.unwrap_or(0.0),
+        has_orbit5_field4: stated.orbit5_field4.is_some(),
+        orbit5_field4: stated.orbit5_field4.unwrap_or(0.0),
+        has_orbit6_field4: stated.orbit6_field4.is_some(),
+        orbit6_field4: stated.orbit6_field4.unwrap_or(0.0),
+        has_transmission_time_sow: stated.transmission_time_sow.is_some(),
+        transmission_time_sow: stated.transmission_time_sow.unwrap_or(0.0),
+        has_orbit7_field2: stated.orbit7_field2.is_some(),
+        orbit7_field2: stated.orbit7_field2.unwrap_or(0.0),
+        has_orbit7_field3: stated.orbit7_field3.is_some(),
+        orbit7_field3: stated.orbit7_field3.unwrap_or(0.0),
+        has_orbit7_field4: stated.orbit7_field4.is_some(),
+        orbit7_field4: stated.orbit7_field4.unwrap_or(0.0),
+    }
+}
+
+fn stated_nav_fields_from_c(
+    stated: &SidereonStatedNavFields,
+) -> sidereon_core::rinex::nav::StatedNavFields {
+    sidereon_core::rinex::nav::StatedNavFields {
+        orbit5_field2: stated.has_orbit5_field2.then_some(stated.orbit5_field2),
+        orbit5_field4: stated.has_orbit5_field4.then_some(stated.orbit5_field4),
+        orbit6_field4: stated.has_orbit6_field4.then_some(stated.orbit6_field4),
+        transmission_time_sow: stated
+            .has_transmission_time_sow
+            .then_some(stated.transmission_time_sow),
+        orbit7_field2: stated.has_orbit7_field2.then_some(stated.orbit7_field2),
+        orbit7_field3: stated.has_orbit7_field3.then_some(stated.orbit7_field3),
+        orbit7_field4: stated.has_orbit7_field4.then_some(stated.orbit7_field4),
+    }
+}
+
+fn empty_stated_nav_fields() -> SidereonStatedNavFields {
+    stated_nav_fields_to_c(&sidereon_core::rinex::nav::StatedNavFields::default())
 }
 
 pub(crate) fn glonass_record_to_c(
@@ -2791,6 +3256,20 @@ pub(crate) fn glonass_record_to_c(
         gamma_n: record.gamma_n,
         sv_health: record.sv_health,
         freq_channel: record.freq_channel,
+        epoch_utc_j2000_s: record.epoch_utc_j2000_s,
+        stated_freq_channel: record.stated_freq_channel,
+        has_message_frame_time_s: record.message_frame_time_s.is_some(),
+        message_frame_time_s: record.message_frame_time_s.unwrap_or(0.0),
+        has_age_days: record.age_days.is_some(),
+        age_days: record.age_days.unwrap_or(0.0),
+        has_status_flags: record.status_flags.is_some(),
+        status_flags: record.status_flags.unwrap_or(0.0),
+        has_l1_l2_group_delay_field_s: record.l1_l2_group_delay_field_s.is_some(),
+        l1_l2_group_delay_field_s: record.l1_l2_group_delay_field_s.unwrap_or(0.0),
+        has_urai: record.urai.is_some(),
+        urai: record.urai.unwrap_or(0.0),
+        has_health_flags: record.health_flags.is_some(),
+        health_flags: record.health_flags.unwrap_or(0.0),
     }
 }
 
@@ -2819,6 +3298,12 @@ pub(crate) fn iono_corrections_to_c(
         gps: klobuchar(iono.gps),
         beidou: klobuchar(iono.beidou),
         galileo,
+        has_galileo_disturbance_flags: iono.galileo_disturbance_flags.is_some(),
+        galileo_disturbance_flags: iono.galileo_disturbance_flags.unwrap_or(0.0),
+        qzss: klobuchar(iono.qzss),
+        navic: klobuchar(iono.navic),
+        has_beidou_bdgim: iono.beidou_bdgim.is_some(),
+        beidou_bdgim: iono.beidou_bdgim.unwrap_or([0.0; 9]),
     }
 }
 
@@ -2891,6 +3376,12 @@ pub(crate) fn empty_iono_corrections() -> SidereonIonoCorrections {
         gps: empty_klobuchar_alpha_beta(),
         beidou: empty_klobuchar_alpha_beta(),
         galileo: empty_galileo_nequick_coeffs(),
+        has_galileo_disturbance_flags: false,
+        galileo_disturbance_flags: 0.0,
+        qzss: empty_klobuchar_alpha_beta(),
+        navic: empty_klobuchar_alpha_beta(),
+        has_beidou_bdgim: false,
+        beidou_bdgim: [0.0; 9],
     }
 }
 
@@ -2947,17 +3438,21 @@ pub(crate) fn broadcast_record_from_c(
         SidereonStatus::InvalidToken
     })?;
     let message = nav_message_from_c(fn_name, record.message)?;
-    let issue_message = nav_message_from_c(fn_name, record.issue_message)?;
+    let issue_of_data = if record.has_issue {
+        Some(sidereon_core::ephemeris::BroadcastIssue {
+            issue: record.issue,
+            message: nav_message_from_c(fn_name, record.issue_message)?,
+        })
+    } else {
+        None
+    };
     let toe = gnss_week_tow_from_c(fn_name, &record.toe)?;
     let toc = gnss_week_tow_from_c(fn_name, &record.toc)?;
     let cnav = broadcast_cnav_parameters_from_c(fn_name, &record.cnav)?;
     Ok(sidereon_core::rinex::nav::BroadcastRecord {
         satellite_id,
         message,
-        issue_of_data: sidereon_core::ephemeris::BroadcastIssue {
-            issue: record.issue,
-            message: issue_message,
-        },
+        issue_of_data,
         week: record.week,
         toe,
         toc,
@@ -2966,8 +3461,9 @@ pub(crate) fn broadcast_record_from_c(
         group_delays: broadcast_group_delays_from_c(&record.group_delays),
         cnav,
         sv_health: record.sv_health,
-        sv_accuracy_m: record.sv_accuracy_m,
+        sv_accuracy_m: record.has_sv_accuracy_m.then_some(record.sv_accuracy_m),
         fit_interval_s: record.has_fit_interval_s.then_some(record.fit_interval_s),
+        stated: stated_nav_fields_from_c(&record.stated),
     })
 }
 
@@ -3014,7 +3510,10 @@ mod lnav_word_tests {
         );
         assert_eq!(subframe_id, 5);
 
+        // The HOW fields read back as written (set_bits above); sidereon-core
+        // reads a 29-byte slice as no HOW word.
         let malformed = [0u8; 29];
+        assert_eq!(sidereon_core::navigation::lnav::tow(&malformed), None);
         assert_eq!(
             unsafe { sidereon_lnav_tow(malformed.as_ptr(), malformed.len(), &mut tow) },
             SidereonStatus::InvalidArgument
@@ -3023,6 +3522,7 @@ mod lnav_word_tests {
 
     #[test]
     fn lnav_routes_preserve_parity_dependency_bits_and_validity() {
+        use sidereon_core::navigation::lnav::{parity, parity_valid};
         let source = [0u8; 24];
         let mut parity_bits = [0u8; 6];
         assert_eq!(
@@ -3038,7 +3538,7 @@ mod lnav_word_tests {
             },
             SidereonStatus::Ok
         );
-        assert_eq!(parity_bits, [0; 6]);
+        assert_eq!(parity_bits, parity(&source, 0, 0).expect("core parity"));
 
         assert_eq!(
             unsafe {
@@ -3053,7 +3553,7 @@ mod lnav_word_tests {
             },
             SidereonStatus::Ok
         );
-        assert_eq!(parity_bits, [1, 0, 1, 0, 0, 1]);
+        assert_eq!(parity_bits, parity(&source, 1, 0).expect("core parity"));
         let mut word = [0u8; 30];
         word[24..].copy_from_slice(&parity_bits);
         let mut valid = false;
@@ -3061,13 +3561,13 @@ mod lnav_word_tests {
             unsafe { sidereon_lnav_parity_valid(word.as_ptr(), word.len(), 1, 0, &mut valid) },
             SidereonStatus::Ok
         );
-        assert!(valid);
+        assert_eq!(valid, parity_valid(&word, 1, 0));
         word[0] = 1;
         assert_eq!(
             unsafe { sidereon_lnav_parity_valid(word.as_ptr(), word.len(), 1, 0, &mut valid) },
             SidereonStatus::Ok
         );
-        assert!(!valid);
+        assert_eq!(valid, parity_valid(&word, 1, 0));
 
         let source_transmitted = [1u8; 24];
         assert_eq!(
@@ -3083,16 +3583,17 @@ mod lnav_word_tests {
             },
             SidereonStatus::Ok
         );
-        assert_eq!(parity_bits, [1; 6]);
+        assert_eq!(parity_bits, parity(&source, 1, 1).expect("core parity"));
         word[..24].copy_from_slice(&source_transmitted);
         word[24..].copy_from_slice(&parity_bits);
         assert_eq!(
             unsafe { sidereon_lnav_parity_valid(word.as_ptr(), word.len(), 1, 1, &mut valid) },
             SidereonStatus::Ok
         );
-        assert!(valid);
+        assert_eq!(valid, parity_valid(&word, 1, 1));
 
         let short_source = [0u8; 23];
+        assert!(parity(&short_source, 0, 0).is_err());
         assert_eq!(
             unsafe {
                 sidereon_lnav_parity(

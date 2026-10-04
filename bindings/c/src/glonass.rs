@@ -8,7 +8,10 @@ use super::*;
 pub struct SidereonGlonassChannel {
     /// GLONASS slot (PRN), e.g. 1 for R01.
     pub slot: u8,
-    /// FDMA frequency channel k, valid range [-7, +6] (engine-enforced).
+    /// FDMA frequency channel k. The FDMA allocation is -7..=6; a channel
+    /// outside it resolves no carrier, so an ionosphere-corrected SPP solve
+    /// leaves that satellite out and reports it with
+    /// SIDEREON_SPP_REJECTION_REASON_IONOSPHERE_CARRIER_UNRESOLVED.
     pub channel: i8,
 }
 

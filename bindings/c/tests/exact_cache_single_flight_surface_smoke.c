@@ -1,4 +1,5 @@
 #include "sidereon.h"
+#include "w6_exact_cache_pins.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -22,10 +23,12 @@ int main(void) {
         check(options.abi_version ==
                   SIDEREON_EXACT_CACHE_SINGLE_FLIGHT_OPTIONS_ABI_VERSION,
               "single-flight options must carry their ABI version") ||
-        check(options.poll_interval_ms == 50 &&
-                  options.heartbeat_interval_ms == 5000 &&
-                  options.liveness_timeout_ms == 30000 &&
-                  options.wait_timeout_ms == 1800000,
+        /* The engine's ExactCacheSingleFlightOptions::default(), from
+         * tests/valgen (w6_exact_cache). */
+        check(options.poll_interval_ms == W6_EXACT_CACHE_POLL_INTERVAL_MS &&
+                  options.heartbeat_interval_ms == W6_EXACT_CACHE_HEARTBEAT_INTERVAL_MS &&
+                  options.liveness_timeout_ms == W6_EXACT_CACHE_LIVENESS_TIMEOUT_MS &&
+                  options.wait_timeout_ms == W6_EXACT_CACHE_WAIT_TIMEOUT_MS,
               "single-flight options must expose engine defaults")) {
         return 1;
     }

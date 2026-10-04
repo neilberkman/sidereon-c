@@ -1,4 +1,171 @@
 use super::*;
+use crate::engine_error::{
+    engine_error_operation_boundary, record_engine_error, SidereonEngineErrorFamily,
+};
+
+fn error_node(kind: &str, fields: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "kind": kind,
+        "fields": fields,
+    })
+}
+
+pub(crate) fn sun_moon_error_value(
+    error: &sidereon_core::astro::bodies::SunMoonError,
+) -> serde_json::Value {
+    use sidereon_core::astro::bodies::SunMoonError as E;
+    match error {
+        E::InvalidInput { field, reason } => error_node(
+            "invalid_input",
+            serde_json::json!({
+                "field": field,
+                "reason": reason,
+            }),
+        ),
+        E::FrameTransform(inner) => error_node(
+            "frame_transform",
+            serde_json::json!({
+                "cause": crate::orbit_fit::frame_transform_error_value(inner),
+            }),
+        ),
+    }
+}
+
+fn map_sun_moon_error(
+    fn_name: &str,
+    err: sidereon_core::astro::bodies::SunMoonError,
+) -> SidereonStatus {
+    record_engine_error(
+        SidereonEngineErrorFamily::SunMoon,
+        fn_name,
+        sun_moon_error_value(&err),
+    );
+    extra_invalid_arg(fn_name, err)
+}
+
+pub(crate) fn angle_error_value(
+    error: &sidereon_core::astro::angles::AngleError,
+) -> serde_json::Value {
+    use sidereon_core::astro::angles::AngleError as E;
+    match error {
+        E::InvalidInput { field, reason } => error_node(
+            "invalid_input",
+            serde_json::json!({
+                "field": field,
+                "reason": reason,
+            }),
+        ),
+    }
+}
+
+pub(crate) fn body_observation_error_value(
+    error: &sidereon_core::astro::bodies::observe::BodyObservationError,
+) -> serde_json::Value {
+    use sidereon_core::astro::bodies::observe::BodyObservationError as E;
+    match error {
+        E::Ephemeris(inner) => error_node(
+            "ephemeris",
+            serde_json::json!({
+                "cause": sun_moon_error_value(inner),
+            }),
+        ),
+        E::FrameTransform(inner) => error_node(
+            "frame_transform",
+            serde_json::json!({
+                "cause": crate::orbit_fit::frame_transform_error_value(inner),
+            }),
+        ),
+        E::Angle(inner) => error_node(
+            "angle",
+            serde_json::json!({
+                "cause": angle_error_value(inner),
+            }),
+        ),
+    }
+}
+
+pub(crate) fn observe_error_value(
+    error: &sidereon_core::astro::bodies::observe::ObserveError,
+) -> serde_json::Value {
+    use sidereon_core::astro::bodies::observe::ObserveError as E;
+    match error {
+        E::Spk(inner) => error_node(
+            "spk",
+            serde_json::json!({
+                "cause": crate::spk::spk_error_value(inner),
+            }),
+        ),
+        E::FrameTransform(inner) => error_node(
+            "frame_transform",
+            serde_json::json!({
+                "cause": crate::orbit_fit::frame_transform_error_value(inner),
+            }),
+        ),
+        E::SunMoon(inner) => error_node(
+            "sun_moon",
+            serde_json::json!({
+                "cause": sun_moon_error_value(inner),
+            }),
+        ),
+        E::Angle(inner) => error_node(
+            "angle",
+            serde_json::json!({
+                "cause": angle_error_value(inner),
+            }),
+        ),
+        E::NonFinite => error_node("non_finite", serde_json::json!({})),
+        E::DegenerateGeometry => error_node("degenerate_geometry", serde_json::json!({})),
+    }
+}
+
+pub(crate) fn almanac_error_value(
+    error: &sidereon_core::astro::almanac::AlmanacError,
+) -> serde_json::Value {
+    use sidereon_core::astro::almanac::AlmanacError as E;
+    match error {
+        E::Finder(inner) => error_node(
+            "finder",
+            serde_json::json!({
+                "cause": crate::tca::event_finder_error_value(inner),
+            }),
+        ),
+        E::Spk(inner) => error_node(
+            "spk",
+            serde_json::json!({
+                "cause": crate::spk::spk_error_value(inner),
+            }),
+        ),
+        E::Frame(msg) => error_node(
+            "frame",
+            serde_json::json!({
+                "message": msg,
+            }),
+        ),
+        E::EphemerisRequired => error_node("ephemeris_required", serde_json::json!({})),
+        E::InferiorPlanetOpposition => {
+            error_node("inferior_planet_opposition", serde_json::json!({}))
+        }
+        E::InvalidInput { field, reason } => error_node(
+            "invalid_input",
+            serde_json::json!({
+                "field": field,
+                "reason": reason,
+            }),
+        ),
+        E::Ut1OutsideCoverage(reason) => error_node(
+            "ut1_outside_coverage",
+            serde_json::json!({
+                "reason": crate::engine_error::degrade_reason_name(*reason),
+            }),
+        ),
+        other => error_node(
+            "unknown",
+            serde_json::json!({
+                "message": other.to_string(),
+            }),
+        ),
+    }
+}
 
 // --- Sun/Moon angles + eclipse (sidereon_core::astro::angles / events) -------
 
@@ -373,7 +540,7 @@ pub unsafe extern "C" fn sidereon_sun_moon_eci(
     out_sun_m: *mut f64,
     out_moon_m: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_sun_moon_eci", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_sun_moon_eci", SidereonStatus::Panic, || {
         c_try!(copy_exact_f64s(
             "sidereon_sun_moon_eci",
             "out_sun_m",
@@ -406,7 +573,7 @@ pub unsafe extern "C" fn sidereon_sun_moon_eci(
                 ));
                 SidereonStatus::Ok
             }
-            Err(err) => extra_invalid_arg("sidereon_sun_moon_eci", err),
+            Err(err) => map_sun_moon_error("sidereon_sun_moon_eci", err),
         }
     })
 }
@@ -422,7 +589,7 @@ pub unsafe extern "C" fn sidereon_sun_moon_ecef(
     out_sun_m: *mut f64,
     out_moon_m: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_sun_moon_ecef", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_sun_moon_ecef", SidereonStatus::Panic, || {
         c_try!(copy_exact_f64s(
             "sidereon_sun_moon_ecef",
             "out_sun_m",
@@ -456,7 +623,7 @@ pub unsafe extern "C" fn sidereon_sun_moon_ecef(
                 ));
                 SidereonStatus::Ok
             }
-            Err(err) => extra_invalid_arg("sidereon_sun_moon_ecef", err),
+            Err(err) => map_sun_moon_error("sidereon_sun_moon_ecef", err),
         }
     })
 }
@@ -476,7 +643,7 @@ pub unsafe extern "C" fn sidereon_sun_moon_eci_batch(
     out_moon_m: *mut f64,
     moon_len: usize,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_sun_moon_eci_batch", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_sun_moon_eci_batch", SidereonStatus::Panic, || {
         sun_moon_epoch_batch(
             "sidereon_sun_moon_eci_batch",
             SunMoonEpochBatchArgs {
@@ -507,7 +674,7 @@ pub unsafe extern "C" fn sidereon_sun_moon_ecef_batch(
     out_moon_m: *mut f64,
     moon_len: usize,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_sun_moon_ecef_batch",
         SidereonStatus::Panic,
         || {
@@ -531,7 +698,7 @@ pub unsafe extern "C" fn sidereon_sun_moon_ecef_batch(
 /// Julian date. Delegates to
 /// sidereon_core::astro::frames::nutation::skyfield_iau2000a_radians.
 ///
-/// Safety: out_dpsi_rad and out_deps_rad point to a double each.
+/// Safety: out_dpsi_rad and out_deps_rad point to disjoint doubles.
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_nutation_iau2000a_radians(
     jd_tt: f64,
@@ -542,6 +709,32 @@ pub unsafe extern "C" fn sidereon_nutation_iau2000a_radians(
         "sidereon_nutation_iau2000a_radians",
         SidereonStatus::Panic,
         || {
+            if !out_dpsi_rad.is_null() && !out_deps_rad.is_null() {
+                let outputs = [
+                    Some((
+                        c_try!(super::checked_output_range(
+                            "sidereon_nutation_iau2000a_radians",
+                            out_dpsi_rad,
+                            1,
+                            "out_dpsi_rad"
+                        )),
+                        "out_dpsi_rad",
+                    )),
+                    Some((
+                        c_try!(super::checked_output_range(
+                            "sidereon_nutation_iau2000a_radians",
+                            out_deps_rad,
+                            1,
+                            "out_deps_rad"
+                        )),
+                        "out_deps_rad",
+                    )),
+                ];
+                c_try!(super::reject_overlapping_optional_outputs(
+                    "sidereon_nutation_iau2000a_radians",
+                    &outputs
+                ));
+            }
             let out_dpsi_rad = c_try!(require_out(
                 out_dpsi_rad,
                 "sidereon_nutation_iau2000a_radians",
@@ -615,7 +808,6 @@ pub unsafe extern "C" fn sidereon_nutation_fundamental_arguments(
                 "sidereon_nutation_fundamental_arguments",
                 "out"
             ));
-            let out = out as *mut f64;
             for idx in 0..5 {
                 *out.add(idx) = 0.0;
             }
@@ -683,7 +875,6 @@ pub unsafe extern "C" fn sidereon_nutation_matrix(
             "sidereon_nutation_matrix",
             "out_matrix"
         ));
-        let out_matrix = out_matrix as *mut f64;
         for idx in 0..9 {
             *out_matrix.add(idx) = 0.0;
         }
@@ -717,7 +908,6 @@ pub unsafe extern "C" fn sidereon_precession_matrix(
             "sidereon_precession_matrix",
             "out_matrix"
         ));
-        let out_matrix = out_matrix as *mut f64;
         for idx in 0..9 {
             *out_matrix.add(idx) = 0.0;
         }
@@ -748,7 +938,6 @@ pub unsafe extern "C" fn sidereon_precession_icrs_to_j2000_matrix(
                 "sidereon_precession_icrs_to_j2000_matrix",
                 "out_matrix"
             ));
-            let out_matrix = out_matrix as *mut f64;
             copy_flat9(out_matrix, ft_precession::build_icrs_to_j2000());
             SidereonStatus::Ok
         },
@@ -798,7 +987,7 @@ pub unsafe extern "C" fn sidereon_solid_earth_tide(
                 ));
                 SidereonStatus::Ok
             }
-            Err(err) => extra_invalid_arg("sidereon_solid_earth_tide", err),
+            Err(err) => crate::tides::station_tide_error("sidereon_solid_earth_tide", err),
         }
     })
 }
@@ -840,7 +1029,7 @@ pub unsafe extern "C" fn sidereon_ocean_tide_loading(
                 ));
                 SidereonStatus::Ok
             }
-            Err(err) => extra_invalid_arg("sidereon_ocean_tide_loading", err),
+            Err(err) => crate::tides::station_tide_error("sidereon_ocean_tide_loading", err),
         }
     })
 }
@@ -882,7 +1071,7 @@ pub unsafe extern "C" fn sidereon_solid_earth_pole_tide(
                     ));
                     SidereonStatus::Ok
                 }
-                Err(err) => extra_invalid_arg("sidereon_solid_earth_pole_tide", err),
+                Err(err) => crate::tides::station_tide_error("sidereon_solid_earth_pole_tide", err),
             }
         },
     )
@@ -991,7 +1180,7 @@ pub unsafe extern "C" fn sidereon_observe_spk_body(
     naif_id: i32,
     out: *mut SidereonBodyObservation,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_observe_spk_body", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_observe_spk_body", SidereonStatus::Panic, || {
         let out = c_try!(require_out(out, "sidereon_observe_spk_body", "out"));
         let station = c_try!(require_ref(station, "sidereon_observe_spk_body", "station"));
         let spk = c_try!(require_ref(spk, "sidereon_observe_spk_body", "spk"));
@@ -1131,7 +1320,7 @@ pub unsafe extern "C" fn sidereon_almanac_seasons(
     out_written: *mut usize,
     out_required: *mut usize,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_almanac_seasons", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_almanac_seasons", SidereonStatus::Panic, || {
         c_try!(init_copy_counts(
             "sidereon_almanac_seasons",
             out_written,
@@ -1181,7 +1370,7 @@ pub unsafe extern "C" fn sidereon_almanac_moon_phases(
     out_written: *mut usize,
     out_required: *mut usize,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_almanac_moon_phases",
         SidereonStatus::Panic,
         || {
@@ -1237,7 +1426,7 @@ pub unsafe extern "C" fn sidereon_almanac_planetary_events(
     out_written: *mut usize,
     out_required: *mut usize,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_almanac_planetary_events",
         SidereonStatus::Panic,
         || {
@@ -1314,7 +1503,7 @@ pub unsafe extern "C" fn sidereon_almanac_meridian_transits(
     out_written: *mut usize,
     out_required: *mut usize,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_almanac_meridian_transits",
         SidereonStatus::Panic,
         || {
@@ -1406,7 +1595,7 @@ pub unsafe extern "C" fn sidereon_almanac_lunar_solar_eclipses(
     out_written: *mut usize,
     out_required: *mut usize,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_almanac_lunar_solar_eclipses",
         SidereonStatus::Panic,
         || {
@@ -1683,7 +1872,7 @@ pub unsafe extern "C" fn sidereon_sun_az_el(
     time_unix_us: i64,
     out: *mut SidereonBodyAzEl,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_sun_az_el", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_sun_az_el", SidereonStatus::Panic, || {
         let out = c_try!(require_out(out, "sidereon_sun_az_el", "out"));
         *out = SidereonBodyAzEl {
             azimuth_deg: 0.0,
@@ -1714,7 +1903,7 @@ pub unsafe extern "C" fn sidereon_moon_az_el(
     time_unix_us: i64,
     out: *mut SidereonBodyAzEl,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_moon_az_el", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_moon_az_el", SidereonStatus::Panic, || {
         let out = c_try!(require_out(out, "sidereon_moon_az_el", "out"));
         *out = SidereonBodyAzEl {
             azimuth_deg: 0.0,
@@ -1744,7 +1933,7 @@ pub unsafe extern "C" fn sidereon_moon_illumination(
     time_unix_us: i64,
     out: *mut SidereonMoonIllumination,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_moon_illumination", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_moon_illumination", SidereonStatus::Panic, || {
         let out = c_try!(require_out(out, "sidereon_moon_illumination", "out"));
         *out = SidereonMoonIllumination {
             illuminated_fraction: 0.0,
@@ -1783,7 +1972,7 @@ pub unsafe extern "C" fn sidereon_moon_elevation_deg(
     time_unix_us: i64,
     out: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_moon_elevation_deg", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_moon_elevation_deg", SidereonStatus::Panic, || {
         let out = c_try!(require_out(out, "sidereon_moon_elevation_deg", "out"));
         *out = 0.0;
         let station = c_try!(require_ref(
@@ -1850,7 +2039,7 @@ pub unsafe extern "C" fn sidereon_find_moon_elevation_crossings(
     out_written: *mut usize,
     out_required: *mut usize,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_find_moon_elevation_crossings",
         SidereonStatus::Panic,
         || {
@@ -1876,7 +2065,7 @@ pub unsafe extern "C" fn sidereon_find_moon_elevation_crossings(
             ) {
                 Ok(crossings) => crossings,
                 Err(err) => {
-                    return map_event_finder_error("sidereon_find_moon_elevation_crossings", err)
+                    return map_event_finder_error("sidereon_find_moon_elevation_crossings", err);
                 }
             };
             let values: Vec<SidereonMoonElevationCrossing> = crossings
@@ -1924,7 +2113,7 @@ pub unsafe extern "C" fn sidereon_find_moon_transits(
     out_written: *mut usize,
     out_required: *mut usize,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_find_moon_transits", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_find_moon_transits", SidereonStatus::Panic, || {
         c_try!(init_copy_counts(
             "sidereon_find_moon_transits",
             out_written,
@@ -1981,7 +2170,7 @@ pub unsafe extern "C" fn sidereon_observe(
     options: *const SidereonObserveOptions,
     out: *mut SidereonBodyObservation,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_observe", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_observe", SidereonStatus::Panic, || {
         let out = c_try!(require_out(out, "sidereon_observe", "out"));
         let station = c_try!(require_ref(station, "sidereon_observe", "station"));
         let station = station_to_core(station);
@@ -2220,7 +2409,7 @@ unsafe fn sun_moon_epoch_batch(
         let ts = UtcInstant::from_unix_microseconds(epoch_unix_us).time_scales();
         let sm = match compute(&ts) {
             Ok(sm) => sm,
-            Err(err) => return extra_invalid_arg(fn_name, err),
+            Err(err) => return map_sun_moon_error(fn_name, err),
         };
         sun.extend_from_slice(&sm.sun);
         moon.extend_from_slice(&sm.moon);
@@ -2296,6 +2485,11 @@ fn map_observe_error(
     fn_name: &str,
     err: sidereon_core::astro::bodies::ObserveError,
 ) -> SidereonStatus {
+    record_engine_error(
+        SidereonEngineErrorFamily::Observe,
+        fn_name,
+        observe_error_value(&err),
+    );
     set_last_error(format!("{fn_name}: {err}"));
     SidereonStatus::Solve
 }
@@ -2304,11 +2498,30 @@ fn map_almanac_error(
     fn_name: &str,
     err: sidereon_core::astro::almanac::AlmanacError,
 ) -> SidereonStatus {
+    record_engine_error(
+        SidereonEngineErrorFamily::Almanac,
+        fn_name,
+        almanac_error_value(&err),
+    );
     set_last_error(format!("{fn_name}: {err}"));
-    match err {
-        sidereon_core::astro::almanac::AlmanacError::InvalidInput { .. }
-        | sidereon_core::astro::almanac::AlmanacError::Finder(_) => SidereonStatus::InvalidArgument,
-        _ => SidereonStatus::Solve,
+    use sidereon_core::astro::almanac::AlmanacError as E;
+    use sidereon_core::astro::events::EventFinderError as F;
+    match &err {
+        E::Ut1OutsideCoverage(_) | E::Finder(F::Ut1OutsideCoverage(_)) => {
+            SidereonStatus::Ut1OutsideCoverage
+        }
+        E::InvalidInput { .. } | E::Finder(F::InvalidInput { .. }) => {
+            SidereonStatus::InvalidArgument
+        }
+        E::Spk(_) | E::Frame(_) | E::EphemerisRequired | E::InferiorPlanetOpposition => {
+            SidereonStatus::Solve
+        }
+        // `AlmanacError` is non-exhaustive: a failure a later engine adds keeps
+        // the engine's text, variant name included, in the message.
+        other => {
+            set_last_error(format!("{fn_name}: {other} ({other:?})"));
+            SidereonStatus::Solve
+        }
     }
 }
 
@@ -2448,6 +2661,11 @@ fn body_az_el_to_c(azel: sidereon_core::astro::bodies::BodyAzEl) -> SidereonBody
 /// failure reports SIDEREON_STATUS_INVALID_ARGUMENT; an ephemeris or
 /// phase-angle geometry failure reports SIDEREON_STATUS_SOLVE.
 fn map_body_observation_error(fn_name: &str, err: BodyObservationError) -> SidereonStatus {
+    record_engine_error(
+        SidereonEngineErrorFamily::BodyObservation,
+        fn_name,
+        body_observation_error_value(&err),
+    );
     set_last_error(format!("{fn_name}: {err}"));
     match err {
         BodyObservationError::FrameTransform(_) => SidereonStatus::InvalidArgument,
@@ -2460,8 +2678,16 @@ fn map_body_observation_error(fn_name: &str, err: BodyObservationError) -> Sider
 /// Map an event-finder error to a status code. Its only cause is an invalid
 /// window/cadence input, reported as SIDEREON_STATUS_INVALID_ARGUMENT.
 fn map_event_finder_error(fn_name: &str, err: EventFinderError) -> SidereonStatus {
+    record_engine_error(
+        SidereonEngineErrorFamily::EventFinder,
+        fn_name,
+        crate::tca::event_finder_error_value(&err),
+    );
     set_last_error(format!("{fn_name}: {err}"));
-    SidereonStatus::InvalidArgument
+    match err {
+        EventFinderError::InvalidInput { .. } => SidereonStatus::InvalidArgument,
+        EventFinderError::Ut1OutsideCoverage(_) => SidereonStatus::Ut1OutsideCoverage,
+    }
 }
 
 unsafe fn moon_elevation_options_from_c(
@@ -2514,5 +2740,529 @@ fn ecliptic_to_c(value: sidereon_core::astro::bodies::Ecliptic) -> SidereonEclip
         longitude_deg: value.longitude_deg,
         latitude_deg: value.latitude_deg,
         distance_km: value.distance_km,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine_error::{
+        clear_engine_error, snapshot_engine_error_for_test, SidereonEngineErrorFamily,
+    };
+    use serde_json::json;
+    use sidereon_core::astro::almanac::AlmanacError;
+    use sidereon_core::astro::angles::AngleError;
+    use sidereon_core::astro::bodies::observe::{BodyObservationError, ObserveError};
+    use sidereon_core::astro::bodies::SunMoonError;
+    use sidereon_core::astro::events::EventFinderError;
+    use sidereon_core::astro::frames::transforms::FrameTransformError;
+    use sidereon_core::astro::spk::SpkError;
+    use sidereon_core::astro::time::DegradeReason;
+
+    #[test]
+    fn test_sun_moon_error_value_variants() {
+        let cases = [
+            (
+                SunMoonError::InvalidInput {
+                    field: "t",
+                    reason: "not finite",
+                },
+                json!({
+                    "kind": "invalid_input",
+                    "fields": { "field": "t", "reason": "not finite" }
+                }),
+            ),
+            (
+                SunMoonError::FrameTransform(FrameTransformError::Ut1OutsideCoverage {
+                    reason: DegradeReason::BeforeCoverage,
+                }),
+                json!({
+                    "kind": "frame_transform",
+                    "fields": {
+                        "cause": {
+                            "kind": "ut1_outside_coverage",
+                            "fields": { "reason": "before_coverage" }
+                        }
+                    }
+                }),
+            ),
+            (
+                SunMoonError::FrameTransform(FrameTransformError::InvalidInput {
+                    field: "jd_tt",
+                    reason: "out of range",
+                }),
+                json!({
+                    "kind": "frame_transform",
+                    "fields": {
+                        "cause": {
+                            "kind": "invalid_input",
+                            "fields": { "field": "jd_tt", "reason": "out of range" }
+                        }
+                    }
+                }),
+            ),
+        ];
+
+        for (err, expected) in cases {
+            assert_eq!(sun_moon_error_value(&err), expected);
+        }
+    }
+
+    #[test]
+    fn test_angle_error_value_variants() {
+        let cases = [
+            (
+                AngleError::InvalidInput {
+                    field: "a",
+                    reason: "zero vector",
+                },
+                json!({
+                    "kind": "invalid_input",
+                    "fields": { "field": "a", "reason": "zero vector" }
+                }),
+            ),
+            (
+                AngleError::InvalidInput {
+                    field: "latitude",
+                    reason: "out of range",
+                },
+                json!({
+                    "kind": "invalid_input",
+                    "fields": { "field": "latitude", "reason": "out of range" }
+                }),
+            ),
+        ];
+
+        for (err, expected) in cases {
+            assert_eq!(angle_error_value(&err), expected);
+        }
+    }
+
+    #[test]
+    fn test_body_observation_error_value_variants() {
+        let cases = [
+            (
+                BodyObservationError::Ephemeris(SunMoonError::InvalidInput {
+                    field: "jd_tt",
+                    reason: "not finite",
+                }),
+                json!({
+                    "kind": "ephemeris",
+                    "fields": {
+                        "cause": {
+                            "kind": "invalid_input",
+                            "fields": { "field": "jd_tt", "reason": "not finite" }
+                        }
+                    }
+                }),
+            ),
+            (
+                BodyObservationError::FrameTransform(FrameTransformError::Ut1OutsideCoverage {
+                    reason: DegradeReason::AfterCoverage,
+                }),
+                json!({
+                    "kind": "frame_transform",
+                    "fields": {
+                        "cause": {
+                            "kind": "ut1_outside_coverage",
+                            "fields": { "reason": "after_coverage" }
+                        }
+                    }
+                }),
+            ),
+            (
+                BodyObservationError::Angle(AngleError::InvalidInput {
+                    field: "sat_pos",
+                    reason: "not finite",
+                }),
+                json!({
+                    "kind": "angle",
+                    "fields": {
+                        "cause": {
+                            "kind": "invalid_input",
+                            "fields": { "field": "sat_pos", "reason": "not finite" }
+                        }
+                    }
+                }),
+            ),
+        ];
+
+        for (err, expected) in cases {
+            assert_eq!(body_observation_error_value(&err), expected);
+        }
+    }
+
+    #[test]
+    fn test_observe_error_value_variants() {
+        let cases = [
+            (
+                ObserveError::Spk(SpkError::UnknownBody { body: 99999 }),
+                json!({
+                    "kind": "spk",
+                    "fields": {
+                        "cause": {
+                            "kind": "unknown_body",
+                            "fields": { "body": 99999 }
+                        }
+                    }
+                }),
+            ),
+            (
+                ObserveError::FrameTransform(FrameTransformError::Ut1OutsideCoverage {
+                    reason: DegradeReason::BeforeCoverage,
+                }),
+                json!({
+                    "kind": "frame_transform",
+                    "fields": {
+                        "cause": {
+                            "kind": "ut1_outside_coverage",
+                            "fields": { "reason": "before_coverage" }
+                        }
+                    }
+                }),
+            ),
+            (
+                ObserveError::SunMoon(SunMoonError::InvalidInput {
+                    field: "t",
+                    reason: "not finite",
+                }),
+                json!({
+                    "kind": "sun_moon",
+                    "fields": {
+                        "cause": {
+                            "kind": "invalid_input",
+                            "fields": { "field": "t", "reason": "not finite" }
+                        }
+                    }
+                }),
+            ),
+            (
+                ObserveError::Angle(AngleError::InvalidInput {
+                    field: "observer_pos",
+                    reason: "zero vector",
+                }),
+                json!({
+                    "kind": "angle",
+                    "fields": {
+                        "cause": {
+                            "kind": "invalid_input",
+                            "fields": { "field": "observer_pos", "reason": "zero vector" }
+                        }
+                    }
+                }),
+            ),
+            (
+                ObserveError::NonFinite,
+                json!({
+                    "kind": "non_finite",
+                    "fields": {}
+                }),
+            ),
+            (
+                ObserveError::DegenerateGeometry,
+                json!({
+                    "kind": "degenerate_geometry",
+                    "fields": {}
+                }),
+            ),
+        ];
+
+        for (err, expected) in cases {
+            assert_eq!(observe_error_value(&err), expected);
+        }
+    }
+
+    #[test]
+    fn test_almanac_error_value_variants() {
+        let cases = [
+            (
+                AlmanacError::Finder(EventFinderError::InvalidInput {
+                    field: "step",
+                    reason: "step must be positive",
+                }),
+                json!({
+                    "kind": "finder",
+                    "fields": {
+                        "cause": {
+                            "kind": "invalid_input",
+                            "fields": { "field": "step", "reason": "step must be positive" }
+                        }
+                    }
+                }),
+            ),
+            (
+                AlmanacError::Spk(SpkError::UnknownBody { body: -1 }),
+                json!({
+                    "kind": "spk",
+                    "fields": {
+                        "cause": {
+                            "kind": "unknown_body",
+                            "fields": { "body": -1 }
+                        }
+                    }
+                }),
+            ),
+            (
+                AlmanacError::Frame("j2000_to_mod"),
+                json!({
+                    "kind": "frame",
+                    "fields": { "message": "j2000_to_mod" }
+                }),
+            ),
+            (
+                AlmanacError::EphemerisRequired,
+                json!({
+                    "kind": "ephemeris_required",
+                    "fields": {}
+                }),
+            ),
+            (
+                AlmanacError::InferiorPlanetOpposition,
+                json!({
+                    "kind": "inferior_planet_opposition",
+                    "fields": {}
+                }),
+            ),
+            (
+                AlmanacError::InvalidInput {
+                    field: "step_seconds",
+                    reason: "not finite",
+                },
+                json!({
+                    "kind": "invalid_input",
+                    "fields": { "field": "step_seconds", "reason": "not finite" }
+                }),
+            ),
+            (
+                AlmanacError::Ut1OutsideCoverage(DegradeReason::BeforeCoverage),
+                json!({
+                    "kind": "ut1_outside_coverage",
+                    "fields": { "reason": "before_coverage" }
+                }),
+            ),
+            (
+                AlmanacError::Ut1OutsideCoverage(DegradeReason::AfterCoverage),
+                json!({
+                    "kind": "ut1_outside_coverage",
+                    "fields": { "reason": "after_coverage" }
+                }),
+            ),
+        ];
+
+        for (err, expected) in cases {
+            assert_eq!(almanac_error_value(&err), expected);
+        }
+    }
+
+    #[test]
+    fn test_sun_az_el_valid_control_and_real_producer_refusal() {
+        clear_engine_error();
+
+        let station = SidereonGeodeticStation {
+            latitude_deg: 0.0,
+            longitude_deg: 0.0,
+            altitude_km: 0.0,
+        };
+        let valid_time_us = 1_704_067_200_000_000i64; // 2024-01-01 00:00:00 UTC
+
+        // 1. Valid control
+        let mut azel = SidereonBodyAzEl {
+            azimuth_deg: 0.0,
+            elevation_deg: 0.0,
+            range_km: 0.0,
+        };
+        let status = unsafe { sidereon_sun_az_el(&station, valid_time_us, &mut azel) };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert!(azel.range_km > 1.4e8 && azel.range_km < 1.6e8);
+        assert!(snapshot_engine_error_for_test().is_none());
+
+        // 2. Real producer refusal: instant at Unix epoch 0 (1970-01-01) is before UT1 coverage
+        let mut refusal_azel = SidereonBodyAzEl {
+            azimuth_deg: 999.0,
+            elevation_deg: 999.0,
+            range_km: 999.0,
+        };
+        let status = unsafe { sidereon_sun_az_el(&station, 0, &mut refusal_azel) };
+        assert_eq!(status, SidereonStatus::InvalidArgument);
+        let (info, payload) = snapshot_engine_error_for_test().expect("engine error recorded");
+        assert_eq!(info.family, SidereonEngineErrorFamily::BodyObservation);
+        let v: serde_json::Value = serde_json::from_str(&payload).expect("valid json");
+        assert_eq!(v["family"], "body_observation");
+        assert_eq!(v["operation"], "sidereon_sun_az_el");
+        assert_eq!(v["error"]["kind"], "frame_transform");
+        assert_eq!(
+            v["error"]["fields"]["cause"]["kind"],
+            "ut1_outside_coverage"
+        );
+        assert_eq!(
+            v["error"]["fields"]["cause"]["fields"]["reason"],
+            "before_coverage"
+        );
+
+        // 3. Real refusal seed followed by success reset
+        let status = unsafe { sidereon_sun_az_el(&station, valid_time_us, &mut azel) };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert!(snapshot_engine_error_for_test().is_none());
+
+        // 4. Real refusal seed followed by early-null reset
+        let status = unsafe { sidereon_sun_az_el(&station, 0, &mut refusal_azel) };
+        assert_eq!(status, SidereonStatus::InvalidArgument);
+        let (info, _) = snapshot_engine_error_for_test().expect("real refusal recorded");
+        assert_eq!(info.family, SidereonEngineErrorFamily::BodyObservation);
+
+        let status = unsafe { sidereon_sun_az_el(&station, valid_time_us, std::ptr::null_mut()) };
+        assert_eq!(status, SidereonStatus::NullPointer);
+        assert!(snapshot_engine_error_for_test().is_none());
+    }
+
+    #[test]
+    fn test_sun_moon_ecef_and_batch_lifecycle() {
+        clear_engine_error();
+
+        let valid_time_us = 1_704_067_200_000_000i64; // 2024-01-01 00:00:00 UTC
+        let mut sun = [0.0; 3];
+        let mut moon = [0.0; 3];
+
+        // 1. Scalar valid control
+        let status =
+            unsafe { sidereon_sun_moon_ecef(valid_time_us, sun.as_mut_ptr(), moon.as_mut_ptr()) };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert!(snapshot_engine_error_for_test().is_none());
+
+        // 2. Scalar real refusal: Unix epoch 0 (1970-01-01) is before UT1 coverage
+        let status = unsafe { sidereon_sun_moon_ecef(0, sun.as_mut_ptr(), moon.as_mut_ptr()) };
+        assert_eq!(status, SidereonStatus::InvalidArgument);
+        let (info, payload) = snapshot_engine_error_for_test().expect("SunMoon error recorded");
+        assert_eq!(info.family, SidereonEngineErrorFamily::SunMoon);
+        let v: serde_json::Value = serde_json::from_str(&payload).expect("valid json");
+        assert_eq!(v["family"], "sun_moon");
+        assert_eq!(v["operation"], "sidereon_sun_moon_ecef");
+        assert_eq!(v["error"]["kind"], "frame_transform");
+        assert_eq!(
+            v["error"]["fields"]["cause"]["kind"],
+            "ut1_outside_coverage"
+        );
+        assert_eq!(
+            v["error"]["fields"]["cause"]["fields"]["reason"],
+            "before_coverage"
+        );
+
+        // 3. Scalar success reset
+        let status =
+            unsafe { sidereon_sun_moon_ecef(valid_time_us, sun.as_mut_ptr(), moon.as_mut_ptr()) };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert!(snapshot_engine_error_for_test().is_none());
+
+        // 4. Scalar early-null reset after real refusal
+        let status = unsafe { sidereon_sun_moon_ecef(0, sun.as_mut_ptr(), moon.as_mut_ptr()) };
+        assert_eq!(status, SidereonStatus::InvalidArgument);
+        assert!(snapshot_engine_error_for_test().is_some());
+        let status = unsafe {
+            sidereon_sun_moon_ecef(valid_time_us, std::ptr::null_mut(), moon.as_mut_ptr())
+        };
+        assert_eq!(status, SidereonStatus::NullPointer);
+        assert!(snapshot_engine_error_for_test().is_none());
+
+        // 5. Batch valid control
+        let epochs = [valid_time_us];
+        let status = unsafe {
+            sidereon_sun_moon_ecef_batch(
+                epochs.as_ptr(),
+                1,
+                sun.as_mut_ptr(),
+                3,
+                moon.as_mut_ptr(),
+                3,
+            )
+        };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert!(snapshot_engine_error_for_test().is_none());
+
+        // 6. Batch real refusal: Unix epoch 0 (1970-01-01) is before UT1 coverage
+        let bad_epochs = [0i64];
+        let status = unsafe {
+            sidereon_sun_moon_ecef_batch(
+                bad_epochs.as_ptr(),
+                1,
+                sun.as_mut_ptr(),
+                3,
+                moon.as_mut_ptr(),
+                3,
+            )
+        };
+        assert_eq!(status, SidereonStatus::InvalidArgument);
+        let (info, payload) =
+            snapshot_engine_error_for_test().expect("SunMoon batch error recorded");
+        assert_eq!(info.family, SidereonEngineErrorFamily::SunMoon);
+        let v: serde_json::Value = serde_json::from_str(&payload).expect("valid json");
+        assert_eq!(v["family"], "sun_moon");
+        assert_eq!(v["operation"], "sidereon_sun_moon_ecef_batch");
+        assert_eq!(v["error"]["kind"], "frame_transform");
+        assert_eq!(
+            v["error"]["fields"]["cause"]["kind"],
+            "ut1_outside_coverage"
+        );
+        assert_eq!(
+            v["error"]["fields"]["cause"]["fields"]["reason"],
+            "before_coverage"
+        );
+
+        // 7. Batch success reset
+        let status = unsafe {
+            sidereon_sun_moon_ecef_batch(
+                epochs.as_ptr(),
+                1,
+                sun.as_mut_ptr(),
+                3,
+                moon.as_mut_ptr(),
+                3,
+            )
+        };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert!(snapshot_engine_error_for_test().is_none());
+
+        // 8. Batch early-null reset after real refusal
+        let status = unsafe {
+            sidereon_sun_moon_ecef_batch(
+                bad_epochs.as_ptr(),
+                1,
+                sun.as_mut_ptr(),
+                3,
+                moon.as_mut_ptr(),
+                3,
+            )
+        };
+        assert_eq!(status, SidereonStatus::InvalidArgument);
+        assert!(snapshot_engine_error_for_test().is_some());
+        let status = unsafe {
+            sidereon_sun_moon_ecef_batch(
+                std::ptr::null(),
+                1,
+                sun.as_mut_ptr(),
+                3,
+                moon.as_mut_ptr(),
+                3,
+            )
+        };
+        assert_eq!(status, SidereonStatus::NullPointer);
+        assert!(snapshot_engine_error_for_test().is_none());
+
+        // 9. ECI real refusal: non-finite input yields invalid_input
+        let status =
+            unsafe { sidereon_sun_moon_eci(f64::NAN, sun.as_mut_ptr(), moon.as_mut_ptr()) };
+        assert_eq!(status, SidereonStatus::InvalidArgument);
+        let (info, payload) = snapshot_engine_error_for_test().expect("SunMoon ECI error recorded");
+        assert_eq!(info.family, SidereonEngineErrorFamily::SunMoon);
+        let v: serde_json::Value = serde_json::from_str(&payload).expect("valid json");
+        assert_eq!(v["family"], "sun_moon");
+        assert_eq!(v["operation"], "sidereon_sun_moon_eci");
+        assert_eq!(v["error"]["kind"], "invalid_input");
+        assert_eq!(v["error"]["fields"]["field"], "t");
+        assert_eq!(v["error"]["fields"]["reason"], "not finite");
+
+        // 10. ECI success reset
+        let status = unsafe { sidereon_sun_moon_eci(0.0, sun.as_mut_ptr(), moon.as_mut_ptr()) };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert!(snapshot_engine_error_for_test().is_none());
     }
 }

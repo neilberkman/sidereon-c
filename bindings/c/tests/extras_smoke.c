@@ -6,8 +6,8 @@
  * Lambert, conjunction, civil-time conversions, CDM parse/serialize, RINEX
  * clock parse, broadcast orbit/clock evaluation, DGNSS differential
  * corrections, and broadcast-vs-precise comparison. Every call delegates to
- * sidereon-core; this program only checks the FFI marshaling and that the
- * engine produces sane numbers.
+ * sidereon-core; each engine value is compared exactly with sidereon-core's
+ * own result for the same inputs (tests/w5_extras_pins.h).
  *
  * argv: <grg_sp3> <cdm_kvn> <cdm_xml> <rinex_clk> <nav> <precise_sp3>
  */
@@ -18,6 +18,7 @@
 #include <string.h>
 
 #include "sidereon.h"
+#include "w5_extras_pins.h"
 
 static int failures = 0;
 
@@ -40,8 +41,19 @@ static void check(int ok, const char *what) {
     }
 }
 
-static void check_close(double got, double want, double tol, const char *what) {
-    check(isfinite(got) && fabs(got - want) <= tol, what);
+static int same_bits(double got, uint64_t want) {
+    uint64_t bits;
+    memcpy(&bits, &got, sizeof(bits));
+    return bits == want;
+}
+
+static int same_bits_n(const double *got, const uint64_t *want, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        if (!same_bits(got[i], want[i])) {
+            return 0;
+        }
+    }
+    return 1;
 }
 
 static uint8_t *read_file(const char *path, size_t *out_len) {
@@ -75,15 +87,24 @@ static uint8_t *read_file(const char *path, size_t *out_len) {
 
 static void test_rf(void) {
     double fspl = 0.0, eirp = 0.0, cn0 = 0.0, margin = 0.0, lambda = 0.0, gain = 0.0;
-    check(sidereon_rf_fspl(36000.0, 1575.42, &fspl) == SIDEREON_STATUS_OK && fspl > 0.0,
+    check(sidereon_rf_fspl(36000.0, 1575.42, &fspl) == SIDEREON_STATUS_OK &&
+              same_bits(fspl, W5_EXTRAS_RF_FSPL_BITS),
           "rf_fspl");
-    check(sidereon_rf_eirp(40.0, 30.0, &eirp) == SIDEREON_STATUS_OK, "rf_eirp");
-    check(sidereon_rf_cn0(eirp, fspl, 5.0, 2.0, &cn0) == SIDEREON_STATUS_OK, "rf_cn0");
+    check(sidereon_rf_eirp(40.0, 30.0, &eirp) == SIDEREON_STATUS_OK &&
+              same_bits(eirp, W5_EXTRAS_RF_EIRP_BITS),
+          "rf_eirp");
+    check(sidereon_rf_cn0(eirp, fspl, 5.0, 2.0, &cn0) == SIDEREON_STATUS_OK &&
+              same_bits(cn0, W5_EXTRAS_RF_CN0_BITS),
+          "rf_cn0");
     SidereonLinkBudget budget = {eirp, fspl, 5.0, 2.0, 35.0};
-    check(sidereon_rf_link_margin(&budget, &margin) == SIDEREON_STATUS_OK, "rf_link_margin");
-    check(sidereon_rf_wavelength(1.57542e9, &lambda) == SIDEREON_STATUS_OK && lambda > 0.0,
+    check(sidereon_rf_link_margin(&budget, &margin) == SIDEREON_STATUS_OK &&
+              same_bits(margin, W5_EXTRAS_RF_LINK_MARGIN_BITS),
+          "rf_link_margin");
+    check(sidereon_rf_wavelength(1.57542e9, &lambda) == SIDEREON_STATUS_OK &&
+              same_bits(lambda, W5_EXTRAS_RF_WAVELENGTH_BITS),
           "rf_wavelength");
-    check(sidereon_rf_dish_gain(2.4, 1.57542e9, 0.6, &gain) == SIDEREON_STATUS_OK,
+    check(sidereon_rf_dish_gain(2.4, 1.57542e9, 0.6, &gain) == SIDEREON_STATUS_OK &&
+              same_bits(gain, W5_EXTRAS_RF_DISH_GAIN_BITS),
           "rf_dish_gain");
 }
 
@@ -91,112 +112,184 @@ static void test_frequencies_combinations(void) {
     double f1 = 0.0, f2 = 0.0, lambda = 0.0, glo = 0.0, def = 0.0;
     check(sidereon_frequency_hz(SIDEREON_GNSS_SYSTEM_GPS, SIDEREON_CARRIER_BAND_L1, &f1) ==
               SIDEREON_STATUS_OK &&
-              fabs(f1 - 1.57542e9) < 1.0,
+              same_bits(f1, W5_EXTRAS_GPS_L1_HZ_BITS),
           "frequency_hz GPS L1");
     check(sidereon_frequency_hz(SIDEREON_GNSS_SYSTEM_GPS, SIDEREON_CARRIER_BAND_L2, &f2) ==
-              SIDEREON_STATUS_OK,
+                  SIDEREON_STATUS_OK &&
+              same_bits(f2, W5_EXTRAS_GPS_L2_HZ_BITS),
           "frequency_hz GPS L2");
     check(sidereon_wavelength_m(SIDEREON_GNSS_SYSTEM_GPS, SIDEREON_CARRIER_BAND_L1, &lambda) ==
-              SIDEREON_STATUS_OK,
+                  SIDEREON_STATUS_OK &&
+              same_bits(lambda, W5_EXTRAS_GPS_L1_WAVELENGTH_M_BITS),
           "wavelength_m");
-    check(sidereon_glonass_g1_frequency_hz(0, &glo) == SIDEREON_STATUS_OK && glo > 0.0,
+    check(sidereon_glonass_g1_frequency_hz(0, &glo) == SIDEREON_STATUS_OK &&
+              same_bits(glo, W5_EXTRAS_GLONASS_G1_CHANNEL_0_HZ_BITS),
           "glonass_g1_frequency_hz");
     check(sidereon_default_spp_frequency_hz(SIDEREON_GNSS_SYSTEM_GPS, &def) ==
-              SIDEREON_STATUS_OK,
+                  SIDEREON_STATUS_OK &&
+              same_bits(def, W5_EXTRAS_GPS_DEFAULT_SPP_HZ_BITS),
           "default_spp_frequency_hz");
 
     double gamma = 0.0, namp = 0.0, iono = 0.0, iono_phase = 0.0;
-    check(sidereon_combination_gamma(f1, f2, &gamma) == SIDEREON_STATUS_OK && gamma > 1.0,
+    check(sidereon_combination_gamma(f1, f2, &gamma) == SIDEREON_STATUS_OK &&
+              same_bits(gamma, W5_EXTRAS_GAMMA_BITS),
           "combination_gamma");
-    check(sidereon_combination_noise_amplification(f1, f2, &namp) == SIDEREON_STATUS_OK,
+    check(sidereon_combination_noise_amplification(f1, f2, &namp) == SIDEREON_STATUS_OK &&
+              same_bits(namp, W5_EXTRAS_NOISE_AMPLIFICATION_BITS),
           "combination_noise_amplification");
     check(sidereon_combination_ionosphere_free(2.0e7, 2.0e7, f1, f2, &iono) ==
-              SIDEREON_STATUS_OK,
+                  SIDEREON_STATUS_OK &&
+              same_bits(iono, W5_EXTRAS_IONOSPHERE_FREE_BITS),
           "combination_ionosphere_free");
     check(sidereon_combination_ionosphere_free_phase_m(2.0e7, 2.0e7, f1, f2, &iono_phase) ==
-              SIDEREON_STATUS_OK,
+                  SIDEREON_STATUS_OK &&
+              same_bits(iono_phase, W5_EXTRAS_IONOSPHERE_FREE_PHASE_M_BITS),
           "combination_ionosphere_free_phase_m");
 }
 
 static void test_carrier_phase_scalars(void) {
     double pm = 0.0, gf = 0.0, wl = 0.0, nl = 0.0, mw = 0.0, wlc = 0.0, cmc = 0.0;
-    check(sidereon_carrier_phase_meters(1.0e8, 1.57542e9, &pm) == SIDEREON_STATUS_OK,
+    check(sidereon_carrier_phase_meters(1.0e8, 1.57542e9, &pm) == SIDEREON_STATUS_OK &&
+              same_bits(pm, W5_EXTRAS_PHASE_METERS_BITS),
           "carrier_phase_meters");
-    check(sidereon_carrier_geometry_free(2.0e7, 2.0e7, &gf) == SIDEREON_STATUS_OK,
+    check(sidereon_carrier_geometry_free(2.0e7, 2.0e7, &gf) == SIDEREON_STATUS_OK &&
+              same_bits(gf, W5_EXTRAS_GEOMETRY_FREE_BITS),
           "carrier_geometry_free");
     check(sidereon_carrier_wide_lane_wavelength(1.57542e9, 1.22760e9, &wl) ==
               SIDEREON_STATUS_OK &&
-              wl > 0.0,
+              same_bits(wl, W5_EXTRAS_WIDE_LANE_WAVELENGTH_BITS),
           "carrier_wide_lane_wavelength");
     check(sidereon_carrier_narrow_lane_code(2.0e7, 2.0e7, 1.57542e9, 1.22760e9, &nl) ==
-              SIDEREON_STATUS_OK,
+                  SIDEREON_STATUS_OK &&
+              same_bits(nl, W5_EXTRAS_NARROW_LANE_CODE_BITS),
           "carrier_narrow_lane_code");
     check(sidereon_carrier_melbourne_wubbena(1.0e8, 8.0e7, 2.0e7, 2.0e7, 1.57542e9, 1.22760e9,
-                                             &mw) == SIDEREON_STATUS_OK,
+                                             &mw) == SIDEREON_STATUS_OK &&
+              same_bits(mw, W5_EXTRAS_MELBOURNE_WUBBENA_BITS),
           "carrier_melbourne_wubbena");
     check(sidereon_carrier_wide_lane_cycles(1.0e8, 8.0e7, 2.0e7, 2.0e7, 1.57542e9, 1.22760e9,
-                                            &wlc) == SIDEREON_STATUS_OK,
+                                            &wlc) == SIDEREON_STATUS_OK &&
+              same_bits(wlc, W5_EXTRAS_WIDE_LANE_CYCLES_BITS),
           "carrier_wide_lane_cycles");
     check(sidereon_carrier_code_minus_carrier(2.0e7, 1.0e8, 1.57542e9, &cmc) ==
-              SIDEREON_STATUS_OK,
+                  SIDEREON_STATUS_OK &&
+              same_bits(cmc, W5_EXTRAS_CODE_MINUS_CARRIER_BITS),
           "carrier_code_minus_carrier");
 }
 
 static void test_signal_quality(void) {
     int8_t chip = 0;
     double loss = 0.0, loss_db = 0.0, snr = 0.0;
-    check(sidereon_signal_ca_chip(1, 0, &chip) == SIDEREON_STATUS_OK && (chip == 1 || chip == -1),
+    check(sidereon_signal_ca_chip(1, 0, &chip) == SIDEREON_STATUS_OK &&
+              chip == W5_EXTRAS_CA_CHIP_PRN1_INDEX0,
           "signal_ca_chip");
-    check(sidereon_signal_coherent_loss(100.0, 0.001, &loss) == SIDEREON_STATUS_OK,
+    check(sidereon_signal_coherent_loss(100.0, 0.001, &loss) == SIDEREON_STATUS_OK &&
+              same_bits(loss, W5_EXTRAS_COHERENT_LOSS_BITS),
           "signal_coherent_loss");
-    check(sidereon_signal_coherent_loss_db(100.0, 0.001, &loss_db) == SIDEREON_STATUS_OK,
+    check(sidereon_signal_coherent_loss_db(100.0, 0.001, &loss_db) == SIDEREON_STATUS_OK &&
+              same_bits(loss_db, W5_EXTRAS_COHERENT_LOSS_DB_BITS),
           "signal_coherent_loss_db");
-    check(sidereon_signal_snr_post_db(45.0, 0.02, &snr) == SIDEREON_STATUS_OK,
+    check(sidereon_signal_snr_post_db(45.0, 0.02, &snr) == SIDEREON_STATUS_OK &&
+              same_bits(snr, W5_EXTRAS_SNR_POST_DB_BITS),
           "signal_snr_post_db");
 
     SidereonPseudorangeVarianceOptions opts;
     check(sidereon_pseudorange_variance_options_init(&opts) == SIDEREON_STATUS_OK,
           "pseudorange_variance_options_init");
     double var = 0.0, chi2 = 0.0;
-    check(sidereon_pseudorange_variance(30.0, &opts, &var) == SIDEREON_STATUS_OK && var > 0.0,
+    check(sidereon_pseudorange_variance(30.0, &opts, &var) == SIDEREON_STATUS_OK &&
+              same_bits(var, W5_EXTRAS_PSEUDORANGE_VARIANCE_BITS),
           "pseudorange_variance");
-    check(sidereon_chi2_inv(0.999, 1, &chi2) == SIDEREON_STATUS_OK && chi2 > 0.0, "chi2_inv");
+    check(sidereon_chi2_inv(0.999, 1, &chi2) == SIDEREON_STATUS_OK &&
+              same_bits(chi2, W5_EXTRAS_CHI2_INV_BITS),
+          "chi2_inv");
 }
 
 static void test_raim(void) {
     const char *sats[5] = {"G01", "G02", "G03", "G04", "G05"};
     double residuals[5] = {0.4, -0.3, 0.5, -0.2, 0.35};
     SidereonRaimResult result;
-    check(sidereon_raim(sats, residuals, 5, 1.0e-3, true, NULL, 0, false, 0, &result) ==
-              SIDEREON_STATUS_OK,
+    check(sidereon_raim(sats, residuals, NULL, 5, 1.0e-3, SIDEREON_RAIM_WEIGHTS_MODE_UNIT, NULL, 0,
+                        false, 0, &result) == SIDEREON_STATUS_OK,
           "raim");
-    check(!result.fault_detected && isfinite(result.test_statistic), "raim summary readable");
-    check_close(result.test_statistic, 0.6625, 1.0e-12, "raim test statistic");
-    check(result.has_threshold && result.threshold > result.test_statistic, "raim threshold");
-    check(result.has_reduced_chi_square, "raim reduced chi-square present");
-    check_close(result.reduced_chi_square, 0.6625, 1.0e-12, "raim reduced chi-square");
-    check_close(result.rms_m, sqrt(0.6625 / 5.0), 1.0e-12, "raim rms");
-    check(result.dof == 1 && result.testable, "raim dof");
-    check(result.normalized_residual_count == 5, "raim normalized residual count");
-    check(result.has_worst_sat && strncmp(result.worst_sat, "G03", sizeof(result.worst_sat)) == 0,
+    check(result.fault_detected == W5_EXTRAS_RAIM_FAULT_DETECTED &&
+              same_bits(result.test_statistic, W5_EXTRAS_RAIM_TEST_STATISTIC_BITS),
+          "raim test statistic");
+    check(result.has_threshold == W5_EXTRAS_RAIM_HAS_THRESHOLD &&
+              same_bits(result.threshold, W5_EXTRAS_RAIM_THRESHOLD_BITS),
+          "raim threshold");
+    check(result.has_reduced_chi_square == W5_EXTRAS_RAIM_HAS_REDUCED_CHI_SQUARE &&
+              same_bits(result.reduced_chi_square, W5_EXTRAS_RAIM_REDUCED_CHI_SQUARE_BITS),
+          "raim reduced chi-square");
+    check(same_bits(result.rms_m, W5_EXTRAS_RAIM_RMS_M_BITS), "raim rms");
+    check(result.dof == W5_EXTRAS_RAIM_DOF && result.testable == W5_EXTRAS_RAIM_TESTABLE,
+          "raim dof");
+    check(result.normalized_residual_count == W5_EXTRAS_RAIM_NORMALIZED_RESIDUAL_COUNT,
+          "raim normalized residual count");
+    check(result.has_worst_sat == W5_EXTRAS_RAIM_HAS_WORST_SAT &&
+              strncmp(result.worst_sat, W5_EXTRAS_RAIM_WORST_SAT, sizeof(result.worst_sat)) == 0,
           "raim worst satellite");
 
     size_t written = 0;
     size_t required = 0;
-    check(sidereon_raim_normalized_residuals(sats, residuals, 5, 1.0e-3, true, NULL, 0, false, 0,
+    check(sidereon_raim_normalized_residuals(sats, residuals, NULL, 5, 1.0e-3,
+                                             SIDEREON_RAIM_WEIGHTS_MODE_UNIT, NULL, 0, false, 0,
                                              NULL, 0, &written, &required) ==
               SIDEREON_STATUS_OK &&
-              written == 0 && required == 5,
+              written == 0 && required == W5_EXTRAS_RAIM_NORMALIZED_RESIDUAL_COUNT,
           "raim normalized residual query");
     SidereonRaimNormalizedResidual rows[5];
-    check(sidereon_raim_normalized_residuals(sats, residuals, 5, 1.0e-3, true, NULL, 0, false, 0,
+    check(sidereon_raim_normalized_residuals(sats, residuals, NULL, 5, 1.0e-3,
+                                             SIDEREON_RAIM_WEIGHTS_MODE_UNIT, NULL, 0, false, 0,
                                              rows, 5, &written, &required) ==
               SIDEREON_STATUS_OK &&
-              written == 5 && required == 5,
+              written == required && required == W5_EXTRAS_RAIM_NORMALIZED_RESIDUAL_COUNT,
           "raim normalized residual copy");
-    check(strncmp(rows[0].sat_id.bytes, "G01", sizeof(rows[0].sat_id.bytes)) == 0,
+    check(strncmp(rows[0].sat_id.bytes, W5_EXTRAS_RAIM_FIRST_NORMALIZED_SAT,
+                  sizeof(rows[0].sat_id.bytes)) == 0,
           "raim normalized residual sat id");
-    check_close(rows[0].normalized_residual, 0.4, 1.0e-12, "raim normalized residual value");
+    check(same_bits(rows[0].normalized_residual, W5_EXTRAS_RAIM_FIRST_NORMALIZED_RESIDUAL_BITS),
+          "raim normalized residual value");
+
+    /* The engine default weights read each residual's variance. */
+    double variances[5];
+    memcpy(variances, W5_EXTRAS_RAIM_VARIANCES_BITS, sizeof(variances));
+    SidereonRaimResult solution;
+    check(sidereon_raim(sats, residuals, variances, 5, 1.0e-3,
+                        SIDEREON_RAIM_WEIGHTS_MODE_SOLUTION, NULL, 0, false, 0,
+                        &solution) == SIDEREON_STATUS_OK &&
+              solution.fault_detected == W5_EXTRAS_RAIM_SOLUTION_FAULT_DETECTED &&
+              same_bits(solution.test_statistic, W5_EXTRAS_RAIM_SOLUTION_TEST_STATISTIC_BITS),
+          "raim over the residual variances");
+    check(sidereon_raim_normalized_residuals(sats, residuals, variances, 5, 1.0e-3,
+                                             SIDEREON_RAIM_WEIGHTS_MODE_SOLUTION, NULL, 0, false,
+                                             0, rows, 5, &written, &required) ==
+                  SIDEREON_STATUS_OK &&
+              same_bits(rows[0].normalized_residual,
+                        W5_EXTRAS_RAIM_SOLUTION_FIRST_NORMALIZED_RESIDUAL_BITS),
+          "raim residual over its standard deviation");
+    check(W5_EXTRAS_RAIM_SOLUTION_WITHOUT_VARIANCES_REFUSED &&
+              sidereon_raim(sats, residuals, NULL, 5, 1.0e-3,
+                            SIDEREON_RAIM_WEIGHTS_MODE_SOLUTION, NULL, 0, false, 0,
+                            &solution) == SIDEREON_STATUS_INVALID_ARGUMENT,
+          "raim solution weights without variances refused");
+    check(sidereon_last_quality_error_kind() == SIDEREON_QUALITY_ERROR_KIND_MISSING_VARIANCES,
+          "raim missing variances kind retained");
+    check(sidereon_raim(sats, residuals, NULL, 5, 1.0e-3,
+                        SIDEREON_RAIM_WEIGHTS_MODE_UNIT, NULL, 0, false, 0,
+                        &solution) == SIDEREON_STATUS_OK &&
+              sidereon_last_quality_error_kind() == SIDEREON_QUALITY_ERROR_KIND_NONE,
+          "successful RAIM clears quality kind");
+    check(sidereon_raim(sats, residuals, NULL, 5, 1.0e-3,
+                        SIDEREON_RAIM_WEIGHTS_MODE_SOLUTION, NULL, 0, false, 0,
+                        &solution) == SIDEREON_STATUS_INVALID_ARGUMENT &&
+              sidereon_last_quality_error_kind() == SIDEREON_QUALITY_ERROR_KIND_MISSING_VARIANCES,
+          "raim missing variances reseeded");
+    check(sidereon_raim(sats, residuals, NULL, 5, 1.0e-3,
+                        SIDEREON_RAIM_WEIGHTS_MODE_SOLUTION, NULL, 0, false, 0,
+                        NULL) == SIDEREON_STATUS_NULL_POINTER &&
+              sidereon_last_quality_error_kind() == SIDEREON_QUALITY_ERROR_KIND_NONE,
+          "early RAIM argument failure clears quality kind");
 }
 
 static void test_tropo(void) {
@@ -205,50 +298,78 @@ static void test_tropo(void) {
     // (sidereon_core::spp::SurfaceMet::default()) as the other bindings.
     SidereonMet met = {0.0, 0.0, 0.0};
     check(sidereon_met_init(&met) == SIDEREON_STATUS_OK &&
-              met.pressure_hpa == 1013.25 && met.temperature_k == 288.15 &&
-              met.relative_humidity == 0.5,
+              same_bits(met.pressure_hpa, W5_EXTRAS_MET_PRESSURE_HPA_BITS) &&
+              same_bits(met.temperature_k, W5_EXTRAS_MET_TEMPERATURE_K_BITS) &&
+              same_bits(met.relative_humidity, W5_EXTRAS_MET_RELATIVE_HUMIDITY_BITS),
           "met_init equals core SurfaceMet::default triad");
     SidereonZenithDelay zd = {0.0, 0.0};
     check(sidereon_tropo_zenith_delay(receiver, &met, &zd) == SIDEREON_STATUS_OK &&
-              zd.dry_m > 1.5 && zd.dry_m < 3.0,
+              same_bits(zd.dry_m, W5_EXTRAS_ZENITH_DRY_M_BITS) &&
+              same_bits(zd.wet_m, W5_EXTRAS_ZENITH_WET_M_BITS),
           "tropo_zenith_delay");
     SidereonMappingFactors mf = {0.0, 0.0};
     check(sidereon_tropo_mapping_factors(0.5, receiver, SIDEREON_TIME_SCALE_TT, 2451545.0, 0.0,
                                          &mf) == SIDEREON_STATUS_OK &&
-              mf.dry > 1.0,
+              same_bits(mf.dry, W5_EXTRAS_MAPPING_DRY_BITS) &&
+              same_bits(mf.wet, W5_EXTRAS_MAPPING_WET_BITS),
           "tropo_mapping_factors");
     double slant = 0.0;
     check(sidereon_tropo_slant_delay(0.5, receiver, &met, SIDEREON_TIME_SCALE_TT, 2451545.0, 0.0,
                                      &slant) == SIDEREON_STATUS_OK &&
-              slant > 0.0,
+              same_bits(slant, W5_EXTRAS_SLANT_DELAY_BITS),
           "tropo_slant_delay");
 }
 
 static void test_tides(void) {
-    double station[3] = {4517590.0, 837270.0, 4527420.0};
-    double sun_ecef[3] = {1.4e11, 0.4e11, 0.2e11};
-    double moon_ecef[3] = {3.0e8, 1.5e8, 1.0e8};
+    const double station[3] = {4517590.0, 837270.0, 4527420.0};
+    const double sun_ecef[3] = {1.4e11, 0.4e11, 0.2e11};
+    const double moon_ecef[3] = {3.0e8, 1.5e8, 1.0e8};
     double solid[3] = {0.0, 0.0, 0.0};
     check(sidereon_solid_earth_tide(station, 2020, 6, 24, 12.0, sun_ecef, moon_ecef, solid) ==
                   SIDEREON_STATUS_OK &&
-              isfinite(solid[0]) && isfinite(solid[1]) && isfinite(solid[2]) &&
-              hypot(hypot(solid[0], solid[1]), solid[2]) < 1.0,
+              same_bits_n(solid, W5_EXTRAS_SOLID_EARTH_TIDE_M_BITS, 3),
           "solid_earth_tide");
+    double solid_with_constants[3] = {0.0, 0.0, 0.0};
+    /* sidereon-core's solid_earth_tide is the Conventions constant set. */
+    check(sidereon_solid_earth_tide_with_constants(
+              station, 2020, 6, 24, 12.0, sun_ecef, moon_ecef,
+              SIDEREON_STATION_TIDE_CONSTANTS_CONVENTIONS, solid_with_constants) ==
+                  SIDEREON_STATUS_OK &&
+              same_bits_n(solid_with_constants, W5_EXTRAS_SOLID_EARTH_TIDE_M_BITS, 3),
+          "solid_earth_tide_with_constants");
 
     SidereonOceanLoadingBlq blq;
     memset(&blq, 0, sizeof(blq));
     double ocean[3] = {1.0, 1.0, 1.0};
     check(sidereon_ocean_tide_loading(station, 2020, 6, 24, 12.0, &blq, ocean) ==
                   SIDEREON_STATUS_OK &&
-              fabs(ocean[0]) + fabs(ocean[1]) + fabs(ocean[2]) < 1.0e-12,
+              same_bits_n(ocean, W5_EXTRAS_OCEAN_TIDE_ZERO_BLQ_M_BITS, 3),
           "ocean_tide_loading zero BLQ");
 
     double pole[3] = {0.0, 0.0, 0.0};
     check(sidereon_solid_earth_pole_tide(station, 2020, 6, 24, 12.0, 0.1, 0.3, pole) ==
                   SIDEREON_STATUS_OK &&
-              isfinite(pole[0]) && isfinite(pole[1]) && isfinite(pole[2]) &&
-              hypot(hypot(pole[0], pole[1]), pole[2]) < 1.0,
+              same_bits_n(pole, W5_EXTRAS_POLE_TIDE_M_BITS, 3),
           "solid_earth_pole_tide");
+}
+
+static void test_gravity_tide_system_selector(void) {
+    SidereonStatePropagationConfig config;
+    SidereonEphemeris *ephemeris = NULL;
+    double time_s = 0.0;
+    check(sidereon_state_propagation_config_init(&config) == SIDEREON_STATUS_OK,
+          "state propagation config init for tide selector");
+    check(sidereon_propagate_state_with_tide_system(
+              &config, SIDEREON_GRAVITY_TIDE_SYSTEM_TIDE_FREE, &time_s, 1, &ephemeris) ==
+              SIDEREON_STATUS_OK &&
+              ephemeris != NULL,
+          "checked tide-free selector");
+    sidereon_ephemeris_free(ephemeris);
+    ephemeris = NULL;
+    check(sidereon_propagate_state_with_tide_system(&config, UINT32_MAX, &time_s, 1, &ephemeris) ==
+                  SIDEREON_STATUS_INVALID_ARGUMENT &&
+              ephemeris == NULL,
+          "invalid gravity tide selector refused");
 }
 
 static void test_angles_eclipse_bodies(void) {
@@ -257,26 +378,36 @@ static void test_angles_eclipse_bodies(void) {
     double moon[3] = {3.8e5, 0.0, 0.0};
     double observer[3] = {6371.0, 0.0, 0.0};
     double ang = 0.0;
-    check(sidereon_sun_angle_deg(sat, sun, &ang) == SIDEREON_STATUS_OK, "sun_angle_deg");
-    check(sidereon_moon_angle_deg(sat, moon, &ang) == SIDEREON_STATUS_OK, "moon_angle_deg");
-    check(sidereon_sun_elevation_deg(sat, sun, &ang) == SIDEREON_STATUS_OK, "sun_elevation_deg");
-    check(sidereon_phase_angle_deg(sat, sun, observer, &ang) == SIDEREON_STATUS_OK,
+    check(sidereon_sun_angle_deg(sat, sun, &ang) == SIDEREON_STATUS_OK &&
+              same_bits(ang, W5_EXTRAS_SUN_ANGLE_DEG_BITS),
+          "sun_angle_deg");
+    check(sidereon_moon_angle_deg(sat, moon, &ang) == SIDEREON_STATUS_OK &&
+              same_bits(ang, W5_EXTRAS_MOON_ANGLE_DEG_BITS),
+          "moon_angle_deg");
+    check(sidereon_sun_elevation_deg(sat, sun, &ang) == SIDEREON_STATUS_OK &&
+              same_bits(ang, W5_EXTRAS_SUN_ELEVATION_DEG_BITS),
+          "sun_elevation_deg");
+    check(sidereon_phase_angle_deg(sat, sun, observer, &ang) == SIDEREON_STATUS_OK &&
+              same_bits(ang, W5_EXTRAS_PHASE_ANGLE_DEG_BITS),
           "phase_angle_deg");
-    check(sidereon_earth_angular_radius_deg(sat, &ang) == SIDEREON_STATUS_OK && ang > 0.0,
+    check(sidereon_earth_angular_radius_deg(sat, &ang) == SIDEREON_STATUS_OK &&
+              same_bits(ang, W5_EXTRAS_EARTH_ANGULAR_RADIUS_DEG_BITS),
           "earth_angular_radius_deg");
 
     double frac = 0.0;
     SidereonEclipseStatus status = SIDEREON_ECLIPSE_STATUS_UMBRA;
-    check(sidereon_eclipse_shadow_fraction(sat, sun, &frac) == SIDEREON_STATUS_OK,
+    check(sidereon_eclipse_shadow_fraction(sat, sun, &frac) == SIDEREON_STATUS_OK &&
+              same_bits(frac, W5_EXTRAS_ECLIPSE_SHADOW_FRACTION_BITS),
           "eclipse_shadow_fraction");
     check(sidereon_eclipse_status(sat, sun, &status) == SIDEREON_STATUS_OK &&
-              status == SIDEREON_ECLIPSE_STATUS_SUNLIT,
-          "eclipse_status sunlit");
+              status == W5_EXTRAS_ECLIPSE_STATUS,
+          "eclipse_status");
 
     double sun_m[3] = {0.0, 0.0, 0.0};
     double moon_m[3] = {0.0, 0.0, 0.0};
     check(sidereon_sun_moon_eci(0.21, sun_m, moon_m) == SIDEREON_STATUS_OK &&
-              fabs(sun_m[0]) + fabs(sun_m[1]) + fabs(sun_m[2]) > 1.0e10,
+              same_bits_n(sun_m, W5_EXTRAS_SUN_ECI_021_M_BITS, 3) &&
+              same_bits_n(moon_m, W5_EXTRAS_MOON_ECI_021_M_BITS, 3),
           "sun_moon_eci");
 
     int64_t epochs[2] = {INT64_C(946728000000000), INT64_C(1593002096000000)};
@@ -284,28 +415,23 @@ static void test_angles_eclipse_bodies(void) {
     double moon_eci[6] = {0.0};
     check(sidereon_sun_moon_eci_batch(epochs, 2, sun_eci, 6, moon_eci, 6) ==
                   SIDEREON_STATUS_OK &&
-              fabs(sun_eci[0]) + fabs(sun_eci[1]) + fabs(sun_eci[2]) > 1.0e10 &&
-              fabs(moon_eci[0]) + fabs(moon_eci[1]) + fabs(moon_eci[2]) > 1.0e8,
+              same_bits_n(sun_eci, W5_EXTRAS_SUN_ECI_BATCH_M_BITS, 6) &&
+              same_bits_n(moon_eci, W5_EXTRAS_MOON_ECI_BATCH_M_BITS, 6),
           "sun_moon_eci_batch");
 
     double sun_ecef[6] = {0.0};
     double moon_ecef[6] = {0.0};
     check(sidereon_sun_moon_ecef_batch(epochs, 2, sun_ecef, 6, moon_ecef, 6) ==
                   SIDEREON_STATUS_OK &&
-              fabs(sun_ecef[0]) + fabs(sun_ecef[1]) + fabs(sun_ecef[2]) > 1.0e10 &&
-              fabs(moon_ecef[0]) + fabs(moon_ecef[1]) + fabs(moon_ecef[2]) > 1.0e8 &&
-              fabs(sun_ecef[0] - sun_eci[0]) > 1.0e6,
+              same_bits_n(sun_ecef, W5_EXTRAS_SUN_ECEF_BATCH_M_BITS, 6) &&
+              same_bits_n(moon_ecef, W5_EXTRAS_MOON_ECEF_BATCH_M_BITS, 6),
           "sun_moon_ecef_batch");
 
     double sun_ecef_one[3] = {0.0, 0.0, 0.0};
     double moon_ecef_one[3] = {0.0, 0.0, 0.0};
     check(sidereon_sun_moon_ecef(epochs[0], sun_ecef_one, moon_ecef_one) == SIDEREON_STATUS_OK &&
-              fabs(sun_ecef_one[0] - sun_ecef[0]) < 1.0e-6 &&
-              fabs(sun_ecef_one[1] - sun_ecef[1]) < 1.0e-6 &&
-              fabs(sun_ecef_one[2] - sun_ecef[2]) < 1.0e-6 &&
-              fabs(moon_ecef_one[0] - moon_ecef[0]) < 1.0e-6 &&
-              fabs(moon_ecef_one[1] - moon_ecef[1]) < 1.0e-6 &&
-              fabs(moon_ecef_one[2] - moon_ecef[2]) < 1.0e-6,
+              memcmp(sun_ecef_one, sun_ecef, sizeof(sun_ecef_one)) == 0 &&
+              memcmp(moon_ecef_one, moon_ecef, sizeof(moon_ecef_one)) == 0,
           "sun_moon_ecef");
 
     check(sidereon_sun_moon_eci_batch(NULL, 0, NULL, 0, NULL, 0) ==
@@ -320,8 +446,7 @@ static void test_iod_lambert_conjunction(void) {
     double v2[3], t12 = 0.0, t23 = 0.0, copa = 0.0;
     check(sidereon_iod_gibbs(r1, r2, r3, v2, &t12, &t23, &copa) == SIDEREON_STATUS_OK,
           "iod_gibbs");
-    const double gibbs_v2[3] = {0.0, 5.5311472050176125, -5.191806413494606};
-    check(memcmp(v2, gibbs_v2, sizeof(v2)) == 0, "iod_gibbs Vallado velocity 0 ULP");
+    check(same_bits_n(v2, W5_EXTRAS_GIBBS_V2_BITS, 3), "iod_gibbs velocity");
 
     double hr1[3] = {3419.85564, 6019.82602, 2784.60022};
     double hr2[3] = {2935.91195, 6326.18324, 2660.59584};
@@ -332,10 +457,7 @@ static void test_iod_lambert_conjunction(void) {
     check(sidereon_iod_hgibbs(hr1, hr2, hr3, jd1, jd2, jd3, v2, &t12, &t23, &copa) ==
               SIDEREON_STATUS_OK,
           "iod_hgibbs");
-    const double hgibbs_v2[3] = {-6.441557227511062, 3.777559606719521,
-                                  -1.7205675602414345};
-    check(memcmp(v2, hgibbs_v2, sizeof(v2)) == 0,
-          "iod_hgibbs Vallado velocity 0 ULP");
+    check(same_bits_n(v2, W5_EXTRAS_HGIBBS_V2_BITS, 3), "iod_hgibbs velocity");
 
     const double earth_radius_km = 6378.1363;
     double lr1[3] = {2.5 * earth_radius_km, 0.0, 0.0};
@@ -345,23 +467,17 @@ static void test_iod_lambert_conjunction(void) {
     check(sidereon_lambert_battin(lr1, lr2, v1, 0, 1, 1, 92854.234, out_v1, out_v2) ==
               SIDEREON_STATUS_OK,
           "lambert_battin");
-    const double lambert_v1[3] = {-0.8696153795282852, 6.3351545812502374, 0.0};
-    const double lambert_v2[3] = {-3.405994961791248, 5.41198791828363, 0.0};
-    for (int axis = 0; axis < 3; axis++) {
-        const double v1_scale = fmax(fabs(lambert_v1[axis]), 1.0);
-        const double v2_scale = fmax(fabs(lambert_v2[axis]), 1.0);
-        check(fabs(out_v1[axis] - lambert_v1[axis]) <= 1.0e-12 * v1_scale,
-              "lambert_battin Vallado departure velocity");
-        check(fabs(out_v2[axis] - lambert_v2[axis]) <= 1.0e-12 * v2_scale,
-              "lambert_battin Vallado arrival velocity");
-    }
+    check(same_bits_n(out_v1, W5_EXTRAS_LAMBERT_V1_BITS, 3), "lambert_battin departure velocity");
+    check(same_bits_n(out_v2, W5_EXTRAS_LAMBERT_V2_BITS, 3), "lambert_battin arrival velocity");
 
     double cr1[3] = {7000.0, 0.0, 0.0};
     double cv1[3] = {0.0, 7.5, 0.0};
     double cr2[3] = {7000.05, 0.02, 0.0};
     double cv2[3] = {0.0, -7.5, 0.1};
     SidereonEncounterFrame frame;
-    check(sidereon_encounter_frame(cr1, cv1, cr2, cv2, &frame) == SIDEREON_STATUS_OK,
+    check(sidereon_encounter_frame(cr1, cv1, cr2, cv2, &frame) == SIDEREON_STATUS_OK &&
+              same_bits(frame.miss_km, W5_EXTRAS_ENCOUNTER_MISS_KM_BITS) &&
+              same_bits(frame.relative_speed_km_s, W5_EXTRAS_ENCOUNTER_RELATIVE_SPEED_KM_S_BITS),
           "encounter_frame");
 
     SidereonConjunctionState o1 = {
@@ -370,20 +486,26 @@ static void test_iod_lambert_conjunction(void) {
         {7000.05, 0.02, 0.0}, {0.0, -7.5, 0.1}, {{0.01, 0.0, 0.0}, {0.0, 0.01, 0.0}, {0.0, 0.0, 0.01}}};
     SidereonCollisionPc pc;
     check(sidereon_collision_probability(&o1, &o2, 0.02, SIDEREON_PC_METHOD_FOSTER_EQUAL_AREA,
-                                         &pc) == SIDEREON_STATUS_OK,
+                                         &pc) == SIDEREON_STATUS_OK &&
+              same_bits(pc.pc, W5_EXTRAS_COLLISION_PC_BITS) &&
+              same_bits(pc.miss_km, W5_EXTRAS_COLLISION_MISS_KM_BITS),
           "collision_probability");
 }
 
 static void test_civil_time(void) {
     double sec = 0.0, sec2 = 0.0;
-    check(sidereon_civil_to_j2000_seconds(2020, 6, 25, 12, 0, 0.0, &sec) == SIDEREON_STATUS_OK,
+    check(sidereon_civil_to_j2000_seconds(2020, 6, 25, 12, 0, 0.0, &sec) == SIDEREON_STATUS_OK &&
+              same_bits(sec, W5_EXTRAS_CIVIL_J2000_S_BITS),
           "civil_to_j2000_seconds");
-    check(sidereon_split_jd_to_j2000_seconds(2451545.0, 0.0, &sec2) == SIDEREON_STATUS_OK,
+    check(sidereon_split_jd_to_j2000_seconds(2451545.0, 0.0, &sec2) == SIDEREON_STATUS_OK &&
+              same_bits(sec2, W5_EXTRAS_SPLIT_JD_J2000_S_BITS),
           "split_jd_to_j2000_seconds");
     int64_t y = 0, mo = 0, d = 0, h = 0, mi = 0, s = 0;
     check(sidereon_j2000_seconds_to_civil((int64_t)llround(sec), &y, &mo, &d, &h, &mi, &s) ==
               SIDEREON_STATUS_OK &&
-              y == 2020 && mo == 6 && d == 25,
+              y == W5_EXTRAS_CIVIL_ROUND_TRIP[0] && mo == W5_EXTRAS_CIVIL_ROUND_TRIP[1] &&
+              d == W5_EXTRAS_CIVIL_ROUND_TRIP[2] && h == W5_EXTRAS_CIVIL_ROUND_TRIP[3] &&
+              mi == W5_EXTRAS_CIVIL_ROUND_TRIP[4] && s == W5_EXTRAS_CIVIL_ROUND_TRIP[5],
           "j2000_seconds_to_civil round-trip");
 }
 
@@ -410,13 +532,25 @@ static void test_carrier_smoothing(void) {
     size_t written = 0, required = 0;
     check(sidereon_smooth_code(arc, 4, &opts, 100, sc, 4, &written, &required) ==
               SIDEREON_STATUS_OK &&
-              written == 4 && required == 4,
+              written == 4 && required == W5_EXTRAS_SMOOTH_P_M_BITS_COUNT,
           "smooth_code");
+    for (size_t i = 0; i < 4; i++) {
+        check(same_bits(sc[i].p_smooth_m, W5_EXTRAS_SMOOTH_P_M_BITS[i]) &&
+                  sc[i].window == W5_EXTRAS_SMOOTH_WINDOW[i] &&
+                  sc[i].reset == W5_EXTRAS_SMOOTH_RESET[i],
+              "smooth_code row");
+    }
     SidereonIonoFreeSmoothResult sif[4];
     check(sidereon_smooth_iono_free_code(arc, 4, &opts, 100, sif, 4, &written, &required) ==
               SIDEREON_STATUS_OK &&
-              written == 4,
+              written == 4 && required == W5_EXTRAS_IONO_FREE_SMOOTH_P_M_BITS_COUNT,
           "smooth_iono_free_code");
+    for (size_t i = 0; i < 4; i++) {
+        check(same_bits(sif[i].p_smooth_m, W5_EXTRAS_IONO_FREE_SMOOTH_P_M_BITS[i]) &&
+                  same_bits(sif[i].p_if_m, W5_EXTRAS_IONO_FREE_P_IF_M_BITS[i]) &&
+                  same_bits(sif[i].l_if_m, W5_EXTRAS_IONO_FREE_L_IF_M_BITS[i]),
+              "smooth_iono_free_code row");
+    }
 }
 
 static void test_cdm(const char *kvn_path, const char *xml_path) {
@@ -430,14 +564,21 @@ static void test_cdm(const char *kvn_path, const char *xml_path) {
           "cdm_parse_kvn");
     if (cdm) {
         double miss = 0.0, speed = 0.0, prob = 0.0, hbr = 0.0;
-        check(sidereon_cdm_numbers(cdm, &miss, &speed, &prob, &hbr) == SIDEREON_STATUS_OK,
+        check(sidereon_cdm_numbers(cdm, &miss, &speed, &prob, &hbr) == SIDEREON_STATUS_OK &&
+                  same_bits(miss, W5_EXTRAS_CDM_MISS_DISTANCE_M_BITS) &&
+                  same_bits(speed, W5_EXTRAS_CDM_RELATIVE_SPEED_M_S_BITS) &&
+                  same_bits(prob, W5_EXTRAS_CDM_COLLISION_PROBABILITY_BITS) &&
+                  same_bits(hbr, W5_EXTRAS_CDM_HARD_BODY_RADIUS_M_BITS),
               "cdm_numbers");
         double pos[3], vel[3], cov[6];
-        check(sidereon_cdm_object_state(cdm, 1, pos, vel, cov) == SIDEREON_STATUS_OK,
+        check(sidereon_cdm_object_state(cdm, 1, pos, vel, cov) == SIDEREON_STATUS_OK &&
+                  same_bits_n(pos, W5_EXTRAS_CDM_OBJECT1_POSITION_BITS, 3) &&
+                  same_bits_n(vel, W5_EXTRAS_CDM_OBJECT1_VELOCITY_BITS, 3) &&
+                  same_bits_n(cov, W5_EXTRAS_CDM_OBJECT1_COVARIANCE_RTN_BITS, 6),
               "cdm_object_state");
         size_t written = 0, required = 0;
         check(sidereon_cdm_to_kvn(cdm, NULL, 0, &written, &required) == SIDEREON_STATUS_OK &&
-                  required > 0,
+                  required == W5_EXTRAS_CDM_KVN_TEXT_LEN,
               "cdm_to_kvn size query");
         uint8_t *buf = (uint8_t *)malloc(required);
         check(buf != NULL && sidereon_cdm_to_kvn(cdm, buf, required, &written, &required) ==
@@ -446,24 +587,32 @@ static void test_cdm(const char *kvn_path, const char *xml_path) {
         free(buf);
         uint8_t field[128];
         check(sidereon_cdm_string_field(cdm, SIDEREON_CDM_STRING_FIELD_TCA, field, sizeof(field),
-                                        &written, &required) == SIDEREON_STATUS_OK,
+                                        &written, &required) == SIDEREON_STATUS_OK &&
+                  written == W5_EXTRAS_CDM_TCA_LEN &&
+                  memcmp(field, W5_EXTRAS_CDM_TCA, W5_EXTRAS_CDM_TCA_LEN) == 0,
               "cdm_string_field tca");
 
         /* Full per-object metadata block: a representative field from each kind. */
         check(sidereon_cdm_object_string_field(cdm, 1,
                                                SIDEREON_CDM_OBJECT_STRING_FIELD_REF_FRAME, field,
                                                sizeof(field), &written, &required) ==
-                  SIDEREON_STATUS_OK,
+                      SIDEREON_STATUS_OK &&
+                  written == W5_EXTRAS_CDM_OBJECT1_REF_FRAME_LEN &&
+                  memcmp(field, W5_EXTRAS_CDM_OBJECT1_REF_FRAME, written) == 0,
               "cdm_object_string_field ref_frame");
         check(sidereon_cdm_object_string_field(cdm, 2,
                                                SIDEREON_CDM_OBJECT_STRING_FIELD_COVARIANCE_METHOD,
                                                field, sizeof(field), &written, &required) ==
-                  SIDEREON_STATUS_OK,
+                      SIDEREON_STATUS_OK &&
+                  written == W5_EXTRAS_CDM_OBJECT2_COVARIANCE_METHOD_LEN &&
+                  memcmp(field, W5_EXTRAS_CDM_OBJECT2_COVARIANCE_METHOD, written) == 0,
               "cdm_object_string_field covariance_method");
         check(sidereon_cdm_object_string_field(cdm, 1,
                                                SIDEREON_CDM_OBJECT_STRING_FIELD_MANEUVERABLE, field,
                                                sizeof(field), &written, &required) ==
-                  SIDEREON_STATUS_OK,
+                      SIDEREON_STATUS_OK &&
+                  written == W5_EXTRAS_CDM_OBJECT1_MANEUVERABLE_LEN &&
+                  memcmp(field, W5_EXTRAS_CDM_OBJECT1_MANEUVERABLE, written) == 0,
               "cdm_object_string_field maneuverable");
         check(sidereon_cdm_object_string_field(cdm, 3,
                                                SIDEREON_CDM_OBJECT_STRING_FIELD_OBJECT_NAME, field,
@@ -476,10 +625,12 @@ static void test_cdm(const char *kvn_path, const char *xml_path) {
         double vcov[15];
         bool vcov_present = false;
         check(sidereon_cdm_object_velocity_covariance(cdm, 1, vcov, &vcov_present) ==
-                  SIDEREON_STATUS_OK,
+                      SIDEREON_STATUS_OK &&
+                  vcov_present == W5_EXTRAS_CDM_OBJECT1_HAS_VELOCITY_COVARIANCE,
               "cdm_object_velocity_covariance object 1");
         check(sidereon_cdm_object_velocity_covariance(cdm, 2, vcov, &vcov_present) ==
-                  SIDEREON_STATUS_OK,
+                      SIDEREON_STATUS_OK &&
+                  vcov_present == W5_EXTRAS_CDM_OBJECT2_HAS_VELOCITY_COVARIANCE,
               "cdm_object_velocity_covariance object 2");
 
         sidereon_cdm_free(cdm);
@@ -491,7 +642,8 @@ static void test_cdm(const char *kvn_path, const char *xml_path) {
         return;
     }
     SidereonCdm *cdm_xml = NULL;
-    check(sidereon_cdm_parse_xml(xml, len, &cdm_xml) == SIDEREON_STATUS_OK && cdm_xml != NULL,
+    check(W5_EXTRAS_CDM_XML_OK &&
+              sidereon_cdm_parse_xml(xml, len, &cdm_xml) == SIDEREON_STATUS_OK && cdm_xml != NULL,
           "cdm_parse_xml");
     sidereon_cdm_free(cdm_xml);
     free(xml);
@@ -509,12 +661,12 @@ static void test_rinex_clock(const char *clk_path) {
     if (clock) {
         size_t count = 0;
         check(sidereon_rinex_clock_satellite_count(clock, &count) == SIDEREON_STATUS_OK &&
-                  count > 0,
+                  count == W5_EXTRAS_RINEX_CLOCK_SATELLITE_COUNT,
               "rinex_clock_satellite_count");
         size_t written = 0, required = 0;
         check(sidereon_rinex_clock_to_text(clock, NULL, 0, &written, &required) ==
                   SIDEREON_STATUS_OK &&
-                  required > 0,
+                  required == W5_EXTRAS_RINEX_CLOCK_TEXT_LEN,
               "rinex_clock_to_text size query");
         sidereon_rinex_clock_free(clock);
     }
@@ -524,14 +676,17 @@ static void test_rinex_clock(const char *clk_path) {
     bool available = false;
     check(sidereon_civil_to_gps_seconds(2020, 6, 25, 0, 0, 0.0, &gps_seconds, &available) ==
               SIDEREON_STATUS_OK &&
-              available,
+              available == W5_EXTRAS_CIVIL_TO_GPS_AVAILABLE &&
+              same_bits(gps_seconds, W5_EXTRAS_CIVIL_TO_GPS_SECONDS_BITS),
           "civil_to_gps_seconds");
 }
 
 static void test_broadcast_eval(void) {
     double ea = 0.0;
     size_t iters = 0;
-    check(sidereon_broadcast_eccentric_anomaly(0.5, 0.01, &ea, &iters) == SIDEREON_STATUS_OK,
+    check(sidereon_broadcast_eccentric_anomaly(0.5, 0.01, &ea, &iters) == SIDEREON_STATUS_OK &&
+              same_bits(ea, W5_EXTRAS_ECCENTRIC_ANOMALY_RAD_BITS) &&
+              iters == W5_EXTRAS_ECCENTRIC_ANOMALY_ITERATIONS,
           "broadcast_eccentric_anomaly");
 }
 
@@ -582,8 +737,10 @@ static void test_sp3_coupled(const char *sp3_path) {
     bool has_clock = false;
     int ok = sidereon_sp3_observable_state(sp3, "G01", mid, pos, &clock, &has_clock) ==
              SIDEREON_STATUS_OK;
-    double mag = sqrt(pos[0] * pos[0] + pos[1] * pos[1] + pos[2] * pos[2]);
-    check(ok && mag > 2.0e7, "sp3_observable_state");
+    check(ok && same_bits_n(pos, W5_EXTRAS_G01_MID_POSITION_M_BITS, 3) &&
+              has_clock == W5_EXTRAS_G01_MID_HAS_CLOCK &&
+              same_bits(clock, W5_EXTRAS_G01_MID_CLOCK_S_BITS),
+          "sp3_observable_state");
 
     /* DGNSS: build one base observation as the geometric range to a ground
      * point, so the correction path has consistent inputs. */
@@ -598,7 +755,8 @@ static void test_sp3_coupled(const char *sp3_path) {
           "dgnss_pseudorange_corrections");
     if (corr) {
         size_t corr_count = 0;
-        check(sidereon_dgnss_corrections_count(corr, &corr_count) == SIDEREON_STATUS_OK,
+        check(sidereon_dgnss_corrections_count(corr, &corr_count) == SIDEREON_STATUS_OK &&
+                  corr_count == W5_EXTRAS_DGNSS_CORRECTION_COUNT,
               "dgnss_corrections_count");
         SidereonDgnssApplied *applied = NULL;
         check(sidereon_dgnss_apply_corrections(&base_obs, 1, corr, &applied) ==
@@ -607,7 +765,8 @@ static void test_sp3_coupled(const char *sp3_path) {
               "dgnss_apply_corrections");
         if (applied) {
             size_t cc = 0, dc = 0;
-            check(sidereon_dgnss_applied_counts(applied, &cc, &dc) == SIDEREON_STATUS_OK,
+            check(sidereon_dgnss_applied_counts(applied, &cc, &dc) == SIDEREON_STATUS_OK &&
+                      cc == W5_EXTRAS_DGNSS_CORRECTED_COUNT && dc == W5_EXTRAS_DGNSS_DROPPED_COUNT,
                   "dgnss_applied_counts");
             sidereon_dgnss_applied_free(applied);
         }
@@ -658,19 +817,19 @@ static void test_broadcast_comparison(const char *nav_path, const char *precise_
         SidereonBroadcastComparison *report = NULL;
         enum SidereonStatus st = sidereon_broadcast_comparison_compare(broadcast, precise, sats,
                                                                        1, &ep, 1, 1.0, &report);
-        /* The comparison succeeds when G01 is present in both products at this
-         * epoch. If the cross-product coverage misses, the engine reports
-         * INVALID_ARGUMENT; either is a valid marshaled outcome (only a
-         * contained panic is a binding failure). */
-        check(st == SIDEREON_STATUS_OK || st == SIDEREON_STATUS_INVALID_ARGUMENT,
-              "broadcast_comparison_compare marshaled");
+        /* The engine's outcome for the same epoch (pinned); the binding reports
+         * a refusal as INVALID_ARGUMENT (src/broadcast.rs). */
+        check(st == (W5_EXTRAS_COMPARE_OK ? SIDEREON_STATUS_OK : SIDEREON_STATUS_INVALID_ARGUMENT),
+              "broadcast_comparison_compare outcome");
         if (st == SIDEREON_STATUS_OK && report) {
             SidereonCompareStats overall;
-            check(sidereon_broadcast_comparison_overall(report, &overall) == SIDEREON_STATUS_OK,
+            check(sidereon_broadcast_comparison_overall(report, &overall) == SIDEREON_STATUS_OK &&
+                      overall.count == W5_EXTRAS_COMPARE_OVERALL_COUNT,
                   "broadcast_comparison_overall");
             size_t sat_count = 0;
             check(sidereon_broadcast_comparison_satellite_count(report, &sat_count) ==
-                      SIDEREON_STATUS_OK,
+                          SIDEREON_STATUS_OK &&
+                      sat_count == W5_EXTRAS_COMPARE_SATELLITE_COUNT,
                   "broadcast_comparison_satellite_count");
         }
         sidereon_broadcast_comparison_free(report);
@@ -684,11 +843,13 @@ static void test_broadcast_comparison(const char *nav_path, const char *precise_
         SidereonBroadcastComparison *wreport = NULL;
         enum SidereonStatus wst = sidereon_broadcast_comparison_compare_window(
             broadcast, precise, wsats, 1, &window, &wreport);
-        check(wst == SIDEREON_STATUS_OK || wst == SIDEREON_STATUS_INVALID_ARGUMENT,
-              "broadcast_comparison_compare_window marshaled");
+        check(wst == (W5_EXTRAS_COMPARE_WINDOW_OK ? SIDEREON_STATUS_OK
+                                                   : SIDEREON_STATUS_INVALID_ARGUMENT),
+              "broadcast_comparison_compare_window outcome");
         if (wst == SIDEREON_STATUS_OK && wreport) {
             SidereonCompareStats overall;
-            check(sidereon_broadcast_comparison_overall(wreport, &overall) == SIDEREON_STATUS_OK,
+            check(sidereon_broadcast_comparison_overall(wreport, &overall) == SIDEREON_STATUS_OK &&
+                      overall.count == W5_EXTRAS_COMPARE_WINDOW_OVERALL_COUNT,
                   "broadcast_comparison_compare_window overall");
         }
         sidereon_broadcast_comparison_free(wreport);
@@ -714,6 +875,7 @@ int main(int argc, char **argv) {
     test_raim();
     test_tropo();
     test_tides();
+    test_gravity_tide_system_selector();
     test_angles_eclipse_bodies();
     test_iod_lambert_conjunction();
     test_civil_time();

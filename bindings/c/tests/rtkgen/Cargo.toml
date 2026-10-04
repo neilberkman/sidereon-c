@@ -1,0 +1,26 @@
+# Fixture generator for the C RTK float/fixed smoke check (smoke.c
+# exercise_rtk_surface). Not part of the binding workspace (own empty
+# [workspace] table), so a plain `cargo build` / `cargo test` of the binding
+# never pulls it in. tests/run_generators.sh runs it from the binding root:
+#
+#     cargo run --release --manifest-path tests/rtkgen/Cargo.toml \
+#         > tests/rtk_fixture.h
+#
+# It builds the synthetic five-satellite single-epoch RTK inputs from a clean
+# model (code is the geometric range from a rover 1.2, -0.85, 0.91 m from the
+# base; phase adds a float offset per satellite for the float solve and whole
+# L1 cycles for the fixed solve), solves them with sidereon-core's float and
+# validated fixed baseline solves under the configuration smoke.c passes, and
+# prints inputs and results as exact IEEE-754 bit patterns.
+[package]
+name = "rtkgen"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+# The sidereon-core revision tests/CORE_REVISION names; tests/run_generators.sh
+# checks that every generator pins the same one.
+sidereon-core = { version = "=3.0.0" }

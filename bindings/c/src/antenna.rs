@@ -2,7 +2,10 @@ use super::*;
 
 /// Write the frequency-dependent phase-center offset (north/east/up, meters) for
 /// `frequency` into out_neu (three doubles). Reports SIDEREON_STATUS_INVALID_ARGUMENT
-/// if the antenna has no such frequency.
+/// if the antenna has no section with that label, or has several with differing
+/// contents; sidereon_last_antex_error reports UnknownFrequency or
+/// AmbiguousFrequency with the section count. Sections that repeat a label with
+/// identical contents answer as one.
 ///
 /// Safety: antenna must be a live handle from sidereon_antex_antenna; frequency
 /// must be a null-terminated C string; out_neu must point to three writable
@@ -42,7 +45,8 @@ pub unsafe extern "C" fn sidereon_antenna_pco(
 /// to *out_value, with the engine's linear zenith/azimuth interpolation. When
 /// has_azimuth is false the no-azimuth grid is used and azimuth_deg is ignored;
 /// when true azimuth_deg selects the azimuth slice (the no-azimuth grid is still
-/// used if the antenna has no azimuth-dependent samples).
+/// used if the antenna has no azimuth-dependent samples). A frequency lookup is
+/// refused as sidereon_antenna_pco describes.
 ///
 /// Safety: antenna must be a live handle from sidereon_antex_antenna; frequency
 /// must be a null-terminated C string; out_value must point to a double.

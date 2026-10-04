@@ -1,4 +1,8 @@
 use super::*;
+use crate::engine_error::{
+    engine_error_operation_boundary, record_engine_error, tle_fit_error_value,
+    tle_fit_result_value, SidereonEngineErrorFamily,
+};
 
 // === Round-2 SGP4 TLE fitting ===============================================
 
@@ -159,7 +163,7 @@ pub unsafe extern "C" fn sidereon_sgp4_fit_tle(
     config: *const SidereonSgp4FitConfig,
     out_fit: *mut *mut SidereonSgp4TleFit,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_sgp4_fit_tle", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_sgp4_fit_tle", SidereonStatus::Panic, || {
         let out_fit = c_try!(require_out(out_fit, "sidereon_sgp4_fit_tle", "out_fit"));
         *out_fit = ptr::null_mut();
         let raw_samples = c_try!(require_slice(
@@ -186,8 +190,13 @@ pub unsafe extern "C" fn sidereon_sgp4_fit_tle(
                 SidereonStatus::Ok
             }
             Err(err) => {
+                record_engine_error(
+                    SidereonEngineErrorFamily::TleFit,
+                    "sidereon_sgp4_fit_tle",
+                    tle_fit_error_value(&err),
+                );
                 set_last_error(format!("sidereon_sgp4_fit_tle: {err}"));
-                match err {
+                match &err {
                     sidereon_core::astro::sgp4::TleFitError::ArcTooShort { .. }
                     | sidereon_core::astro::sgp4::TleFitError::InvalidInput { .. }
                     | sidereon_core::astro::sgp4::TleFitError::EpochsNotIncreasing { .. }
@@ -263,6 +272,55 @@ pub unsafe extern "C" fn sidereon_sgp4_tle_fit_omm(
             },
         );
         SidereonStatus::Ok
+    })
+}
+
+/// Copy the complete lossless fit result as JSON. The payload includes every
+/// ElementSet field, OMM field, generated TLE line, and fit statistic. Query
+/// the required byte count with a NULL output and zero capacity, then retry
+/// with a caller-owned buffer. A short-buffer retry leaves the fit unchanged.
+///
+/// Safety: fit must be a live handle. If len is nonzero, out_payload must point
+/// to len writable bytes. Both count outputs must be writable.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sgp4_tle_fit_result_payload(
+    fit: *const SidereonSgp4TleFit,
+    out_payload: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_sgp4_tle_fit_result_payload";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        if let Err(status) = init_copy_counts(FN_NAME, out_written, out_required) {
+            return status;
+        }
+        let fit = match require_ref(fit, FN_NAME, "fit") {
+            Ok(fit) => fit,
+            Err(status) => return status,
+        };
+        let value = tle_fit_result_value(&fit.inner);
+        let payload = match serde_json::to_vec(&value) {
+            Ok(payload) => payload,
+            Err(error) => {
+                set_last_error(format!(
+                    "{FN_NAME}: could not serialize fit result: {error}"
+                ));
+                return SidereonStatus::Panic;
+            }
+        };
+        match copy_prefix_to_c(
+            FN_NAME,
+            "out_payload",
+            &payload,
+            out_payload,
+            len,
+            out_written,
+            out_required,
+        ) {
+            Ok(()) => SidereonStatus::Ok,
+            Err(status) => status,
+        }
     })
 }
 
@@ -408,6 +466,345 @@ fn sgp4_fit_epoch_from_c(
                 config.epoch_kind
             ));
             Err(SidereonStatus::InvalidArgument)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine_error::{snapshot_engine_error_for_test, SidereonEngineErrorFamily};
+    use serde_json::{json, Value};
+
+    const ISS_LINE1: &str = "1 25544U 98067A   26168.18949189  .00009113  00000+0  17172-3 0  9996";
+    const ISS_LINE2: &str = "2 25544  51.6332 300.0813 0004737 195.1146 164.9702 15.49273435571752";
+
+    fn existing_fit_samples() -> Vec<SidereonSgp4FitSample> {
+        use sidereon_core::astro::sgp4::{MinutesSinceEpoch, Satellite};
+        let satellite =
+            Satellite::from_tle(ISS_LINE1, ISS_LINE2).expect("existing ISS fit fixture");
+        let epoch = satellite.epoch_jd();
+        [-10.0, 0.0, 10.0]
+            .into_iter()
+            .map(|minutes| {
+                let state = satellite
+                    .propagate(MinutesSinceEpoch(minutes))
+                    .expect("fixture sample propagates");
+                SidereonSgp4FitSample {
+                    jd_whole: epoch.0,
+                    jd_fraction: epoch.1 + minutes / 1440.0,
+                    position_teme_km: state.position,
+                    has_velocity_teme_km_s: true,
+                    velocity_teme_km_s: state.velocity,
+                }
+            })
+            .collect()
+    }
+
+    unsafe fn valid_config(max_nfev: Option<usize>) -> SidereonSgp4FitConfig {
+        let mut out = std::mem::MaybeUninit::<SidereonSgp4FitConfig>::uninit();
+        assert_eq!(
+            sidereon_sgp4_fit_config_init(out.as_mut_ptr()),
+            SidereonStatus::Ok
+        );
+        let mut config = out.assume_init();
+        config.has_max_nfev = max_nfev.is_some();
+        config.max_nfev = max_nfev.unwrap_or(0);
+        config.catalog_number = 25544;
+        config.element_set_number = 999;
+        config.rev_at_epoch = 57175;
+        config
+    }
+
+    unsafe fn last_legacy_error() -> String {
+        let required = crate::sidereon_last_error_message(ptr::null_mut(), 0);
+        let mut bytes = vec![0 as c_char; required + 1];
+        assert_eq!(
+            crate::sidereon_last_error_message(bytes.as_mut_ptr(), bytes.len()),
+            required
+        );
+        std::ffi::CStr::from_ptr(bytes.as_ptr())
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    #[test]
+    fn fit_tle_records_arc_and_best_effort_errors_with_lifecycle_boundaries() {
+        unsafe {
+            let samples = existing_fit_samples();
+            let mut config = valid_config(None);
+            let mut fit = ptr::null_mut();
+
+            assert_eq!(
+                sidereon_sgp4_fit_tle(samples.as_ptr(), 2, &config, &mut fit),
+                SidereonStatus::InvalidArgument
+            );
+            assert!(fit.is_null());
+            assert_eq!(
+                last_legacy_error(),
+                "sidereon_sgp4_fit_tle: fit arc has 2 samples; need at least 3"
+            );
+            let (info, payload) =
+                snapshot_engine_error_for_test().expect("typed arc-too-short error");
+            assert_eq!(info.family, SidereonEngineErrorFamily::TleFit);
+            let json: Value = serde_json::from_str(&payload).expect("error payload JSON");
+            assert_eq!(json["family"], "tle_fit");
+            assert_eq!(json["operation"], "sidereon_sgp4_fit_tle");
+            assert_eq!(json["error"]["kind"], "arc_too_short");
+            assert_eq!(json["error"]["fields"]["samples"], 2);
+            assert_eq!(json["error"]["fields"]["needed"], 3);
+
+            assert_eq!(
+                sidereon_sgp4_fit_tle(samples.as_ptr(), 2, &config, &mut fit),
+                SidereonStatus::InvalidArgument
+            );
+            assert!(snapshot_engine_error_for_test().is_some());
+            assert_eq!(
+                sidereon_sgp4_fit_tle(samples.as_ptr(), samples.len(), &config, ptr::null_mut()),
+                SidereonStatus::NullPointer
+            );
+            assert!(snapshot_engine_error_for_test().is_none());
+
+            config = valid_config(Some(80));
+            assert_eq!(
+                sidereon_sgp4_fit_tle(samples.as_ptr(), samples.len(), &config, &mut fit),
+                SidereonStatus::Ok
+            );
+            assert!(!fit.is_null());
+            assert!(snapshot_engine_error_for_test().is_none());
+
+            let mut written = usize::MAX;
+            let mut required = 0;
+            assert_eq!(
+                sidereon_sgp4_tle_fit_result_payload(
+                    fit,
+                    ptr::null_mut(),
+                    0,
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, 0);
+            assert!(required > 0);
+            let mut short = vec![0xA5; required - 1];
+            assert_eq!(
+                sidereon_sgp4_tle_fit_result_payload(
+                    fit,
+                    short.as_mut_ptr(),
+                    short.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::InvalidArgument
+            );
+            assert_eq!(written, 0);
+            assert_eq!(required, short.len() + 1);
+            assert!(short.iter().all(|byte| *byte == 0xA5));
+
+            let mut owned_full_fit_payload = vec![0; required];
+            assert_eq!(
+                sidereon_sgp4_tle_fit_result_payload(
+                    fit,
+                    owned_full_fit_payload.as_mut_ptr(),
+                    owned_full_fit_payload.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, required);
+            let full_fit: Value =
+                serde_json::from_slice(&owned_full_fit_payload).expect("full fit JSON");
+            for key in [
+                "epoch",
+                "bstar",
+                "mean_motion_dot",
+                "mean_motion_double_dot",
+                "eccentricity",
+                "argument_of_perigee_deg",
+                "inclination_deg",
+                "mean_anomaly_deg",
+                "mean_motion_rev_per_day",
+                "right_ascension_deg",
+                "catalog_number",
+                "omm_epoch_days",
+            ] {
+                assert!(
+                    full_fit["elements"].get(key).is_some(),
+                    "missing element {key}"
+                );
+            }
+            assert!(full_fit["omm"]["exact_sgp4_epoch"].is_array());
+            assert!(full_fit["omm"].get("quantize_tle_derived_fields").is_some());
+
+            let mut null_output_written = usize::MAX;
+            let mut null_output_required = 0;
+            assert_eq!(
+                sidereon_sgp4_tle_fit_result_payload(
+                    fit,
+                    ptr::null_mut(),
+                    1,
+                    &mut null_output_written,
+                    &mut null_output_required,
+                ),
+                SidereonStatus::NullPointer
+            );
+            assert_eq!(null_output_written, 0);
+            assert_eq!(null_output_required, owned_full_fit_payload.len());
+
+            written = usize::MAX;
+            required = usize::MAX;
+            assert_eq!(
+                sidereon_sgp4_tle_fit_result_payload(
+                    ptr::null(),
+                    ptr::null_mut(),
+                    0,
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::NullPointer
+            );
+            assert_eq!(written, 0);
+            assert_eq!(required, 0);
+
+            let mut lines = std::mem::MaybeUninit::<SidereonTleLines>::uninit();
+            config = valid_config(Some(1));
+            let mut failed_fit = ptr::null_mut();
+            assert_eq!(
+                sidereon_sgp4_fit_tle(samples.as_ptr(), samples.len(), &config, &mut failed_fit,),
+                SidereonStatus::Solve
+            );
+            assert!(failed_fit.is_null());
+            assert_eq!(
+                last_legacy_error(),
+                "sidereon_sgp4_fit_tle: evaluation budget exhausted before convergence (best-effort result attached)"
+            );
+            let (best_effort_info, best_effort_payload) =
+                snapshot_engine_error_for_test().expect("typed best-effort fit error");
+            assert_eq!(best_effort_info.family, SidereonEngineErrorFamily::TleFit);
+            let detail: Value =
+                serde_json::from_str(&best_effort_payload).expect("best-effort JSON");
+            assert_eq!(detail["error"]["kind"], "did_not_converge");
+            let best = &detail["error"]["fields"]["best_effort_fit"];
+            assert_eq!(
+                best["line1"]
+                    .as_str()
+                    .map(|line| line.starts_with("1 25544")),
+                Some(true)
+            );
+            assert_eq!(
+                best["line2"]
+                    .as_str()
+                    .map(|line| line.starts_with("2 25544")),
+                Some(true)
+            );
+            for key in [
+                "epoch",
+                "bstar",
+                "mean_motion_dot",
+                "mean_motion_double_dot",
+                "eccentricity",
+                "argument_of_perigee_deg",
+                "inclination_deg",
+                "mean_anomaly_deg",
+                "mean_motion_rev_per_day",
+                "right_ascension_deg",
+                "catalog_number",
+                "omm_epoch_days",
+            ] {
+                assert!(best["elements"].get(key).is_some(), "missing element {key}");
+            }
+            assert_eq!(best["elements"]["omm_epoch_days"], Value::Null);
+            for key in [
+                "ccsds_omm_vers",
+                "classification",
+                "creation_date",
+                "originator",
+                "message_id",
+                "object_name",
+                "object_id",
+                "center_name",
+                "ref_frame",
+                "ref_frame_epoch",
+                "time_system",
+                "mean_element_theory",
+                "epoch",
+                "mean_motion",
+                "semi_major_axis_km",
+                "eccentricity",
+                "inclination_deg",
+                "ra_of_asc_node_deg",
+                "arg_of_pericenter_deg",
+                "mean_anomaly_deg",
+                "gm_km3_s2",
+                "spacecraft",
+                "ephemeris_type",
+                "classification_type",
+                "norad_cat_id",
+                "element_set_no",
+                "rev_at_epoch",
+                "bstar",
+                "bterm_m2_kg",
+                "mean_motion_dot",
+                "mean_motion_ddot",
+                "agom_m2_kg",
+                "covariance",
+                "user_defined",
+                "comments",
+                "exact_sgp4_epoch",
+                "quantize_tle_derived_fields",
+            ] {
+                assert!(best["omm"].get(key).is_some(), "missing OMM field {key}");
+            }
+            assert_eq!(best["omm"]["spacecraft"], Value::Null);
+            assert_eq!(best["omm"]["covariance"], Value::Null);
+            assert_eq!(best["omm"]["user_defined"], json!([]));
+            assert_eq!(best["omm"]["comments"]["header"], json!([]));
+            assert_eq!(
+                best["omm"]["exact_sgp4_epoch"]
+                    .as_array()
+                    .map(|epoch| epoch.len()),
+                Some(2)
+            );
+            assert_eq!(best["omm"]["quantize_tle_derived_fields"], false);
+            assert_eq!(best["stats"]["status"], 0);
+            assert_eq!(best["stats"]["nfev"], 1);
+            assert_eq!(
+                best["stats"]["rms_position_km"]["bits_hex"]
+                    .as_str()
+                    .map(str::len),
+                Some(16)
+            );
+
+            assert_eq!(
+                sidereon_sgp4_tle_fit_lines(fit, lines.as_mut_ptr()),
+                SidereonStatus::Ok
+            );
+            assert_eq!(
+                snapshot_engine_error_for_test()
+                    .expect("getter retains typed detail")
+                    .1,
+                best_effort_payload
+            );
+            sidereon_sgp4_tle_fit_free(fit);
+            let retained_after_free: Value =
+                serde_json::from_slice(&owned_full_fit_payload).expect("retained full fit JSON");
+            assert_eq!(retained_after_free, full_fit);
+            assert_eq!(
+                snapshot_engine_error_for_test()
+                    .expect("free retains typed detail")
+                    .1,
+                best_effort_payload
+            );
+
+            config = valid_config(Some(80));
+            assert_eq!(
+                sidereon_sgp4_fit_tle(samples.as_ptr(), samples.len(), &config, &mut fit),
+                SidereonStatus::Ok
+            );
+            assert!(snapshot_engine_error_for_test().is_none());
+            sidereon_sgp4_tle_fit_free(fit);
         }
     }
 }

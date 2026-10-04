@@ -1,4 +1,107 @@
 use super::*;
+use crate::engine_error::{
+    engine_error_operation_boundary, engine_f64, record_engine_error, SidereonEngineErrorFamily,
+};
+use serde_json::{json, Value};
+
+fn orbit_node(kind: &str, fields: Value) -> Value {
+    json!({
+        "kind": kind,
+        "fields": fields,
+    })
+}
+
+pub(crate) fn elements_error_value(error: &ElementsError) -> Value {
+    match error {
+        ElementsError::NonFinite { field } => orbit_node(
+            "non_finite",
+            json!({
+                "field": field,
+            }),
+        ),
+        ElementsError::NonPositiveMu => orbit_node("non_positive_mu", json!({})),
+        ElementsError::ZeroPosition => orbit_node("zero_position", json!({})),
+        ElementsError::DegenerateOrbit => orbit_node("degenerate_orbit", json!({})),
+        ElementsError::NonPositiveSemiLatus => orbit_node("non_positive_semi_latus", json!({})),
+    }
+}
+
+pub(crate) fn anomaly_error_value(error: &sidereon_core::astro::anomaly::AnomalyError) -> Value {
+    use sidereon_core::astro::anomaly::AnomalyError as E;
+    match error {
+        E::NonFinite { field } => orbit_node(
+            "non_finite",
+            json!({
+                "field": field,
+            }),
+        ),
+        E::NegativeEccentricity => orbit_node("negative_eccentricity", json!({})),
+        E::NonPositiveMu => orbit_node("non_positive_mu", json!({})),
+        E::NonPositiveSemiLatus => orbit_node("non_positive_semi_latus", json!({})),
+        E::BeyondAsymptote { nu, limit } => orbit_node(
+            "beyond_asymptote",
+            json!({
+                "nu": engine_f64(*nu),
+                "limit": engine_f64(*limit),
+            }),
+        ),
+        E::InconsistentElements { field } => orbit_node(
+            "inconsistent_elements",
+            json!({
+                "field": field,
+            }),
+        ),
+        E::NonConvergent {
+            iterations,
+            residual,
+        } => orbit_node(
+            "non_convergent",
+            json!({
+                "iterations": iterations,
+                "residual": engine_f64(*residual),
+            }),
+        ),
+    }
+}
+
+pub(crate) fn equinoctial_error_value(
+    error: &sidereon_core::astro::equinoctial::EquinoctialError,
+) -> Value {
+    use sidereon_core::astro::equinoctial::EquinoctialError as E;
+    match error {
+        E::Elements(source) => orbit_node(
+            "elements",
+            json!({
+                "cause": elements_error_value(source),
+            }),
+        ),
+        E::Anomaly(source) => orbit_node(
+            "anomaly",
+            json!({
+                "cause": anomaly_error_value(source),
+            }),
+        ),
+        E::RetrogradePole => orbit_node("retrograde_pole", json!({})),
+        E::ParabolicEquinoctial => orbit_node("parabolic_equinoctial", json!({})),
+    }
+}
+
+pub(crate) fn rtn_frame_error_value(
+    error: &sidereon_core::astro::covariance::RtnFrameError,
+) -> Value {
+    use sidereon_core::astro::covariance::RtnFrameError as E;
+    match error {
+        E::InvalidInput { field, reason } => orbit_node(
+            "invalid_input",
+            json!({
+                "field": field,
+                "reason": reason,
+            }),
+        ),
+        E::ZeroPosition => orbit_node("zero_position", json!({})),
+        E::ParallelPositionVelocity => orbit_node("parallel_position_velocity", json!({})),
+    }
+}
 
 /// Convert a 3x3 RTN covariance matrix to ECI. Delegates to
 /// sidereon_core::astro::covariance::rtn_to_eci.
@@ -12,7 +115,7 @@ pub unsafe extern "C" fn sidereon_rtn_to_eci_covariance(
     v_km_s: *const f64,
     out_cov_eci: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_rtn_to_eci_covariance",
         SidereonStatus::Panic,
         || {
@@ -39,6 +142,11 @@ pub unsafe extern "C" fn sidereon_rtn_to_eci_covariance(
                     SidereonStatus::Ok
                 }
                 Err(err) => {
+                    record_engine_error(
+                        SidereonEngineErrorFamily::RtnFrame,
+                        "sidereon_rtn_to_eci_covariance",
+                        rtn_frame_error_value(&err),
+                    );
                     set_last_error(format!("sidereon_rtn_to_eci_covariance: {}", err.message()));
                     SidereonStatus::InvalidArgument
                 }
@@ -283,7 +391,7 @@ pub unsafe extern "C" fn sidereon_rv2coe(
     mu_km3_s2: f64,
     out: *mut SidereonClassicalElements,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_rv2coe", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_rv2coe", SidereonStatus::Panic, || {
         let out = c_try!(require_out(out, "sidereon_rv2coe", "out"));
         let r = c_try!(read_vec3("sidereon_rv2coe", "r_km", r_km));
         let v = c_try!(read_vec3("sidereon_rv2coe", "v_km_s", v_km_s));
@@ -310,7 +418,7 @@ pub unsafe extern "C" fn sidereon_coe2rv(
     out_r_km: *mut f64,
     out_v_km_s: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_coe2rv", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_coe2rv", SidereonStatus::Panic, || {
         c_try!(copy_exact_f64s(
             "sidereon_coe2rv",
             "out_r_km",
@@ -365,7 +473,7 @@ pub unsafe extern "C" fn sidereon_mean_to_eccentric_anomaly(
     eccentricity: f64,
     out: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_mean_to_eccentric_anomaly",
         SidereonStatus::Panic,
         || {
@@ -386,7 +494,7 @@ pub unsafe extern "C" fn sidereon_eccentric_to_mean_anomaly(
     eccentricity: f64,
     out: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_eccentric_to_mean_anomaly",
         SidereonStatus::Panic,
         || {
@@ -407,7 +515,7 @@ pub unsafe extern "C" fn sidereon_eccentric_to_true_anomaly(
     eccentricity: f64,
     out: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_eccentric_to_true_anomaly",
         SidereonStatus::Panic,
         || {
@@ -428,7 +536,7 @@ pub unsafe extern "C" fn sidereon_true_to_eccentric_anomaly(
     eccentricity: f64,
     out: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_true_to_eccentric_anomaly",
         SidereonStatus::Panic,
         || {
@@ -449,7 +557,7 @@ pub unsafe extern "C" fn sidereon_mean_to_true_anomaly(
     eccentricity: f64,
     out: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_mean_to_true_anomaly",
         SidereonStatus::Panic,
         || {
@@ -470,7 +578,7 @@ pub unsafe extern "C" fn sidereon_true_to_mean_anomaly(
     eccentricity: f64,
     out: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_true_to_mean_anomaly",
         SidereonStatus::Panic,
         || {
@@ -491,7 +599,7 @@ pub unsafe extern "C" fn sidereon_solve_kepler(
     eccentricity: f64,
     out: *mut SidereonKeplerSolution,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_solve_kepler", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_solve_kepler", SidereonStatus::Panic, || {
         let out = c_try!(require_out(out, "sidereon_solve_kepler", "out"));
         *out = SidereonKeplerSolution {
             anomaly_rad: 0.0,
@@ -517,7 +625,7 @@ pub unsafe extern "C" fn sidereon_propagate_kepler(
     dt_s: f64,
     out: *mut SidereonClassicalElements,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_propagate_kepler", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_propagate_kepler", SidereonStatus::Panic, || {
         let out = c_try!(require_out(out, "sidereon_propagate_kepler", "out"));
         let coe = c_try!(require_ref(coe, "sidereon_propagate_kepler", "coe"));
         let elements = c_try!(classical_elements_from_c("sidereon_propagate_kepler", coe));
@@ -570,7 +678,7 @@ pub unsafe extern "C" fn sidereon_coe2eq(
     retrograde: u32,
     out: *mut SidereonEquinoctialElements,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_coe2eq", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_coe2eq", SidereonStatus::Panic, || {
         let out = c_try!(require_out(out, "sidereon_coe2eq", "out"));
         let coe = c_try!(require_ref(coe, "sidereon_coe2eq", "coe"));
         let coe = c_try!(classical_elements_from_c("sidereon_coe2eq", coe));
@@ -590,7 +698,7 @@ pub unsafe extern "C" fn sidereon_eq2coe(
     eq: *const SidereonEquinoctialElements,
     out: *mut SidereonClassicalElements,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_eq2coe", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_eq2coe", SidereonStatus::Panic, || {
         let out = c_try!(require_out(out, "sidereon_eq2coe", "out"));
         let eq = c_try!(require_ref(eq, "sidereon_eq2coe", "eq"));
         let eq = c_try!(equinoctial_from_c("sidereon_eq2coe", eq));
@@ -610,7 +718,7 @@ pub unsafe extern "C" fn sidereon_coe2mee(
     retrograde: u32,
     out: *mut SidereonModifiedEquinoctialElements,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_coe2mee", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_coe2mee", SidereonStatus::Panic, || {
         let out = c_try!(require_out(out, "sidereon_coe2mee", "out"));
         let coe = c_try!(require_ref(coe, "sidereon_coe2mee", "coe"));
         let coe = c_try!(classical_elements_from_c("sidereon_coe2mee", coe));
@@ -630,7 +738,7 @@ pub unsafe extern "C" fn sidereon_mee2coe(
     mee: *const SidereonModifiedEquinoctialElements,
     out: *mut SidereonClassicalElements,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_mee2coe", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_mee2coe", SidereonStatus::Panic, || {
         let out = c_try!(require_out(out, "sidereon_mee2coe", "out"));
         let mee = c_try!(require_ref(mee, "sidereon_mee2coe", "mee"));
         let mee = c_try!(modified_equinoctial_from_c("sidereon_mee2coe", mee));
@@ -652,7 +760,7 @@ pub unsafe extern "C" fn sidereon_rv2eq(
     retrograde: u32,
     out: *mut SidereonEquinoctialElements,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_rv2eq", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_rv2eq", SidereonStatus::Panic, || {
         let out = c_try!(require_out(out, "sidereon_rv2eq", "out"));
         let r = c_try!(read_vec3("sidereon_rv2eq", "r_km", r_km));
         let v = c_try!(read_vec3("sidereon_rv2eq", "v_km_s", v_km_s));
@@ -674,7 +782,7 @@ pub unsafe extern "C" fn sidereon_eq2rv(
     out_r_km: *mut f64,
     out_v_km_s: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_eq2rv", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_eq2rv", SidereonStatus::Panic, || {
         let eq = c_try!(require_ref(eq, "sidereon_eq2rv", "eq"));
         let eq = c_try!(equinoctial_from_c("sidereon_eq2rv", eq));
         match sidereon_core::astro::equinoctial::eq2rv(&eq, mu_km3_s2) {
@@ -708,7 +816,7 @@ pub unsafe extern "C" fn sidereon_rv2mee(
     retrograde: u32,
     out: *mut SidereonModifiedEquinoctialElements,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_rv2mee", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_rv2mee", SidereonStatus::Panic, || {
         let out = c_try!(require_out(out, "sidereon_rv2mee", "out"));
         let r = c_try!(read_vec3("sidereon_rv2mee", "r_km", r_km));
         let v = c_try!(read_vec3("sidereon_rv2mee", "v_km_s", v_km_s));
@@ -730,7 +838,7 @@ pub unsafe extern "C" fn sidereon_mee2rv(
     out_r_km: *mut f64,
     out_v_km_s: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_mee2rv", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_mee2rv", SidereonStatus::Panic, || {
         let mee = c_try!(require_ref(mee, "sidereon_mee2rv", "mee"));
         let mee = c_try!(modified_equinoctial_from_c("sidereon_mee2rv", mee));
         match sidereon_core::astro::equinoctial::mee2rv(&mee, mu_km3_s2) {
@@ -833,7 +941,7 @@ pub unsafe extern "C" fn sidereon_absolute_from_relative(
     rel: *const SidereonCartesianState,
     out: *mut SidereonCartesianState,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_absolute_from_relative",
         SidereonStatus::Panic,
         || {
@@ -865,7 +973,7 @@ pub unsafe extern "C" fn sidereon_cw_stm(
     out_row_major: *mut f64,
     len: usize,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_cw_stm", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_cw_stm", SidereonStatus::Panic, || {
         match sidereon_core::astro::relative::cw_stm(mean_motion_rad_s, dt_s) {
             Ok(matrix) => {
                 let mut flat = [0.0_f64; 36];
@@ -895,7 +1003,7 @@ pub unsafe extern "C" fn sidereon_cw_propagate(
     dt_s: f64,
     out: *mut SidereonCartesianState,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_cw_propagate", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_cw_propagate", SidereonStatus::Panic, || {
         let out = c_try!(require_out(out, "sidereon_cw_propagate", "out"));
         let rel = c_try!(require_ref(rel, "sidereon_cw_propagate", "rel"));
         match sidereon_core::astro::relative::cw_propagate(
@@ -917,7 +1025,7 @@ pub unsafe extern "C" fn sidereon_relative_mean_motion_circular(
     radius_km: f64,
     out: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_relative_mean_motion_circular",
         SidereonStatus::Panic,
         || {
@@ -943,7 +1051,7 @@ pub unsafe extern "C" fn sidereon_relative_mean_motion_from_state(
     chief: *const SidereonCartesianState,
     out: *mut f64,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_relative_mean_motion_from_state",
         SidereonStatus::Panic,
         || {
@@ -978,7 +1086,7 @@ pub unsafe extern "C" fn sidereon_relative_rotation(
     out_row_major: *mut f64,
     len: usize,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_relative_rotation", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_relative_rotation", SidereonStatus::Panic, || {
         let frame = c_try!(relative_frame_from_c("sidereon_relative_rotation", frame));
         let chief = c_try!(require_ref(chief, "sidereon_relative_rotation", "chief"));
         let chief = cartesian_state_from_c(chief);
@@ -1029,7 +1137,7 @@ pub unsafe extern "C" fn sidereon_relative_state(
     deputy: *const SidereonCartesianState,
     out: *mut SidereonCartesianState,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_relative_state", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_relative_state", SidereonStatus::Panic, || {
         let out = c_try!(require_out(out, "sidereon_relative_state", "out"));
         let chief = c_try!(require_ref(chief, "sidereon_relative_state", "chief"));
         let deputy = c_try!(require_ref(deputy, "sidereon_relative_state", "deputy"));
@@ -1165,6 +1273,11 @@ fn classical_elements_from_c(
 }
 
 fn map_elements_error(fn_name: &str, err: ElementsError) -> SidereonStatus {
+    record_engine_error(
+        SidereonEngineErrorFamily::Elements,
+        fn_name,
+        elements_error_value(&err),
+    );
     extra_invalid_arg(fn_name, err)
 }
 
@@ -1250,6 +1363,11 @@ fn map_equinoctial_error(
     fn_name: &str,
     err: sidereon_core::astro::equinoctial::EquinoctialError,
 ) -> SidereonStatus {
+    record_engine_error(
+        SidereonEngineErrorFamily::Equinoctial,
+        fn_name,
+        equinoctial_error_value(&err),
+    );
     extra_invalid_arg(fn_name, err)
 }
 
@@ -1267,6 +1385,11 @@ fn map_relative_error(
     fn_name: &str,
     err: sidereon_core::astro::covariance::RtnFrameError,
 ) -> SidereonStatus {
+    record_engine_error(
+        SidereonEngineErrorFamily::RtnFrame,
+        fn_name,
+        rtn_frame_error_value(&err),
+    );
     set_last_error(format!("{fn_name}: {err:?}"));
     SidereonStatus::InvalidArgument
 }
@@ -1299,6 +1422,11 @@ fn map_anomaly_error(
     fn_name: &str,
     err: sidereon_core::astro::anomaly::AnomalyError,
 ) -> SidereonStatus {
+    record_engine_error(
+        SidereonEngineErrorFamily::Anomaly,
+        fn_name,
+        anomaly_error_value(&err),
+    );
     extra_invalid_arg(fn_name, err)
 }
 
@@ -1327,6 +1455,513 @@ fn retrograde_factor_to_c(value: sidereon_core::astro::equinoctial::RetrogradeFa
         }
         sidereon_core::astro::equinoctial::RetrogradeFactor::Retrograde => {
             SidereonRetrogradeFactor::Retrograde as u32
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine_error::{
+        sidereon_last_engine_error_info, sidereon_last_engine_error_payload,
+        SidereonEngineErrorFamily, SidereonEngineErrorInfo,
+    };
+    use sidereon_core::astro::anomaly::AnomalyError as AE;
+    use sidereon_core::astro::covariance::RtnFrameError as RFE;
+    use sidereon_core::astro::elements::ElementsError as EE;
+    use sidereon_core::astro::equinoctial::EquinoctialError as EQE;
+    use std::ptr;
+
+    #[test]
+    fn test_orbit_mappers_and_nested_payloads() {
+        // 1. ElementsError (all 5 variants)
+        let val = elements_error_value(&EE::NonFinite { field: "mu" });
+        assert_eq!(val["kind"], "non_finite");
+        assert_eq!(val["fields"]["field"], "mu");
+
+        let val = elements_error_value(&EE::NonPositiveMu);
+        assert_eq!(val["kind"], "non_positive_mu");
+        assert_eq!(val["fields"], json!({}));
+
+        let val = elements_error_value(&EE::ZeroPosition);
+        assert_eq!(val["kind"], "zero_position");
+        assert_eq!(val["fields"], json!({}));
+
+        let val = elements_error_value(&EE::DegenerateOrbit);
+        assert_eq!(val["kind"], "degenerate_orbit");
+        assert_eq!(val["fields"], json!({}));
+
+        let val = elements_error_value(&EE::NonPositiveSemiLatus);
+        assert_eq!(val["kind"], "non_positive_semi_latus");
+        assert_eq!(val["fields"], json!({}));
+
+        // 2. AnomalyError (all 7 variants, exact engine_f64 checks)
+        let val = anomaly_error_value(&AE::NonFinite { field: "mean_anom" });
+        assert_eq!(val["kind"], "non_finite");
+        assert_eq!(val["fields"]["field"], "mean_anom");
+
+        let val = anomaly_error_value(&AE::NegativeEccentricity);
+        assert_eq!(val["kind"], "negative_eccentricity");
+        assert_eq!(val["fields"], json!({}));
+
+        let val = anomaly_error_value(&AE::NonPositiveMu);
+        assert_eq!(val["kind"], "non_positive_mu");
+        assert_eq!(val["fields"], json!({}));
+
+        let val = anomaly_error_value(&AE::NonPositiveSemiLatus);
+        assert_eq!(val["kind"], "non_positive_semi_latus");
+        assert_eq!(val["fields"], json!({}));
+
+        let nu_val = std::f64::consts::PI;
+        let limit_val = 3.0_f64;
+        let val = anomaly_error_value(&AE::BeyondAsymptote {
+            nu: nu_val,
+            limit: limit_val,
+        });
+        assert_eq!(val["kind"], "beyond_asymptote");
+        assert_eq!(val["fields"]["nu"]["decimal"], nu_val.to_string());
+        assert_eq!(
+            val["fields"]["nu"]["bits_hex"],
+            format!("{:016x}", nu_val.to_bits())
+        );
+        assert_eq!(val["fields"]["limit"]["decimal"], limit_val.to_string());
+        assert_eq!(
+            val["fields"]["limit"]["bits_hex"],
+            format!("{:016x}", limit_val.to_bits())
+        );
+
+        let val = anomaly_error_value(&AE::InconsistentElements { field: "incl" });
+        assert_eq!(val["kind"], "inconsistent_elements");
+        assert_eq!(val["fields"]["field"], "incl");
+
+        let res_val = 1.234e-8_f64;
+        let val = anomaly_error_value(&AE::NonConvergent {
+            iterations: 50,
+            residual: res_val,
+        });
+        assert_eq!(val["kind"], "non_convergent");
+        assert_eq!(val["fields"]["iterations"], 50);
+        assert_eq!(val["fields"]["residual"]["decimal"], res_val.to_string());
+        assert_eq!(
+            val["fields"]["residual"]["bits_hex"],
+            format!("{:016x}", res_val.to_bits())
+        );
+
+        // 3. EquinoctialError (all 4 variants, nested causes)
+        let val = equinoctial_error_value(&EQE::Elements(EE::NonPositiveMu));
+        assert_eq!(val["kind"], "elements");
+        assert_eq!(val["fields"]["cause"]["kind"], "non_positive_mu");
+
+        let val = equinoctial_error_value(&EQE::Anomaly(AE::NegativeEccentricity));
+        assert_eq!(val["kind"], "anomaly");
+        assert_eq!(val["fields"]["cause"]["kind"], "negative_eccentricity");
+
+        let val = equinoctial_error_value(&EQE::RetrogradePole);
+        assert_eq!(val["kind"], "retrograde_pole");
+        assert_eq!(val["fields"], json!({}));
+
+        let val = equinoctial_error_value(&EQE::ParabolicEquinoctial);
+        assert_eq!(val["kind"], "parabolic_equinoctial");
+        assert_eq!(val["fields"], json!({}));
+
+        // 4. RtnFrameError (all 3 variants)
+        let val = rtn_frame_error_value(&RFE::InvalidInput {
+            field: "cov_rtn",
+            reason: "matrix must be positive semidefinite",
+        });
+        assert_eq!(val["kind"], "invalid_input");
+        assert_eq!(val["fields"]["field"], "cov_rtn");
+        assert_eq!(
+            val["fields"]["reason"],
+            "matrix must be positive semidefinite"
+        );
+
+        let val = rtn_frame_error_value(&RFE::ZeroPosition);
+        assert_eq!(val["kind"], "zero_position");
+        assert_eq!(val["fields"], json!({}));
+
+        let val = rtn_frame_error_value(&RFE::ParallelPositionVelocity);
+        assert_eq!(val["kind"], "parallel_position_velocity");
+        assert_eq!(val["fields"], json!({}));
+    }
+
+    #[test]
+    fn test_orbit_public_controls_and_refusals() {
+        unsafe {
+            let mut info = SidereonEngineErrorInfo {
+                family: SidereonEngineErrorFamily::None,
+                payload_len: 0,
+            };
+
+            // -------------------------------------------------------------
+            // Family 27: Elements (sidereon_rv2coe / sidereon_coe2rv)
+            // -------------------------------------------------------------
+            let r = [7000.0, 0.0, 0.0];
+            let v = [0.0, 7.5, 0.0];
+            let mu = 398600.4418;
+            let mut coe: SidereonClassicalElements = std::mem::zeroed();
+
+            // Valid control: rv2coe
+            assert_eq!(
+                sidereon_rv2coe(r.as_ptr(), v.as_ptr(), mu, &mut coe),
+                SidereonStatus::Ok
+            );
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+            assert_eq!(info.payload_len, 0);
+
+            // Real public refusal: non-positive mu (-100.0)
+            assert_eq!(
+                sidereon_rv2coe(r.as_ptr(), v.as_ptr(), -100.0, &mut coe),
+                SidereonStatus::InvalidArgument
+            );
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::Elements);
+            assert!(info.payload_len > 0);
+
+            // Two-pass payload test
+            let mut short_buf = [0u8; 4];
+            let mut written = 999;
+            let mut required = 0;
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    short_buf.as_mut_ptr(),
+                    short_buf.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::InvalidArgument
+            );
+            assert_eq!(written, 0);
+            assert_eq!(required, info.payload_len);
+
+            let mut full_buf = vec![0u8; info.payload_len];
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    full_buf.as_mut_ptr(),
+                    full_buf.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, info.payload_len);
+            let payload: serde_json::Value =
+                serde_json::from_slice(&full_buf).expect("valid json engine error payload");
+            assert_eq!(payload["schema_version"], 1);
+            assert_eq!(payload["family"], "elements");
+            assert_eq!(payload["operation"], "sidereon_rv2coe");
+            assert_eq!(payload["error"]["kind"], "non_positive_mu");
+
+            // Early null reset: calling with invalid out resets engine error
+            assert_eq!(
+                sidereon_rv2coe(r.as_ptr(), v.as_ptr(), mu, ptr::null_mut()),
+                SidereonStatus::NullPointer
+            );
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+            assert_eq!(info.payload_len, 0);
+
+            // Success reset
+            assert_eq!(
+                sidereon_rv2coe(r.as_ptr(), v.as_ptr(), -100.0, &mut coe),
+                SidereonStatus::InvalidArgument
+            );
+            assert_eq!(
+                sidereon_rv2coe(r.as_ptr(), v.as_ptr(), mu, &mut coe),
+                SidereonStatus::Ok
+            );
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+            assert_eq!(info.payload_len, 0);
+
+            // -------------------------------------------------------------
+            // Family 30: Anomaly (sidereon_solve_kepler)
+            // -------------------------------------------------------------
+            let mut sol: SidereonKeplerSolution = std::mem::zeroed();
+
+            // Valid control: solve_kepler
+            assert_eq!(
+                sidereon_solve_kepler(0.5, 0.1, &mut sol),
+                SidereonStatus::Ok
+            );
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+
+            // Real public refusal: negative eccentricity (-0.2)
+            assert_eq!(
+                sidereon_solve_kepler(0.5, -0.2, &mut sol),
+                SidereonStatus::InvalidArgument
+            );
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::Anomaly);
+            assert!(info.payload_len > 0);
+
+            // Two-pass payload test
+            let mut full_buf = vec![0u8; info.payload_len];
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    full_buf.as_mut_ptr(),
+                    full_buf.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            let payload: serde_json::Value =
+                serde_json::from_slice(&full_buf).expect("valid json engine error payload");
+            assert_eq!(payload["schema_version"], 1);
+            assert_eq!(payload["family"], "anomaly");
+            assert_eq!(payload["operation"], "sidereon_solve_kepler");
+            assert_eq!(payload["error"]["kind"], "negative_eccentricity");
+
+            // Early null reset
+            assert_eq!(
+                sidereon_solve_kepler(0.5, -0.2, ptr::null_mut()),
+                SidereonStatus::NullPointer
+            );
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+
+            // Success reset
+            assert_eq!(
+                sidereon_solve_kepler(0.5, -0.2, &mut sol),
+                SidereonStatus::InvalidArgument
+            );
+            assert_eq!(
+                sidereon_solve_kepler(0.5, 0.1, &mut sol),
+                SidereonStatus::Ok
+            );
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+
+            // -------------------------------------------------------------
+            // Family 28: Equinoctial (sidereon_coe2eq)
+            // -------------------------------------------------------------
+            let mut eq: SidereonEquinoctialElements = std::mem::zeroed();
+
+            // Valid control: coe2eq with coe from rv2coe
+            assert_eq!(
+                sidereon_coe2eq(&coe, SidereonRetrogradeFactor::Prograde as u32, &mut eq),
+                SidereonStatus::Ok
+            );
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+
+            // Real public refusal: parabolic orbit (ecc == 1.0)
+            let mut parabolic_coe = coe;
+            parabolic_coe.ecc = 1.0;
+            assert_eq!(
+                sidereon_coe2eq(
+                    &parabolic_coe,
+                    SidereonRetrogradeFactor::Prograde as u32,
+                    &mut eq,
+                ),
+                SidereonStatus::InvalidArgument
+            );
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::Equinoctial);
+            assert!(info.payload_len > 0);
+
+            // Two-pass payload test
+            let mut full_buf = vec![0u8; info.payload_len];
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    full_buf.as_mut_ptr(),
+                    full_buf.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            let payload: serde_json::Value =
+                serde_json::from_slice(&full_buf).expect("valid json engine error payload");
+            assert_eq!(payload["schema_version"], 1);
+            assert_eq!(payload["family"], "equinoctial");
+            assert_eq!(payload["operation"], "sidereon_coe2eq");
+            assert_eq!(payload["error"]["kind"], "parabolic_equinoctial");
+
+            // Early null reset
+            assert_eq!(
+                sidereon_coe2eq(
+                    &parabolic_coe,
+                    SidereonRetrogradeFactor::Prograde as u32,
+                    ptr::null_mut(),
+                ),
+                SidereonStatus::NullPointer
+            );
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+
+            // Success reset
+            assert_eq!(
+                sidereon_coe2eq(
+                    &parabolic_coe,
+                    SidereonRetrogradeFactor::Prograde as u32,
+                    &mut eq,
+                ),
+                SidereonStatus::InvalidArgument
+            );
+            assert_eq!(
+                sidereon_coe2eq(&coe, SidereonRetrogradeFactor::Prograde as u32, &mut eq),
+                SidereonStatus::Ok
+            );
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+
+            // -------------------------------------------------------------
+            // Family 29: RtnFrame (sidereon_rtn_to_eci_covariance / sidereon_cw_stm)
+            // -------------------------------------------------------------
+            let mut flat_stm = [0.0_f64; 36];
+
+            // Valid control: sidereon_cw_stm
+            assert_eq!(
+                sidereon_cw_stm(0.001, 60.0, flat_stm.as_mut_ptr(), 36),
+                SidereonStatus::Ok
+            );
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+
+            // Real public refusal: sidereon_rtn_to_eci_covariance with zero position
+            let cov_rtn = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+            let zero_r = [0.0, 0.0, 0.0];
+            let normal_v = [0.0, 7.5, 0.0];
+            let mut out_cov_eci = [0.0_f64; 9];
+
+            assert_eq!(
+                sidereon_rtn_to_eci_covariance(
+                    cov_rtn.as_ptr(),
+                    zero_r.as_ptr(),
+                    normal_v.as_ptr(),
+                    out_cov_eci.as_mut_ptr(),
+                ),
+                SidereonStatus::InvalidArgument
+            );
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::RtnFrame);
+            assert!(info.payload_len > 0);
+
+            // Two-pass payload test
+            let mut full_buf = vec![0u8; info.payload_len];
+            assert_eq!(
+                sidereon_last_engine_error_payload(
+                    full_buf.as_mut_ptr(),
+                    full_buf.len(),
+                    &mut written,
+                    &mut required,
+                ),
+                SidereonStatus::Ok
+            );
+            let payload: serde_json::Value =
+                serde_json::from_slice(&full_buf).expect("valid json engine error payload");
+            assert_eq!(payload["schema_version"], 1);
+            assert_eq!(payload["family"], "rtn_frame");
+            assert_eq!(payload["operation"], "sidereon_rtn_to_eci_covariance");
+            assert_eq!(payload["error"]["kind"], "zero_position");
+
+            // Early null reset: use valid nonzero position and nonparallel velocity
+            // to pass core validation and reach out_cov_eci null check
+            let valid_r = [7000.0, 0.0, 0.0];
+            assert_eq!(
+                sidereon_rtn_to_eci_covariance(
+                    cov_rtn.as_ptr(),
+                    valid_r.as_ptr(),
+                    normal_v.as_ptr(),
+                    ptr::null_mut(),
+                ),
+                SidereonStatus::NullPointer
+            );
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+            assert_eq!(info.payload_len, 0);
+
+            // Success reset: seed refusal with zero position, then verify valid call resets to None
+            assert_eq!(
+                sidereon_rtn_to_eci_covariance(
+                    cov_rtn.as_ptr(),
+                    zero_r.as_ptr(),
+                    normal_v.as_ptr(),
+                    out_cov_eci.as_mut_ptr(),
+                ),
+                SidereonStatus::InvalidArgument
+            );
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::RtnFrame);
+
+            assert_eq!(
+                sidereon_rtn_to_eci_covariance(
+                    cov_rtn.as_ptr(),
+                    valid_r.as_ptr(),
+                    normal_v.as_ptr(),
+                    out_cov_eci.as_mut_ptr(),
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+            assert_eq!(info.payload_len, 0);
+
+            assert_eq!(
+                sidereon_cw_stm(0.001, 60.0, flat_stm.as_mut_ptr(), 36),
+                SidereonStatus::Ok
+            );
+            assert_eq!(
+                sidereon_last_engine_error_info(&mut info),
+                SidereonStatus::Ok
+            );
+            assert_eq!(info.family, SidereonEngineErrorFamily::None);
+            assert_eq!(info.payload_len, 0);
         }
     }
 }

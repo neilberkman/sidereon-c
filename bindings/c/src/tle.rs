@@ -1,6 +1,171 @@
 use super::*;
+use crate::engine_error::{
+    engine_error_operation_boundary, record_engine_error, SidereonEngineErrorFamily,
+};
+
+fn error_node(kind: &str, fields: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "kind": kind,
+        "fields": fields,
+    })
+}
+
+fn sgp4_input_kind_name(kind: sidereon_core::astro::sgp4::Sgp4InputErrorKind) -> &'static str {
+    use sidereon_core::astro::sgp4::Sgp4InputErrorKind as K;
+    match kind {
+        K::NonFinite => "non_finite",
+        K::NotPositive => "not_positive",
+        K::Negative => "negative",
+        K::OutOfRange => "out_of_range",
+        K::Missing => "missing",
+        K::FloatParse => "float_parse",
+        K::IntParse => "int_parse",
+        K::InvalidCivilDate => "invalid_civil_date",
+        K::InvalidCivilTime => "invalid_civil_time",
+    }
+}
+
+pub(crate) fn sgp4_error_value(error: &sidereon_core::astro::sgp4::Error) -> serde_json::Value {
+    use sidereon_core::astro::sgp4::Error as E;
+    match error {
+        E::InvalidInput { field, kind } => error_node(
+            "invalid_input",
+            serde_json::json!({
+                "field": field,
+                "kind": sgp4_input_kind_name(*kind),
+            }),
+        ),
+        E::NonFiniteOutput { field } => error_node(
+            "non_finite_output",
+            serde_json::json!({
+                "field": field,
+            }),
+        ),
+        E::InvalidTle(message) => error_node(
+            "invalid_tle",
+            serde_json::json!({
+                "message": message,
+            }),
+        ),
+        E::Sgp4 { code } => error_node(
+            "sgp4",
+            serde_json::json!({
+                "code": code,
+            }),
+        ),
+        E::ResonanceStepBudget { budget } => error_node(
+            "resonance_step_budget",
+            serde_json::json!({
+                "budget": budget,
+            }),
+        ),
+    }
+}
+
+pub(crate) fn look_angle_error_value(
+    error: &sidereon_core::astro::passes::LookAngleError,
+) -> serde_json::Value {
+    use sidereon_core::astro::passes::LookAngleError as E;
+    match error {
+        E::InvalidInput { field, reason } => error_node(
+            "invalid_input",
+            serde_json::json!({
+                "field": field,
+                "reason": reason,
+            }),
+        ),
+        E::Init(inner) => error_node(
+            "init",
+            serde_json::json!({
+                "cause": sgp4_error_value(inner),
+            }),
+        ),
+        E::Propagate(inner) => error_node(
+            "propagate",
+            serde_json::json!({
+                "cause": sgp4_error_value(inner),
+            }),
+        ),
+        E::FrameTransform(inner) => error_node(
+            "frame_transform",
+            serde_json::json!({
+                "cause": crate::orbit_fit::frame_transform_error_value(inner),
+            }),
+        ),
+    }
+}
 
 pub const TLE_FIELD_C_BYTES: usize = 32;
+
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonSgp4ErrorKind {
+    None = 0,
+    InvalidInput = 1,
+    NonFiniteOutput = 2,
+    InvalidTle = 3,
+    Engine = 4,
+    ResonanceStepBudget = 5,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct SidereonSgp4ErrorInfo {
+    pub kind: SidereonSgp4ErrorKind,
+    pub has_code: bool,
+    pub code: i32,
+    pub has_budget: bool,
+    pub budget: u64,
+}
+
+thread_local! {
+    static LAST_SGP4_ERROR: std::cell::Cell<SidereonSgp4ErrorInfo> = const { std::cell::Cell::new(SidereonSgp4ErrorInfo { kind: SidereonSgp4ErrorKind::None, has_code: false, code: 0, has_budget: false, budget: 0 }) };
+}
+
+fn record_sgp4_error(error: &Sgp4Error) {
+    let mut detail = SidereonSgp4ErrorInfo {
+        kind: SidereonSgp4ErrorKind::None,
+        has_code: false,
+        code: 0,
+        has_budget: false,
+        budget: 0,
+    };
+    match error {
+        Sgp4Error::InvalidInput { .. } => detail.kind = SidereonSgp4ErrorKind::InvalidInput,
+        Sgp4Error::NonFiniteOutput { .. } => detail.kind = SidereonSgp4ErrorKind::NonFiniteOutput,
+        Sgp4Error::InvalidTle(_) => detail.kind = SidereonSgp4ErrorKind::InvalidTle,
+        Sgp4Error::Sgp4 { code } => {
+            detail.kind = SidereonSgp4ErrorKind::Engine;
+            detail.has_code = true;
+            detail.code = *code;
+        }
+        Sgp4Error::ResonanceStepBudget { budget } => {
+            detail.kind = SidereonSgp4ErrorKind::ResonanceStepBudget;
+            detail.has_budget = true;
+            detail.budget = *budget;
+        }
+    }
+    LAST_SGP4_ERROR.with(|slot| slot.set(detail));
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sgp4_last_error_info(
+    out_info: *mut SidereonSgp4ErrorInfo,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_sgp4_last_error_info",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_info,
+                "sidereon_sgp4_last_error_info",
+                "out_info"
+            ));
+            *out = LAST_SGP4_ERROR.with(std::cell::Cell::get);
+            SidereonStatus::Ok
+        },
+    )
+}
 
 /// A parsed TLE and initialized SGP4 satellite. Opaque to C. Create with
 /// sidereon_tle_load and release with sidereon_tle_free.
@@ -9,6 +174,255 @@ pub struct SidereonTle {
     pub(crate) elements: TleElements,
     pub(crate) satellite: Satellite,
     pub(crate) checksum_warnings: Vec<ChecksumWarning>,
+}
+
+/// A propagation-ready SGP4 satellite initialized directly from an OMM.
+pub struct SidereonSgp4Satellite {
+    pub(crate) inner: Satellite,
+}
+
+/// Read the initialized element epoch without collapsing its split fraction.
+///
+/// Safety: satellite is a live handle; both outputs point to writable f64 storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sgp4_satellite_epoch_jd(
+    satellite: *const SidereonSgp4Satellite,
+    out_whole: *mut f64,
+    out_fraction: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_sgp4_satellite_epoch_jd",
+        SidereonStatus::Panic,
+        || {
+            let whole = c_try!(require_out(
+                out_whole,
+                "sidereon_sgp4_satellite_epoch_jd",
+                "out_whole"
+            ));
+            let fraction = c_try!(require_out(
+                out_fraction,
+                "sidereon_sgp4_satellite_epoch_jd",
+                "out_fraction"
+            ));
+            c_try!(reject_output_overlaps_handle(
+                "sidereon_sgp4_satellite_epoch_jd",
+                whole,
+                "out_whole",
+                satellite,
+                "satellite"
+            ));
+            c_try!(reject_output_overlaps_handle(
+                "sidereon_sgp4_satellite_epoch_jd",
+                fraction,
+                "out_fraction",
+                satellite,
+                "satellite"
+            ));
+            let whole_range =
+                checked_output_range("sidereon_sgp4_satellite_epoch_jd", whole, 1, "out_whole");
+            let fraction_range = checked_output_range(
+                "sidereon_sgp4_satellite_epoch_jd",
+                fraction,
+                1,
+                "out_fraction",
+            );
+            c_try!(reject_overlapping_outputs(
+                "sidereon_sgp4_satellite_epoch_jd",
+                c_try!(whole_range),
+                c_try!(fraction_range),
+                "out_whole",
+                "out_fraction"
+            ));
+            *whole = 0.0;
+            *fraction = 0.0;
+            let satellite = c_try!(require_ref(
+                satellite,
+                "sidereon_sgp4_satellite_epoch_jd",
+                "satellite"
+            ));
+            let epoch = satellite.inner.epoch_jd();
+            *whole = epoch.0;
+            *fraction = epoch.1;
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Initialize an owned SGP4 satellite from an OMM's full core bridge.
+///
+/// Safety: omm must be a live OMM handle; out_satellite points to writable handle storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sgp4_satellite_from_omm(
+    omm: *const crate::omm::SidereonOmm,
+    out_satellite: *mut *mut SidereonSgp4Satellite,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_sgp4_satellite_from_omm",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_satellite,
+                "sidereon_sgp4_satellite_from_omm",
+                "out_satellite"
+            ));
+            c_try!(reject_output_overlaps_handle(
+                "sidereon_sgp4_satellite_from_omm",
+                out,
+                "out_satellite",
+                omm,
+                "omm"
+            ));
+            *out = ptr::null_mut();
+            let omm = c_try!(require_ref(omm, "sidereon_sgp4_satellite_from_omm", "omm"));
+            match Satellite::from_omm(&omm.inner) {
+                Ok(inner) => {
+                    write_boxed_handle(out, SidereonSgp4Satellite { inner });
+                    SidereonStatus::Ok
+                }
+                Err(error) => map_sgp4_error("sidereon_sgp4_satellite_from_omm", error),
+            }
+        },
+    )
+}
+
+/// Read the initialized OMM satellite epoch as seconds from J2000.
+///
+/// Safety: satellite is a live handle; out_epoch_j2000_s points to writable f64 storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sgp4_satellite_epoch_j2000_s(
+    satellite: *const SidereonSgp4Satellite,
+    out_epoch_j2000_s: *mut f64,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_sgp4_satellite_epoch_j2000_s",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_epoch_j2000_s,
+                "sidereon_sgp4_satellite_epoch_j2000_s",
+                "out_epoch_j2000_s"
+            ));
+            c_try!(reject_output_overlaps_handle(
+                "sidereon_sgp4_satellite_epoch_j2000_s",
+                out,
+                "out_epoch_j2000_s",
+                satellite,
+                "satellite"
+            ));
+            *out = 0.0;
+            let satellite = c_try!(require_ref(
+                satellite,
+                "sidereon_sgp4_satellite_epoch_j2000_s",
+                "satellite"
+            ));
+            let epoch = satellite.inner.epoch_jd();
+            *out = j2000_seconds_from_split(epoch.0, epoch.1);
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Propagate at minutes since the OMM element epoch into a detached TEME state.
+///
+/// Safety: satellite is live; out_state points to writable SidereonTemeState storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sgp4_satellite_propagate_minutes(
+    satellite: *const SidereonSgp4Satellite,
+    minutes_since_epoch: f64,
+    out_state: *mut SidereonTemeState,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_sgp4_satellite_propagate_minutes",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_state,
+                "sidereon_sgp4_satellite_propagate_minutes",
+                "out_state"
+            ));
+            c_try!(reject_output_overlaps_handle(
+                "sidereon_sgp4_satellite_propagate_minutes",
+                out,
+                "out_state",
+                satellite,
+                "satellite"
+            ));
+            *out = SidereonTemeState {
+                position_km: [0.0; 3],
+                velocity_km_s: [0.0; 3],
+            };
+            let satellite = c_try!(require_ref(
+                satellite,
+                "sidereon_sgp4_satellite_propagate_minutes",
+                "satellite"
+            ));
+            match satellite
+                .inner
+                .propagate(MinutesSinceEpoch(minutes_since_epoch))
+            {
+                Ok(prediction) => {
+                    *out = prediction_to_c(&prediction);
+                    SidereonStatus::Ok
+                }
+                Err(error) => map_sgp4_error("sidereon_sgp4_satellite_propagate_minutes", error),
+            }
+        },
+    )
+}
+
+/// Propagate at an exact split Julian date into a detached TEME state.
+///
+/// Safety: satellite is live; out_state points to writable SidereonTemeState storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sgp4_satellite_propagate_jd(
+    satellite: *const SidereonSgp4Satellite,
+    epoch_whole: f64,
+    epoch_fraction: f64,
+    out_state: *mut SidereonTemeState,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_sgp4_satellite_propagate_jd",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out_state,
+                "sidereon_sgp4_satellite_propagate_jd",
+                "out_state"
+            ));
+            c_try!(reject_output_overlaps_handle(
+                "sidereon_sgp4_satellite_propagate_jd",
+                out,
+                "out_state",
+                satellite,
+                "satellite"
+            ));
+            *out = SidereonTemeState {
+                position_km: [0.0; 3],
+                velocity_km_s: [0.0; 3],
+            };
+            let satellite = c_try!(require_ref(
+                satellite,
+                "sidereon_sgp4_satellite_propagate_jd",
+                "satellite"
+            ));
+            let epoch = sidereon_core::astro::sgp4::JulianDate::new(epoch_whole, epoch_fraction);
+            match satellite.inner.propagate_jd(epoch) {
+                Ok(prediction) => {
+                    *out = prediction_to_c(&prediction);
+                    SidereonStatus::Ok
+                }
+                Err(error) => map_sgp4_error("sidereon_sgp4_satellite_propagate_jd", error),
+            }
+        },
+    )
+}
+
+/// Release an OMM-initialized SGP4 satellite.
+///
+/// Safety: satellite is a live handle returned by sidereon_sgp4_satellite_from_omm or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sgp4_satellite_free(satellite: *mut SidereonSgp4Satellite) {
+    free_boxed(satellite);
 }
 
 /// Stateful SGP4 decay latch. Opaque to C. Create with
@@ -22,7 +436,7 @@ pub struct SidereonSgp4DecayLatch {
 /// with sidereon_parse_tle_file and release with sidereon_tle_file_free.
 pub struct SidereonTleFile {
     pub(crate) records: Vec<SidereonTleFileRecord>,
-    pub(crate) skipped: usize,
+    pub(crate) rejected: Vec<sidereon::sgp4::RejectedTleRecord>,
 }
 
 /// A TEME state arc from TLE/SGP4 propagation. Opaque to C. Create with
@@ -99,16 +513,72 @@ pub struct SidereonTlePair {
     pub line2: *const c_char,
 }
 
-/// Advisory checksum discrepancy from TLE parsing.
+/// TLE checksum-reading policy. Pass these values as uint32_t policy
+/// arguments. Mirrors sidereon_core::astro::tle::TlePolicy.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonTlePolicy {
+    /// Refuse a column-69 digit that disagrees with the checksum and a column
+    /// 69 that is not a digit.
+    Strict = 0,
+    /// Read both and report each as a checksum warning, as Vallado's
+    /// `twoline2rv` reads.
+    Lenient = 1,
+}
+
+/// What column 69 of a line held when it did not confirm the checksum.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonTleChecksumWarningKind {
+    /// A digit that differs from the computed checksum; `found` is the digit.
+    Mismatch = 0,
+    /// A character other than a digit; `found` is its byte.
+    NotDigit = 1,
+    /// The line ends before column 69, so it carries no checksum; `found` is 0.
+    Missing = 2,
+}
+
+/// A line whose column 69 did not confirm its checksum.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct SidereonTleChecksumWarning {
     /// TLE line number, 1 or 2.
     pub line_number: u8,
-    /// Checksum digit found in column 69.
-    pub expected: u8,
-    /// Checksum recomputed from columns 1 through 68.
+    /// What column 69 held.
+    pub kind: SidereonTleChecksumWarningKind,
+    /// The digit (MISMATCH) or byte (NOT_DIGIT) found in column 69; 0 for
+    /// MISSING.
+    pub found: u8,
+    /// Checksum recomputed from columns 1 through 68 (or as many as the line
+    /// has).
     pub computed: u8,
+}
+
+/// Why a stretch of a TLE file did not become a satellite. Mirrors
+/// sidereon_core::astro::sgp4::TleRecordIssue.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonTleRecordIssue {
+    /// A line 1 and line 2 whose element set the TLE grammar, the checksum
+    /// policy, or SGP4 initialization refused.
+    Invalid = 0,
+    /// A line 1 with no line 2 after it.
+    MissingLine2 = 1,
+    /// A line 2 with no line 1 before it.
+    OrphanLine2 = 2,
+    /// A name line not followed by an element set.
+    OrphanName = 3,
+}
+
+/// One rejected stretch of a TLE file.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonTleRejectedRecord {
+    /// One-based line number of the first rejected line: the name line when
+    /// the record had one, otherwise its line 1 or line 2.
+    pub line_number: usize,
+    /// Why the lines were rejected.
+    pub issue: SidereonTleRecordIssue,
 }
 
 /// Parsed TLE element fields exposed as read-only metadata.
@@ -143,11 +613,17 @@ pub struct SidereonTleMetadata {
     pub mean_motion_double_dot: f64,
     /// B* drag term in TLE convention.
     pub bstar: f64,
-    /// Ephemeris type from line 1.
+    /// Whether line 1 states an ephemeris type (the field may be blank).
+    pub has_ephemeris_type: bool,
+    /// Ephemeris type from line 1, zero when blank.
     pub ephemeris_type: i32,
-    /// Element set number from line 1.
+    /// Whether line 1 states an element set number.
+    pub has_elset_number: bool,
+    /// Element set number from line 1, zero when blank.
     pub elset_number: i32,
-    /// Revolution number at epoch.
+    /// Whether line 2 states a revolution number.
+    pub has_rev_number: bool,
+    /// Revolution number at epoch, zero when blank.
     pub rev_number: i32,
 }
 
@@ -251,7 +727,40 @@ pub unsafe extern "C" fn sidereon_tle_load(
     ffi_boundary("sidereon_tle_load", SidereonStatus::Panic, || {
         let out_tle = c_try!(require_out(out_tle, "sidereon_tle_load", "out_tle"));
         *out_tle = ptr::null_mut();
-        let tle = c_try!(parse_tle_handle("sidereon_tle_load", line1, line2, opsmode,));
+        let tle = c_try!(parse_tle_handle(
+            "sidereon_tle_load",
+            line1,
+            line2,
+            opsmode,
+            TlePolicy::Strict
+        ));
+        write_boxed_handle(out_tle, tle);
+        SidereonStatus::Ok
+    })
+}
+
+/// Parse a TLE line pair under `policy`, a SidereonTlePolicy value, and
+/// initialize an SGP4 satellite. SIDEREON_TLE_POLICY_LENIENT reads a
+/// column-69 checksum that disagrees or is not a digit and reports it through
+/// sidereon_tle_checksum_warnings; sidereon_tle_load refuses both. On success
+/// writes a newly owned handle to *out_tle. Release it with sidereon_tle_free.
+///
+/// Safety: line1 and line2 must be null-terminated within 128 bytes; out_tle
+/// must point to storage for a SidereonTle*.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_tle_load_with_policy(
+    line1: *const c_char,
+    line2: *const c_char,
+    opsmode: u32,
+    policy: u32,
+    out_tle: *mut *mut SidereonTle,
+) -> SidereonStatus {
+    let fn_name = "sidereon_tle_load_with_policy";
+    ffi_boundary(fn_name, SidereonStatus::Panic, || {
+        let out_tle = c_try!(require_out(out_tle, fn_name, "out_tle"));
+        *out_tle = ptr::null_mut();
+        let policy = c_try!(tle_policy_from_c(fn_name, policy));
+        let tle = c_try!(parse_tle_handle(fn_name, line1, line2, opsmode, policy));
         write_boxed_handle(out_tle, tle);
         SidereonStatus::Ok
     })
@@ -323,8 +832,11 @@ pub unsafe extern "C" fn sidereon_tle_metadata(
             mean_motion_dot: 0.0,
             mean_motion_double_dot: 0.0,
             bstar: 0.0,
+            has_ephemeris_type: false,
             ephemeris_type: 0,
+            has_elset_number: false,
             elset_number: 0,
+            has_rev_number: false,
             rev_number: 0,
         };
         let tle = c_try!(require_ref(tle, "sidereon_tle_metadata", "tle"));
@@ -377,13 +889,16 @@ pub unsafe extern "C" fn sidereon_tle_checksum_warnings(
 }
 
 /// Parse a multi-record CelesTrak/Space-Track TLE file into N initialized
-/// satellites. text must point to text_len readable UTF-8 bytes (the whole
-/// file); opsmode is one of SidereonTleOpsMode_* encoded as uint32_t. Handles
-/// bare 2-line sets, 3-line name+line1+line2 sets, and CelesTrak "0 NAME" name
-/// lines; CRLF endings, blank lines, and surrounding whitespace are tolerated.
-/// A record that fails SGP4 initialization is skipped and counted (see
-/// sidereon_tle_file_skipped) rather than aborting the whole parse. On success
-/// writes a newly owned handle to *out_file. Release it with
+/// satellites under the strict checksum policy. text must point to text_len
+/// readable UTF-8 bytes (the whole file); opsmode is one of
+/// SidereonTleOpsMode_* encoded as uint32_t. Handles bare 2-line sets, 3-line
+/// name+line1+line2 sets, and CelesTrak "0 NAME" name lines; CRLF endings,
+/// blank lines, and surrounding whitespace are tolerated. Every element set
+/// that reads is kept, and every other non-blank line is reported as a
+/// rejected record (sidereon_tle_file_rejected) with its line and reason: an
+/// element set the grammar, checksum policy or SGP4 initialization refused, a
+/// line 1 without a line 2, a stray line 2, or a name line with no element
+/// set. On success writes a newly owned handle to *out_file. Release it with
 /// sidereon_tle_file_free.
 ///
 /// Safety: text must point to text_len readable bytes or be NULL when text_len
@@ -396,33 +911,217 @@ pub unsafe extern "C" fn sidereon_parse_tle_file(
     out_file: *mut *mut SidereonTleFile,
 ) -> SidereonStatus {
     ffi_boundary("sidereon_parse_tle_file", SidereonStatus::Panic, || {
-        let out_file = c_try!(require_out(out_file, "sidereon_parse_tle_file", "out_file"));
-        *out_file = ptr::null_mut();
-        let bytes = c_try!(require_slice(
+        parse_tle_file_body(
+            "sidereon_parse_tle_file",
             text,
             text_len,
-            "sidereon_parse_tle_file",
-            "text"
-        ));
-        let text = match str::from_utf8(bytes) {
-            Ok(text) => text,
-            Err(_) => {
-                set_last_error("sidereon_parse_tle_file: text is not valid UTF-8".to_string());
-                return SidereonStatus::InvalidToken;
-            }
-        };
-        let mode = c_try!(tle_ops_mode_from_c("sidereon_parse_tle_file", opsmode));
-        let parsed = parse_tle_file_with_opsmode(text, mode);
-        let skipped = parsed.skipped;
-        let mut records = Vec::with_capacity(parsed.satellites.len());
-        for named in parsed.satellites {
-            records.push(c_try!(named_satellite_to_record(
-                "sidereon_parse_tle_file",
-                named
-            )));
+            opsmode,
+            TlePolicy::Strict,
+            out_file,
+        )
+    })
+}
+
+/// Parse a multi-record TLE file as sidereon_parse_tle_file does, under
+/// `policy`, a SidereonTlePolicy value. Under SIDEREON_TLE_POLICY_LENIENT a
+/// column-69 checksum that disagrees or is not a digit is read and reported
+/// in the record's checksum warnings instead of rejecting the record.
+///
+/// Safety: as for sidereon_parse_tle_file.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_parse_tle_file_with_policy(
+    text: *const u8,
+    text_len: usize,
+    opsmode: u32,
+    policy: u32,
+    out_file: *mut *mut SidereonTleFile,
+) -> SidereonStatus {
+    let fn_name = "sidereon_parse_tle_file_with_policy";
+    ffi_boundary(fn_name, SidereonStatus::Panic, || {
+        if !out_file.is_null() {
+            *out_file = ptr::null_mut();
         }
-        write_boxed_handle(out_file, SidereonTleFile { records, skipped });
+        let policy = c_try!(tle_policy_from_c(fn_name, policy));
+        parse_tle_file_body(fn_name, text, text_len, opsmode, policy, out_file)
+    })
+}
+
+unsafe fn parse_tle_file_body(
+    fn_name: &str,
+    text: *const u8,
+    text_len: usize,
+    opsmode: u32,
+    policy: TlePolicy,
+    out_file: *mut *mut SidereonTleFile,
+) -> SidereonStatus {
+    let out_file = c_try!(require_out(out_file, fn_name, "out_file"));
+    *out_file = ptr::null_mut();
+    let bytes = c_try!(require_slice(text, text_len, fn_name, "text"));
+    let text = match str::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(_) => {
+            set_last_error(format!("{fn_name}: text is not valid UTF-8"));
+            return SidereonStatus::InvalidToken;
+        }
+    };
+    let mode = c_try!(tle_ops_mode_from_c(fn_name, opsmode));
+    let parsed = sidereon::sgp4::parse_tle_file_with_policy(text, mode, policy);
+    let mut records = Vec::with_capacity(parsed.satellites.len());
+    for named in parsed.satellites {
+        records.push(c_try!(named_satellite_to_record(fn_name, named)));
+    }
+    write_boxed_handle(
+        out_file,
+        SidereonTleFile {
+            records,
+            rejected: parsed.rejected,
+        },
+    );
+    SidereonStatus::Ok
+}
+
+/// Copy rejected record `index` of a TLE file into *out_record. Its name line
+/// is read with sidereon_tle_file_rejected_name and, for an INVALID record,
+/// the refusal with sidereon_tle_file_rejected_error.
+///
+/// Safety: file must be a live handle; out_record must point to a
+/// SidereonTleRejectedRecord.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_tle_file_rejected(
+    file: *const SidereonTleFile,
+    index: usize,
+    out_record: *mut SidereonTleRejectedRecord,
+) -> SidereonStatus {
+    let fn_name = "sidereon_tle_file_rejected";
+    ffi_boundary(fn_name, SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out_record, fn_name, "out_record"));
+        *out = SidereonTleRejectedRecord {
+            line_number: 0,
+            issue: SidereonTleRecordIssue::Invalid,
+        };
+        let file = c_try!(require_ref(file, fn_name, "file"));
+        let record = c_try!(tle_rejected_at(fn_name, file, index));
+        *out = SidereonTleRejectedRecord {
+            line_number: record.line_number,
+            issue: match record.issue {
+                sidereon::sgp4::TleRecordIssue::Invalid(_) => SidereonTleRecordIssue::Invalid,
+                sidereon::sgp4::TleRecordIssue::MissingLine2 => {
+                    SidereonTleRecordIssue::MissingLine2
+                }
+                sidereon::sgp4::TleRecordIssue::OrphanLine2 => SidereonTleRecordIssue::OrphanLine2,
+                sidereon::sgp4::TleRecordIssue::OrphanName => SidereonTleRecordIssue::OrphanName,
+            },
+        };
         SidereonStatus::Ok
+    })
+}
+
+/// Copy the name line of rejected record `index` (not null-terminated, empty
+/// when the record had none) under the variable-length output contract.
+///
+/// Safety: file must be a live handle; out points to len writable bytes or is
+/// NULL when len is 0; out_written and out_required point to size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_tle_file_rejected_name(
+    file: *const SidereonTleFile,
+    index: usize,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    let fn_name = "sidereon_tle_file_rejected_name";
+    ffi_boundary(fn_name, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(fn_name, out_written, out_required));
+        let file = c_try!(require_ref(file, fn_name, "file"));
+        let record = c_try!(tle_rejected_at(fn_name, file, index));
+        c_try!(copy_prefix_to_c(
+            fn_name,
+            "out",
+            record.name.as_bytes(),
+            out,
+            len,
+            out_written,
+            out_required,
+        ));
+        SidereonStatus::Ok
+    })
+}
+
+/// Copy the refusal of rejected record `index` (not null-terminated) under
+/// the variable-length output contract. Empty for a record whose issue is not
+/// SIDEREON_TLE_RECORD_ISSUE_INVALID.
+///
+/// Safety: as for sidereon_tle_file_rejected_name.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_tle_file_rejected_error(
+    file: *const SidereonTleFile,
+    index: usize,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    let fn_name = "sidereon_tle_file_rejected_error";
+    ffi_boundary(fn_name, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(fn_name, out_written, out_required));
+        let file = c_try!(require_ref(file, fn_name, "file"));
+        let record = c_try!(tle_rejected_at(fn_name, file, index));
+        let text = match &record.issue {
+            sidereon::sgp4::TleRecordIssue::Invalid(err) => err.to_string(),
+            _ => String::new(),
+        };
+        c_try!(copy_prefix_to_c(
+            fn_name,
+            "out",
+            text.as_bytes(),
+            out,
+            len,
+            out_written,
+            out_required,
+        ));
+        SidereonStatus::Ok
+    })
+}
+
+/// Write the one-based line number of record `index`'s line 1 in the file
+/// text to *out_line_number.
+///
+/// Safety: file must be a live handle; out_line_number must point to a size_t.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_tle_file_line_number(
+    file: *const SidereonTleFile,
+    index: usize,
+    out_line_number: *mut usize,
+) -> SidereonStatus {
+    let fn_name = "sidereon_tle_file_line_number";
+    ffi_boundary(fn_name, SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out_line_number, fn_name, "out_line_number"));
+        *out = 0;
+        let file = c_try!(require_ref(file, fn_name, "file"));
+        let Some(record) = file.records.get(index) else {
+            set_last_error(format!(
+                "{fn_name}: index {index} out of range ({} records)",
+                file.records.len()
+            ));
+            return SidereonStatus::InvalidArgument;
+        };
+        *out = record.line_number;
+        SidereonStatus::Ok
+    })
+}
+
+fn tle_rejected_at<'a>(
+    fn_name: &str,
+    file: &'a SidereonTleFile,
+    index: usize,
+) -> Result<&'a sidereon::sgp4::RejectedTleRecord, SidereonStatus> {
+    file.rejected.get(index).ok_or_else(|| {
+        set_last_error(format!(
+            "{fn_name}: index {index} out of range ({} rejected records)",
+            file.rejected.len()
+        ));
+        SidereonStatus::InvalidArgument
     })
 }
 
@@ -448,10 +1147,9 @@ pub unsafe extern "C" fn sidereon_tle_file_count(
     })
 }
 
-/// Write the number of records that were found but skipped because their element
-/// set failed SGP4 initialization to *out_skipped. An empty file
-/// (count == 0, skipped == 0) is thus distinguishable from a fully corrupt one
-/// (count == 0, skipped > 0).
+/// Write the number of rejected records (sidereon_tle_file_rejected) to
+/// *out_skipped. An empty file (count == 0, skipped == 0) is thus
+/// distinguishable from a fully corrupt one (count == 0, skipped > 0).
 ///
 /// Safety: file must be a live handle; out_skipped must point to a size_t.
 #[no_mangle]
@@ -467,7 +1165,7 @@ pub unsafe extern "C" fn sidereon_tle_file_skipped(
         ));
         *out_skipped = 0;
         let file = c_try!(require_ref(file, "sidereon_tle_file_skipped", "file"));
-        *out_skipped = file.skipped;
+        *out_skipped = file.rejected.len();
         SidereonStatus::Ok
     })
 }
@@ -741,7 +1439,7 @@ pub unsafe extern "C" fn sidereon_tle_look_angles(
     epoch_count: usize,
     out_look_angles: *mut *mut SidereonLookAngles,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_tle_look_angles", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_tle_look_angles", SidereonStatus::Panic, || {
         let out_look_angles = c_try!(require_out(
             out_look_angles,
             "sidereon_tle_look_angles",
@@ -849,7 +1547,7 @@ pub unsafe extern "C" fn sidereon_tle_find_passes(
     options: *const SidereonPassFinderOptions,
     out_passes: *mut *mut SidereonPassList,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_tle_find_passes", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_tle_find_passes", SidereonStatus::Panic, || {
         let out_passes = c_try!(require_out(
             out_passes,
             "sidereon_tle_find_passes",
@@ -949,7 +1647,7 @@ pub unsafe extern "C" fn sidereon_tle_ground_track(
     epoch_count: usize,
     out_track: *mut *mut SidereonGroundTrack,
 ) -> SidereonStatus {
-    ffi_boundary("sidereon_tle_ground_track", SidereonStatus::Panic, || {
+    engine_error_operation_boundary("sidereon_tle_ground_track", SidereonStatus::Panic, || {
         let out_track = c_try!(require_out(
             out_track,
             "sidereon_tle_ground_track",
@@ -1663,7 +2361,7 @@ pub unsafe extern "C" fn sidereon_visible_from_satellites(
     min_elevation_deg: f64,
     out_visible: *mut *mut SidereonVisibleList,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_visible_from_satellites",
         SidereonStatus::Panic,
         || {
@@ -1723,6 +2421,11 @@ pub unsafe extern "C" fn sidereon_visible_from_satellites(
 }
 
 fn map_look_angle_error(fn_name: &str, err: LookAngleError) -> SidereonStatus {
+    record_engine_error(
+        SidereonEngineErrorFamily::LookAngle,
+        fn_name,
+        look_angle_error_value(&err),
+    );
     set_last_error(format!("{fn_name}: {err}"));
     match err {
         LookAngleError::InvalidInput { .. } => SidereonStatus::InvalidArgument,
@@ -1737,15 +2440,16 @@ fn parse_tle_handle(
     line1: *const c_char,
     line2: *const c_char,
     opsmode: u32,
+    policy: TlePolicy,
 ) -> Result<SidereonTle, SidereonStatus> {
     let line1 = tle_line_from_c(fn_name, "line1", line1)?;
     let line2 = tle_line_from_c(fn_name, "line2", line2)?;
     let mode = tle_ops_mode_from_c(fn_name, opsmode)?;
-    let parsed = sidereon_tle::parse(&line1, &line2).map_err(|err| {
+    let parsed = sidereon_tle::parse_with_policy(&line1, &line2, policy).map_err(|err| {
         set_last_error(format!("{fn_name}: {err}"));
         SidereonStatus::InvalidArgument
     })?;
-    let satellite = Satellite::from_tle_with_opsmode(&line1, &line2, mode)
+    let (satellite, _) = Satellite::from_tle_with_policy(&line1, &line2, mode, policy)
         .map_err(|err| map_sgp4_error(fn_name, err))?;
     Ok(SidereonTle {
         elements: parsed.elements,
@@ -1762,17 +2466,28 @@ fn named_satellite_to_record(
     fn_name: &str,
     named: NamedSatellite,
 ) -> Result<SidereonTleFileRecord, SidereonStatus> {
-    let NamedSatellite { name, satellite } = named;
-    let parsed = sidereon_tle::parse(satellite.line1(), satellite.line2()).map_err(|err| {
-        set_last_error(format!("{fn_name}: {err}"));
-        SidereonStatus::InvalidArgument
-    })?;
+    let NamedSatellite {
+        name,
+        satellite,
+        line_number,
+        checksum_warnings,
+    } = named;
+    // The file reader already applied its checksum policy and kept the
+    // findings it accepted; the element fields read the same under both
+    // policies, so the lenient re-read only recovers them.
+    let parsed =
+        sidereon_tle::parse_with_policy(satellite.line1(), satellite.line2(), TlePolicy::Lenient)
+            .map_err(|err| {
+            set_last_error(format!("{fn_name}: {err}"));
+            SidereonStatus::InvalidArgument
+        })?;
     Ok(SidereonTleFileRecord {
         name,
+        line_number,
         tle: SidereonTle {
             elements: parsed.elements,
             satellite,
-            checksum_warnings: parsed.checksum_warnings,
+            checksum_warnings,
         },
     })
 }
@@ -1793,18 +2508,42 @@ fn tle_metadata_to_c(elements: &TleElements) -> SidereonTleMetadata {
         mean_motion_dot: elements.mean_motion_dot,
         mean_motion_double_dot: elements.mean_motion_double_dot,
         bstar: elements.bstar,
-        ephemeris_type: elements.ephemeris_type,
-        elset_number: elements.elset_number,
-        rev_number: elements.rev_number,
+        has_ephemeris_type: elements.ephemeris_type.is_some(),
+        ephemeris_type: elements.ephemeris_type.unwrap_or(0),
+        has_elset_number: elements.elset_number.is_some(),
+        elset_number: elements.elset_number.unwrap_or(0),
+        has_rev_number: elements.rev_number.is_some(),
+        rev_number: elements.rev_number.unwrap_or(0),
     }
 }
 
 fn checksum_warning_to_c(warning: &ChecksumWarning) -> SidereonTleChecksumWarning {
     let line_number = if warning.line_label == "line 1" { 1 } else { 2 };
+    let (kind, found) = match warning.kind {
+        ChecksumWarningKind::Mismatch { expected } => {
+            (SidereonTleChecksumWarningKind::Mismatch, expected)
+        }
+        ChecksumWarningKind::NotDigit { found } => {
+            (SidereonTleChecksumWarningKind::NotDigit, found as u8)
+        }
+        ChecksumWarningKind::Missing => (SidereonTleChecksumWarningKind::Missing, 0),
+    };
     SidereonTleChecksumWarning {
         line_number,
-        expected: warning.expected,
+        kind,
+        found,
         computed: warning.computed,
+    }
+}
+
+pub(crate) fn tle_policy_from_c(fn_name: &str, policy: u32) -> Result<TlePolicy, SidereonStatus> {
+    match policy {
+        x if x == SidereonTlePolicy::Strict as u32 => Ok(TlePolicy::Strict),
+        x if x == SidereonTlePolicy::Lenient as u32 => Ok(TlePolicy::Lenient),
+        other => {
+            set_last_error(format!("{fn_name}: unknown TLE policy {other}"));
+            Err(SidereonStatus::InvalidArgument)
+        }
     }
 }
 
@@ -1843,11 +2582,13 @@ unsafe fn tle_pair_satellites_from_c(
         let line2 = tle_line_from_c(fn_name, &format!("tles[{idx}].line2"), row.line2)?;
         let satellite = Satellite::from_tle_with_opsmode(&line1, &line2, mode).map_err(|err| {
             set_last_error(format!("{fn_name}: satellite {idx}: {err}"));
+            record_sgp4_error(&err);
             match err {
                 Sgp4Error::InvalidInput { .. } => SidereonStatus::InvalidArgument,
                 Sgp4Error::NonFiniteOutput { .. } => SidereonStatus::Solve,
                 Sgp4Error::InvalidTle(_) => SidereonStatus::InvalidArgument,
                 Sgp4Error::Sgp4 { .. } => SidereonStatus::Solve,
+                Sgp4Error::ResonanceStepBudget { .. } => SidereonStatus::Solve,
             }
         })?;
         satellites.push(satellite);
@@ -1873,16 +2614,21 @@ fn unwrap_look_batch(
 
 fn map_sgp4_error(fn_name: &str, err: Sgp4Error) -> SidereonStatus {
     set_last_error(format!("{fn_name}: {err}"));
+    record_sgp4_error(&err);
     match err {
         Sgp4Error::InvalidInput { .. } => SidereonStatus::InvalidArgument,
         Sgp4Error::NonFiniteOutput { .. } => SidereonStatus::Solve,
         Sgp4Error::InvalidTle(_) => SidereonStatus::InvalidArgument,
         Sgp4Error::Sgp4 { .. } => SidereonStatus::Solve,
+        Sgp4Error::ResonanceStepBudget { .. } => SidereonStatus::Solve,
     }
 }
 
 fn map_decay_latched_error(fn_name: &str, err: DecayLatchedError) -> SidereonStatus {
     set_last_error(format!("{fn_name}: {err}"));
+    if let DecayLatchedError::Propagation(ref propagation_error) = err {
+        record_sgp4_error(propagation_error);
+    }
     match err {
         DecayLatchedError::Decayed { .. } => SidereonStatus::Solve,
         DecayLatchedError::Propagation(err) => match err {
@@ -1890,6 +2636,391 @@ fn map_decay_latched_error(fn_name: &str, err: DecayLatchedError) -> SidereonSta
             Sgp4Error::NonFiniteOutput { .. }
             | Sgp4Error::Sgp4 { .. }
             | Sgp4Error::InvalidTle(_) => SidereonStatus::Solve,
+            Sgp4Error::ResonanceStepBudget { .. } => SidereonStatus::Solve,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine_error::{
+        clear_engine_error, snapshot_engine_error_for_test, SidereonEngineErrorFamily,
+    };
+    use serde_json::json;
+    use sidereon_core::astro::frames::transforms::FrameTransformError;
+    use sidereon_core::astro::passes::LookAngleError;
+    use sidereon_core::astro::sgp4::{Error as Sgp4Error, Sgp4InputErrorKind};
+    use sidereon_core::astro::time::DegradeReason;
+
+    #[test]
+    fn test_sgp4_error_value_variants() {
+        let cases = [
+            (
+                Sgp4Error::InvalidInput {
+                    field: "eccentricity",
+                    kind: Sgp4InputErrorKind::OutOfRange,
+                },
+                json!({
+                    "kind": "invalid_input",
+                    "fields": { "field": "eccentricity", "kind": "out_of_range" }
+                }),
+            ),
+            (
+                Sgp4Error::NonFiniteOutput { field: "velocity" },
+                json!({
+                    "kind": "non_finite_output",
+                    "fields": { "field": "velocity" }
+                }),
+            ),
+            (
+                Sgp4Error::InvalidTle("checksum mismatch".to_string()),
+                json!({
+                    "kind": "invalid_tle",
+                    "fields": { "message": "checksum mismatch" }
+                }),
+            ),
+            (
+                Sgp4Error::Sgp4 { code: 6 },
+                json!({
+                    "kind": "sgp4",
+                    "fields": { "code": 6 }
+                }),
+            ),
+            (
+                Sgp4Error::ResonanceStepBudget { budget: 1000 },
+                json!({
+                    "kind": "resonance_step_budget",
+                    "fields": { "budget": 1000 }
+                }),
+            ),
+        ];
+
+        for (err, expected) in cases {
+            assert_eq!(sgp4_error_value(&err), expected);
+        }
+    }
+
+    #[test]
+    fn test_look_angle_error_value_variants() {
+        let cases = [
+            (
+                LookAngleError::InvalidInput {
+                    field: "ground_station.latitude_deg",
+                    reason: "out of range",
+                },
+                json!({
+                    "kind": "invalid_input",
+                    "fields": {
+                        "field": "ground_station.latitude_deg",
+                        "reason": "out of range"
+                    }
+                }),
+            ),
+            (
+                LookAngleError::Init(Sgp4Error::InvalidTle("corrupt line 2".to_string())),
+                json!({
+                    "kind": "init",
+                    "fields": {
+                        "cause": {
+                            "kind": "invalid_tle",
+                            "fields": { "message": "corrupt line 2" }
+                        }
+                    }
+                }),
+            ),
+            (
+                LookAngleError::Propagate(Sgp4Error::NonFiniteOutput { field: "position" }),
+                json!({
+                    "kind": "propagate",
+                    "fields": {
+                        "cause": {
+                            "kind": "non_finite_output",
+                            "fields": { "field": "position" }
+                        }
+                    }
+                }),
+            ),
+            (
+                LookAngleError::FrameTransform(FrameTransformError::Ut1OutsideCoverage {
+                    reason: DegradeReason::BeforeCoverage,
+                }),
+                json!({
+                    "kind": "frame_transform",
+                    "fields": {
+                        "cause": {
+                            "kind": "ut1_outside_coverage",
+                            "fields": { "reason": "before_coverage" }
+                        }
+                    }
+                }),
+            ),
+        ];
+
+        for (err, expected) in cases {
+            assert_eq!(look_angle_error_value(&err), expected);
+        }
+    }
+
+    #[test]
+    fn test_tle_find_passes_and_look_angles_lifecycle() {
+        clear_engine_error();
+
+        let l1 = b"1 25544U 98067A   18184.80969102  .00001614  00000-0  31745-4 0  9993\0";
+        let l2 = b"2 25544  51.6414 295.8524 0003435 262.6267 204.2868 15.54005638121106\0";
+
+        let mut tle: *mut SidereonTle = ptr::null_mut();
+        let status = unsafe {
+            sidereon_tle_load(
+                l1.as_ptr() as *const c_char,
+                l2.as_ptr() as *const c_char,
+                0,
+                &mut tle,
+            )
+        };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert!(!tle.is_null());
+
+        let station = SidereonGroundStation {
+            latitude_deg: 51.5074,
+            longitude_deg: -0.1278,
+            altitude_m: 80.0,
+        };
+        let start_unix_us = 1_530_619_200_000_000i64; // 2018-07-03 12:00:00 UTC
+        let end_unix_us = 1_530_705_600_000_000i64; // 2018-07-04 12:00:00 UTC (+24h)
+        let mut options = std::mem::MaybeUninit::<SidereonPassFinderOptions>::uninit();
+        let status = unsafe { sidereon_pass_finder_options_init(options.as_mut_ptr()) };
+        assert_eq!(status, SidereonStatus::Ok);
+        let mut options = unsafe { options.assume_init() };
+        options.elevation_mask_deg = 0.0;
+        options.step_seconds = 10.0;
+        options.time_tolerance_s = 1.0e-3;
+
+        // 1. Valid control: create and hold live handle in SEPARATE pointer
+        let mut live_passes: *mut SidereonPassList = ptr::null_mut();
+        let status = unsafe {
+            sidereon_tle_find_passes(
+                tle,
+                &station,
+                start_unix_us,
+                end_unix_us,
+                &options,
+                &mut live_passes,
+            )
+        };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert!(!live_passes.is_null());
+        assert!(snapshot_engine_error_for_test().is_none());
+
+        // 2. Real producer refusal for Pass: station latitude out of range
+        let invalid_station = SidereonGroundStation {
+            latitude_deg: 150.0,
+            longitude_deg: 0.0,
+            altitude_m: 0.0,
+        };
+        let mut failure_out: *mut SidereonPassList = ptr::null_mut();
+        let status = unsafe {
+            sidereon_tle_find_passes(
+                tle,
+                &invalid_station,
+                start_unix_us,
+                end_unix_us,
+                &options,
+                &mut failure_out,
+            )
+        };
+        assert_eq!(status, SidereonStatus::InvalidArgument);
+        assert!(failure_out.is_null()); // Live pointer not clobbered
+
+        let (info, payload) = snapshot_engine_error_for_test().expect("engine error recorded");
+        assert_eq!(info.family, SidereonEngineErrorFamily::Pass);
+        let v: serde_json::Value = serde_json::from_str(&payload).expect("valid json");
+        assert_eq!(v["family"], "pass");
+        assert_eq!(v["operation"], "sidereon_tle_find_passes");
+        assert_eq!(v["error"]["kind"], "invalid_input");
+        assert_eq!(v["error"]["fields"]["field"], "ground_station.latitude_deg");
+        assert_eq!(v["error"]["fields"]["reason"], "out of range");
+
+        // 3. Real producer refusal for LookAngle: station latitude out of range
+        let mut failure_looks: *mut SidereonLookAngles = ptr::null_mut();
+        let epochs = [start_unix_us];
+        let status = unsafe {
+            sidereon_tle_look_angles(
+                tle,
+                &invalid_station,
+                epochs.as_ptr(),
+                1,
+                &mut failure_looks,
+            )
+        };
+        assert_eq!(status, SidereonStatus::InvalidArgument);
+        assert!(failure_looks.is_null());
+
+        let (info, payload) = snapshot_engine_error_for_test().expect("engine error recorded");
+        assert_eq!(info.family, SidereonEngineErrorFamily::LookAngle);
+        let v: serde_json::Value = serde_json::from_str(&payload).expect("valid json");
+        assert_eq!(v["family"], "look_angle");
+        assert_eq!(v["operation"], "sidereon_tle_look_angles");
+        assert_eq!(v["error"]["kind"], "invalid_input");
+        assert_eq!(v["error"]["fields"]["field"], "ground_station.latitude_deg");
+        assert_eq!(v["error"]["fields"]["reason"], "out of range");
+
+        // 4. Trigger failure again to test retention across ACTUALLY LIVE getters and free
+        let status = unsafe {
+            sidereon_tle_find_passes(
+                tle,
+                &invalid_station,
+                start_unix_us,
+                end_unix_us,
+                &options,
+                &mut failure_out,
+            )
+        };
+        assert_eq!(status, SidereonStatus::InvalidArgument);
+        assert!(failure_out.is_null());
+
+        let (base_info, base_payload) =
+            snapshot_engine_error_for_test().expect("engine error recorded before getters");
+        assert_eq!(base_info.family, SidereonEngineErrorFamily::Pass);
+
+        // Call count on the live handle
+        let mut count = 0usize;
+        let status = unsafe { sidereon_pass_list_count(live_passes, &mut count) };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert!(count > 0);
+        let (info_after_count, payload_after_count) =
+            snapshot_engine_error_for_test().expect("retained across count");
+        assert_eq!(info_after_count.family, base_info.family);
+        assert_eq!(info_after_count.payload_len, base_info.payload_len);
+        assert_eq!(payload_after_count.as_bytes(), base_payload.as_bytes());
+
+        // Short buffer query on the live handle: out non-null with len 0 returns InvalidArgument
+        let mut dummy = [SidereonSatellitePass {
+            aos_unix_us: 0,
+            los_unix_us: 0,
+            culmination_unix_us: 0,
+            max_elevation_deg: 0.0,
+            duration_s: 0.0,
+        }];
+        let mut out_written = 999usize;
+        let mut out_required = 0usize;
+        let status = unsafe {
+            sidereon_pass_list_values(
+                live_passes,
+                dummy.as_mut_ptr(),
+                0,
+                &mut out_written,
+                &mut out_required,
+            )
+        };
+        assert_eq!(status, SidereonStatus::InvalidArgument);
+        assert_eq!(out_written, 0);
+        assert_eq!(out_required, count);
+        let (info_after_short, payload_after_short) =
+            snapshot_engine_error_for_test().expect("retained across short copy");
+        assert_eq!(info_after_short.family, base_info.family);
+        assert_eq!(info_after_short.payload_len, base_info.payload_len);
+        assert_eq!(payload_after_short.as_bytes(), base_payload.as_bytes());
+
+        // Full buffer copy
+        let mut passes_buf = vec![
+            SidereonSatellitePass {
+                aos_unix_us: 0,
+                los_unix_us: 0,
+                culmination_unix_us: 0,
+                max_elevation_deg: 0.0,
+                duration_s: 0.0,
+            };
+            count
+        ];
+        let status = unsafe {
+            sidereon_pass_list_values(
+                live_passes,
+                passes_buf.as_mut_ptr(),
+                count,
+                &mut out_written,
+                &mut out_required,
+            )
+        };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert_eq!(out_written, count);
+        assert_eq!(out_required, count);
+        let (info_after_full, payload_after_full) =
+            snapshot_engine_error_for_test().expect("retained across full copy");
+        assert_eq!(info_after_full.family, base_info.family);
+        assert_eq!(info_after_full.payload_len, base_info.payload_len);
+        assert_eq!(payload_after_full.as_bytes(), base_payload.as_bytes());
+
+        // Free live handle
+        unsafe { sidereon_pass_list_free(live_passes) };
+
+        // FULL payload retained after ACTUALLY LIVE getters and free!
+        let (info_after_free, payload_after_free) = snapshot_engine_error_for_test()
+            .expect("engine error retained across live getters and free");
+        assert_eq!(info_after_free.family, base_info.family);
+        assert_eq!(info_after_free.payload_len, base_info.payload_len);
+        assert_eq!(payload_after_free.as_bytes(), base_payload.as_bytes());
+        let v: serde_json::Value = serde_json::from_str(&payload_after_free).expect("valid json");
+        assert_eq!(v["family"], "pass");
+        assert_eq!(v["operation"], "sidereon_tle_find_passes");
+        assert_eq!(v["error"]["kind"], "invalid_input");
+
+        // 5. Early NULL clear (seeded via real producer refusal)
+        let status = unsafe {
+            sidereon_tle_find_passes(
+                tle,
+                &invalid_station,
+                start_unix_us,
+                end_unix_us,
+                &options,
+                &mut failure_out,
+            )
+        };
+        assert_eq!(status, SidereonStatus::InvalidArgument);
+        assert!(snapshot_engine_error_for_test().is_some());
+
+        let status = unsafe {
+            sidereon_tle_find_passes(
+                ptr::null(),
+                &station,
+                start_unix_us,
+                end_unix_us,
+                &options,
+                ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, SidereonStatus::NullPointer);
+        assert!(snapshot_engine_error_for_test().is_none());
+
+        // 6. Success reset (seeded via real producer refusal)
+        let status = unsafe {
+            sidereon_tle_find_passes(
+                tle,
+                &invalid_station,
+                start_unix_us,
+                end_unix_us,
+                &options,
+                &mut failure_out,
+            )
+        };
+        assert_eq!(status, SidereonStatus::InvalidArgument);
+        assert!(snapshot_engine_error_for_test().is_some());
+
+        let mut live_passes2: *mut SidereonPassList = ptr::null_mut();
+        let status = unsafe {
+            sidereon_tle_find_passes(
+                tle,
+                &station,
+                start_unix_us,
+                end_unix_us,
+                &options,
+                &mut live_passes2,
+            )
+        };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert!(snapshot_engine_error_for_test().is_none());
+
+        unsafe { sidereon_pass_list_free(live_passes2) };
+        unsafe { sidereon_tle_free(tle) };
     }
 }

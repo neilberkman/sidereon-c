@@ -1,4 +1,8 @@
 use super::*;
+use crate::engine_error::{
+    engine_error_operation_boundary, engine_f64, record_engine_error, SidereonEngineErrorFamily,
+};
+use serde_json::{json, Value};
 
 // --- Clock stability: Allan-family estimators -------------------------------
 
@@ -296,7 +300,7 @@ pub unsafe extern "C" fn sidereon_clock_compute_allan_deviations(
     options: *const SidereonAllanOptions,
     out_curves: *mut *mut SidereonAllanDeviationCurves,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_clock_compute_allan_deviations",
         SidereonStatus::Panic,
         || {
@@ -439,7 +443,7 @@ pub unsafe extern "C" fn sidereon_clock_allan_deviation(
     out_written: *mut usize,
     out_required: *mut usize,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_clock_allan_deviation",
         SidereonStatus::Panic,
         || {
@@ -479,7 +483,7 @@ pub unsafe extern "C" fn sidereon_clock_overlapping_adev(
     out_written: *mut usize,
     out_required: *mut usize,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_clock_overlapping_adev",
         SidereonStatus::Panic,
         || {
@@ -519,7 +523,7 @@ pub unsafe extern "C" fn sidereon_clock_modified_adev(
     out_written: *mut usize,
     out_required: *mut usize,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_clock_modified_adev",
         SidereonStatus::Panic,
         || {
@@ -559,7 +563,7 @@ pub unsafe extern "C" fn sidereon_clock_hadamard_deviation(
     out_written: *mut usize,
     out_required: *mut usize,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_clock_hadamard_deviation",
         SidereonStatus::Panic,
         || {
@@ -598,7 +602,7 @@ pub unsafe extern "C" fn sidereon_clock_time_deviation(
     out_written: *mut usize,
     out_required: *mut usize,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_clock_time_deviation",
         SidereonStatus::Panic,
         || {
@@ -650,7 +654,7 @@ pub unsafe extern "C" fn sidereon_clock_power_law_noise_options_init(
 /// Return exact ADEV and MDEV log-log slopes for a power-law noise type.
 ///
 /// Safety: out_adev_slope, out_mdev_slope, and out_variance_tau_exponent must
-/// point to writable scalars.
+/// point to writable scalars and their output ranges must be disjoint.
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_clock_power_law_noise_slopes(
     noise_type: u32,
@@ -662,6 +666,44 @@ pub unsafe extern "C" fn sidereon_clock_power_law_noise_slopes(
         "sidereon_clock_power_law_noise_slopes",
         SidereonStatus::Panic,
         || {
+            if !out_adev_slope.is_null()
+                && !out_mdev_slope.is_null()
+                && !out_variance_tau_exponent.is_null()
+            {
+                let outputs = [
+                    Some((
+                        c_try!(super::checked_output_range(
+                            "sidereon_clock_power_law_noise_slopes",
+                            out_adev_slope,
+                            1,
+                            "out_adev_slope"
+                        )),
+                        "out_adev_slope",
+                    )),
+                    Some((
+                        c_try!(super::checked_output_range(
+                            "sidereon_clock_power_law_noise_slopes",
+                            out_mdev_slope,
+                            1,
+                            "out_mdev_slope"
+                        )),
+                        "out_mdev_slope",
+                    )),
+                    Some((
+                        c_try!(super::checked_output_range(
+                            "sidereon_clock_power_law_noise_slopes",
+                            out_variance_tau_exponent,
+                            1,
+                            "out_variance_tau_exponent"
+                        )),
+                        "out_variance_tau_exponent",
+                    )),
+                ];
+                c_try!(super::reject_overlapping_optional_outputs(
+                    "sidereon_clock_power_law_noise_slopes",
+                    &outputs
+                ));
+            }
             let out_adev = c_try!(require_out(
                 out_adev_slope,
                 "sidereon_clock_power_law_noise_slopes",
@@ -707,7 +749,7 @@ pub unsafe extern "C" fn sidereon_clock_fit_power_law_noise(
     options: *const SidereonPowerLawNoiseOptions,
     out_fit: *mut *mut SidereonPowerLawNoiseFit,
 ) -> SidereonStatus {
-    ffi_boundary(
+    engine_error_operation_boundary(
         "sidereon_clock_fit_power_law_noise",
         SidereonStatus::Panic,
         || {
@@ -1033,7 +1075,93 @@ impl SidereonClockOffset {
     };
 }
 
+fn allan_node(kind: &str, fields: Value) -> Value {
+    json!({
+        "kind": kind,
+        "fields": fields,
+    })
+}
+
+pub(crate) fn allan_estimator_name(estimator: CoreAllanEstimator) -> &'static str {
+    match estimator {
+        CoreAllanEstimator::Adev => "adev",
+        CoreAllanEstimator::OverlappingAdev => "overlapping_adev",
+        CoreAllanEstimator::Mdev => "mdev",
+        CoreAllanEstimator::Hdev => "hdev",
+        CoreAllanEstimator::Tdev => "tdev",
+    }
+}
+
+pub(crate) fn allan_error_value(error: &AllanError) -> Value {
+    match error {
+        AllanError::EmptySeries => allan_node("empty_series", json!({})),
+        AllanError::InvalidTau0 { tau0_s } => allan_node(
+            "invalid_tau0",
+            json!({
+                "tau0_s": engine_f64(*tau0_s),
+            }),
+        ),
+        AllanError::NoEstimators => allan_node("no_estimators", json!({})),
+        AllanError::EmptyTauGrid => allan_node("empty_tau_grid", json!({})),
+        AllanError::InvalidAveragingFactor { averaging_factor } => allan_node(
+            "invalid_averaging_factor",
+            json!({
+                "averaging_factor": averaging_factor,
+            }),
+        ),
+        AllanError::TooFewSamples {
+            estimator,
+            averaging_factor,
+            available_phase_samples,
+        } => allan_node(
+            "too_few_samples",
+            json!({
+                "estimator": allan_estimator_name(*estimator),
+                "averaging_factor": averaging_factor,
+                "available_phase_samples": available_phase_samples,
+            }),
+        ),
+        AllanError::NonFiniteSample { index } => allan_node(
+            "non_finite_sample",
+            json!({
+                "index": index,
+            }),
+        ),
+        AllanError::Gap { index } => allan_node(
+            "gap",
+            json!({
+                "index": index,
+            }),
+        ),
+        AllanError::NonFiniteTau {
+            estimator,
+            averaging_factor,
+        } => allan_node(
+            "non_finite_tau",
+            json!({
+                "estimator": allan_estimator_name(*estimator),
+                "averaging_factor": averaging_factor,
+            }),
+        ),
+        AllanError::NonFiniteDeviation {
+            estimator,
+            averaging_factor,
+        } => allan_node(
+            "non_finite_deviation",
+            json!({
+                "estimator": allan_estimator_name(*estimator),
+                "averaging_factor": averaging_factor,
+            }),
+        ),
+    }
+}
+
 fn map_allan_error(fn_name: &str, err: AllanError) -> SidereonStatus {
+    record_engine_error(
+        SidereonEngineErrorFamily::Allan,
+        fn_name,
+        allan_error_value(&err),
+    );
     set_last_error(format!("{fn_name}: {err}"));
     SidereonStatus::InvalidArgument
 }
@@ -1282,7 +1410,775 @@ fn power_law_region_to_c(region: &PowerLawNoiseRegion) -> SidereonPowerLawNoiseR
     }
 }
 
+fn power_law_noise_node(kind: &str, fields: Value) -> Value {
+    json!({
+        "kind": kind,
+        "fields": fields,
+    })
+}
+
+pub(crate) fn power_law_noise_error_value(error: &PowerLawNoiseError) -> Value {
+    match error {
+        PowerLawNoiseError::InvalidOptions { field, reason } => power_law_noise_node(
+            "invalid_options",
+            json!({
+                "field": field,
+                "reason": reason,
+            }),
+        ),
+        PowerLawNoiseError::InvalidCurve { curve, reason } => power_law_noise_node(
+            "invalid_curve",
+            json!({
+                "curve": curve,
+                "reason": reason,
+            }),
+        ),
+    }
+}
+
 fn map_power_law_noise_error(fn_name: &str, err: PowerLawNoiseError) -> SidereonStatus {
+    record_engine_error(
+        SidereonEngineErrorFamily::PowerLawNoise,
+        fn_name,
+        power_law_noise_error_value(&err),
+    );
     set_last_error(format!("{fn_name}: {err}"));
     SidereonStatus::InvalidArgument
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine_error::{
+        clear_engine_error, engine_f64, sidereon_last_engine_error_info,
+        sidereon_last_engine_error_payload, SidereonEngineErrorFamily, SidereonEngineErrorInfo,
+    };
+    use serde_json::Value;
+    use std::ptr;
+
+    #[test]
+    fn test_allan_error_variants_payload_table() {
+        let cases = vec![
+            (AllanError::EmptySeries, "empty_series", json!({})),
+            (
+                AllanError::InvalidTau0 { tau0_s: 0.0 },
+                "invalid_tau0",
+                json!({
+                    "tau0_s": engine_f64(0.0),
+                }),
+            ),
+            (
+                AllanError::InvalidTau0 { tau0_s: -0.0 },
+                "invalid_tau0",
+                json!({
+                    "tau0_s": engine_f64(-0.0),
+                }),
+            ),
+            (
+                AllanError::InvalidTau0 { tau0_s: f64::NAN },
+                "invalid_tau0",
+                json!({
+                    "tau0_s": engine_f64(f64::NAN),
+                }),
+            ),
+            (
+                AllanError::InvalidTau0 {
+                    tau0_s: f64::INFINITY,
+                },
+                "invalid_tau0",
+                json!({
+                    "tau0_s": engine_f64(f64::INFINITY),
+                }),
+            ),
+            (
+                AllanError::InvalidTau0 {
+                    tau0_s: f64::NEG_INFINITY,
+                },
+                "invalid_tau0",
+                json!({
+                    "tau0_s": engine_f64(f64::NEG_INFINITY),
+                }),
+            ),
+            (AllanError::NoEstimators, "no_estimators", json!({})),
+            (AllanError::EmptyTauGrid, "empty_tau_grid", json!({})),
+            (
+                AllanError::InvalidAveragingFactor {
+                    averaging_factor: 0,
+                },
+                "invalid_averaging_factor",
+                json!({
+                    "averaging_factor": 0,
+                }),
+            ),
+            (
+                AllanError::TooFewSamples {
+                    estimator: CoreAllanEstimator::Adev,
+                    averaging_factor: 2,
+                    available_phase_samples: 3,
+                },
+                "too_few_samples",
+                json!({
+                    "estimator": "adev",
+                    "averaging_factor": 2,
+                    "available_phase_samples": 3,
+                }),
+            ),
+            (
+                AllanError::TooFewSamples {
+                    estimator: CoreAllanEstimator::OverlappingAdev,
+                    averaging_factor: 4,
+                    available_phase_samples: 5,
+                },
+                "too_few_samples",
+                json!({
+                    "estimator": "overlapping_adev",
+                    "averaging_factor": 4,
+                    "available_phase_samples": 5,
+                }),
+            ),
+            (
+                AllanError::TooFewSamples {
+                    estimator: CoreAllanEstimator::Mdev,
+                    averaging_factor: 8,
+                    available_phase_samples: 9,
+                },
+                "too_few_samples",
+                json!({
+                    "estimator": "mdev",
+                    "averaging_factor": 8,
+                    "available_phase_samples": 9,
+                }),
+            ),
+            (
+                AllanError::TooFewSamples {
+                    estimator: CoreAllanEstimator::Hdev,
+                    averaging_factor: 16,
+                    available_phase_samples: 17,
+                },
+                "too_few_samples",
+                json!({
+                    "estimator": "hdev",
+                    "averaging_factor": 16,
+                    "available_phase_samples": 17,
+                }),
+            ),
+            (
+                AllanError::TooFewSamples {
+                    estimator: CoreAllanEstimator::Tdev,
+                    averaging_factor: 32,
+                    available_phase_samples: 33,
+                },
+                "too_few_samples",
+                json!({
+                    "estimator": "tdev",
+                    "averaging_factor": 32,
+                    "available_phase_samples": 33,
+                }),
+            ),
+            (
+                AllanError::NonFiniteSample { index: 42 },
+                "non_finite_sample",
+                json!({
+                    "index": 42,
+                }),
+            ),
+            (
+                AllanError::Gap { index: 7 },
+                "gap",
+                json!({
+                    "index": 7,
+                }),
+            ),
+            (
+                AllanError::NonFiniteTau {
+                    estimator: CoreAllanEstimator::Adev,
+                    averaging_factor: 12,
+                },
+                "non_finite_tau",
+                json!({
+                    "estimator": "adev",
+                    "averaging_factor": 12,
+                }),
+            ),
+            (
+                AllanError::NonFiniteDeviation {
+                    estimator: CoreAllanEstimator::Mdev,
+                    averaging_factor: 24,
+                },
+                "non_finite_deviation",
+                json!({
+                    "estimator": "mdev",
+                    "averaging_factor": 24,
+                }),
+            ),
+        ];
+
+        for (err, expected_kind, expected_fields) in cases {
+            let val = allan_error_value(&err);
+            assert_eq!(val["kind"], expected_kind);
+            assert_eq!(val["fields"], expected_fields);
+        }
+    }
+
+    #[test]
+    fn test_power_law_noise_error_variants_payload_table() {
+        let cases = vec![
+            (
+                PowerLawNoiseError::InvalidOptions {
+                    field: "min_points_per_octave",
+                    reason: "must be at least 2",
+                },
+                "invalid_options",
+                json!({
+                    "field": "min_points_per_octave",
+                    "reason": "must be at least 2",
+                }),
+            ),
+            (
+                PowerLawNoiseError::InvalidCurve {
+                    curve: "ADEV",
+                    reason: "tau values must be strictly increasing",
+                },
+                "invalid_curve",
+                json!({
+                    "curve": "ADEV",
+                    "reason": "tau values must be strictly increasing",
+                }),
+            ),
+        ];
+
+        for (err, expected_kind, expected_fields) in cases {
+            let val = power_law_noise_error_value(&err);
+            assert_eq!(val["kind"], expected_kind);
+            assert_eq!(val["fields"], expected_fields);
+        }
+    }
+
+    #[test]
+    fn test_allan_producer_valid_and_refusal_controls() {
+        clear_engine_error();
+
+        // 1. Valid producer control: compute allan deviations with valid samples
+        let sample_data: Vec<SidereonAllanSample> = (0..20)
+            .map(|i| SidereonAllanSample {
+                has_value: true,
+                value: i as f64 * 1e-9,
+            })
+            .collect();
+        let mut curves_handle: *mut SidereonAllanDeviationCurves = ptr::null_mut();
+        let status = unsafe {
+            sidereon_clock_compute_allan_deviations(
+                sample_data.as_ptr(),
+                sample_data.len(),
+                SidereonAllanSeriesKind::PhaseSeconds as u32,
+                1.0,
+                ptr::null(),
+                &mut curves_handle,
+            )
+        };
+        if status != SidereonStatus::Ok {
+            let mut info = SidereonEngineErrorInfo {
+                family: SidereonEngineErrorFamily::None,
+                payload_len: 0,
+            };
+            let _ = unsafe { sidereon_last_engine_error_info(&mut info) };
+            let mut err_msg_buf = [0 as c_char; 512];
+            let len = unsafe {
+                crate::sidereon_last_error_message(err_msg_buf.as_mut_ptr(), err_msg_buf.len())
+            };
+            let msg = if len > 0 {
+                unsafe {
+                    std::ffi::CStr::from_ptr(err_msg_buf.as_ptr())
+                        .to_string_lossy()
+                        .into_owned()
+                }
+            } else {
+                String::new()
+            };
+            panic!(
+                "sidereon_clock_compute_allan_deviations failed: status={:?}, message={:?}, family={:?}",
+                status, msg, info.family
+            );
+        }
+        assert_eq!(status, SidereonStatus::Ok);
+        assert!(!curves_handle.is_null());
+
+        // Check TLS is None on success
+        let mut info = SidereonEngineErrorInfo {
+            family: SidereonEngineErrorFamily::Unknown,
+            payload_len: 12345,
+        };
+        let info_status = unsafe { sidereon_last_engine_error_info(&mut info) };
+        assert_eq!(info_status, SidereonStatus::Ok);
+        assert_eq!(info.family, SidereonEngineErrorFamily::None);
+        assert_eq!(info.payload_len, 0);
+
+        // Non-producing inspectors and readers retain TLS.
+        // Default standard options compute OverlappingAdev (overlapping_adev: true, adev: false).
+        let mut present = false;
+        let p_status = unsafe {
+            sidereon_clock_allan_curve_present(
+                curves_handle,
+                SidereonAllanEstimator::OverlappingAdev as u32,
+                &mut present,
+            )
+        };
+        assert_eq!(p_status, SidereonStatus::Ok);
+        assert!(present);
+
+        let mut adev_present = true;
+        let adev_p_status = unsafe {
+            sidereon_clock_allan_curve_present(
+                curves_handle,
+                SidereonAllanEstimator::Adev as u32,
+                &mut adev_present,
+            )
+        };
+        assert_eq!(adev_p_status, SidereonStatus::Ok);
+        assert!(!adev_present);
+
+        let mut written = 0usize;
+        let mut required = 0usize;
+        let c_status = unsafe {
+            sidereon_clock_allan_curve(
+                curves_handle,
+                SidereonAllanEstimator::OverlappingAdev as u32,
+                ptr::null_mut(),
+                0,
+                &mut written,
+                &mut required,
+            )
+        };
+        assert_eq!(c_status, SidereonStatus::Ok);
+        assert!(required > 0);
+
+        unsafe { sidereon_clock_allan_deviation_curves_free(curves_handle) };
+
+        // 2. Real public refusal control: empty series
+        let mut bad_curves: *mut SidereonAllanDeviationCurves = ptr::null_mut();
+        let status_empty = unsafe {
+            sidereon_clock_compute_allan_deviations(
+                ptr::null(),
+                0,
+                SidereonAllanSeriesKind::PhaseSeconds as u32,
+                1.0,
+                ptr::null(),
+                &mut bad_curves,
+            )
+        };
+        assert_eq!(status_empty, SidereonStatus::InvalidArgument);
+        assert!(bad_curves.is_null());
+
+        let info_status = unsafe { sidereon_last_engine_error_info(&mut info) };
+        assert_eq!(info_status, SidereonStatus::Ok);
+        assert_eq!(info.family, SidereonEngineErrorFamily::Allan);
+        assert!(info.payload_len > 0);
+
+        let mut buf = vec![0u8; info.payload_len];
+        let p_status = unsafe {
+            sidereon_last_engine_error_payload(
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut written,
+                &mut required,
+            )
+        };
+        assert_eq!(p_status, SidereonStatus::Ok);
+        assert_eq!(written, info.payload_len);
+        let payload: Value = serde_json::from_slice(&buf).expect("valid JSON");
+        assert_eq!(payload["schema_version"], 1);
+        assert_eq!(payload["family"], "allan");
+        assert_eq!(
+            payload["operation"],
+            "sidereon_clock_compute_allan_deviations"
+        );
+        assert_eq!(payload["error"]["kind"], "empty_series");
+
+        // 3. Real public refusal control: TooFewSamples via sidereon_clock_allan_deviation
+        let small_samples = [
+            SidereonAllanSample {
+                has_value: true,
+                value: 0.0,
+            },
+            SidereonAllanSample {
+                has_value: true,
+                value: 1e-9,
+            },
+            SidereonAllanSample {
+                has_value: true,
+                value: 2e-9,
+            },
+        ];
+        let factor = 10usize;
+        let mut out_pts = [SidereonAllanPoint {
+            tau_s: 0.0,
+            deviation: 0.0,
+            n: 0,
+        }; 2];
+        let dev_status = unsafe {
+            sidereon_clock_allan_deviation(
+                small_samples.as_ptr(),
+                small_samples.len(),
+                SidereonAllanSeriesKind::PhaseSeconds as u32,
+                1.0,
+                &factor,
+                1,
+                out_pts.as_mut_ptr(),
+                out_pts.len(),
+                &mut written,
+                &mut required,
+            )
+        };
+        assert_eq!(dev_status, SidereonStatus::InvalidArgument);
+        let info_status = unsafe { sidereon_last_engine_error_info(&mut info) };
+        assert_eq!(info_status, SidereonStatus::Ok);
+        assert_eq!(info.family, SidereonEngineErrorFamily::Allan);
+
+        let mut buf = vec![0u8; info.payload_len];
+        unsafe {
+            sidereon_last_engine_error_payload(
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut written,
+                &mut required,
+            )
+        };
+        let payload: Value = serde_json::from_slice(&buf).expect("valid JSON");
+        assert_eq!(payload["family"], "allan");
+        assert_eq!(payload["operation"], "sidereon_clock_allan_deviation");
+        assert_eq!(payload["error"]["kind"], "too_few_samples");
+        assert_eq!(payload["error"]["fields"]["estimator"], "adev");
+        assert_eq!(payload["error"]["fields"]["averaging_factor"], 10);
+        assert_eq!(payload["error"]["fields"]["available_phase_samples"], 3);
+    }
+
+    #[test]
+    fn test_power_law_producer_valid_and_refusal_controls() {
+        clear_engine_error();
+
+        // Points for ADEV and MDEV
+        let adev_points = [
+            SidereonAllanPoint {
+                tau_s: 1.0,
+                deviation: 1e-12,
+                n: 100,
+            },
+            SidereonAllanPoint {
+                tau_s: 2.0,
+                deviation: 1e-12,
+                n: 100,
+            },
+            SidereonAllanPoint {
+                tau_s: 4.0,
+                deviation: 1e-12,
+                n: 100,
+            },
+        ];
+        let mdev_points = [
+            SidereonAllanPoint {
+                tau_s: 1.0,
+                deviation: 1e-12,
+                n: 100,
+            },
+            SidereonAllanPoint {
+                tau_s: 2.0,
+                deviation: 1e-12,
+                n: 100,
+            },
+            SidereonAllanPoint {
+                tau_s: 4.0,
+                deviation: 1e-12,
+                n: 100,
+            },
+        ];
+
+        let mut options = SidereonPowerLawNoiseOptions {
+            min_points_per_octave: 2,
+            slope_tolerance: 0.1,
+            scatter_tolerance: 0.2,
+            basic_tau_s: 1.0,
+            measurement_bandwidth_hz: 10.0,
+        };
+
+        // 1. Valid producer control: fit power law noise
+        let mut fit_handle: *mut SidereonPowerLawNoiseFit = ptr::null_mut();
+        let status = unsafe {
+            sidereon_clock_fit_power_law_noise(
+                adev_points.as_ptr(),
+                adev_points.len(),
+                mdev_points.as_ptr(),
+                mdev_points.len(),
+                &options,
+                &mut fit_handle,
+            )
+        };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert!(!fit_handle.is_null());
+
+        let mut info = SidereonEngineErrorInfo {
+            family: SidereonEngineErrorFamily::Unknown,
+            payload_len: 999,
+        };
+        unsafe { sidereon_last_engine_error_info(&mut info) };
+        assert_eq!(info.family, SidereonEngineErrorFamily::None);
+        assert_eq!(info.payload_len, 0);
+
+        // Non-producing getters and free
+        let mut coeffs = [0.0; 5];
+        let c_status = unsafe {
+            sidereon_clock_power_law_noise_fit_coefficients(fit_handle, coeffs.as_mut_ptr())
+        };
+        assert_eq!(c_status, SidereonStatus::Ok);
+
+        let mut written = 0usize;
+        let mut required = 0usize;
+        let oct_status = unsafe {
+            sidereon_clock_power_law_noise_fit_octaves(
+                fit_handle,
+                ptr::null_mut(),
+                0,
+                &mut written,
+                &mut required,
+            )
+        };
+        assert_eq!(oct_status, SidereonStatus::Ok);
+
+        unsafe { sidereon_clock_power_law_noise_fit_free(fit_handle) };
+
+        // 2. Real public refusal control: invalid options
+        options.min_points_per_octave = 1; // core requires >= 2
+        let mut bad_fit: *mut SidereonPowerLawNoiseFit = ptr::null_mut();
+        let status_bad_opt = unsafe {
+            sidereon_clock_fit_power_law_noise(
+                adev_points.as_ptr(),
+                adev_points.len(),
+                mdev_points.as_ptr(),
+                mdev_points.len(),
+                &options,
+                &mut bad_fit,
+            )
+        };
+        assert_eq!(status_bad_opt, SidereonStatus::InvalidArgument);
+        assert!(bad_fit.is_null());
+
+        unsafe { sidereon_last_engine_error_info(&mut info) };
+        assert_eq!(info.family, SidereonEngineErrorFamily::PowerLawNoise);
+        assert!(info.payload_len > 0);
+
+        let mut buf = vec![0u8; info.payload_len];
+        unsafe {
+            sidereon_last_engine_error_payload(
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut written,
+                &mut required,
+            )
+        };
+        let payload: Value = serde_json::from_slice(&buf).expect("valid JSON");
+        assert_eq!(payload["schema_version"], 1);
+        assert_eq!(payload["family"], "power_law_noise");
+        assert_eq!(payload["operation"], "sidereon_clock_fit_power_law_noise");
+        assert_eq!(payload["error"]["kind"], "invalid_options");
+        assert_eq!(payload["error"]["fields"]["field"], "min_points_per_octave");
+        assert_eq!(payload["error"]["fields"]["reason"], "must be at least 2");
+
+        // 3. Real public refusal control: invalid curve (non-increasing tau)
+        let decreasing_adev = [
+            SidereonAllanPoint {
+                tau_s: 2.0,
+                deviation: 1e-12,
+                n: 100,
+            },
+            SidereonAllanPoint {
+                tau_s: 1.0,
+                deviation: 1e-12,
+                n: 100,
+            },
+        ];
+        options.min_points_per_octave = 2;
+        let status_bad_curve = unsafe {
+            sidereon_clock_fit_power_law_noise(
+                decreasing_adev.as_ptr(),
+                decreasing_adev.len(),
+                mdev_points.as_ptr(),
+                mdev_points.len(),
+                &options,
+                &mut bad_fit,
+            )
+        };
+        assert_eq!(status_bad_curve, SidereonStatus::InvalidArgument);
+        unsafe { sidereon_last_engine_error_info(&mut info) };
+        assert_eq!(info.family, SidereonEngineErrorFamily::PowerLawNoise);
+
+        let mut buf = vec![0u8; info.payload_len];
+        unsafe {
+            sidereon_last_engine_error_payload(
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut written,
+                &mut required,
+            )
+        };
+        let payload: Value = serde_json::from_slice(&buf).expect("valid JSON");
+        assert_eq!(payload["error"]["kind"], "invalid_curve");
+        assert_eq!(payload["error"]["fields"]["curve"], "ADEV");
+        assert_eq!(
+            payload["error"]["fields"]["reason"],
+            "tau values must be strictly increasing"
+        );
+    }
+
+    #[test]
+    fn test_clock_engine_error_lifecycle_buffer_sizing_and_clearing() {
+        clear_engine_error();
+
+        // Cause an Allan refusal
+        let mut curves: *mut SidereonAllanDeviationCurves = ptr::null_mut();
+        let status = unsafe {
+            sidereon_clock_compute_allan_deviations(
+                ptr::null(),
+                0,
+                SidereonAllanSeriesKind::PhaseSeconds as u32,
+                1.0,
+                ptr::null(),
+                &mut curves,
+            )
+        };
+        assert_eq!(status, SidereonStatus::InvalidArgument);
+
+        let mut info = SidereonEngineErrorInfo {
+            family: SidereonEngineErrorFamily::Unknown,
+            payload_len: 0,
+        };
+        unsafe { sidereon_last_engine_error_info(&mut info) };
+        assert_eq!(info.family, SidereonEngineErrorFamily::Allan);
+        let needed = info.payload_len;
+        assert!(needed > 0);
+
+        // 1. Query size with null buffer
+        let mut written = 999;
+        let mut required = 0;
+        let q_status = unsafe {
+            sidereon_last_engine_error_payload(ptr::null_mut(), 0, &mut written, &mut required)
+        };
+        assert_eq!(q_status, SidereonStatus::Ok);
+        assert_eq!(written, 0);
+        assert_eq!(required, needed);
+
+        // 2. Undersized buffer returns InvalidArgument, writes zero, reports full required,
+        // does not copy bytes, and retains error
+        let mut short_buf = vec![0xAAu8; needed / 2];
+        let short_len = short_buf.len();
+        let u_status = unsafe {
+            sidereon_last_engine_error_payload(
+                short_buf.as_mut_ptr(),
+                short_len,
+                &mut written,
+                &mut required,
+            )
+        };
+        assert_eq!(u_status, SidereonStatus::InvalidArgument);
+        assert_eq!(written, 0);
+        assert_eq!(required, needed);
+        assert!(short_buf.iter().all(|&b| b == 0xAA));
+
+        // Error is still retained!
+        unsafe { sidereon_last_engine_error_info(&mut info) };
+        assert_eq!(info.family, SidereonEngineErrorFamily::Allan);
+        assert_eq!(info.payload_len, needed);
+
+        // 3. Exact copy succeeds and retains error
+        let mut full_buf = vec![0u8; needed];
+        let f_status = unsafe {
+            sidereon_last_engine_error_payload(
+                full_buf.as_mut_ptr(),
+                needed,
+                &mut written,
+                &mut required,
+            )
+        };
+        assert_eq!(f_status, SidereonStatus::Ok);
+        assert_eq!(written, needed);
+        assert_eq!(required, needed);
+
+        // Error is still retained!
+        unsafe { sidereon_last_engine_error_info(&mut info) };
+        assert_eq!(info.family, SidereonEngineErrorFamily::Allan);
+
+        // 4. Non-producing readers/inspectors/frees retain error
+        let mut adev_slope = 0.0;
+        let mut mdev_slope = 0.0;
+        let mut exp = 0;
+        let slope_status = unsafe {
+            sidereon_clock_power_law_noise_slopes(
+                SidereonPowerLawNoiseType::WhiteFM as u32,
+                &mut adev_slope,
+                &mut mdev_slope,
+                &mut exp,
+            )
+        };
+        assert_eq!(slope_status, SidereonStatus::Ok);
+        unsafe { sidereon_last_engine_error_info(&mut info) };
+        assert_eq!(info.family, SidereonEngineErrorFamily::Allan);
+
+        unsafe { sidereon_clock_allan_deviation_curves_free(ptr::null_mut()) };
+        unsafe { sidereon_clock_power_law_noise_fit_free(ptr::null_mut()) };
+        unsafe { sidereon_last_engine_error_info(&mut info) };
+        assert_eq!(info.family, SidereonEngineErrorFamily::Allan);
+
+        // 5. Early argument validation failure clears TLS
+        let null_arg_status = unsafe {
+            sidereon_clock_compute_allan_deviations(
+                ptr::null(),
+                0,
+                SidereonAllanSeriesKind::PhaseSeconds as u32,
+                1.0,
+                ptr::null(),
+                ptr::null_mut(), // null out_curves
+            )
+        };
+        assert_eq!(null_arg_status, SidereonStatus::NullPointer);
+        unsafe { sidereon_last_engine_error_info(&mut info) };
+        assert_eq!(info.family, SidereonEngineErrorFamily::None);
+        assert_eq!(info.payload_len, 0);
+
+        // 6. Successful producer clears TLS
+        // Re-introduce an error first
+        let _ = unsafe {
+            sidereon_clock_compute_allan_deviations(
+                ptr::null(),
+                0,
+                SidereonAllanSeriesKind::PhaseSeconds as u32,
+                1.0,
+                ptr::null(),
+                &mut curves,
+            )
+        };
+        unsafe { sidereon_last_engine_error_info(&mut info) };
+        assert_eq!(info.family, SidereonEngineErrorFamily::Allan);
+
+        // Now run a successful producer
+        let samples: Vec<SidereonAllanSample> = (0..20)
+            .map(|i| SidereonAllanSample {
+                has_value: true,
+                value: i as f64 * 1e-9,
+            })
+            .collect();
+        let succ_status = unsafe {
+            sidereon_clock_compute_allan_deviations(
+                samples.as_ptr(),
+                samples.len(),
+                SidereonAllanSeriesKind::PhaseSeconds as u32,
+                1.0,
+                ptr::null(),
+                &mut curves,
+            )
+        };
+        assert_eq!(succ_status, SidereonStatus::Ok);
+        unsafe { sidereon_last_engine_error_info(&mut info) };
+        assert_eq!(info.family, SidereonEngineErrorFamily::None);
+        assert_eq!(info.payload_len, 0);
+
+        unsafe { sidereon_clock_allan_deviation_curves_free(curves) };
+    }
 }

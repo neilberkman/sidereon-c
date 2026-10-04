@@ -19,6 +19,16 @@ pub struct SidereonSbasLogBlock {
     pub form: SidereonSbasWireForm,
     /// Number of payload bytes available through the bytes accessor.
     pub byte_count: usize,
+    /// Whether the log line stated a message type (the EMS message-type field,
+    /// the fourth RTKLIB header field, or the NovAtel OEM4 message ID).
+    pub has_declared_message_type: bool,
+    /// The message type the log line stated, when present. The type the bytes
+    /// carry can differ from it.
+    pub declared_message_type: u8,
+    /// Whether the payload carries a message type.
+    pub has_message_type: bool,
+    /// The message type the payload bytes carry, when present.
+    pub message_type: u8,
 }
 
 /// Owned timestamped SBAS text-log blocks returned by the EMS or RTKLIB
@@ -70,8 +80,44 @@ pub unsafe extern "C" fn sidereon_sbas_prn_to_satellite_id(
     )
 }
 
+/// Map an SBAS satellite-id token (`S20`..`S58`) to its broadcast PRN
+/// (120..158). Delegates to `sidereon_core::sbas::sat_to_sbas_prn`.
+/// *out_present is false, with *out_prn 0, for a token of another
+/// constellation and for an SBAS slot outside 20..58: `S01`, `S19`, `S59` and
+/// `S99` are valid satellite tokens but name no broadcast PRN.
+///
+/// Safety: sat_id is a null-terminated satellite token; out_prn points to a
+/// uint16_t; out_present points to a bool.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_satellite_id_to_sbas_prn(
+    sat_id: *const c_char,
+    out_prn: *mut u16,
+    out_present: *mut bool,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_satellite_id_to_sbas_prn";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        if !out_prn.is_null() {
+            *out_prn = 0;
+        }
+        if !out_present.is_null() {
+            *out_present = false;
+        }
+        let out_prn = c_try!(require_out(out_prn, FN_NAME, "out_prn"));
+        let out_present = c_try!(require_out(out_present, FN_NAME, "out_present"));
+        let sat = c_try!(parse_satellite_token(FN_NAME, sat_id));
+        if let Some(prn) = sidereon_core::sbas::sat_to_sbas_prn(sat) {
+            *out_prn = prn;
+            *out_present = true;
+        }
+        SidereonStatus::Ok
+    })
+}
+
 /// Parse comma-delimited EMS SBAS text-log lines. This is a text parser and
-/// does not perform binary SBAS message decoding.
+/// does not perform binary SBAS message decoding. Lines are read under the
+/// strict policy with default options: a record line whose fields cannot be
+/// read at known positions, or whose checksum differs, fails the call. Blank
+/// and comment lines are passed over.
 ///
 /// Safety: data points to len readable bytes; out_blocks points to an owned
 /// list handle slot.
@@ -91,7 +137,10 @@ pub unsafe extern "C" fn sidereon_parse_sbas_ems_lines(
 }
 
 /// Parse RTKLIB SBAS text-log lines. This is a text parser and does not
-/// perform binary SBAS message decoding.
+/// perform binary SBAS message decoding. Lines are read under the strict
+/// policy with default options: a record line whose fields cannot be read at
+/// known positions, or whose checksum differs, fails the call. Blank and
+/// comment lines are passed over.
 ///
 /// Safety: data points to len readable bytes; out_blocks points to an owned
 /// list handle slot.
@@ -274,6 +323,10 @@ fn sbas_log_block_to_c(block: &sidereon_core::sbas::SbasLogBlock) -> SidereonSba
             SbasWireForm::Body226 => SidereonSbasWireForm::Body226,
         },
         byte_count: block.bytes.len(),
+        has_declared_message_type: block.declared_message_type.is_some(),
+        declared_message_type: block.declared_message_type.unwrap_or(0),
+        has_message_type: block.message_type().is_some(),
+        message_type: block.message_type().unwrap_or(0),
     }
 }
 
@@ -287,6 +340,10 @@ pub(crate) fn empty_sbas_log_block() -> SidereonSbasLogBlock {
         },
         form: SidereonSbasWireForm::Body226,
         byte_count: 0,
+        has_declared_message_type: false,
+        declared_message_type: 0,
+        has_message_type: false,
+        message_type: 0,
     }
 }
 
@@ -1124,13 +1181,21 @@ pub unsafe extern "C" fn sidereon_sbas_block_encode(
     out_required: *mut usize,
 ) -> SidereonStatus {
     ffi_boundary("sidereon_sbas_block_encode", SidereonStatus::Panic, || {
+        crate::rtcm::clear_rtcm_typed_error();
         c_try!(init_copy_counts(
             "sidereon_sbas_block_encode",
             out_written,
             out_required
         ));
         let block = c_try!(require_ref(block, "sidereon_sbas_block_encode", "block"));
-        let bytes = block.inner.encode();
+        let bytes = match block.inner.encode() {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                crate::rtcm::record_rtcm_typed_error(&err);
+                set_last_error(format!("sidereon_sbas_block_encode: {err}"));
+                return SidereonStatus::InvalidArgument;
+            }
+        };
         c_try!(copy_prefix_to_c(
             "sidereon_sbas_block_encode",
             "out",
@@ -1178,7 +1243,7 @@ pub unsafe extern "C" fn sidereon_sbas_store_ingest(
     epoch: *const SidereonGnssWeekTow,
 ) -> SidereonStatus {
     ffi_boundary("sidereon_sbas_store_ingest", SidereonStatus::Panic, || {
-        let store = c_try!(require_out(store, "sidereon_sbas_store_ingest", "store"));
+        let store = c_try!(require_mut(store, "sidereon_sbas_store_ingest", "store"));
         let block = c_try!(require_ref(block, "sidereon_sbas_store_ingest", "block"));
         let geo = c_try!(parse_satellite_token(
             "sidereon_sbas_store_ingest",
@@ -1592,6 +1657,191 @@ pub unsafe extern "C" fn sidereon_sbas_corrected_state(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn sidereon_sbas_corrected_state_at_epoch_queries(
+    broadcast: *const SidereonBroadcastEphemeris,
+    store: *const SidereonSbasCorrectionStore,
+    geo_sat_id: *const c_char,
+    mode: u32,
+    sat_id: *const c_char,
+    state_epoch: *const SidereonExactEpochQuery,
+    selection_epoch: *const SidereonExactEpochQuery,
+    out: *mut SidereonEphemerisSourceState,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_sbas_corrected_state_at_epoch_queries";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out, FN_NAME, "out"));
+        *out = SidereonEphemerisSourceState::default();
+        record_degrade_reason(None);
+        let broadcast = c_try!(require_ref(broadcast, FN_NAME, "broadcast"));
+        let store = c_try!(require_ref(store, FN_NAME, "store"));
+        let geo = c_try!(parse_satellite_token(FN_NAME, geo_sat_id));
+        let mode = c_try!(sbas_solve_mode_from_c(FN_NAME, mode));
+        let satellite = c_try!(parse_satellite_token(FN_NAME, sat_id));
+        let state_epoch = c_try!(require_ref(state_epoch, FN_NAME, "state_epoch"));
+        let selection_epoch = c_try!(require_ref(selection_epoch, FN_NAME, "selection_epoch"));
+        let corrected =
+            SbasCorrectedEphemeris::new(&broadcast.inner, &store.inner, geo).with_mode(mode);
+        let state = c_try!(guard_core(
+            || {
+                sidereon_core::positioning::EphemerisSource::try_position_clock_group_delay_selected_at_epoch_query(
+                &corrected, satellite, &state_epoch.inner, &selection_epoch.inner,
+            )
+            },
+            |error| crate::precise::precise_source_error_to_status(FN_NAME, error),
+        ));
+        if let Some(state) = state {
+            record_degrade_reason(state.degraded);
+            *out = SidereonEphemerisSourceState {
+                has_state: true,
+                position_ecef_m: state.value.0,
+                clock_s: state.value.1,
+                has_group_delay: state.value.2.is_some(),
+                group_delay_s: state.value.2.unwrap_or_default(),
+                degraded: state.degraded.is_some(),
+            };
+        }
+        SidereonStatus::Ok
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sbas_transmit_epoch_clock_at_epoch_queries(
+    broadcast: *const SidereonBroadcastEphemeris,
+    store: *const SidereonSbasCorrectionStore,
+    geo_sat_id: *const c_char,
+    mode: u32,
+    sat_id: *const c_char,
+    transmit_epoch: *const SidereonExactEpochQuery,
+    selection_epoch: *const SidereonExactEpochQuery,
+    out_has_clock: *mut bool,
+    out_clock_s: *mut f64,
+    out_degraded: *mut bool,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_sbas_transmit_epoch_clock_at_epoch_queries";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let out_has_clock = c_try!(require_out(out_has_clock, FN_NAME, "out_has_clock"));
+        let out_clock_s = c_try!(require_out(out_clock_s, FN_NAME, "out_clock_s"));
+        let out_degraded = c_try!(require_out(out_degraded, FN_NAME, "out_degraded"));
+        *out_has_clock = false;
+        *out_clock_s = 0.0;
+        *out_degraded = false;
+        record_degrade_reason(None);
+        let broadcast = c_try!(require_ref(broadcast, FN_NAME, "broadcast"));
+        let store = c_try!(require_ref(store, FN_NAME, "store"));
+        let geo = c_try!(parse_satellite_token(FN_NAME, geo_sat_id));
+        let mode = c_try!(sbas_solve_mode_from_c(FN_NAME, mode));
+        let satellite = c_try!(parse_satellite_token(FN_NAME, sat_id));
+        let transmit_epoch = c_try!(require_ref(transmit_epoch, FN_NAME, "transmit_epoch"));
+        let selection_epoch = c_try!(require_ref(selection_epoch, FN_NAME, "selection_epoch"));
+        let corrected =
+            SbasCorrectedEphemeris::new(&broadcast.inner, &store.inner, geo).with_mode(mode);
+        let clock = c_try!(guard_core(
+            || sidereon_core::positioning::EphemerisSource::try_transmit_epoch_clock_at_epoch_query(
+                &corrected,
+                satellite,
+                &transmit_epoch.inner,
+                &selection_epoch.inner,
+            ),
+            |error| crate::precise::precise_source_error_to_status(FN_NAME, error),
+        ));
+        if let Some(clock) = clock {
+            *out_has_clock = true;
+            *out_clock_s = clock.value;
+            record_degrade_reason(clock.degraded);
+            *out_degraded = clock.degraded.is_some();
+        }
+        SidereonStatus::Ok
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sbas_clock_relativity_at_epoch_query(
+    broadcast: *const SidereonBroadcastEphemeris,
+    store: *const SidereonSbasCorrectionStore,
+    geo_sat_id: *const c_char,
+    mode: u32,
+    sat_id: *const c_char,
+    epoch: *const SidereonExactEpochQuery,
+    position_ecef_m: *const f64,
+    out_kind: *mut SidereonClockRelativityKind,
+    out_term_s: *mut f64,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_sbas_clock_relativity_at_epoch_query";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let out_kind = c_try!(require_out(out_kind, FN_NAME, "out_kind"));
+        let out_term_s = c_try!(require_out(out_term_s, FN_NAME, "out_term_s"));
+        *out_kind = SidereonClockRelativityKind::NotApplicable;
+        *out_term_s = 0.0;
+        let broadcast = c_try!(require_ref(broadcast, FN_NAME, "broadcast"));
+        let store = c_try!(require_ref(store, FN_NAME, "store"));
+        let geo = c_try!(parse_satellite_token(FN_NAME, geo_sat_id));
+        let mode = c_try!(sbas_solve_mode_from_c(FN_NAME, mode));
+        let satellite = c_try!(parse_satellite_token(FN_NAME, sat_id));
+        let epoch = c_try!(require_ref(epoch, FN_NAME, "epoch"));
+        let position = c_try!(require_slice(
+            position_ecef_m,
+            3,
+            FN_NAME,
+            "position_ecef_m"
+        ));
+        let position = [position[0], position[1], position[2]];
+        let corrected =
+            SbasCorrectedEphemeris::new(&broadcast.inner, &store.inner, geo).with_mode(mode);
+        match sidereon_core::positioning::EphemerisSource::clock_relativity_for_state_at_epoch_query(
+            &corrected,
+            satellite,
+            &epoch.inner,
+            position,
+        ) {
+            sidereon_core::positioning::ClockRelativity::NotApplicable => {}
+            sidereon_core::positioning::ClockRelativity::Term(term) => {
+                *out_kind = SidereonClockRelativityKind::Term;
+                *out_term_s = term;
+            }
+            sidereon_core::positioning::ClockRelativity::Unavailable => {
+                *out_kind = SidereonClockRelativityKind::Unavailable;
+            }
+        }
+        SidereonStatus::Ok
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sbas_ephemeris_variance_at_epoch_queries(
+    broadcast: *const SidereonBroadcastEphemeris,
+    store: *const SidereonSbasCorrectionStore,
+    geo_sat_id: *const c_char,
+    mode: u32,
+    sat_id: *const c_char,
+    state_epoch: *const SidereonExactEpochQuery,
+    selection_epoch: *const SidereonExactEpochQuery,
+    out_variance_m2: *mut f64,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_sbas_ephemeris_variance_at_epoch_queries";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let out_variance_m2 = c_try!(require_out(out_variance_m2, FN_NAME, "out_variance_m2"));
+        *out_variance_m2 = 0.0;
+        let broadcast = c_try!(require_ref(broadcast, FN_NAME, "broadcast"));
+        let store = c_try!(require_ref(store, FN_NAME, "store"));
+        let geo = c_try!(parse_satellite_token(FN_NAME, geo_sat_id));
+        let mode = c_try!(sbas_solve_mode_from_c(FN_NAME, mode));
+        let satellite = c_try!(parse_satellite_token(FN_NAME, sat_id));
+        let state_epoch = c_try!(require_ref(state_epoch, FN_NAME, "state_epoch"));
+        let selection_epoch = c_try!(require_ref(selection_epoch, FN_NAME, "selection_epoch"));
+        let corrected =
+            SbasCorrectedEphemeris::new(&broadcast.inner, &store.inner, geo).with_mode(mode);
+        *out_variance_m2 =
+            sidereon_core::positioning::EphemerisSource::ephemeris_variance_at_epoch_query(
+                &corrected,
+                satellite,
+                &state_epoch.inner,
+                &selection_epoch.inner,
+            );
+        SidereonStatus::Ok
+    })
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn sidereon_sbas_solve_broadcast(
     broadcast: *const SidereonBroadcastEphemeris,
     store: *const SidereonSbasCorrectionStore,
@@ -1600,57 +1850,198 @@ pub unsafe extern "C" fn sidereon_sbas_solve_broadcast(
     inputs: *const SidereonSppInputs,
     out_solution: *mut *mut SidereonSppSolution,
 ) -> SidereonStatus {
-    ffi_boundary(
-        "sidereon_sbas_solve_broadcast",
-        SidereonStatus::Panic,
-        || {
-            let out_solution = c_try!(require_out(
-                out_solution,
-                "sidereon_sbas_solve_broadcast",
-                "out_solution"
-            ));
-            *out_solution = ptr::null_mut();
-            let broadcast = c_try!(require_ref(
-                broadcast,
-                "sidereon_sbas_solve_broadcast",
-                "broadcast"
-            ));
-            let store = c_try!(require_ref(store, "sidereon_sbas_solve_broadcast", "store"));
-            let geo = c_try!(parse_satellite_token(
-                "sidereon_sbas_solve_broadcast",
-                geo_sat_id
-            ));
-            let mode = c_try!(sbas_solve_mode_from_c(
-                "sidereon_sbas_solve_broadcast",
-                mode
-            ));
-            let inputs = c_try!(require_ref(
-                inputs,
-                "sidereon_sbas_solve_broadcast",
-                "inputs"
-            ));
-            let corrected =
-                SbasCorrectedEphemeris::new(&broadcast.inner, &store.inner, geo).with_mode(mode);
-            let mut solve_inputs = c_try!(build_spp_solve_inputs(
-                "sidereon_sbas_solve_broadcast",
-                inputs,
-                None,
-                None,
-                BTreeMap::new(),
-            ));
-            solve_inputs.sbas_iono = corrected.iono_grid().cloned();
-            let inner = c_try!(guard(SidereonStatus::Solve, || {
-                sidereon::solve_spp(
-                    &corrected,
-                    &solve_inputs,
-                    inputs.with_geodetic,
-                    SolvePolicy::default(),
-                )
-            }));
-            write_boxed_handle(out_solution, SidereonSppSolution { inner });
-            SidereonStatus::Ok
-        },
-    )
+    const FN_NAME: &str = "sidereon_sbas_solve_broadcast";
+    engine_error_operation_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let out_solution = c_try!(require_out(out_solution, FN_NAME, "out_solution"));
+        *out_solution = ptr::null_mut();
+        let broadcast = c_try!(require_ref(broadcast, FN_NAME, "broadcast"));
+        let store = c_try!(require_ref(store, FN_NAME, "store"));
+        let geo = c_try!(parse_satellite_token(FN_NAME, geo_sat_id));
+        let mode = c_try!(sbas_solve_mode_from_c(FN_NAME, mode));
+        let inputs = c_try!(require_ref(inputs, FN_NAME, "inputs"));
+        let corrected =
+            SbasCorrectedEphemeris::new(&broadcast.inner, &store.inner, geo).with_mode(mode);
+        let mut solve_inputs = c_try!(build_spp_solve_inputs(
+            FN_NAME,
+            inputs,
+            None,
+            None,
+            BTreeMap::new(),
+        ));
+        solve_inputs.sbas_iono = corrected.iono_grid().cloned();
+        let inner = c_try!(guard(FN_NAME, SidereonStatus::Solve, || {
+            sidereon::solve_spp(
+                &corrected,
+                &solve_inputs,
+                inputs.with_geodetic,
+                SolvePolicy::default(),
+            )
+        }));
+        write_boxed_handle(out_solution, SidereonSppSolution { inner });
+        SidereonStatus::Ok
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sbas_solve_broadcast_at_exact_epoch(
+    broadcast: *const SidereonBroadcastEphemeris,
+    store: *const SidereonSbasCorrectionStore,
+    geo_sat_id: *const c_char,
+    mode: u32,
+    inputs: *const SidereonSppInputs,
+    receive_epoch: *const SidereonExactEpoch,
+    out_solution: *mut *mut SidereonSppSolution,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_sbas_solve_broadcast_at_exact_epoch";
+    engine_error_operation_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let out_solution = c_try!(require_out(out_solution, FN_NAME, "out_solution"));
+        *out_solution = ptr::null_mut();
+        let broadcast = c_try!(require_ref(broadcast, FN_NAME, "broadcast"));
+        let store = c_try!(require_ref(store, FN_NAME, "store"));
+        let geo = c_try!(parse_satellite_token(FN_NAME, geo_sat_id));
+        let mode = c_try!(sbas_solve_mode_from_c(FN_NAME, mode));
+        let inputs = c_try!(require_ref(inputs, FN_NAME, "inputs"));
+        let receive_epoch = c_try!(require_ref(receive_epoch, FN_NAME, "receive_epoch"));
+        let corrected =
+            SbasCorrectedEphemeris::new(&broadcast.inner, &store.inner, geo).with_mode(mode);
+        let mut solve_inputs = c_try!(build_spp_solve_inputs(
+            FN_NAME,
+            inputs,
+            None,
+            None,
+            BTreeMap::new(),
+        ));
+        solve_inputs.sbas_iono = corrected.iono_grid().cloned();
+        let exact_inputs = sidereon_core::positioning::ExactSolveInputs {
+            inputs: solve_inputs,
+            receive_epoch: receive_epoch.inner,
+        };
+        let inner = c_try!(guard_result(FN_NAME, SidereonStatus::Solve, || {
+            sidereon_core::positioning::solve_with_exact_epoch(
+                &corrected,
+                &exact_inputs,
+                inputs.with_geodetic,
+            )
+        }));
+        write_boxed_handle(out_solution, SidereonSppSolution { inner });
+        SidereonStatus::Ok
+    })
+}
+
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn sidereon_sbas_solve_broadcast_v2_with_models_at_exact_epoch(
+    broadcast: *const SidereonBroadcastEphemeris,
+    store: *const SidereonSbasCorrectionStore,
+    geo_sat_id: *const c_char,
+    mode: u32,
+    inputs: *const SidereonSppInputsV2,
+    models: *const SidereonSppModelOptions,
+    receive_epoch: *const SidereonExactEpoch,
+    out_solution: *mut *mut SidereonSppSolution,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_sbas_solve_broadcast_v2_with_models_at_exact_epoch";
+    engine_error_operation_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let out_solution = c_try!(require_out(out_solution, FN_NAME, "out_solution"));
+        *out_solution = ptr::null_mut();
+        let broadcast = c_try!(require_ref(broadcast, FN_NAME, "broadcast"));
+        let store = c_try!(require_ref(store, FN_NAME, "store"));
+        let geo = c_try!(parse_satellite_token(FN_NAME, geo_sat_id));
+        let mode = c_try!(sbas_solve_mode_from_c(FN_NAME, mode));
+        let inputs = c_try!(require_ref(inputs, FN_NAME, "inputs"));
+        let receive_epoch = c_try!(require_ref(receive_epoch, FN_NAME, "receive_epoch"));
+        let corrected =
+            SbasCorrectedEphemeris::new(&broadcast.inner, &store.inner, geo).with_mode(mode);
+        let mut solve_inputs = c_try!(crate::spp::build_spp_solve_inputs_with_models(
+            FN_NAME, inputs, models
+        ));
+        solve_inputs.sbas_iono = corrected.iono_grid().cloned();
+        solve_inputs.t_rx_j2000_s = receive_epoch.inner.j2000_seconds();
+        let exact_inputs = sidereon_core::positioning::ExactSolveInputs {
+            inputs: solve_inputs,
+            receive_epoch: receive_epoch.inner,
+        };
+        let policy = c_try!(solve_policy_from_c(FN_NAME, &inputs.policy));
+        let solution = c_try!(guard_result(FN_NAME, SidereonStatus::Solve, || {
+            sidereon_core::positioning::solve_with_exact_epoch_and_policy(
+                &corrected,
+                &exact_inputs,
+                inputs.base.with_geodetic,
+                policy,
+            )
+        }));
+        write_boxed_handle(out_solution, SidereonSppSolution { inner: solution });
+        SidereonStatus::Ok
+    })
+}
+
+/// Corrections a source GEO addressed to one active PRN-mask bit that names no
+/// satellite the store holds.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SidereonSbasUnassignedMaskCorrections {
+    /// One-based DO-229 PRN mask number of the bit.
+    pub mask_number: u8,
+    /// Number of corrections addressed to it.
+    pub count: u64,
+}
+
+/// Copy the corrections a source GEO addressed to active PRN-mask bits that name
+/// no satellite the store holds (a future-GNSS or unassigned mask number), per
+/// mask number in ascending order. Such a bit keeps its place among the active
+/// bits, so the corrections after it still reach their own satellites; the
+/// corrections addressed to it are applied to no satellite and are counted here
+/// instead of being dropped. *out_present is false, with nothing copied, when
+/// the GEO has no partition in the store. Uses the standard caller-buffer
+/// convention.
+///
+/// Safety: store is a live handle; geo_sat_id is a null-terminated satellite
+/// token; out_present points to a bool; out points to len writable
+/// SidereonSbasUnassignedMaskCorrections values or is NULL when len is 0;
+/// out_written and out_required point to size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sbas_store_unassigned_mask_corrections(
+    store: *const SidereonSbasCorrectionStore,
+    geo_sat_id: *const c_char,
+    out_present: *mut bool,
+    out: *mut SidereonSbasUnassignedMaskCorrections,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_sbas_store_unassigned_mask_corrections";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        if !out_present.is_null() {
+            *out_present = false;
+        }
+        c_try!(init_copy_counts(FN_NAME, out_written, out_required));
+        let out_present = c_try!(require_out(out_present, FN_NAME, "out_present"));
+        let store = c_try!(require_ref(store, FN_NAME, "store"));
+        let geo = c_try!(parse_satellite_token(FN_NAME, geo_sat_id));
+        let Some(counts) = store.inner.unassigned_mask_corrections(geo) else {
+            return SidereonStatus::Ok;
+        };
+        let values: Vec<SidereonSbasUnassignedMaskCorrections> = counts
+            .iter()
+            .map(
+                |(&mask_number, &count)| SidereonSbasUnassignedMaskCorrections {
+                    mask_number,
+                    count,
+                },
+            )
+            .collect();
+        c_try!(copy_prefix_to_c(
+            FN_NAME,
+            "out",
+            &values,
+            out,
+            len,
+            out_written,
+            out_required,
+        ));
+        *out_present = true;
+        SidereonStatus::Ok
+    })
 }
 
 #[no_mangle]
@@ -1882,7 +2273,13 @@ fn map_sbas_error(fn_name: &str, err: CoreError) -> SidereonStatus {
     set_last_error(format!("{fn_name}: {err}"));
     match err {
         CoreError::InvalidInput(_) | CoreError::Parse(_) => SidereonStatus::InvalidArgument,
-        _ => SidereonStatus::Solve,
+        CoreError::Ut1OutsideCoverage(_) => SidereonStatus::Ut1OutsideCoverage,
+        // `sidereon_core::Error` is non-exhaustive: a failure a later engine
+        // adds keeps its variant name in the message.
+        other => {
+            set_last_error(format!("{fn_name}: {other} ({other:?})"));
+            SidereonStatus::Solve
+        }
     }
 }
 
@@ -1926,5 +2323,324 @@ fn sbas_igp_delay_to_c(value: &SbasIgpDelay) -> SidereonSbasIgpDelay {
     SidereonSbasIgpDelay {
         vertical_delay: value.vertical_delay,
         givei: value.givei,
+    }
+}
+
+#[cfg(test)]
+mod sbas_mask_c_tests {
+    use super::*;
+    use sidereon_core::sbas::{SbasFastCorrections, SbasMessage, SbasPrnMask, SpareBits};
+
+    fn epoch(tow_s: f64) -> GnssWeekTow {
+        GnssWeekTow::new(TimeScale::Gpst, 2400, tow_s).expect("valid epoch")
+    }
+
+    #[test]
+    fn corrections_to_an_unassigned_mask_bit_are_counted_by_mask_number() {
+        let geo = sidereon_core::sbas::sbas_prn_to_sat(120).expect("S20");
+        let mut mask = [false; 210];
+        mask[0] = true; // G01
+        mask[70] = true; // mask number 71, future GNSS
+        mask[119] = true; // SBAS PRN 120
+        let mut store = SidereonSbasCorrectionStore {
+            inner: SbasCorrectionStore::new(),
+        };
+        store
+            .inner
+            .ingest(
+                &SbasMessage::PrnMask(SbasPrnMask {
+                    preamble: 0x53,
+                    iodp: 1,
+                    mask,
+                    reserved: SpareBits::new(),
+                }),
+                geo,
+                epoch(10.0),
+            )
+            .expect("mask");
+        let mut prc = [0i16; 13];
+        prc[0] = 8;
+        prc[1] = 16;
+        prc[2] = 24;
+        store
+            .inner
+            .ingest(
+                &SbasMessage::FastCorrections(SbasFastCorrections {
+                    preamble: 0x53,
+                    message_type: 2,
+                    iodf: 1,
+                    iodp: 1,
+                    prc,
+                    udrei: [0u8; 13],
+                    reserved: SpareBits::new(),
+                }),
+                geo,
+                epoch(20.0),
+            )
+            .expect("fast corrections");
+
+        // sidereon-core's own counts for the same store.
+        let core_counts: Vec<SidereonSbasUnassignedMaskCorrections> = store
+            .inner
+            .unassigned_mask_corrections(geo)
+            .expect("core counts for S20")
+            .iter()
+            .map(
+                |(&mask_number, &count)| SidereonSbasUnassignedMaskCorrections {
+                    mask_number,
+                    count,
+                },
+            )
+            .collect();
+        let geo_token = CString::new("S20").expect("token");
+        let mut present = false;
+        let mut rows = [SidereonSbasUnassignedMaskCorrections {
+            mask_number: 0,
+            count: 0,
+        }; 2];
+        let mut written = 0;
+        let mut required = 0;
+        assert_eq!(
+            unsafe {
+                sidereon_sbas_store_unassigned_mask_corrections(
+                    &store,
+                    geo_token.as_ptr(),
+                    &mut present,
+                    rows.as_mut_ptr(),
+                    rows.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert!(present);
+        assert_eq!((written, required), (core_counts.len(), core_counts.len()));
+        assert_eq!(&rows[..written], core_counts.as_slice());
+
+        // sidereon-core holds no counts for a GEO that sent nothing.
+        let s21 = sidereon_core::sbas::sbas_prn_to_sat(121).expect("S21");
+        assert!(store.inner.unassigned_mask_corrections(s21).is_none());
+        let other_geo = CString::new("S21").expect("token");
+        assert_eq!(
+            unsafe {
+                sidereon_sbas_store_unassigned_mask_corrections(
+                    &store,
+                    other_geo.as_ptr(),
+                    &mut present,
+                    rows.as_mut_ptr(),
+                    rows.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert!(!present);
+        assert_eq!((written, required), (0, 0));
+    }
+
+    #[test]
+    fn only_the_broadcast_window_converts_to_an_sbas_prn() {
+        // The window edges and the tokens just outside it; the expected PRN
+        // is sidereon-core's own conversion of the same satellite.
+        for token in ["S20", "S58", "S19", "S59", "S99", "G01"] {
+            let expected = sidereon_core::sbas::sat_to_sbas_prn(
+                token.parse::<GnssSatelliteId>().expect("satellite token"),
+            );
+            let token = CString::new(token).expect("token");
+            let mut prn = u16::MAX;
+            let mut present = true;
+            assert_eq!(
+                unsafe {
+                    sidereon_satellite_id_to_sbas_prn(token.as_ptr(), &mut prn, &mut present)
+                },
+                SidereonStatus::Ok
+            );
+            assert_eq!(present.then_some(prn), expected);
+            if expected.is_none() {
+                assert_eq!(prn, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn test_sbas_public_control_and_early_null_checks() {
+        use crate::engine_error::{
+            sidereon_last_engine_error_info, sidereon_last_engine_error_payload,
+            SidereonEngineErrorFamily, SidereonEngineErrorInfo,
+        };
+
+        unsafe fn trigger_refusal() {
+            let malformed = b"INVALID SP3";
+            let mut refused = ptr::null_mut();
+            let status =
+                crate::sp3::sidereon_sp3_load(malformed.as_ptr(), malformed.len(), &mut refused);
+            assert_eq!(status, SidereonStatus::Sp3Parse);
+            assert!(refused.is_null());
+        }
+
+        // 1. Seed through a real public refusal
+        unsafe { trigger_refusal() };
+        let mut info = SidereonEngineErrorInfo {
+            family: SidereonEngineErrorFamily::None,
+            payload_len: 0,
+        };
+        assert_eq!(
+            unsafe { sidereon_last_engine_error_info(&mut info) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(info.family, SidereonEngineErrorFamily::Facade);
+        assert!(info.payload_len > 0);
+
+        // 2. Early null out_solution clears TLS via engine_error_operation_boundary
+        let status = unsafe {
+            sidereon_sbas_solve_broadcast(
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                0,
+                ptr::null(),
+                ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, SidereonStatus::NullPointer);
+        assert_eq!(
+            unsafe { sidereon_last_engine_error_info(&mut info) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(info.family, SidereonEngineErrorFamily::None);
+        assert_eq!(info.payload_len, 0);
+
+        // 3. Re-seed refusal before testing successful producer reset
+        unsafe { trigger_refusal() };
+        assert_eq!(
+            unsafe { sidereon_last_engine_error_info(&mut info) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(info.family, SidereonEngineErrorFamily::Facade);
+        assert!(info.payload_len > 0);
+
+        // 4. Successful producer: valid SP3 load clears TLS
+        let valid = include_bytes!("../tests/fixtures/sp3/GRG0MGXFIN_20201760000_01D_15M_ORB.SP3");
+        let mut live_sp3 = ptr::null_mut();
+        let status =
+            unsafe { crate::sp3::sidereon_sp3_load(valid.as_ptr(), valid.len(), &mut live_sp3) };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert!(!live_sp3.is_null());
+        unsafe { crate::sp3::sidereon_sp3_free(live_sp3) };
+
+        assert_eq!(
+            unsafe { sidereon_last_engine_error_info(&mut info) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(info.family, SidereonEngineErrorFamily::None);
+        assert_eq!(info.payload_len, 0);
+
+        // 5. Pre-seed refusal into TLS and create live store handle
+        let mut store = ptr::null_mut();
+        assert_eq!(
+            unsafe { sidereon_sbas_store_new(&mut store) },
+            SidereonStatus::Ok
+        );
+        assert!(!store.is_null());
+
+        unsafe { trigger_refusal() };
+        let mut seed_info = SidereonEngineErrorInfo {
+            family: SidereonEngineErrorFamily::None,
+            payload_len: 0,
+        };
+        assert_eq!(
+            unsafe { sidereon_last_engine_error_info(&mut seed_info) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(seed_info.family, SidereonEngineErrorFamily::Facade);
+        assert!(seed_info.payload_len > 0);
+        let mut seed_payload = vec![0u8; seed_info.payload_len];
+        let mut written = 0;
+        let mut required = 0;
+        assert_eq!(
+            unsafe {
+                sidereon_last_engine_error_payload(
+                    seed_payload.as_mut_ptr(),
+                    seed_payload.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(written, seed_info.payload_len);
+
+        let verify_seed_tls = || {
+            let mut cur_info = SidereonEngineErrorInfo {
+                family: SidereonEngineErrorFamily::None,
+                payload_len: 0,
+            };
+            assert_eq!(
+                unsafe { sidereon_last_engine_error_info(&mut cur_info) },
+                SidereonStatus::Ok
+            );
+            assert_eq!(cur_info.family, SidereonEngineErrorFamily::Facade);
+            assert_eq!(cur_info.payload_len, seed_info.payload_len);
+            let mut cur_payload = vec![0u8; cur_info.payload_len];
+            let mut w = 0;
+            let mut r = 0;
+            assert_eq!(
+                unsafe {
+                    sidereon_last_engine_error_payload(
+                        cur_payload.as_mut_ptr(),
+                        cur_payload.len(),
+                        &mut w,
+                        &mut r,
+                    )
+                },
+                SidereonStatus::Ok
+            );
+            assert_eq!(cur_payload, seed_payload);
+        };
+
+        // 6. Live reader on store retains complete generic TLS
+        let mut geo_written = 999;
+        let mut geo_required = 999;
+        assert_eq!(
+            unsafe {
+                sidereon_sbas_store_ready_geos(
+                    store,
+                    0.0,
+                    ptr::null_mut(),
+                    0,
+                    &mut geo_written,
+                    &mut geo_required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(geo_written, 0);
+        assert_eq!(geo_required, 0);
+        verify_seed_tls();
+
+        // 7. Free retains complete generic TLS
+        unsafe { sidereon_sbas_store_free(store) };
+        verify_seed_tls();
+
+        // 8. Actual unrelated successful producer resets TLS
+        let mut sp3_reset = ptr::null_mut();
+        let status =
+            unsafe { crate::sp3::sidereon_sp3_load(valid.as_ptr(), valid.len(), &mut sp3_reset) };
+        assert_eq!(status, SidereonStatus::Ok);
+        assert!(!sp3_reset.is_null());
+        unsafe { crate::sp3::sidereon_sp3_free(sp3_reset) };
+
+        let mut reset_info = SidereonEngineErrorInfo {
+            family: SidereonEngineErrorFamily::Facade,
+            payload_len: 999,
+        };
+        assert_eq!(
+            unsafe { sidereon_last_engine_error_info(&mut reset_info) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(reset_info.family, SidereonEngineErrorFamily::None);
+        assert_eq!(reset_info.payload_len, 0);
     }
 }

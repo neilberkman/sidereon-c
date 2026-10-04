@@ -109,6 +109,13 @@ pub unsafe extern "C" fn sidereon_moving_baseline_solution_epoch_count(
                 "sidereon_moving_baseline_solution_epoch_count",
                 "out_count"
             ));
+            c_try!(reject_output_overlaps_handle(
+                "sidereon_moving_baseline_solution_epoch_count",
+                out,
+                "out_count",
+                solution,
+                "solution",
+            ));
             *out = 0;
             let solution = c_try!(require_ref(
                 solution,
@@ -135,10 +142,17 @@ pub unsafe extern "C" fn sidereon_moving_baseline_solution_epoch(
         "sidereon_moving_baseline_solution_epoch",
         SidereonStatus::Panic,
         || {
-            let out = c_try!(require_out(
+            let out = c_try!(require_uninit_out(
                 out,
                 "sidereon_moving_baseline_solution_epoch",
                 "out"
+            ));
+            c_try!(reject_output_overlaps_handle(
+                "sidereon_moving_baseline_solution_epoch",
+                out,
+                "out",
+                solution,
+                "solution",
             ));
             let solution = c_try!(require_ref(
                 solution,
@@ -155,7 +169,7 @@ pub unsafe extern "C" fn sidereon_moving_baseline_solution_epoch(
                     return SidereonStatus::InvalidArgument;
                 }
             };
-            *out = moving_baseline_summary(epoch);
+            out.write(moving_baseline_summary(epoch));
             SidereonStatus::Ok
         },
     )
