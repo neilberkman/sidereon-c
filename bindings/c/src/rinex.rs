@@ -1,6 +1,7 @@
 use super::*;
 use sidereon_core::rinex::observations::{
-    CarrierPhaseRow, CorrectionUnavailable, ObsDowngradeChange, ObsHeader, RinexObsWriteError,
+    CarrierPhaseRow, CorrectionUnavailable, ObsDowngradeChange, ObsEpochTime, ObsHeader,
+    RinexObsWriteError,
 };
 
 /// A parsed RINEX observation product. Create with sidereon_rinex_obs_parse and
@@ -482,6 +483,204 @@ pub unsafe extern "C" fn sidereon_rinex_obs_header_timeline(
             len,
             out_written,
             out_required,
+        ));
+        SidereonStatus::Ok
+    })
+}
+
+use serde_json::{json, Value};
+
+fn rinex_obs_header_detail_json(header: &ObsHeader) -> Value {
+    let float_option = |value: Option<f64>| value.map(finding_json_float).unwrap_or(Value::Null);
+    let vector_option = |value: Option<[f64; 3]>| {
+        value
+            .map(|values| json!(values.map(finding_json_float)))
+            .unwrap_or(Value::Null)
+    };
+    let system_codes = |values: &std::collections::BTreeMap<GnssSystem, Vec<String>>| {
+        let mut result = serde_json::Map::new();
+        for (system, codes) in values {
+            result.insert(system.as_str().to_owned(), json!(codes));
+        }
+        Value::Object(result)
+    };
+    let epoch = |value: &ObsEpochTime| {
+        json!({
+            "year": value.year, "month": value.month, "day": value.day,
+            "hour": value.hour, "minute": value.minute,
+            "second": finding_json_float(value.second),
+        })
+    };
+    let satellite_counts = {
+        let mut result = serde_json::Map::new();
+        for (satellite, counts) in &header.prn_obs_counts {
+            result.insert(
+                satellite.to_string(),
+                Value::Array(
+                    counts
+                        .iter()
+                        .map(|count| count.map_or(Value::Null, |n| json!(n)))
+                        .collect(),
+                ),
+            );
+        }
+        Value::Object(result)
+    };
+    let phase_shifts = header
+        .phase_shifts
+        .iter()
+        .map(|record| {
+            json!({
+                "system": record.system.as_str(),
+                "code": record.code,
+                "correction_cycles": float_option(record.correction_cycles),
+                "satellites": record.satellites.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                "unrepresentable_satellites": record.unrepresentable_satellites,
+            })
+        })
+        .collect::<Vec<_>>();
+    let scale_factors = header
+        .scale_factors
+        .iter()
+        .map(|record| {
+            json!({
+                "system": record.system.as_str(), "factor": finding_json_float(record.factor),
+                "codes": record.codes,
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut glonass_slots = serde_json::Map::new();
+    for (slot, channel) in &header.glonass_slots {
+        glonass_slots.insert(slot.to_string(), json!(channel));
+    }
+    let glonass_biases = header
+        .glonass_cod_phs_bis
+        .as_ref()
+        .map(|entries| {
+            Value::Array(
+                entries
+                    .iter()
+                    .map(|(code, bias)| json!([code, float_option(*bias)]))
+                    .collect(),
+            )
+        })
+        .unwrap_or(Value::Null);
+    let first = header
+        .time_of_first_obs
+        .as_ref()
+        .map(|(time, scale)| {
+            json!({
+                "epoch": epoch(time), "time_scale": scale.abbrev(),
+            })
+        })
+        .unwrap_or(Value::Null);
+    let last = header
+        .time_of_last_obs
+        .as_ref()
+        .map(|(time, scale)| {
+            json!({
+                "epoch": epoch(time), "time_scale": scale.abbrev(),
+            })
+        })
+        .unwrap_or(Value::Null);
+    json!({
+        "version": finding_json_float(header.version),
+        "approx_position_m": vector_option(header.approx_position_m),
+        "antenna_delta_hen_m": vector_option(header.antenna_delta_hen_m),
+        "obs_codes": system_codes(&header.obs_codes),
+        "declared_obs_codes": system_codes(&header.declared_obs_codes),
+        "rinex2_types": header.rinex2_types,
+        "rinex2_system": header.rinex2_system.map(|system| system.as_str()),
+        "program_run_by_date": header.program_run_by_date.as_ref().map(|value| json!({
+            "program": value.program, "run_by": value.run_by, "date": value.date,
+        })),
+        "comments": header.comments,
+        "marker_number": header.marker_number,
+        "marker_type": header.marker_type,
+        "observer": header.observer,
+        "agency": header.agency,
+        "receiver": header.receiver.as_ref().map(|value| json!({
+            "number": value.number, "receiver_type": value.receiver_type, "version": value.version,
+        })),
+        "antenna": header.antenna.as_ref().map(|value| json!({
+            "number": value.number, "antenna_type": value.antenna_type,
+        })),
+        "interval_s": float_option(header.interval_s),
+        "time_of_first_obs": first,
+        "time_of_last_obs": last,
+        "n_satellites": header.n_satellites,
+        "prn_obs_counts": satellite_counts,
+        "phase_shifts": phase_shifts,
+        "scale_factors": scale_factors,
+        "glonass_slots": glonass_slots,
+        "glonass_cod_phs_bis": glonass_biases,
+        "signal_strength_unit": header.signal_strength_unit,
+        "leap_seconds": header.leap_seconds.as_ref().map(|value| json!({
+            "current": value.current, "delta_future": value.delta_future,
+            "week": value.week, "day": value.day, "time_system": value.time_system,
+        })),
+        "marker_name": header.marker_name,
+        "unretained_header_labels": header.unretained_header_labels,
+    })
+}
+
+/// Copy complete RINEX observation headers as stable JSON. The output contains
+/// every detached segment from the public header timeline, including the file
+/// header at epoch zero and headers introduced by events. Optional values are
+/// JSON null; counts are exact JSON integers; floating-point special values use
+/// the strings NaN, Infinity, and -Infinity.
+///
+/// The JSON is UTF-8 without a trailing NUL. The output pointer may be null only
+/// when its length is zero to query the required byte count.
+///
+/// # Safety
+///
+/// The observation must be a live handle returned by sidereon_rinex_obs_parse.
+/// The output pointer must reference the specified writable byte count unless
+/// that count is zero. Both count outputs must point to writable size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rinex_obs_header_details_json(
+    obs: *const SidereonRinexObs,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_rinex_obs_header_details_json";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(FN_NAME, out_written, out_required));
+        let obs = c_try!(require_ref(obs, FN_NAME, "obs"));
+        let timeline = match obs.inner.header_timeline() {
+            Ok(timeline) => timeline,
+            Err(error) => {
+                set_last_error(format!("{FN_NAME}: {error}"));
+                return SidereonStatus::InvalidArgument;
+            }
+        };
+        let segments = timeline
+            .segments()
+            .map(|(first_epoch_index, header)| {
+                json!({
+                    "first_epoch_index": first_epoch_index,
+                    "header": rinex_obs_header_detail_json(header),
+                })
+            })
+            .collect::<Vec<_>>();
+        let payload = match serde_json::to_vec(&json!({"segments": segments})) {
+            Ok(payload) => payload,
+            Err(error) => {
+                set_last_error(format!("{FN_NAME}: JSON serialization failed: {error}"));
+                return SidereonStatus::Panic;
+            }
+        };
+        c_try!(copy_prefix_to_c(
+            FN_NAME,
+            "out",
+            &payload,
+            out,
+            len,
+            out_written,
+            out_required
         ));
         SidereonStatus::Ok
     })

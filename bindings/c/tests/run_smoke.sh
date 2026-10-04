@@ -104,7 +104,10 @@ cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -o "${rinex_obs_complete_out}"
 
 echo "== running complete RINEX OBS surface smoke program =="
-"${rinex_obs_complete_out}"
+"${rinex_obs_complete_out}" \
+    "${esbc_rnx_path}" \
+    "${fixtures}/obs/rinex211_table_a7_example.rnx" \
+    "${fixtures}/obs/WTZZ00DEU_R_20201770000_01D_30S_MO_120epoch.rnx"
 
 echo "== compiling smoke program =="
 out="${target_dir}/smoke"

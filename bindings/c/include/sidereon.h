@@ -41817,6 +41817,28 @@ enum SidereonStatus sidereon_rinex_obs_header_at(const struct SidereonRinexObs *
                                                  struct SidereonRinexObsHeader *out_header);
 
 /**
+ * Copy complete RINEX observation headers as stable JSON. The output contains
+ * every detached segment from the public header timeline, including the file
+ * header at epoch zero and headers introduced by events. Optional values are
+ * JSON null; counts are exact JSON integers; floating-point special values use
+ * the strings NaN, Infinity, and -Infinity.
+ *
+ * The JSON is UTF-8 without a trailing NUL. The output pointer may be null only
+ * when its length is zero to query the required byte count.
+ *
+ * # Safety
+ *
+ * The observation must be a live handle returned by sidereon_rinex_obs_parse.
+ * The output pointer must reference the specified writable byte count unless
+ * that count is zero. Both count outputs must point to writable size_t values.
+ */
+enum SidereonStatus sidereon_rinex_obs_header_details_json(const struct SidereonRinexObs *obs,
+                                                           uint8_t *out,
+                                                           size_t len,
+                                                           size_t *out_written,
+                                                           size_t *out_required);
+
+/**
  * Copy every detached header-timeline segment in file order. The first row is
  * always `(0, file_header)`; later rows are effective event headers only.
  * Uses the standard two-call variable-length output contract.

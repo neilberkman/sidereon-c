@@ -105,6 +105,136 @@ static uint8_t *copy_rinex_text(const SidereonRinexObs *obs, size_t *out_len) {
     return text;
 }
 
+static char *read_fixture(const char *path) {
+    FILE *file = fopen(path, "rb");
+    if (file == NULL) {
+        return NULL;
+    }
+    if (fseek(file, 0, SEEK_END) != 0) {
+        fclose(file);
+        return NULL;
+    }
+    long length = ftell(file);
+    if (length < 0 || fseek(file, 0, SEEK_SET) != 0) {
+        fclose(file);
+        return NULL;
+    }
+    char *text = malloc((size_t)length + 1);
+    if (text == NULL) {
+        fclose(file);
+        return NULL;
+    }
+    size_t read = fread(text, 1, (size_t)length, file);
+    fclose(file);
+    if (read != (size_t)length) {
+        free(text);
+        return NULL;
+    }
+    text[read] = '\0';
+    return text;
+}
+
+static char *header_details_json(const SidereonRinexObs *obs) {
+    size_t written = 99, required = 99;
+    check(sidereon_rinex_obs_header_details_json(obs, NULL, 0, &written,
+                                                  &required) ==
+              SIDEREON_STATUS_OK,
+          "header details size query");
+    check(written == 0 && required > 2, "header details query counts");
+    char *json = calloc(required + 1, 1);
+    check(json != NULL, "header details allocation");
+    if (json == NULL) {
+        return NULL;
+    }
+    written = 0;
+    check(sidereon_rinex_obs_header_details_json(
+              obs, (uint8_t *)json, required, &written, &required) ==
+              SIDEREON_STATUS_OK,
+          "header details copy");
+    check(written == required, "header details exact copy");
+    return json;
+}
+
+static void check_header_detail_fields(const char *path) {
+    char *text = read_fixture(path);
+    check(text != NULL, "header detail fixture read");
+    if (text == NULL) {
+        return;
+    }
+    SidereonRinexObs *obs = parse_text(text);
+    free(text);
+    if (obs == NULL) {
+        return;
+    }
+    char *json = header_details_json(obs);
+    if (json != NULL) {
+        const char *keys[] = {
+            "\"version\"", "\"approx_position_m\"", "\"antenna_delta_hen_m\"",
+            "\"obs_codes\"", "\"declared_obs_codes\"", "\"rinex2_types\"",
+            "\"rinex2_system\"", "\"program_run_by_date\"", "\"comments\"",
+            "\"marker_number\"", "\"marker_type\"", "\"observer\"", "\"agency\"",
+            "\"receiver\"", "\"antenna\"", "\"interval_s\"", "\"time_of_first_obs\"",
+            "\"time_of_last_obs\"", "\"n_satellites\"", "\"prn_obs_counts\"",
+            "\"phase_shifts\"", "\"scale_factors\"", "\"glonass_slots\"",
+            "\"glonass_cod_phs_bis\"", "\"signal_strength_unit\"", "\"leap_seconds\"",
+            "\"marker_name\"", "\"unretained_header_labels\""
+        };
+        for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+            check(strstr(json, keys[i]) != NULL, "complete header field key");
+        }
+        if (strstr(path, "ESBC") != NULL) {
+            check(strstr(json, "\"marker_type\":\"GEODETIC\"") != NULL,
+                  "marker type detail");
+            check(strstr(json, "\"signal_strength_unit\":\"DBHZ\"") != NULL,
+                  "signal-strength-unit detail");
+            check(strstr(json, "\"n_satellites\":0") != NULL,
+                  "present zero satellite count");
+            check(strstr(json, "\"interval_s\":30.0") != NULL,
+                  "interval detail");
+            check(strstr(json, "\"marker_number\":\"10118M001\"") != NULL,
+                  "marker number detail");
+        }
+        if (strstr(path, "a7") != NULL || strstr(path, "A7") != NULL) {
+            check(strstr(json, "\"rinex2_types\":[\"P1\",\"L1\",\"L2\",\"P2\",\"L5\"]") != NULL,
+                  "RINEX 2 type order");
+        }
+        free(json);
+    }
+    uint8_t short_buffer[1] = {0};
+    size_t written = 77, required = 88;
+    check(sidereon_rinex_obs_header_details_json(obs, short_buffer,
+                                                  sizeof(short_buffer), &written,
+                                                  &required) ==
+              SIDEREON_STATUS_INVALID_ARGUMENT &&
+              written == 0 && required > sizeof(short_buffer) && short_buffer[0] == 0,
+          "header details short buffer reports required size without partial output");
+    uint8_t overflow_probe = 0;
+    written = 77;
+    required = 88;
+    check(sidereon_rinex_obs_header_details_json(
+              obs, &overflow_probe, SIZE_MAX, &written, &required) ==
+              SIDEREON_STATUS_INVALID_ARGUMENT &&
+              written == 0 && required > 2 && overflow_probe == 0,
+          "header details rejects overflowing capacity before writing");
+    sidereon_rinex_obs_free(obs);
+}
+
+static void test_header_details(const char *esbc_path, const char *a7_path,
+                                const char *wtzz_path) {
+    check_header_detail_fields(esbc_path);
+    check_header_detail_fields(a7_path);
+    check_header_detail_fields(wtzz_path);
+    size_t written = 77, required = 88;
+    check(sidereon_rinex_obs_header_details_json(NULL, NULL, 0, &written,
+                                                  &required) ==
+              SIDEREON_STATUS_NULL_POINTER &&
+              written == 0 && required == 0,
+          "header details null source initializes output counts");
+    check(sidereon_rinex_obs_header_details_json(NULL, NULL, 0, NULL, NULL) ==
+              SIDEREON_STATUS_NULL_POINTER,
+          "header details null counts are rejected");
+}
+
 static void test_header_routes_and_skips(void) {
     char text[1024];
     int n = snprintf(
@@ -297,7 +427,12 @@ static void test_downgrade_refusals(void) {
     sidereon_rinex_obs_free(source);
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    if (argc == 4) {
+        test_header_details(argv[1], argv[2], argv[3]);
+    } else {
+        check(false, "header detail fixture arguments");
+    }
     test_header_routes_and_skips();
     test_downgrade();
     test_downgrade_refusals();

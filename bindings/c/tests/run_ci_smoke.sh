@@ -33,7 +33,10 @@ cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -Wl,-rpath,"${lib_dir}" \
     -lm \
     -o "${target_dir}/rinex_obs_complete_smoke_ci"
-"${target_dir}/rinex_obs_complete_smoke_ci"
+"${target_dir}/rinex_obs_complete_smoke_ci" \
+    "${here}/fixtures/obs/ESBC00DNK_R_20201770000_01D_30S_MO_trim.rnx" \
+    "${here}/fixtures/obs/rinex211_table_a7_example.rnx" \
+    "${here}/fixtures/obs/WTZZ00DEU_R_20201770000_01D_30S_MO_120epoch.rnx"
 
 cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -I"${binding_root}/include" \
