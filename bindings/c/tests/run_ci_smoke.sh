@@ -195,6 +195,17 @@ cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
 
 cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -I"${binding_root}/include" \
+    "${here}/clock_header_field_public_smoke.c" \
+    -L"${lib_dir}" \
+    -lsidereon \
+    -Wl,-rpath,"${lib_dir}" \
+    -o "${target_dir}/clock_header_field_public_smoke_ci"
+"${target_dir}/clock_header_field_public_smoke_ci" \
+    "${here}/fixtures/clk/lossless/rinex_clock304_table_a17.clk" \
+    "${here}/fixtures/clk/lossless/rinex_clock304_table_a18.clk"
+
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
+    -I"${binding_root}/include" \
     "${here}/rinex_rtk_dted_smoke.c" \
     -L"${lib_dir}" \
     -lsidereon \
