@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 3.0.1 - 2026-10-04
+
+### Changed
+
+- Coordinate C with sidereon-core 3.0.1 at 592ca2bd293177bcd901286080baa6350522020f; the engine numerical algorithms are unchanged in this patch release.
+- Add public UT1 ABI regressions for table-backed, before-coverage and after-coverage flags, including typed frame-transform refusal.
+
 ## 3.0.0 - 2026-10-04
 
 ### Changed

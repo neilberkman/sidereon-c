@@ -1360,6 +1360,82 @@ static void test_additional_multi_output_aliases(void) {
     }
 }
 
+static void assert_ut1_frame_refusal(const SidereonTimeScales *scales,
+                                    const char *reason,
+                                    const char *label) {
+    const double position[3] = {7000.0, 0.0, 0.0};
+    double output[3] = {1.0, 2.0, 3.0};
+    check(sidereon_frame_gcrs_to_itrs(position, scales, false, output) ==
+              SIDEREON_STATUS_UT1_OUTSIDE_COVERAGE,
+          label);
+    check(output[0] == 0.0 && output[1] == 0.0 && output[2] == 0.0,
+          "UT1 frame refusal resets output");
+
+    SidereonEngineErrorInfo info;
+    memset(&info, 0, sizeof info);
+    size_t written = 0;
+    size_t required = 0;
+    const SidereonStatus info_status = sidereon_last_engine_error_info(&info);
+    const SidereonStatus query_status =
+        sidereon_last_engine_error_payload(NULL, 0, &written, &required);
+    check(info_status == SIDEREON_STATUS_OK &&
+              info.family == SIDEREON_ENGINE_ERROR_FAMILY_FRAME_TRANSFORM &&
+              query_status == SIDEREON_STATUS_OK && written == 0 &&
+              required == info.payload_len,
+          "UT1 frame refusal retains typed frame error");
+    if (required == 0 || required >= 4096) return;
+
+    uint8_t *payload = (uint8_t *)malloc(required + 1);
+    check(payload != NULL, "allocate UT1 frame error payload");
+    if (payload == NULL) return;
+    const SidereonStatus payload_status = sidereon_last_engine_error_payload(
+        payload, required, &written, &required);
+    check(payload_status == SIDEREON_STATUS_OK && written == required,
+          "copy UT1 frame error payload");
+    if (payload_status == SIDEREON_STATUS_OK && written == required) {
+        payload[written] = 0;
+        check(strstr((const char *)payload,
+                     "\"kind\":\"ut1_outside_coverage\"") != NULL &&
+                  strstr((const char *)payload, reason) != NULL,
+              "UT1 frame error retains expected reason");
+    }
+    free(payload);
+}
+
+static void test_ut1_degradation_public_abi(void) {
+    SidereonTimeScales before;
+    SidereonTimeScales covered;
+    SidereonTimeScales after;
+    check(sidereon_timescales_from_utc(1960, 1, 1, 0, 0, 0.0, &before) ==
+              SIDEREON_STATUS_OK &&
+              before.ut1_degraded == SIDEREON_UT1_DEGRADATION_BEFORE_COVERAGE,
+          "UTC conversion reports before-table UT1 degradation");
+    check(sidereon_timescales_from_utc(2024, 1, 1, 0, 0, 0.0, &covered) ==
+              SIDEREON_STATUS_OK &&
+              covered.ut1_degraded == SIDEREON_UT1_DEGRADATION_NONE,
+          "UTC conversion reports table-backed UT1 without degradation");
+    check(sidereon_timescales_from_utc(2500, 1, 1, 0, 0, 0.0, &after) ==
+              SIDEREON_STATUS_OK &&
+              after.ut1_degraded == SIDEREON_UT1_DEGRADATION_AFTER_COVERAGE,
+          "UTC conversion reports after-table UT1 degradation");
+
+    assert_ut1_frame_refusal(&before,
+                             "\"reason\":\"before_coverage\"",
+                             "valid before-coverage UT1 flag refuses frame transform");
+    assert_ut1_frame_refusal(&after,
+                             "\"reason\":\"after_coverage\"",
+                             "valid after-coverage UT1 flag refuses frame transform");
+
+    double position[3] = {7000.0, 0.0, 0.0};
+    double output[3] = {1.0, 2.0, 3.0};
+    SidereonTimeScales invalid = covered;
+    invalid.ut1_degraded = 99;
+    check(sidereon_frame_gcrs_to_itrs(position, &invalid, false, output) ==
+              SIDEREON_STATUS_INVALID_ARGUMENT &&
+              output[0] == 0.0 && output[1] == 0.0 && output[2] == 0.0,
+          "frame transform rejects unknown UT1 degradation and resets output");
+}
+
 static void test_frame_iod_in_place_inputs(void) {
     SidereonTimeScales ts;
     SidereonStatus epoch_status =
@@ -2019,6 +2095,7 @@ int main(int argc, char **argv) {
     test_inertial_dual_output_alias_rejection();
     test_remaining_multi_output_preflights();
     test_additional_multi_output_aliases();
+    test_ut1_degradation_public_abi();
     test_frame_iod_in_place_inputs();
     test_raw_buffer_in_place_inputs();
     test_rtk_residual_refusal();

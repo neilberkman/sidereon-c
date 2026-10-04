@@ -192,7 +192,7 @@ def registry_emitters(source: Path, scratch: Path, helper_root: Path) -> tuple[P
     if not lock_source.is_file():
         fail(
             "registry-linked fixture harness has no resolved Cargo.lock yet; "
-            "resolve its exact registry graph after sidereon 3.0.0 publication"
+            "resolve its exact registry graph after sidereon 3.0.1 publication"
         )
     shutil.copy2(manifest_source, harness / "Cargo.toml")
     shutil.copy2(lock_source, harness / "Cargo.lock")

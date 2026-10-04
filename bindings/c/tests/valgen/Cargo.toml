@@ -23,7 +23,7 @@ publish = false
 [dependencies]
 # The sidereon-core revision tests/CORE_REVISION names; tests/run_generators.sh
 # checks that every generator pins the same one.
-sidereon-core = { version = "=3.0.0" }
+sidereon-core = { version = "=3.0.1" }
 serde_json = "1"
 # The trust-region least-squares crate and the nalgebra pin sidereon-core
 # builds against, for the solver checks whose inputs are those crates' types.

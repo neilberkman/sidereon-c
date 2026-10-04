@@ -89,8 +89,8 @@ after_includes = """
 
 #define SIDEREON_VERSION_MAJOR 3
 #define SIDEREON_VERSION_MINOR 0
-#define SIDEREON_VERSION_PATCH 0
-#define SIDEREON_VERSION_STRING "3.0.0\""""
+#define SIDEREON_VERSION_PATCH 1
+#define SIDEREON_VERSION_STRING "3.0.1\""""
 
 [enum]
 # Idiomatic C enum constants: SidereonStatus::Ok -> SIDEREON_STATUS_OK.

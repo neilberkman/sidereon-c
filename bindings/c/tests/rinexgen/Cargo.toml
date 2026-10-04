@@ -19,5 +19,5 @@ publish = false
 [dependencies]
 # The sidereon-core revision tests/CORE_REVISION names; tests/run_generators.sh
 # checks that every generator pins the same one.
-sidereon-core = { version = "=3.0.0" }
+sidereon-core = { version = "=3.0.1" }
 serde_json = "1"
