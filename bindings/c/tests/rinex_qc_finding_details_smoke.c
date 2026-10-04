@@ -63,6 +63,57 @@ static void check_epoch_order(const char *path) {
     sidereon_rinex_lint_report_free(report);
 }
 
+static void replace_once(uint8_t *bytes, size_t len, const char *old_text, const char *new_text) {
+    size_t old_len = strlen(old_text);
+    require(old_len == strlen(new_text), "mutation preserves field width");
+    size_t matches = 0;
+    for (size_t i = 0; i + old_len <= len; ++i) {
+        if (memcmp(bytes + i, old_text, old_len) == 0) {
+            memcpy(bytes + i, new_text, old_len);
+            ++matches;
+            break;
+        }
+    }
+    require(matches == 1, "find mutation field");
+}
+static void check_mutated_finding(const char *fixture, const char *old_a, const char *new_a,
+                                  const char *old_b, const char *new_b,
+                                  const char *old_c, const char *new_c,
+                                  const char *expected_code, uint32_t expected_severity, bool expected_repairable, const char *expected_field,
+                                  const char *expected_json) {
+    size_t len = 0;
+    uint8_t *bytes = read_file(fixture, &len);
+    if (old_a != NULL) replace_once(bytes, len, old_a, new_a);
+    if (old_b != NULL) replace_once(bytes, len, old_b, new_b);
+    if (old_c != NULL) replace_once(bytes, len, old_c, new_c);
+    SidereonRinexLintReport *report = NULL;
+    require(sidereon_rinex_lint_obs(bytes, len, &report) == SIDEREON_STATUS_OK && report != NULL, "lint mutated OBS fixture");
+    free(bytes);
+    size_t written = 0, required = 0;
+    require(sidereon_rinex_lint_findings(report, NULL, 0, &written, &required) == SIDEREON_STATUS_OK && required > 0, "query mutated findings");
+    SidereonRinexLintFinding *findings = (SidereonRinexLintFinding *)calloc(required, sizeof(*findings));
+    require(findings != NULL, "allocate mutated findings");
+    require(sidereon_rinex_lint_findings(report, findings, required, &written, &required) == SIDEREON_STATUS_OK, "copy mutated findings");
+    size_t index = required;
+    for (size_t i = 0; i < required; ++i) if (strcmp(findings[i].code, expected_code) == 0) { index = i; break; }
+    require(index < required && findings[index].severity == expected_severity && findings[index].repairable == expected_repairable && findings[index].has_field && strcmp(findings[index].field, expected_field) == 0, "exact mutated finding code, severity, and header location");
+    char *json = details_json(report, index);
+    require(strcmp(json, expected_json) == 0, "exact mutated finding variant payload");
+    free(json);
+    free(findings);
+    sidereon_rinex_lint_report_free(report);
+}
+static void check_header_mutations(const char *fixture) {
+    check_mutated_finding(fixture, "30.0000", "01.0000", NULL, NULL, NULL, NULL,
+        "OBS-H09", 2, true, "INTERVAL",
+        "{\"kind\":\"ObsIntervalMismatch\",\"spec_ref\":\"RINEX 3.05 Table A2\",\"details\":{\"declared_s\":1.0,\"observed_s\":30.0}}");
+    check_mutated_finding(fixture, "918129.4000", "     1.0000", "-4346071.2000", "       1.0000", "4561977.8000", "      1.0000",
+        "OBS-H17", 2, false, "APPROX POSITION XYZ",
+        "{\"kind\":\"ObsImplausibleApproxPosition\",\"spec_ref\":\"RINEX 3.05 Table A2\",\"details\":{\"radius_m\":1.7320508075688772}}");
+    check_mutated_finding(fixture, "  2015     1     1     0     0    0.0000000", "  2015     1     2     0     0    0.0000000", NULL, NULL, NULL, NULL,
+        "OBS-H07", 1, true, "TIME OF FIRST OBS",
+        "{\"kind\":\"ObsTimeOfFirstMismatch\",\"spec_ref\":\"RINEX 3.05 Table A2\",\"details\":{\"declared\":{\"year\":2015,\"month\":1,\"day\":2,\"hour\":0,\"minute\":0,\"second\":0.0},\"declared_scale\":\"GPST\",\"observed\":{\"year\":2015,\"month\":1,\"day\":1,\"hour\":0,\"minute\":0,\"second\":0.0},\"observed_scale\":\"GPST\"}}");
+}
 int main(int argc, char **argv) {
     require(argc == 3, "expected two OBS fixture paths"); size_t len = 0; uint8_t *bytes = read_file(argv[1], &len);
     SidereonRinexLintReport *report = NULL; require(sidereon_rinex_lint_obs(bytes, len, &report) == SIDEREON_STATUS_OK && report != NULL, "lint fixture"); free(bytes);
@@ -86,6 +137,7 @@ int main(int argc, char **argv) {
     size_t short_capacity = sizeof(short_buffer);
     require(sidereon_rinex_lint_finding_details_json(report, 0, short_buffer, short_capacity, &written, &required) == SIDEREON_STATUS_INVALID_ARGUMENT && written == 0 && required > short_capacity && short_buffer[0] == 0xA5, "short buffer reports required size without writing");
     sidereon_rinex_lint_report_free(report);
+    check_header_mutations(argv[1]);
     check_epoch_order(argv[2]);
     puts("rinex_qc_finding_details_smoke: OK"); return 0;
 }
