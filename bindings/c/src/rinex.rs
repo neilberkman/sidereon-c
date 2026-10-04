@@ -3326,6 +3326,63 @@ pub unsafe extern "C" fn sidereon_rinex_lint_findings(
     )
 }
 
+/// Copy the stable JSON detail payload for one lint finding.
+///
+/// The report must be live. `out` may be null only when `len` is zero to query
+/// the required byte count. The output is UTF-8 JSON without a trailing NUL and
+/// has `kind`, `spec_ref`, and `details` fields. `kind` is the PascalCase core
+/// variant name; `spec_ref` is its standards reference; `details` contains the
+/// variant-specific payload. Optional values are JSON `null`, while counts are
+/// exact JSON integers. Finite floating-point values are JSON numbers; NaN and
+/// positive or negative infinity are the strings `NaN`, `Infinity`, or
+/// `-Infinity` so they are not lost as JSON null.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rinex_lint_finding_details_json(
+    report: *const SidereonRinexLintReport,
+    index: usize,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rinex_lint_finding_details_json",
+        SidereonStatus::Panic,
+        || {
+            let report = c_try!(require_ref(
+                report,
+                "sidereon_rinex_lint_finding_details_json",
+                "report"
+            ));
+            let Some(finding) = report.inner.findings.get(index) else {
+                set_last_error(format!(
+                    "sidereon_rinex_lint_finding_details_json: finding index {index} is out of range"
+                ));
+                return SidereonStatus::InvalidArgument;
+            };
+            let payload = match serde_json::to_vec(&rinex_lint_finding_detail_json(finding)) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    set_last_error(format!(
+                        "sidereon_rinex_lint_finding_details_json: JSON serialization failed: {error}"
+                    ));
+                    return SidereonStatus::Panic;
+                }
+            };
+            c_try!(copy_prefix_to_c(
+                "sidereon_rinex_lint_finding_details_json",
+                "out",
+                &payload,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_rinex_lint_report_free(report: *mut SidereonRinexLintReport) {
     free_boxed(report);
@@ -3885,6 +3942,210 @@ fn rinex_lint_finding_to_c(
         has_field: at.field.is_some(),
         field: fixed_c_chars::<RINEX_QC_FIELD_C_BYTES>(at.field.unwrap_or("")),
     }
+}
+
+fn finding_json_float(value: f64) -> serde_json::Value {
+    if let Some(number) = serde_json::Number::from_f64(value) {
+        serde_json::Value::Number(number)
+    } else if value.is_nan() {
+        serde_json::Value::String("NaN".to_owned())
+    } else if value.is_sign_positive() {
+        serde_json::Value::String("Infinity".to_owned())
+    } else {
+        serde_json::Value::String("-Infinity".to_owned())
+    }
+}
+
+fn finding_epoch_json(
+    epoch: &sidereon_core::rinex::observations::ObsEpochTime,
+) -> serde_json::Value {
+    use serde_json::{json, Map, Value};
+    let mut value = Map::new();
+    value.insert("year".to_owned(), json!(epoch.year));
+    value.insert("month".to_owned(), json!(epoch.month));
+    value.insert("day".to_owned(), json!(epoch.day));
+    value.insert("hour".to_owned(), json!(epoch.hour));
+    value.insert("minute".to_owned(), json!(epoch.minute));
+    value.insert("second".to_owned(), finding_json_float(epoch.second));
+    Value::Object(value)
+}
+
+fn rinex_lint_finding_detail_json(
+    finding: &sidereon_core::rinex::qc::Finding,
+) -> serde_json::Value {
+    use serde_json::json;
+    use sidereon_core::rinex::qc::Finding as F;
+
+    let (kind, details) = match finding {
+        F::ObsFatalParse { message, .. } => ("ObsFatalParse", json!({"message": message})),
+        F::ObsUnpublishedVersion { version, .. } => (
+            "ObsUnpublishedVersion",
+            json!({"version": finding_json_float(*version)}),
+        ),
+        F::ObsMissingHeader { label, .. } => ("ObsMissingHeader", json!({"label": label})),
+        F::ObsMissingObsTypes { .. } => ("ObsMissingObsTypes", json!({})),
+        F::ObsInvalidObsCode { system, code, .. } => (
+            "ObsInvalidObsCode",
+            json!({"system": system.as_str(), "code": code}),
+        ),
+        F::ObsDuplicateObsCode { system, code, .. } => (
+            "ObsDuplicateObsCode",
+            json!({"system": system.as_str(), "code": code}),
+        ),
+        F::ObsTimeOfFirstMismatch {
+            declared,
+            declared_scale,
+            observed,
+            observed_scale,
+            ..
+        } => (
+            "ObsTimeOfFirstMismatch",
+            json!({"declared": finding_epoch_json(declared), "declared_scale": declared_scale.abbrev(), "observed": finding_epoch_json(observed), "observed_scale": observed_scale.abbrev()}),
+        ),
+        F::ObsTimeOfLastMismatch {
+            declared,
+            declared_scale,
+            observed,
+            observed_scale,
+            ..
+        } => (
+            "ObsTimeOfLastMismatch",
+            json!({"declared": finding_epoch_json(declared), "declared_scale": declared_scale.abbrev(), "observed": finding_epoch_json(observed), "observed_scale": observed_scale.abbrev()}),
+        ),
+        F::ObsIntervalMismatch {
+            declared_s,
+            observed_s,
+            ..
+        } => (
+            "ObsIntervalMismatch",
+            json!({"declared_s": finding_json_float(*declared_s), "observed_s": finding_json_float(*observed_s)}),
+        ),
+        F::ObsIntervalUnavailable { .. } => ("ObsIntervalUnavailable", json!({})),
+        F::ObsInvalidInterval { declared_s, .. } => (
+            "ObsInvalidInterval",
+            json!({"declared_s": finding_json_float(*declared_s)}),
+        ),
+        F::ObsSatelliteCountMismatch {
+            declared, observed, ..
+        } => (
+            "ObsSatelliteCountMismatch",
+            json!({"declared": declared, "observed": observed}),
+        ),
+        F::ObsPrnObsCountMismatch {
+            satellite,
+            code,
+            declared,
+            observed,
+            ..
+        } => (
+            "ObsPrnObsCountMismatch",
+            json!({"satellite": satellite.to_string(), "code": code, "declared": declared, "observed": observed}),
+        ),
+        F::ObsGlonassSlotIssue {
+            satellite, issue, ..
+        } => (
+            "ObsGlonassSlotIssue",
+            json!({"satellite": satellite.to_string(), "issue": issue}),
+        ),
+        F::ObsPhaseShiftUndeclaredCode { system, code, .. } => (
+            "ObsPhaseShiftUndeclaredCode",
+            json!({"system": system.as_str(), "code": code}),
+        ),
+        F::ObsScaleFactorIssue { system, code, .. } => (
+            "ObsScaleFactorIssue",
+            json!({"system": system.as_str(), "code": code}),
+        ),
+        F::ObsMarkerTypeIssue { marker_type, .. } => {
+            ("ObsMarkerTypeIssue", json!({"marker_type": marker_type}))
+        }
+        F::ObsIdentityFieldIssue { label, value, .. } => (
+            "ObsIdentityFieldIssue",
+            json!({"label": label, "value": value}),
+        ),
+        F::ObsImplausibleApproxPosition { radius_m, .. } => (
+            "ObsImplausibleApproxPosition",
+            json!({"radius_m": finding_json_float(*radius_m)}),
+        ),
+        F::ObsImplausibleAntennaDelta {
+            component, value_m, ..
+        } => (
+            "ObsImplausibleAntennaDelta",
+            json!({"component": component, "value_m": finding_json_float(*value_m)}),
+        ),
+        F::ObsEpochOrder {
+            previous, current, ..
+        } => (
+            "ObsEpochOrder",
+            json!({"previous": finding_epoch_json(previous), "current": finding_epoch_json(current)}),
+        ),
+        F::ObsDuplicateEpoch { epoch, .. } => (
+            "ObsDuplicateEpoch",
+            json!({"epoch": finding_epoch_json(epoch)}),
+        ),
+        F::ObsSkippedRecords { count, .. } => ("ObsSkippedRecords", json!({"count": count})),
+        F::ObsEpochSatCountMismatch {
+            declared, retained, ..
+        } => (
+            "ObsEpochSatCountMismatch",
+            json!({"declared": declared, "retained": retained}),
+        ),
+        F::ObsEventHeaderUnreadable { message, .. } => {
+            ("ObsEventHeaderUnreadable", json!({"message": message}))
+        }
+        F::ObsUnretainedHeader { label, .. } => ("ObsUnretainedHeader", json!({"label": label})),
+        F::ObsPseudorangeOutOfRange { code, value_m, .. } => (
+            "ObsPseudorangeOutOfRange",
+            json!({"code": code, "value_m": finding_json_float(*value_m)}),
+        ),
+        F::ObsLossOfLockOutOfRange { code, lli, .. } => {
+            ("ObsLossOfLockOutOfRange", json!({"code": code, "lli": lli}))
+        }
+        F::ObsEventEpoch { flag, .. } => ("ObsEventEpoch", json!({"flag": flag})),
+        F::ObsEmptySatelliteRecord { .. } => ("ObsEmptySatelliteRecord", json!({})),
+        F::ObsEpochGap {
+            gap_s, interval_s, ..
+        } => (
+            "ObsEpochGap",
+            json!({"gap_s": finding_json_float(*gap_s), "interval_s": finding_json_float(*interval_s)}),
+        ),
+        F::NavFatalParse { message, .. } => ("NavFatalParse", json!({"message": message})),
+        F::NavLeapSecondsAbsent { .. } => ("NavLeapSecondsAbsent", json!({})),
+        F::NavIonoMalformed { message, .. } => ("NavIonoMalformed", json!({"message": message})),
+        F::NavDroppedBlock {
+            satellite, message, ..
+        } => (
+            "NavDroppedBlock",
+            json!({"satellite": satellite, "message": message}),
+        ),
+        F::NavDuplicateRecord {
+            satellite,
+            same_payload,
+            ..
+        } => (
+            "NavDuplicateRecord",
+            json!({"satellite": satellite.to_string(), "same_payload": same_payload}),
+        ),
+        F::NavUnsortedRecords { .. } => ("NavUnsortedRecords", json!({})),
+        F::NavImplausibleRecord {
+            satellite,
+            field,
+            value,
+            ..
+        } => (
+            "NavImplausibleRecord",
+            json!({"satellite": satellite.to_string(), "field": field, "value": finding_json_float(*value)}),
+        ),
+        F::NavUnhealthyRecords { system, count, .. } => (
+            "NavUnhealthyRecords",
+            json!({"system": system.as_str(), "count": count}),
+        ),
+        F::NavOutOfScopeRecords { class, count, .. } => (
+            "NavOutOfScopeRecords",
+            json!({"class": class, "count": count}),
+        ),
+        _ => ("Unknown", json!({})),
+    };
+    json!({"kind": kind, "spec_ref": finding.spec_ref(), "details": details})
 }
 
 fn repair_options_from_c(
@@ -4897,5 +5158,61 @@ mod rinex_obs_contract_c_tests {
                 assert_eq!(got.cycles.to_bits(), want.unwrap_or(f64::NAN).to_bits());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod rinex_finding_detail_json_tests {
+    use super::{finding_json_float, rinex_lint_finding_detail_json};
+    use sidereon_core::rinex::qc::{Finding, FindingRef};
+    use sidereon_core::{GnssSatelliteId, GnssSystem};
+
+    #[test]
+    fn nonfinite_and_signed_zero_floats_are_preserved_explicitly() {
+        assert_eq!(finding_json_float(f64::NAN), serde_json::json!("NaN"));
+        assert_eq!(
+            finding_json_float(f64::INFINITY),
+            serde_json::json!("Infinity")
+        );
+        assert_eq!(
+            finding_json_float(f64::NEG_INFINITY),
+            serde_json::json!("-Infinity")
+        );
+        assert!(finding_json_float(-0.0)
+            .as_f64()
+            .unwrap()
+            .is_sign_negative());
+    }
+
+    #[test]
+    fn large_counts_and_optional_zero_remain_exact() {
+        let max_count = Finding::NavUnhealthyRecords {
+            at: FindingRef::default(),
+            system: GnssSystem::Gps,
+            count: usize::MAX,
+        };
+        let value = rinex_lint_finding_detail_json(&max_count);
+        assert_eq!(value["details"]["count"].as_u64(), Some(usize::MAX as u64));
+
+        let satellite = GnssSatelliteId::new(GnssSystem::Gps, 1).unwrap();
+        let absent = Finding::ObsPrnObsCountMismatch {
+            at: FindingRef::default(),
+            satellite,
+            code: "C1C".to_owned(),
+            declared: None,
+            observed: 0,
+        };
+        let zero = Finding::ObsPrnObsCountMismatch {
+            at: FindingRef::default(),
+            satellite,
+            code: "C1C".to_owned(),
+            declared: Some(0),
+            observed: 0,
+        };
+        assert!(rinex_lint_finding_detail_json(&absent)["details"]["declared"].is_null());
+        assert_eq!(
+            rinex_lint_finding_detail_json(&zero)["details"]["declared"].as_u64(),
+            Some(0)
+        );
     }
 }

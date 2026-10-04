@@ -151,6 +151,17 @@ cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
 
 cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -I"${binding_root}/include" \
+    "${here}/rinex_qc_finding_details_smoke.c" \
+    -L"${lib_dir}" \
+    -lsidereon \
+    -Wl,-rpath,"${lib_dir}" \
+    -o "${target_dir}/rinex_qc_finding_details_smoke_ci"
+"${target_dir}/rinex_qc_finding_details_smoke_ci" \
+    "${here}/fixtures/obs/algo0010_2015001_v1_trim.rnx" \
+    "${here}/fixtures/obs/ESBC00DNK_R_20201770000_01D_30S_MO_trim.rnx"
+
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
+    -I"${binding_root}/include" \
     "${here}/window_continuity_smoke.c" \
     -L"${lib_dir}" \
     -lsidereon \

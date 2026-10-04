@@ -41540,6 +41540,25 @@ enum SidereonStatus sidereon_rinex_glonass_records_skipped_item(const struct Sid
                                                                 size_t index,
                                                                 struct SidereonSkippedGlonassRecord *out_skipped);
 
+/**
+ * Copy the stable JSON detail payload for one lint finding.
+ *
+ * The report must be live. `out` may be null only when `len` is zero to query
+ * the required byte count. The output is UTF-8 JSON without a trailing NUL and
+ * has `kind`, `spec_ref`, and `details` fields. `kind` is the PascalCase core
+ * variant name; `spec_ref` is its standards reference; `details` contains the
+ * variant-specific payload. Optional values are JSON `null`, while counts are
+ * exact JSON integers. Finite floating-point values are JSON numbers; NaN and
+ * positive or negative infinity are the strings `NaN`, `Infinity`, or
+ * `-Infinity` so they are not lost as JSON null.
+ */
+enum SidereonStatus sidereon_rinex_lint_finding_details_json(const struct SidereonRinexLintReport *report,
+                                                             size_t index,
+                                                             uint8_t *out,
+                                                             size_t len,
+                                                             size_t *out_written,
+                                                             size_t *out_required);
+
 enum SidereonStatus sidereon_rinex_lint_findings(const struct SidereonRinexLintReport *report,
                                                  struct SidereonRinexLintFinding *out,
                                                  size_t len,
