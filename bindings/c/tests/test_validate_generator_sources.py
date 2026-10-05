@@ -28,10 +28,10 @@ SPEC.loader.exec_module(SOURCE_CHECK)
 
 def crate_archive(vcs: dict[str, object], name: str = "sidereon-core") -> bytes:
     members = {
-        f"{name}-3.0.1/Cargo.toml": (
-            f'[package]\nname = "{name}"\nversion = "3.0.1"\n'
+        f"{name}-3.0.2/Cargo.toml": (
+            f'[package]\nname = "{name}"\nversion = "3.0.2"\n'
         ).encode(),
-        f"{name}-3.0.1/.cargo_vcs_info.json": json.dumps(vcs).encode(),
+        f"{name}-3.0.2/.cargo_vcs_info.json": json.dumps(vcs).encode(),
     }
     output = io.BytesIO()
     with tarfile.open(fileobj=output, mode="w:gz") as archive:
@@ -54,19 +54,19 @@ class RegistryArchiveIdentityTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def write_archive(self, archive: bytes) -> str:
-        (self.cache / "sidereon-core-3.0.1.crate").write_bytes(archive)
+        (self.cache / "sidereon-core-3.0.2.crate").write_bytes(archive)
         return hashlib.sha256(archive).hexdigest()
 
     def resolve(self, checksum: str) -> str:
         with patch.dict(os.environ, {"CARGO_HOME": str(self.cargo_home)}):
-            return SOURCE_CHECK.archive_vcs_revision("sidereon-core", "3.0.1", checksum)
+            return SOURCE_CHECK.archive_vcs_revision("sidereon-core", "3.0.2", checksum)
 
     def test_reads_vcs_from_the_lock_checksum_verified_archive(self) -> None:
         archive = crate_archive({"git": {"sha1": self.revision}})
         checksum = self.write_archive(archive)
         extracted = (
             self.cargo_home
-            / "registry/src/test-index/sidereon-core-3.0.1/.cargo_vcs_info.json"
+            / "registry/src/test-index/sidereon-core-3.0.2/.cargo_vcs_info.json"
         )
         extracted.parent.mkdir(parents=True)
         extracted.write_text(json.dumps({"git": {"sha1": "f" * 40}}))
@@ -84,25 +84,25 @@ class RegistryArchiveIdentityTests(unittest.TestCase):
             self.resolve("0" * 64)
 
     def test_rejects_a_renamed_direct_engine_dependency(self) -> None:
-        root_id = "path+file:///binding#sidereon-c@3.0.1"
-        core_id = "registry+https://github.com/rust-lang/crates.io-index#sidereon-core@3.0.1"
-        facade_id = "registry+https://github.com/rust-lang/crates.io-index#sidereon@3.0.1"
+        root_id = "path+file:///binding#sidereon-c@3.0.2"
+        core_id = "registry+https://github.com/rust-lang/crates.io-index#sidereon-core@3.0.2"
+        facade_id = "registry+https://github.com/rust-lang/crates.io-index#sidereon@3.0.2"
         manifest = self.cargo_home / "Cargo.toml"
-        manifest.write_text('[package]\nname = "sidereon-c"\nversion = "3.0.1"\n')
+        manifest.write_text('[package]\nname = "sidereon-c"\nversion = "3.0.2"\n')
         metadata = {
             "packages": [
                 {"id": root_id, "name": "sidereon-c", "manifest_path": str(manifest)},
                 {
                     "id": core_id,
                     "name": "sidereon-core",
-                    "version": "3.0.1",
+                    "version": "3.0.2",
                     "source": SOURCE_CHECK.REGISTRY,
                     "manifest_path": str(self.cargo_home / "core/Cargo.toml"),
                 },
                 {
                     "id": facade_id,
                     "name": "sidereon",
-                    "version": "3.0.1",
+                    "version": "3.0.2",
                     "source": SOURCE_CHECK.REGISTRY,
                     "manifest_path": str(self.cargo_home / "facade/Cargo.toml"),
                 },
@@ -140,36 +140,36 @@ class WorkspaceLockResolutionTests(unittest.TestCase):
         binding_dir = workspace_root / "bindings/c"
         binding_dir.mkdir(parents=True)
         manifest = binding_dir / "Cargo.toml"
-        manifest.write_text('[package]\nname = "sidereon-c"\nversion = "3.0.1"\n')
+        manifest.write_text('[package]\nname = "sidereon-c"\nversion = "3.0.2"\n')
 
         git_source = f"{SOURCE_CHECK.GIT_PREFIX}{self.revision}#{self.revision}"
         lock_path = workspace_root / "Cargo.lock"
         lock_path.write_text(
             f'version = 3\n\n'
-            f'[[package]]\nname = "sidereon-core"\nversion = "3.0.1"\nsource = "{git_source}"\n\n'
-            f'[[package]]\nname = "sidereon"\nversion = "3.0.1"\nsource = "{git_source}"\n'
+            f'[[package]]\nname = "sidereon-core"\nversion = "3.0.2"\nsource = "{git_source}"\n\n'
+            f'[[package]]\nname = "sidereon"\nversion = "3.0.2"\nsource = "{git_source}"\n'
         )
 
         self.assertFalse((binding_dir / "Cargo.lock").exists())
 
-        root_id = "path+file:///binding#sidereon-c@3.0.1"
-        core_id = f"{git_source}#sidereon-core@3.0.1"
-        facade_id = f"{git_source}#sidereon@3.0.1"
+        root_id = "path+file:///binding#sidereon-c@3.0.2"
+        core_id = f"{git_source}#sidereon-core@3.0.2"
+        facade_id = f"{git_source}#sidereon@3.0.2"
         metadata = {
             "workspace_root": str(workspace_root),
             "packages": [
-                {"id": root_id, "name": "sidereon-c", "version": "3.0.1", "manifest_path": str(manifest)},
+                {"id": root_id, "name": "sidereon-c", "version": "3.0.2", "manifest_path": str(manifest)},
                 {
                     "id": core_id,
                     "name": "sidereon-core",
-                    "version": "3.0.1",
+                    "version": "3.0.2",
                     "source": git_source,
                     "manifest_path": str(workspace_root / "crates/sidereon-core/Cargo.toml"),
                 },
                 {
                     "id": facade_id,
                     "name": "sidereon",
-                    "version": "3.0.1",
+                    "version": "3.0.2",
                     "source": git_source,
                     "manifest_path": str(workspace_root / "crates/sidereon/Cargo.toml"),
                 },
@@ -207,11 +207,11 @@ class WorkspaceLockResolutionTests(unittest.TestCase):
         lock_path = standalone_dir / "Cargo.lock"
         lock_path.write_text(
             f'version = 3\n\n'
-            f'[[package]]\nname = "sidereon-core"\nversion = "3.0.1"\nsource = "{git_source}"\n'
+            f'[[package]]\nname = "sidereon-core"\nversion = "3.0.2"\nsource = "{git_source}"\n'
         )
 
         root_id = "path+file:///fbgen#fbgen@0.0.0"
-        core_id = f"{git_source}#sidereon-core@3.0.1"
+        core_id = f"{git_source}#sidereon-core@3.0.2"
         metadata = {
             "workspace_root": str(standalone_dir),
             "packages": [
@@ -219,7 +219,7 @@ class WorkspaceLockResolutionTests(unittest.TestCase):
                 {
                     "id": core_id,
                     "name": "sidereon-core",
-                    "version": "3.0.1",
+                    "version": "3.0.2",
                     "source": git_source,
                     "manifest_path": str(self.cargo_home / "core/Cargo.toml"),
                 },
@@ -249,27 +249,27 @@ class WorkspaceLockResolutionTests(unittest.TestCase):
         binding_dir = workspace_root / "bindings/c"
         binding_dir.mkdir(parents=True)
         manifest = binding_dir / "Cargo.toml"
-        manifest.write_text('[package]\nname = "sidereon-c"\nversion = "3.0.1"\n')
+        manifest.write_text('[package]\nname = "sidereon-c"\nversion = "3.0.2"\n')
 
         git_source = f"{SOURCE_CHECK.GIT_PREFIX}{self.revision}#{self.revision}"
-        root_id = "path+file:///binding#sidereon-c@3.0.1"
-        core_id = f"{git_source}#sidereon-core@3.0.1"
-        facade_id = f"{git_source}#sidereon@3.0.1"
+        root_id = "path+file:///binding#sidereon-c@3.0.2"
+        core_id = f"{git_source}#sidereon-core@3.0.2"
+        facade_id = f"{git_source}#sidereon@3.0.2"
         metadata = {
             "workspace_root": str(workspace_root),
             "packages": [
-                {"id": root_id, "name": "sidereon-c", "version": "3.0.1", "manifest_path": str(manifest)},
+                {"id": root_id, "name": "sidereon-c", "version": "3.0.2", "manifest_path": str(manifest)},
                 {
                     "id": core_id,
                     "name": "sidereon-core",
-                    "version": "3.0.1",
+                    "version": "3.0.2",
                     "source": git_source,
                     "manifest_path": str(workspace_root / "crates/sidereon-core/Cargo.toml"),
                 },
                 {
                     "id": facade_id,
                     "name": "sidereon",
-                    "version": "3.0.1",
+                    "version": "3.0.2",
                     "source": git_source,
                     "manifest_path": str(workspace_root / "crates/sidereon/Cargo.toml"),
                 },
@@ -296,35 +296,35 @@ class WorkspaceLockResolutionTests(unittest.TestCase):
         binding_dir = workspace_root / "bindings/c"
         binding_dir.mkdir(parents=True)
         manifest = binding_dir / "Cargo.toml"
-        manifest.write_text('[package]\nname = "sidereon-c"\nversion = "3.0.1"\n')
+        manifest.write_text('[package]\nname = "sidereon-c"\nversion = "3.0.2"\n')
 
         git_source = f"{SOURCE_CHECK.GIT_PREFIX}{self.revision}#{self.revision}"
         different_source = f"{SOURCE_CHECK.GIT_PREFIX}{'0' * 40}#{'0' * 40}"
         lock_path = workspace_root / "Cargo.lock"
         lock_path.write_text(
             f'version = 3\n\n'
-            f'[[package]]\nname = "sidereon-core"\nversion = "3.0.1"\nsource = "{different_source}"\n\n'
-            f'[[package]]\nname = "sidereon"\nversion = "3.0.1"\nsource = "{git_source}"\n'
+            f'[[package]]\nname = "sidereon-core"\nversion = "3.0.2"\nsource = "{different_source}"\n\n'
+            f'[[package]]\nname = "sidereon"\nversion = "3.0.2"\nsource = "{git_source}"\n'
         )
 
-        root_id = "path+file:///binding#sidereon-c@3.0.1"
-        core_id = f"{git_source}#sidereon-core@3.0.1"
-        facade_id = f"{git_source}#sidereon@3.0.1"
+        root_id = "path+file:///binding#sidereon-c@3.0.2"
+        core_id = f"{git_source}#sidereon-core@3.0.2"
+        facade_id = f"{git_source}#sidereon@3.0.2"
         metadata = {
             "workspace_root": str(workspace_root),
             "packages": [
-                {"id": root_id, "name": "sidereon-c", "version": "3.0.1", "manifest_path": str(manifest)},
+                {"id": root_id, "name": "sidereon-c", "version": "3.0.2", "manifest_path": str(manifest)},
                 {
                     "id": core_id,
                     "name": "sidereon-core",
-                    "version": "3.0.1",
+                    "version": "3.0.2",
                     "source": git_source,
                     "manifest_path": str(workspace_root / "crates/sidereon-core/Cargo.toml"),
                 },
                 {
                     "id": facade_id,
                     "name": "sidereon",
-                    "version": "3.0.1",
+                    "version": "3.0.2",
                     "source": git_source,
                     "manifest_path": str(workspace_root / "crates/sidereon/Cargo.toml"),
                 },
@@ -351,41 +351,41 @@ class WorkspaceLockResolutionTests(unittest.TestCase):
         binding_dir = workspace_root / "bindings/c"
         binding_dir.mkdir(parents=True)
         manifest = binding_dir / "Cargo.toml"
-        manifest.write_text('[package]\nname = "sidereon-c"\nversion = "3.0.1"\n')
+        manifest.write_text('[package]\nname = "sidereon-c"\nversion = "3.0.2"\n')
 
         archive = crate_archive({"git": {"sha1": self.revision}})
-        (self.cache / "sidereon-core-3.0.1.crate").write_bytes(archive)
-        (self.cache / "sidereon-3.0.1.crate").write_bytes(
+        (self.cache / "sidereon-core-3.0.2.crate").write_bytes(archive)
+        (self.cache / "sidereon-3.0.2.crate").write_bytes(
             crate_archive({"git": {"sha1": self.revision}}, name="sidereon")
         )
 
         lock_path = workspace_root / "Cargo.lock"
         lock_path.write_text(
             f'version = 3\n\n'
-            f'[[package]]\nname = "sidereon-core"\nversion = "3.0.1"\n'
+            f'[[package]]\nname = "sidereon-core"\nversion = "3.0.2"\n'
             f'source = "{SOURCE_CHECK.REGISTRY}"\nchecksum = "{"0" * 64}"\n\n'
-            f'[[package]]\nname = "sidereon"\nversion = "3.0.1"\n'
+            f'[[package]]\nname = "sidereon"\nversion = "3.0.2"\n'
             f'source = "{SOURCE_CHECK.REGISTRY}"\nchecksum = "{"0" * 64}"\n'
         )
 
-        root_id = "path+file:///binding#sidereon-c@3.0.1"
-        core_id = f"{SOURCE_CHECK.REGISTRY}#sidereon-core@3.0.1"
-        facade_id = f"{SOURCE_CHECK.REGISTRY}#sidereon@3.0.1"
+        root_id = "path+file:///binding#sidereon-c@3.0.2"
+        core_id = f"{SOURCE_CHECK.REGISTRY}#sidereon-core@3.0.2"
+        facade_id = f"{SOURCE_CHECK.REGISTRY}#sidereon@3.0.2"
         metadata = {
             "workspace_root": str(workspace_root),
             "packages": [
-                {"id": root_id, "name": "sidereon-c", "version": "3.0.1", "manifest_path": str(manifest)},
+                {"id": root_id, "name": "sidereon-c", "version": "3.0.2", "manifest_path": str(manifest)},
                 {
                     "id": core_id,
                     "name": "sidereon-core",
-                    "version": "3.0.1",
+                    "version": "3.0.2",
                     "source": SOURCE_CHECK.REGISTRY,
                     "manifest_path": str(workspace_root / "core/Cargo.toml"),
                 },
                 {
                     "id": facade_id,
                     "name": "sidereon",
-                    "version": "3.0.1",
+                    "version": "3.0.2",
                     "source": SOURCE_CHECK.REGISTRY,
                     "manifest_path": str(workspace_root / "facade/Cargo.toml"),
                 },
@@ -416,14 +416,14 @@ class WorkspaceLockResolutionTests(unittest.TestCase):
 
         git_source = f"{SOURCE_CHECK.GIT_PREFIX}{self.revision}#{self.revision}"
         root_id = "path+file:///fbgen#fbgen@0.0.0"
-        core_id = f"{git_source}#sidereon-core@3.0.1"
+        core_id = f"{git_source}#sidereon-core@3.0.2"
         metadata = {
             "packages": [
                 {"id": root_id, "name": "fbgen", "version": "0.0.0", "manifest_path": str(manifest)},
                 {
                     "id": core_id,
                     "name": "sidereon-core",
-                    "version": "3.0.1",
+                    "version": "3.0.2",
                     "source": git_source,
                     "manifest_path": str(self.cargo_home / "core/Cargo.toml"),
                 },

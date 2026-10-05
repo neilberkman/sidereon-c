@@ -983,6 +983,21 @@ pub(crate) fn ut1_refusal(err: &(dyn std::error::Error + 'static)) -> bool {
             }
         } else if let Some(e) = e.downcast_ref::<CoreError>() {
             matches!(e, CoreError::Ut1OutsideCoverage(_))
+        } else if let Some(e) = e.downcast_ref::<sidereon_core::astro::time::CoverageError>() {
+            matches!(
+                e,
+                sidereon_core::astro::time::CoverageError::OutsideCoverage(_)
+            )
+        } else if let Some(e) =
+            e.downcast_ref::<sidereon_core::ppp_corrections::PppCorrectionsError>()
+        {
+            matches!(
+                e,
+                sidereon_core::ppp_corrections::PppCorrectionsError::Epoch {
+                    source: sidereon_core::astro::time::CoverageError::OutsideCoverage(_),
+                    ..
+                }
+            )
         } else if let Some(e) = e.downcast_ref::<SppError>() {
             spp(e)
         } else if let Some(e) = e.downcast_ref::<SolvePolicyError>() {
@@ -5723,8 +5738,9 @@ mod tests {
 #[cfg(test)]
 mod ut1_status_tests {
     use super::*;
-    use sidereon_core::astro::time::DegradeReason;
+    use sidereon_core::astro::time::{CoverageError, DegradeReason};
     use sidereon_core::positioning::{SolvePolicyError, SppError};
+    use sidereon_core::ppp_corrections::PppCorrectionsError;
     use sidereon_core::precise_positioning::{FixedSolveError, FloatSolveError};
 
     fn status_of(err: sidereon::Error) -> SidereonStatus {
@@ -5769,6 +5785,19 @@ mod ut1_status_tests {
         assert!(ut1_refusal(&decay_ut1));
         let decay_non_ut1 = DecayError::InvalidConfig("test");
         assert!(!ut1_refusal(&decay_non_ut1));
+
+        let coverage = CoverageError::OutsideCoverage(DegradeReason::BeforeCoverage);
+        assert!(ut1_refusal(&coverage));
+
+        let ppp_corrections = PppCorrectionsError::Epoch {
+            epoch_index: 0,
+            source: coverage,
+        };
+        assert!(ut1_refusal(&ppp_corrections));
+        assert!(!ut1_refusal(&PppCorrectionsError::InvalidInput {
+            field: "test",
+            reason: "test",
+        }));
     }
 }
 

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 3.0.2 - 2026-10-05
+
+### Fixed
+
+- Validate NMEA epoch summary instants through the canonical UTC conversion, so a fractional leap second keeps its calendar fields without reporting an invalid instant.
+- Return `SIDEREON_STATUS_UT1_OUTSIDE_COVERAGE` from PPP correction builders when strict UT1 coverage refuses the requested epoch, while preserving the existing typed error detail and permissive behavior.
+
 ## 3.0.1 - 2026-10-04
 
 ### Changed

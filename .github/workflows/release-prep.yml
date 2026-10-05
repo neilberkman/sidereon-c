@@ -1,0 +1,117 @@
+name: Release fixture preparation
+
+on:
+  push:
+    branches: [release/3.0.2-20261005]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  generate:
+    name: Generate candidate fixtures and header
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-fixture-prep
+      - name: Install pinned cbindgen
+        run: cargo install --locked cbindgen --version 0.29.4
+      - name: Read the exact engine revision
+        id: core
+        shell: bash
+        run: |
+          revision="$(tr -d '[:space:]' < bindings/c/tests/CORE_REVISION)"
+          if [[ ! "$revision" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "CORE_REVISION is not one full Git commit" >&2
+            exit 1
+          fi
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+      - name: Check out the exact engine source
+        uses: actions/checkout@v4
+        with:
+          repository: neilberkman/sidereon
+          ref: ${{ steps.core.outputs.revision }}
+          path: .sidereon-core
+          sparse-checkout: crates/sidereon-core/tests
+      - name: Regenerate all numerical fixtures
+        env:
+          SIDEREON_CORE_SOURCE: ${{ github.workspace }}/.sidereon-core
+        working-directory: bindings/c
+        run: ./tests/run_generators.sh
+      - name: Regenerate the public header
+        working-directory: bindings/c
+        run: cbindgen --quiet --config cbindgen.toml --crate sidereon-c --output include/sidereon.h
+      - name: Verify generated paths
+        run: |
+          python3 - <<'PY'
+          import re
+          import subprocess
+
+          changed = subprocess.run(
+              ["git", "diff", "--name-only", "--", "bindings/c"],
+              check=True,
+              capture_output=True,
+              text=True,
+          ).stdout.splitlines()
+          fixture = re.compile(
+              r"^bindings/c/tests/(?:"
+              r"fixtures/(?:spp_expected|ppp_esbc)\.json|"
+              r"(?:antex|broadcast|constellation|dop|engine_pins|iono|ppp|prop|rinex|rtk|spp|velocity)_fixture\.h|"
+              r"[^/]+_pins\.h"
+              r")$"
+          )
+          unexpected = [
+              path
+              for path in changed
+              if path != "bindings/c/include/sidereon.h" and fixture.fullmatch(path) is None
+          ]
+          if unexpected:
+              raise SystemExit(f"generator changed unexpected paths: {unexpected}")
+          if not any(fixture.fullmatch(path) for path in changed):
+              raise SystemExit("generator produced no fixture changes")
+          PY
+          git diff --check -- bindings/c/include/sidereon.h bindings/c/tests
+      - name: Assemble review artifact
+        env:
+          ARTIFACT_ROOT: ${{ runner.temp }}/sidereon-c-release-prep
+        run: |
+          rm -rf "$ARTIFACT_ROOT"
+          mkdir -p "$ARTIFACT_ROOT"
+          python3 - <<'PY'
+          import os
+          import shutil
+          import subprocess
+          from pathlib import Path
+
+          artifact = Path(os.environ["ARTIFACT_ROOT"])
+          changed = subprocess.run(
+              ["git", "diff", "--name-only", "--", "bindings/c/include/sidereon.h", "bindings/c/tests"],
+              check=True,
+              capture_output=True,
+              text=True,
+          ).stdout.splitlines()
+          header = "bindings/c/include/sidereon.h"
+          for name in sorted(set(changed + [header])):
+              source = Path(name)
+              target = artifact / name
+              target.parent.mkdir(parents=True, exist_ok=True)
+              shutil.copy2(source, target)
+          (artifact / "changed-files.txt").write_text("\n".join(changed) + "\n")
+          PY
+          git diff --binary -- bindings/c/include/sidereon.h bindings/c/tests \
+            > "$ARTIFACT_ROOT/generated.patch"
+          cp "$RUNNER_TEMP/sidereon-c-generator-provenance.json" \
+            "$ARTIFACT_ROOT/generation-context.json"
+          git diff --stat -- bindings/c/include/sidereon.h bindings/c/tests \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Upload generated fixtures and header
+        uses: actions/upload-artifact@v4
+        with:
+          name: sidereon-c-3.0.2-generated-${{ github.sha }}
+          path: ${{ runner.temp }}/sidereon-c-release-prep
+          if-no-files-found: error
+          retention-days: 14
