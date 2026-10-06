@@ -31,6 +31,8 @@ jobs:
   test:
     name: cargo test / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
     strategy:
       fail-fast: false
       matrix:

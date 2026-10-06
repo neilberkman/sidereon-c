@@ -3,6 +3,14 @@ name: Release fixture preparation
 on:
   push:
     branches: [release/3.0.2-20261005]
+    paths:
+      - '.github/workflows/release-prep.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'bindings/c/Cargo.toml'
+      - 'bindings/c/tests/CORE_REVISION'
+      - 'bindings/c/tests/**/Cargo.toml'
+      - 'bindings/c/tests/**/Cargo.lock'
   workflow_dispatch:
 
 permissions:
@@ -12,6 +20,8 @@ jobs:
   generate:
     name: Generate candidate fixtures and header
     runs-on: macos-15
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.1

@@ -1225,10 +1225,18 @@ fn append_nmea_diagnostics(
 
 fn nmea_epoch_summary_to_c(epoch: &sidereon_core::nmea::EpochSnapshot) -> SidereonNmeaEpochSummary {
     let calendar_epoch = nmea_epoch_calendar(epoch);
-    let instant_j2000_s = epoch
-        .instant_utc()
-        .as_ref()
-        .and_then(instant_to_j2000_seconds);
+    let instant_j2000_s = epoch.instant_utc().and_then(|_| {
+        calendar_epoch.map(|epoch| {
+            sidereon_core::astro::time::civil::j2000_seconds(
+                epoch.year,
+                epoch.month,
+                epoch.day,
+                epoch.hour,
+                epoch.minute,
+                epoch.second,
+            )
+        })
+    });
     let position = epoch.position();
     let pdop = epoch.pdop();
     let hdop = epoch.hdop();
@@ -1378,16 +1386,20 @@ mod tests {
     }
 
     #[test]
-    fn nmea_epoch_summary_uses_canonical_instant_validation() {
-        let date = sidereon_core::nmea::NmeaDate::new(2000, 1, 1).unwrap();
-
+    fn nmea_epoch_summary_preserves_published_ordinary_instant() {
+        const PUBLISHED_3_0_1_INSTANT_J2000_S: f64 = 0.12345678900000001;
         let ordinary = epoch_summary(
-            Some(date),
+            Some(sidereon_core::nmea::NmeaDate::new(2000, 1, 1).unwrap()),
             Some(sidereon_core::nmea::NmeaTime::parse("120000.123456789").unwrap()),
         );
         assert!(ordinary.has_calendar_epoch);
         assert!(ordinary.has_instant_j2000_s);
-        assert_eq!(ordinary.instant_j2000_s, 0.12345678900000001);
+        assert_eq!(ordinary.instant_j2000_s, PUBLISHED_3_0_1_INSTANT_J2000_S);
+    }
+
+    #[test]
+    fn nmea_epoch_summary_uses_canonical_instant_validation() {
+        let date = sidereon_core::nmea::NmeaDate::new(2000, 1, 1).unwrap();
 
         let whole_leap = epoch_summary(
             Some(date),

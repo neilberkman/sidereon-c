@@ -1,9 +1,9 @@
 # Workspace root.
 #
 # This repository hosts the C ABI binding over the canonical Sidereon engine. The
-# engine itself lives in ONE place: the published crates `sidereon-core` and
-# `sidereon` on crates.io. It is consumed as a registry dependency, never
-# vendored here, so there is a single source of truth for the modeling code.
+# engine itself lives in ONE canonical repository. Release candidates pin one
+# full Git commit; final releases consume the matching published
+# `sidereon-core` and `sidereon` crates. The modeling code is never vendored.
 [workspace]
 resolver = "2"
 members = ["bindings/c"]
@@ -12,4 +12,3 @@ members = ["bindings/c"]
 # this workspace must not pull it in. It carries its own lockfile and consumes
 # the same canonical engine over git.
 exclude = ["bindings/python"]
-
