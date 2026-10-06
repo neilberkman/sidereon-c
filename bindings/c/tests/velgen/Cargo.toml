@@ -19,7 +19,7 @@ publish = false
 [workspace]
 
 [dependencies]
-# The sidereon-core revision tests/CORE_REVISION names; tests/run_generators.sh
-# checks that every generator pins the same one.
-sidereon-core = { version = "=3.0.1" }
+# The published sidereon-core crate; tests/run_generators.sh verifies its archive
+# provenance against tests/CORE_REVISION.
+sidereon-core = { version = "=3.0.2" }
 serde_json = "1"

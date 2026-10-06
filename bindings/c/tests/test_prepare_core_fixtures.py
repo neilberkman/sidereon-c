@@ -43,7 +43,7 @@ class PrepareCoreFixturesRegressionTests(unittest.TestCase):
             (tests_dir / f"{target}.rs").write_text("// emitter source\n")
 
         manifest = self.source_dir / "crates/sidereon-core/Cargo.toml"
-        manifest.write_text('[package]\nname = "sidereon-core"\nversion = "3.0.1"\n')
+        manifest.write_text('[package]\nname = "sidereon-core"\nversion = "3.0.2"\n')
 
         self.report_data = {
             "mode": "git",
@@ -68,7 +68,7 @@ class PrepareCoreFixturesRegressionTests(unittest.TestCase):
     def make_tar_bytes(self) -> bytes:
         tar_io = io.BytesIO()
         with tarfile.open(fileobj=tar_io, mode="w") as tf:
-            manifest_data = b'[package]\nname = "sidereon-core"\nversion = "3.0.1"\n'
+            manifest_data = b'[package]\nname = "sidereon-core"\nversion = "3.0.2"\n'
             ti = tarfile.TarInfo("crates/sidereon-core/Cargo.toml")
             ti.size = len(manifest_data)
             tf.addfile(ti, io.BytesIO(manifest_data))
@@ -233,7 +233,7 @@ class PrepareCoreFixturesRegressionTests(unittest.TestCase):
         fixture_dir = tree / "crates/sidereon-core/tests/fixtures"
         fixture_dir.mkdir(parents=True, exist_ok=True)
         manifest = tree / "crates/sidereon-core/Cargo.toml"
-        manifest.write_text('[package]\nname = "sidereon-core"\nversion = "3.0.1"\n')
+        manifest.write_text('[package]\nname = "sidereon-core"\nversion = "3.0.2"\n')
         return tree
 
     def create_git_metadata_runner(

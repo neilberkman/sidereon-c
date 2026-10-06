@@ -1,6 +1,6 @@
 [package]
 name = "sidereon-c"
-version = "3.0.1"
+version = "3.0.2"
 authors = []
 edition = "2021"
 description = "C ABI bindings over the sidereon ergonomic API: opaque handles, integer error codes, caller-allocated buffers"
@@ -19,8 +19,8 @@ crate-type = ["cdylib", "staticlib"]
 # lives here: every solve delegates to a `sidereon` entry point, which in turn
 # delegates to `sidereon-core`. The numbers are exactly what the engine produces.
 # Published canonical engine surface.
-sidereon = { version = "=3.0.1" }
-sidereon-core = { version = "=3.0.1", features = ["mmap"] }
+sidereon = { version = "=3.0.2" }
+sidereon-core = { version = "=3.0.2", features = ["mmap"] }
 serde_json = "1"
 serde = "1"
 # The generic data-driven trust-region least-squares engine the headline TRLS

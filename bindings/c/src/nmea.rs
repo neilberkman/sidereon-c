@@ -1225,13 +1225,8 @@ fn append_nmea_diagnostics(
 
 fn nmea_epoch_summary_to_c(epoch: &sidereon_core::nmea::EpochSnapshot) -> SidereonNmeaEpochSummary {
     let calendar_epoch = nmea_epoch_calendar(epoch);
-    let position = epoch.position();
-    let pdop = epoch.pdop();
-    let hdop = epoch.hdop();
-    let vdop = epoch.vdop();
-    let (skip_count, warning_count) = nmea_epoch_diagnostic_counts(epoch);
-    let instant_j2000_s = calendar_epoch
-        .map(|epoch| {
+    let instant_j2000_s = epoch.instant_utc().and_then(|_| {
+        calendar_epoch.map(|epoch| {
             sidereon_core::astro::time::civil::j2000_seconds(
                 epoch.year,
                 epoch.month,
@@ -1241,8 +1236,12 @@ fn nmea_epoch_summary_to_c(epoch: &sidereon_core::nmea::EpochSnapshot) -> Sidere
                 epoch.second,
             )
         })
-        .unwrap_or(0.0);
-
+    });
+    let position = epoch.position();
+    let pdop = epoch.pdop();
+    let hdop = epoch.hdop();
+    let vdop = epoch.vdop();
+    let (skip_count, warning_count) = nmea_epoch_diagnostic_counts(epoch);
     SidereonNmeaEpochSummary {
         has_calendar_epoch: calendar_epoch.is_some(),
         calendar_epoch: calendar_epoch.unwrap_or(SidereonCalendarEpoch {
@@ -1258,8 +1257,8 @@ fn nmea_epoch_summary_to_c(epoch: &sidereon_core::nmea::EpochSnapshot) -> Sidere
             .as_ref()
             .map(geodetic_to_c)
             .unwrap_or_else(empty_geodetic),
-        has_instant_j2000_s: calendar_epoch.is_some(),
-        instant_j2000_s,
+        has_instant_j2000_s: instant_j2000_s.is_some(),
+        instant_j2000_s: instant_j2000_s.unwrap_or(0.0),
         has_pdop: pdop.is_some(),
         pdop: pdop.unwrap_or(0.0),
         has_hdop: hdop.is_some(),
@@ -1365,6 +1364,70 @@ mod tests {
     use crate::engine_error::snapshot_engine_error_for_test;
 
     const GGA: &str = "$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47";
+
+    fn epoch_summary(
+        date: Option<sidereon_core::nmea::NmeaDate>,
+        time_of_day: Option<sidereon_core::nmea::NmeaTime>,
+    ) -> SidereonNmeaEpochSummary {
+        nmea_epoch_summary_to_c(&sidereon_core::nmea::EpochSnapshot {
+            time_of_day,
+            date,
+            gga: None,
+            rmc: None,
+            gll: None,
+            gst: None,
+            vtg: None,
+            zda: None,
+            gsa: Vec::new(),
+            gsv: Vec::new(),
+            sentence_count: 0,
+            diagnostics: sidereon_core::nmea::Diagnostics::new(),
+        })
+    }
+
+    #[test]
+    fn nmea_epoch_summary_preserves_published_ordinary_instant() {
+        const PUBLISHED_3_0_1_INSTANT_J2000_S: f64 = 0.12345678900000001;
+        let ordinary = epoch_summary(
+            Some(sidereon_core::nmea::NmeaDate::new(2000, 1, 1).unwrap()),
+            Some(sidereon_core::nmea::NmeaTime::parse("120000.123456789").unwrap()),
+        );
+        assert!(ordinary.has_calendar_epoch);
+        assert!(ordinary.has_instant_j2000_s);
+        assert_eq!(ordinary.instant_j2000_s, PUBLISHED_3_0_1_INSTANT_J2000_S);
+    }
+
+    #[test]
+    fn nmea_epoch_summary_uses_canonical_instant_validation() {
+        let date = sidereon_core::nmea::NmeaDate::new(2000, 1, 1).unwrap();
+
+        let whole_leap = epoch_summary(
+            Some(date),
+            Some(sidereon_core::nmea::NmeaTime::parse("235960").unwrap()),
+        );
+        assert!(whole_leap.has_instant_j2000_s);
+        assert_eq!(whole_leap.instant_j2000_s, 43_200.0);
+
+        let fractional_leap = epoch_summary(
+            Some(date),
+            Some(sidereon_core::nmea::NmeaTime::parse("235960.123456789").unwrap()),
+        );
+        assert!(fractional_leap.has_calendar_epoch);
+        assert_eq!(fractional_leap.calendar_epoch.second, 60.123456789);
+        assert!(!fractional_leap.has_instant_j2000_s);
+        assert_eq!(fractional_leap.instant_j2000_s, 0.0);
+
+        let missing_date = epoch_summary(
+            None,
+            Some(sidereon_core::nmea::NmeaTime::parse("120000").unwrap()),
+        );
+        assert!(!missing_date.has_instant_j2000_s);
+        assert_eq!(missing_date.instant_j2000_s, 0.0);
+
+        let missing_time = epoch_summary(Some(date), None);
+        assert!(!missing_time.has_instant_j2000_s);
+        assert_eq!(missing_time.instant_j2000_s, 0.0);
+    }
 
     unsafe fn diagnostic_payload(list: *const SidereonNmeaDiagnosticList, index: usize) -> String {
         let mut info = std::mem::MaybeUninit::<SidereonNmeaDiagnosticInfo>::uninit();

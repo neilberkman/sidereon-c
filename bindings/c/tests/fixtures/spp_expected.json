@@ -1,6 +1,6 @@
 {
   "source": "sidereon-core default SPP solve of the spp_trace_L0_minimal inputs, written by tests/sppgen",
-  "core_revision": "592ca2bd293177bcd901286080baa6350522020f",
+  "core_revision": "8694648892d8ab065d94014e2e21d6cd5054818e",
   "position_m": ["0x41511b0a63f49487", "0x4120cd6408329d2f", "0x41511e646761efc5"],
   "rx_clock_s": "0x3f1a3cfb33cd8027"
 }

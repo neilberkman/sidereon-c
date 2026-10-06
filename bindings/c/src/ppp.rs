@@ -2399,7 +2399,15 @@ pub unsafe extern "C" fn sidereon_ppp_corrections_build(
                     );
                     SidereonStatus::Ok
                 }
-                Err(err) => extra_invalid_arg("sidereon_ppp_corrections_build", err),
+                Err(err) => {
+                    let is_ut1_refusal = ut1_refusal(&err);
+                    let status = extra_invalid_arg("sidereon_ppp_corrections_build", err);
+                    if is_ut1_refusal {
+                        SidereonStatus::Ut1OutsideCoverage
+                    } else {
+                        status
+                    }
+                }
             }
         },
     )

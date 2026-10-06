@@ -7,7 +7,7 @@ publish = false
 [workspace]
 
 [dependencies]
-sidereon-core = "=3.0.1"
+sidereon-core = "=3.0.2"
 serde_json = "1"
 nalgebra = "=0.33.3"
 libm = "0.2"
