@@ -5,6 +5,7 @@ on:
     branches: [release/3.0.2-20261005]
     paths:
       - '.github/workflows/release-prep.yml'
+      - '.github/release-registry.patch'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'bindings/c/Cargo.toml'
@@ -18,18 +19,40 @@ permissions:
 
 jobs:
   generate:
-    name: Generate candidate fixtures and header
+    name: Resolve registry locks and generate fixtures
     runs-on: macos-15
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
     steps:
       - uses: actions/checkout@v4
+      - name: Apply reviewed registry metadata
+        run: |
+          git apply --check .github/release-registry.patch
+          git apply .github/release-registry.patch
+          git diff --check
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: release-fixture-prep
       - name: Install pinned cbindgen
         run: cargo install --locked cbindgen --version 0.29.4
+      - name: Resolve published registry lockfiles
+        shell: bash
+        run: |
+          manifests=(
+            Cargo.toml
+            bindings/c/tests/fbgen/Cargo.toml
+            bindings/c/tests/pingen/Cargo.toml
+            bindings/c/tests/rinexgen/Cargo.toml
+            bindings/c/tests/rtkgen/Cargo.toml
+            bindings/c/tests/sppgen/Cargo.toml
+            bindings/c/tests/valgen/Cargo.toml
+            bindings/c/tests/velgen/Cargo.toml
+            bindings/c/tests/registry_fixture_harness/Cargo.toml
+          )
+          for manifest in "${manifests[@]}"; do
+            cargo update --workspace --manifest-path "$manifest" --verbose
+          done
       - name: Read the exact engine revision
         id: core
         shell: bash
@@ -62,11 +85,28 @@ jobs:
           import subprocess
 
           changed = subprocess.run(
-              ["git", "diff", "--name-only", "--", "bindings/c"],
+              ["git", "diff", "--name-only"],
               check=True,
               capture_output=True,
               text=True,
           ).stdout.splitlines()
+          metadata = {
+              "Cargo.toml",
+              "Cargo.lock",
+              "bindings/c/Cargo.toml",
+              "bindings/c/tests/CORE_REVISION",
+          }
+          generators = ("fbgen", "pingen", "rinexgen", "rtkgen", "sppgen", "valgen", "velgen")
+          for name in generators:
+              metadata.add(f"bindings/c/tests/{name}/Cargo.toml")
+              metadata.add(f"bindings/c/tests/{name}/Cargo.lock")
+          metadata.update({
+              "bindings/c/tests/registry_fixture_harness/Cargo.toml",
+              "bindings/c/tests/registry_fixture_harness/Cargo.lock",
+          })
+          expected_locks = {"Cargo.lock"}
+          expected_locks.update(f"bindings/c/tests/{name}/Cargo.lock" for name in generators)
+          expected_locks.add("bindings/c/tests/registry_fixture_harness/Cargo.lock")
           fixture = re.compile(
               r"^bindings/c/tests/(?:"
               r"fixtures/(?:spp_expected|ppp_esbc)\.json|"
@@ -77,14 +117,19 @@ jobs:
           unexpected = [
               path
               for path in changed
-              if path != "bindings/c/include/sidereon.h" and fixture.fullmatch(path) is None
+              if path not in metadata
+              and path != "bindings/c/include/sidereon.h"
+              and fixture.fullmatch(path) is None
           ]
           if unexpected:
               raise SystemExit(f"generator changed unexpected paths: {unexpected}")
+          missing_locks = sorted(expected_locks.difference(changed))
+          if missing_locks:
+              raise SystemExit(f"registry resolution did not update locks: {missing_locks}")
           if not any(fixture.fullmatch(path) for path in changed):
               raise SystemExit("generator produced no fixture changes")
           PY
-          git diff --check -- bindings/c/include/sidereon.h bindings/c/tests
+          git diff --check
       - name: Assemble review artifact
         env:
           ARTIFACT_ROOT: ${{ runner.temp }}/sidereon-c-release-prep
@@ -99,25 +144,34 @@ jobs:
 
           artifact = Path(os.environ["ARTIFACT_ROOT"])
           changed = subprocess.run(
-              ["git", "diff", "--name-only", "--", "bindings/c/include/sidereon.h", "bindings/c/tests"],
+              ["git", "diff", "--name-only"],
               check=True,
               capture_output=True,
               text=True,
           ).stdout.splitlines()
           header = "bindings/c/include/sidereon.h"
-          for name in sorted(set(changed + [header])):
+          metadata = [
+              "Cargo.toml",
+              "Cargo.lock",
+              "bindings/c/Cargo.toml",
+              "bindings/c/tests/CORE_REVISION",
+              "bindings/c/tests/registry_fixture_harness/Cargo.toml",
+              "bindings/c/tests/registry_fixture_harness/Cargo.lock",
+          ]
+          for generator in ("fbgen", "pingen", "rinexgen", "rtkgen", "sppgen", "valgen", "velgen"):
+              metadata.append(f"bindings/c/tests/{generator}/Cargo.toml")
+              metadata.append(f"bindings/c/tests/{generator}/Cargo.lock")
+          for name in sorted(set(changed + [header] + metadata)):
               source = Path(name)
               target = artifact / name
               target.parent.mkdir(parents=True, exist_ok=True)
               shutil.copy2(source, target)
           (artifact / "changed-files.txt").write_text("\n".join(changed) + "\n")
           PY
-          git diff --binary -- bindings/c/include/sidereon.h bindings/c/tests \
-            > "$ARTIFACT_ROOT/generated.patch"
+          git diff --binary > "$ARTIFACT_ROOT/generated.patch"
           cp "$RUNNER_TEMP/sidereon-c-generator-provenance.json" \
             "$ARTIFACT_ROOT/generation-context.json"
-          git diff --stat -- bindings/c/include/sidereon.h bindings/c/tests \
-            | tee -a "$GITHUB_STEP_SUMMARY"
+          git diff --stat | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Upload generated fixtures and header
         uses: actions/upload-artifact@v4
         with:
