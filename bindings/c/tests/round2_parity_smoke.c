@@ -1064,6 +1064,49 @@ static void test_ntrip(void) {
     sidereon_ntrip_bytes_free(gga);
     sidereon_ntrip_machine_free(machine);
 
+    machine = NULL;
+    check(sidereon_ntrip_machine_new(&cfg, &machine) == SIDEREON_STATUS_OK && machine != NULL,
+          "NTRIP sourcetable machine new");
+    request_handle = NULL;
+    check(sidereon_ntrip_machine_connection_request(machine, &request_handle) ==
+              SIDEREON_STATUS_OK &&
+              request_handle != NULL,
+          "NTRIP sourcetable machine request");
+    sidereon_ntrip_bytes_free(request_handle);
+
+    const uint8_t unterminated_table[] =
+        "SOURCETABLE 200 OK\r\n"
+        "STR;MOUNT;ID;RTCM;;;;;;;;;;;;;;;N;;tail\r\n"
+        "ENDSOURCETABLE";
+    events = NULL;
+    check(sidereon_ntrip_machine_push(machine, unterminated_table,
+                                      sizeof(unterminated_table) - 1, &events) ==
+                  SIDEREON_STATUS_OK &&
+              events != NULL &&
+              sidereon_ntrip_events_count(events, &event_count) == SIDEREON_STATUS_OK &&
+              event_count == 0,
+          "NTRIP unterminated sourcetable waits for finish");
+    sidereon_ntrip_events_free(events);
+
+    events = NULL;
+    check(sidereon_ntrip_machine_finish(machine, &events) == SIDEREON_STATUS_OK &&
+              events != NULL &&
+              sidereon_ntrip_events_count(events, &event_count) == SIDEREON_STATUS_OK &&
+              event_count == 1 &&
+              sidereon_ntrip_events_event(events, 0, &info) == SIDEREON_STATUS_OK &&
+              info.kind == SIDEREON_NTRIP_EVENT_KIND_SOURCETABLE,
+          "NTRIP unterminated sourcetable emits one terminal event");
+    sidereon_ntrip_events_free(events);
+
+    events = NULL;
+    check(sidereon_ntrip_machine_finish(machine, &events) == SIDEREON_STATUS_OK &&
+              events != NULL &&
+              sidereon_ntrip_events_count(events, &event_count) == SIDEREON_STATUS_OK &&
+              event_count == 0,
+          "NTRIP repeated finish emits no events");
+    sidereon_ntrip_events_free(events);
+    sidereon_ntrip_machine_free(machine);
+
     const char *table_text =
         "STR;MOUNT;ID;RTCM 3;1004(1);2;GPS;NET;USA;40.1;-105.2;1;0;gen;none;B;N;9600;misc;with;semis\r\n"
         "CAS;caster.example.test;2101;Caster;Op;0;USA;40.0;-105.0;backup.example.test;2102;cas misc\r\n"

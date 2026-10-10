@@ -3521,6 +3521,35 @@ mod lnav_word_tests {
     }
 
     #[test]
+    fn lnav_routes_restore_complemented_full_subframe_how() {
+        let mut source_how = [0u8; 30];
+        set_bits(&mut source_how, 0, 17, 54_321);
+        set_bits(&mut source_how, 19, 3, 1);
+
+        let mut subframe = [0u8; 300];
+        subframe[29] = 1;
+        for (transmitted, source) in subframe[30..54].iter_mut().zip(source_how[..24].iter()) {
+            *transmitted = source ^ 1;
+        }
+        subframe[54..60].copy_from_slice(&source_how[24..30]);
+
+        let mut tow = 0;
+        let mut subframe_id = 0;
+        assert_eq!(
+            unsafe { sidereon_lnav_tow(subframe.as_ptr(), subframe.len(), &mut tow) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(tow, 54_321);
+        assert_eq!(
+            unsafe {
+                sidereon_lnav_subframe_id(subframe.as_ptr(), subframe.len(), &mut subframe_id)
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(subframe_id, 1);
+    }
+
+    #[test]
     fn lnav_routes_preserve_parity_dependency_bits_and_validity() {
         use sidereon_core::navigation::lnav::{parity, parity_valid};
         let source = [0u8; 24];
