@@ -149,6 +149,15 @@ jobs:
         env:
           SIDEREON_CORE_FIXTURES: ${{ github.workspace }}/.sidereon-core/crates/sidereon-core/tests/fixtures
         run: ./bindings/c/tests/run_smoke.sh
+      - name: Upload candidate static library and public header
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sidereon-c-candidate-${{ runner.os }}-${{ runner.arch }}
+          path: |
+            target/release/libsidereon.a
+            bindings/c/include/sidereon.h
+          if-no-files-found: error
       # Every golden the smoke tests compare against is written by a generator
       # from the sidereon-core revision bindings/c/tests/CORE_REVISION names.
       # Running them all must leave the tree unchanged.
@@ -159,12 +168,3 @@ jobs:
         run: |
           ./bindings/c/tests/run_generators.sh
           git diff --exit-code -- bindings/c
-      - name: Upload candidate static library and public header
-        if: github.event_name == 'pull_request'
-        uses: actions/upload-artifact@v4
-        with:
-          name: sidereon-c-candidate-${{ runner.os }}-${{ runner.arch }}
-          path: |
-            target/release/libsidereon.a
-            bindings/c/include/sidereon.h
-          if-no-files-found: error
