@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Fixed
+
+- Read complemented LNAV hand-over fields correctly from full subframes through the C ABI; standalone 30-bit hand-over words retain their existing contract.
+- Follow the candidate core revision whose PPP auto-init seed uses caller-supplied surface meteorology when its troposphere correction is enabled.
+
 ## 3.0.2 - 2026-10-05
 
 ### Fixed
