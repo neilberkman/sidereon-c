@@ -21,13 +21,13 @@ publish = false
 [workspace]
 
 [dependencies]
-# Candidate engine source; tests/run_generators.sh verifies its locked Git
+# Exact registry engine release; tests/run_generators.sh verifies its locked
 # provenance against tests/CORE_REVISION.
-sidereon-core = { version = "=3.0.2", git = "https://github.com/neilberkman/sidereon", rev = "2025d853d9cb08cb1367166fa09e594bec6aa7f6" }
+sidereon-core = "=3.0.3"
 serde_json = "1"
 # The trust-region least-squares crate and the nalgebra pin sidereon-core
 # builds against, for the solver checks whose inputs are those crates' types.
-trust-region-least-squares = { version = "=0.11.0", git = "https://github.com/neilberkman/sidereon", rev = "2025d853d9cb08cb1367166fa09e594bec6aa7f6" }
+trust-region-least-squares = "=0.11.0"
 nalgebra = "=0.33.3"
 # The gzip reader for the compressed Bias-SINEX fixture.
 flate2 = "1"
