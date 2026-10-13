@@ -12314,7 +12314,7 @@
     }
   },
   "expected": {
-    "core_revision": "2025d853d9cb08cb1367166fa09e594bec6aa7f6",
+    "core_revision": "d48b02561c4ad53fbc9d0ec72732aed447631337",
     "position_m": [
       3582104.3891192144,
       532587.3737544214,

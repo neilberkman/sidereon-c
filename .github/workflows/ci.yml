@@ -144,6 +144,14 @@ jobs:
           ref: ${{ steps.core.outputs.fixture_ref }}
           path: .sidereon-core
           sparse-checkout: crates/sidereon-core/tests
+      # Generate before the exhaustive smoke suite so a release-candidate run
+      # tests the newly resolved engine values. The later diff assertion still
+      # requires every generated file to match the committed provenance.
+      - name: Regenerate binding goldens
+        if: runner.os == 'macOS'
+        env:
+          SIDEREON_CORE_SOURCE: ${{ github.workspace }}/.sidereon-core
+        run: ./bindings/c/tests/run_generators.sh
       - name: Full C smoke
         if: runner.os == 'macOS'
         env:
@@ -158,13 +166,18 @@ jobs:
             target/release/libsidereon.a
             bindings/c/include/sidereon.h
           if-no-files-found: error
-      # Every golden the smoke tests compare against is written by a generator
-      # from the sidereon-core revision bindings/c/tests/CORE_REVISION names.
-      # Running them all must leave the tree unchanged.
+      # Every golden the smoke tests compare against must match the generator
+      # output from the revision bindings/c/tests/CORE_REVISION names.
       - name: Regenerated goldens match the committed ones
         if: runner.os == 'macOS'
-        env:
-          SIDEREON_CORE_SOURCE: ${{ github.workspace }}/.sidereon-core
-        run: |
-          ./bindings/c/tests/run_generators.sh
-          git diff --exit-code -- bindings/c
+        run: git diff --exit-code -- bindings/c
+      - name: Capture regenerated binding differences
+        if: always() && runner.os == 'macOS' && github.event_name == 'pull_request'
+        run: git diff --binary -- bindings/c > "${RUNNER_TEMP}/sidereon-c-generated.patch"
+      - name: Upload regenerated binding differences
+        if: always() && runner.os == 'macOS' && github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sidereon-c-generated-diff-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/sidereon-c-generated.patch
+          if-no-files-found: error
