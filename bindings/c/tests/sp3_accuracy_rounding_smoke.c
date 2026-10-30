@@ -33,8 +33,57 @@ static int fail(const char *message, int code) {
     return code;
 }
 
+static int check_unbased_pair(const char *a_path, const char *b_path, bool reverse) {
+    uint8_t *a_bytes = NULL, *b_bytes = NULL;
+    size_t a_len = 0, b_len = 0;
+    if (!read_file(a_path, &a_bytes, &a_len) || !read_file(b_path, &b_bytes, &b_len))
+        return fail("read unbased pair", 20);
+    SidereonSp3 *a = NULL, *b = NULL;
+    if (sidereon_sp3_load(a_bytes, a_len, &a) != SIDEREON_STATUS_OK ||
+        sidereon_sp3_load(b_bytes, b_len, &b) != SIDEREON_STATUS_OK) {
+        free(a_bytes);
+        free(b_bytes);
+        return fail("parse unbased pair", 21);
+    }
+    free(a_bytes);
+    free(b_bytes);
+
+    SidereonSp3MergeOptions options;
+    if (sidereon_sp3_merge_options_init(&options) != SIDEREON_STATUS_OK)
+        return fail("initialize unbased merge options", 22);
+    options.combine = SIDEREON_SP3_MERGE_COMBINE_PRECEDENCE;
+    options.precedence_scope = SIDEREON_SP3_MERGE_PRECEDENCE_SCOPE_CELL;
+    options.min_agree = 1;
+    options.clock_min_common = 1;
+    options.position_tolerance_m = 5.0;
+    options.clock_tolerance_s = 50e-9;
+    const SidereonSp3 *sources[] = {reverse ? b : a, reverse ? a : b};
+    SidereonSp3 *merged = NULL;
+    SidereonSp3MergeReport *report = NULL;
+    if (sidereon_sp3_merge(sources, 2, &options, &merged, &report) != SIDEREON_STATUS_OK)
+        return fail("merge unbased pair", 23);
+    sidereon_sp3_merge_report_free(report);
+
+    SidereonSp3RecordAccuracy accuracy = {0};
+    if (sidereon_sp3_record_accuracy(merged, "G12", 0, &accuracy) != SIDEREON_STATUS_OK ||
+        !accuracy.has_p || accuracy.p.position_sigma_m[0].kind != SIDEREON_SP3_ACCURACY_VALUE_KIND_KNOWN ||
+        fabs(accuracy.p.position_sigma_m[0].value - pow(1.25, 13.0) * 1e-3) > 1e-15)
+        return fail("unbased pair did not preserve G12 decoded sigma", 24);
+    SidereonSp3WriteResult *strict = NULL;
+    SidereonSp3WriteOutcome outcome;
+    if (sidereon_sp3_to_sp3_text_result(merged, &strict) != SIDEREON_STATUS_OK || strict == NULL ||
+        sidereon_sp3_write_result_get_outcome(strict, &outcome) != SIDEREON_STATUS_OK ||
+        !outcome.is_ok)
+        return fail("unbased pair strict write", 25);
+    sidereon_sp3_write_result_free(strict);
+    sidereon_sp3_free(merged);
+    sidereon_sp3_free(a);
+    sidereon_sp3_free(b);
+    return 0;
+}
+
 int main(int argc, char **argv) {
-    if (argc != 3) return fail("expected A.sp3 and B.sp3 paths", 1);
+    if (argc != 5) return fail("expected accuracy A/B and unbased A/B paths", 1);
     uint8_t *a_bytes = NULL, *b_bytes = NULL;
     size_t a_len = 0, b_len = 0;
     if (!read_file(argv[1], &a_bytes, &a_len) || !read_file(argv[2], &b_bytes, &b_len))
@@ -83,14 +132,20 @@ int main(int argc, char **argv) {
         return fail("read accuracy report", 10);
     const double source_sigma = pow(1.25, 13.0) * 1e-3;
     const double expected_delta = 0.032 - source_sigma;
+    const double source_velocity_sigma = pow(1.25, 13.0) * 1e-7;
+    const double expected_velocity_delta = 32e-7 - source_velocity_sigma;
     const double source_clock_sigma = pow(1.025, 13.0) * 299792458e-12;
     const double expected_clock_delta = 2.0 * 299792458e-12 - source_clock_sigma;
+    const double source_rate_sigma = pow(1.025, 13.0) * 299792458e-16;
+    const double expected_rate_delta = 2.0 * 299792458e-16 - source_rate_sigma;
     if (fabs(accuracy.position_sigma_x_m - expected_delta) > 1e-15 ||
+        fabs(accuracy.position_sigma_y_m - expected_delta) > 1e-15 ||
+        fabs(accuracy.position_sigma_z_m - expected_delta) > 1e-15 ||
+        fabs(accuracy.velocity_sigma_x_m_s - expected_velocity_delta) > 1e-15 ||
+        fabs(accuracy.velocity_sigma_y_m_s - expected_velocity_delta) > 1e-15 ||
+        fabs(accuracy.velocity_sigma_z_m_s - expected_velocity_delta) > 1e-15 ||
         fabs(accuracy.clock_sigma_m - expected_clock_delta) > 1e-15 ||
-        accuracy.position_sigma_y_m != 0.0 || accuracy.position_sigma_z_m != 0.0 ||
-        accuracy.velocity_sigma_x_m_s != 0.0 || accuracy.velocity_sigma_y_m_s != 0.0 ||
-        accuracy.velocity_sigma_z_m_s != 0.0 ||
-        accuracy.clock_rate_sigma_m_s != 0.0)
+        fabs(accuracy.clock_rate_sigma_m_s - expected_rate_delta) > 1e-15)
         return fail("accuracy report differs from independent exponent calculation", 11);
 
     SidereonSp3RoundingReport records = {0};
@@ -106,6 +161,9 @@ int main(int argc, char **argv) {
 
     sidereon_sp3_write_result_free(rounded);
     sidereon_sp3_free(merged);
+    if (check_unbased_pair(argv[3], argv[4], false) != 0 ||
+        check_unbased_pair(argv[3], argv[4], true) != 0)
+        return 14;
     puts("sp3_accuracy_rounding_smoke: all checks passed");
     return 0;
 }
