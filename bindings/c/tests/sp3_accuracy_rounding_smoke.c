@@ -175,6 +175,15 @@ static int check_exponent_case(const char *a_text, const char *b_text,
     if (a == NULL || b == NULL || !check_strict_source(a) || !check_strict_source(b) ||
         !merge_two(a, b, &merged))
         return 0;
+    if (expect_refusal) {
+        SidereonSp3WriteResult *strict = NULL;
+        SidereonSp3WriteOutcome strict_outcome;
+        int strict_refused = sidereon_sp3_to_sp3_text_result(merged, &strict) == SIDEREON_STATUS_OK &&
+                             sidereon_sp3_write_result_get_outcome(strict, &strict_outcome) == SIDEREON_STATUS_OK &&
+                             !strict_outcome.is_ok && strict_outcome.error.kind == SIDEREON_SP3_WRITE_ERROR_KIND_ACCURACY_NOT_REPRESENTABLE;
+        sidereon_sp3_write_result_free(strict);
+        if (!strict_refused) { sidereon_sp3_free(a); sidereon_sp3_free(b); sidereon_sp3_free(merged); return 0; }
+    }
     SidereonSp3WriteResult *result = NULL;
     SidereonSp3WriteOutcome outcome;
     int ok = sidereon_sp3_to_sp3_text_with_accuracy_rounding_result(merged, 0, &result) == SIDEREON_STATUS_OK &&
@@ -279,6 +288,9 @@ static int check_sentinel_and_invalid_base(const uint8_t *a_bytes, size_t a_len,
         sidereon_sp3_record_accuracy(reparsed, "G12", 0, &invalid_accuracy) != SIDEREON_STATUS_OK ||
         invalid_accuracy.p.position_sigma_m[0].kind != SIDEREON_SP3_ACCURACY_VALUE_KIND_INVALID_BASE)
         return fail("standalone invalid-base meaning changed", 64);
+    if (sidereon_sp3_record_accuracy(invalid, "G12", 0, &invalid_accuracy) != SIDEREON_STATUS_OK ||
+        invalid_accuracy.p.position_sigma_m[0].kind != SIDEREON_SP3_ACCURACY_VALUE_KIND_INVALID_BASE)
+        return fail("standalone invalid-base input changed", 69);
     sidereon_sp3_write_result_free(result); result = NULL;
     char *known_text = copy_text(a_bytes, a_len);
     SidereonSp3 *known = load_text(known_text);

@@ -76,8 +76,8 @@
 
 #define SIDEREON_VERSION_MAJOR 3
 #define SIDEREON_VERSION_MINOR 0
-#define SIDEREON_VERSION_PATCH 5
-#define SIDEREON_VERSION_STRING "3.0.5"
+#define SIDEREON_VERSION_PATCH 6
+#define SIDEREON_VERSION_STRING "3.0.6"
 
 #define ANALYSIS_CENTER_C_BYTES 32
 
@@ -3762,6 +3762,27 @@ typedef enum SidereonSp3MergeFlagKind {
      */
     SIDEREON_SP3_MERGE_FLAG_KIND_ARC_WITHHELD = 4,
 } SidereonSp3MergeFlagKind;
+
+/**
+ * Accuracy sigma quantization policy for the explicit accuracy-rounding writer.
+ */
+enum SidereonSp3AccuracyRoundingPolicy
+#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+  : uint32_t
+#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+ {
+    /**
+     * Select the smallest legal output sigma that is at least the source sigma.
+     */
+    SIDEREON_SP3_ACCURACY_ROUNDING_POLICY_CONSERVATIVE = 0,
+};
+#ifndef __cplusplus
+#if __STDC_VERSION__ >= 202311L
+typedef enum SidereonSp3AccuracyRoundingPolicy SidereonSp3AccuracyRoundingPolicy;
+#else
+typedef uint32_t SidereonSp3AccuracyRoundingPolicy;
+#endif // __STDC_VERSION__ >= 202311L
+#endif // __cplusplus
 
 /**
  * Observation value convention for a velocity solve.
@@ -26131,6 +26152,44 @@ typedef struct SidereonSp3RawRecordAccuracy {
     bool has_v;
     struct SidereonSp3AccuracyCodeGroup v;
 } SidereonSp3RawRecordAccuracy;
+
+/**
+ * Maximum absolute changes to decoded SP3 accuracy sigmas, in SI units.
+ */
+typedef struct SidereonSp3AccuracyRoundingReport {
+    /**
+     * Maximum position X sigma increase, meters.
+     */
+    double position_sigma_x_m;
+    /**
+     * Maximum position Y sigma increase, meters.
+     */
+    double position_sigma_y_m;
+    /**
+     * Maximum position Z sigma increase, meters.
+     */
+    double position_sigma_z_m;
+    /**
+     * Maximum velocity X sigma increase, meters per second.
+     */
+    double velocity_sigma_x_m_s;
+    /**
+     * Maximum velocity Y sigma increase, meters per second.
+     */
+    double velocity_sigma_y_m_s;
+    /**
+     * Maximum velocity Z sigma increase, meters per second.
+     */
+    double velocity_sigma_z_m_s;
+    /**
+     * Maximum clock sigma increase, meters.
+     */
+    double clock_sigma_m;
+    /**
+     * Maximum clock-rate sigma increase, meters per second.
+     */
+    double clock_rate_sigma_m_s;
+} SidereonSp3AccuracyRoundingReport;
 
 /**
  * Typed detail of a refused SP3 write.
@@ -48720,6 +48779,21 @@ enum SidereonStatus sidereon_sp3_to_sp3_text_result(const struct SidereonSp3 *sp
                                                     struct SidereonSp3WriteResult **out_result);
 
 /**
+ * Write an SP3 product while conservatively quantizing its accuracy sigmas.
+ * The policy is required and must be a `SidereonSp3AccuracyRoundingPolicy`.
+ * Unknown values return `SIDEREON_STATUS_INVALID_ARGUMENT`; they never select
+ * a default policy. The result contains the ordinary record-value report and
+ * a separate accuracy-sigma report read with
+ * `sidereon_sp3_write_result_get_accuracy_rounding_report`.
+ *
+ * Safety: the pointer requirements are identical to
+ * `sidereon_sp3_to_sp3_text_result`.
+ */
+enum SidereonStatus sidereon_sp3_to_sp3_text_with_accuracy_rounding_result(const struct SidereonSp3 *sp3,
+                                                                           uint32_t policy,
+                                                                           struct SidereonSp3WriteResult **out_result);
+
+/**
  * Write a rounded copy of the product as SP3 text and retain the typed
  * outcome plus the rounding report on success. The source product is unchanged.
  * Read the result with the existing write-result getters and
@@ -48752,6 +48826,19 @@ enum SidereonStatus sidereon_sp3_validate_exact(const struct SidereonSp3 *sp3,
  * once. The handle is invalid afterwards.
  */
 void sidereon_sp3_write_result_free(struct SidereonSp3WriteResult *result);
+
+/**
+ * Copy the accuracy-sigma report from a successful opt-in accuracy-rounded
+ * write result. For ordinary write results and refusals, `has_report` is
+ * false and `out_report` is zeroed. The legacy eight-value record report and
+ * its getter remain unchanged.
+ *
+ * Safety: pointer requirements match
+ * `sidereon_sp3_write_result_get_rounding_report`.
+ */
+enum SidereonStatus sidereon_sp3_write_result_get_accuracy_rounding_report(const struct SidereonSp3WriteResult *result,
+                                                                           bool *out_has_report,
+                                                                           struct SidereonSp3AccuracyRoundingReport *out_report);
 
 /**
  * Copy the name of the header or record field a refused SP3 write names,
