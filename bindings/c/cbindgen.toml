@@ -158,6 +158,7 @@ include = [
     "SidereonSp3MergeOptions",
     "SidereonSp3MergeFlagKind",
     "SidereonSp3MergeFlag",
+    "SidereonSp3AccuracyRoundingPolicy",
     "SidereonSp3PredictionSummary",
     "SidereonSp3EpochPrediction",
     "SidereonSp3EpochAgreement",
