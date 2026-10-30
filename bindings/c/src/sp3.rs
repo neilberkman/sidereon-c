@@ -6,8 +6,9 @@ use sidereon_core::ephemeris::{
     ContinuityOptions, ContinuityOptionsError, EpochWindow,
     ExactSp3Coverage as CoreExactSp3Coverage, ExactSp3Request as CoreExactSp3Request,
     ExactSp3ValidationError, MergeContinuityViolation, MergeToleranceError, MergeToleranceField,
-    OrbitClass, Sp3EpochIntervalError, Sp3EpochIntervalRejection, Sp3WriteError, SpeedBound,
-    StencilExtent, UnusableSampleReason, WindowContinuityDecision, WindowContinuityVerdict,
+    OrbitClass, Sp3EpochIntervalError, Sp3EpochIntervalRejection, Sp3RoundingReport, Sp3WriteError,
+    SpeedBound, StencilExtent, UnusableSampleReason, WindowContinuityDecision,
+    WindowContinuityVerdict,
 };
 
 const SP3_FRAME_LABEL_MAX_BYTES: usize = 64;
@@ -629,7 +630,7 @@ pub struct SidereonSp3MergeFlag {
 }
 
 /// Per-epoch aggregate of the merge agreement metric: how tightly the consensus
-/// sources clustered about the combined value written to the merged product,
+/// sources clustered about the combined value before final column rounding,
 /// pooled over the multi-source satellites at one output epoch. Mirrors
 /// sidereon_core::ephemeris::EpochAgreement. Copied with
 /// sidereon_sp3_merge_report_epoch_agreement; the entries are in output-epoch
@@ -965,6 +966,44 @@ pub struct SidereonSp3WriteOutcome {
     pub error: SidereonSp3WriteError,
 }
 
+/// Maximum absolute changes made when record values are quantized to SP3
+/// columns. Values use the product's SI units.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct SidereonSp3RoundingReport {
+    /// Maximum position X change, meters.
+    pub position_x_m: f64,
+    /// Maximum position Y change, meters.
+    pub position_y_m: f64,
+    /// Maximum position Z change, meters.
+    pub position_z_m: f64,
+    /// Maximum velocity X change, meters per second.
+    pub velocity_x_m_s: f64,
+    /// Maximum velocity Y change, meters per second.
+    pub velocity_y_m_s: f64,
+    /// Maximum velocity Z change, meters per second.
+    pub velocity_z_m_s: f64,
+    /// Maximum clock offset change, seconds.
+    pub clock_s: f64,
+    /// Maximum clock-rate change, seconds per second.
+    pub clock_rate_s_s: f64,
+}
+
+impl From<Sp3RoundingReport> for SidereonSp3RoundingReport {
+    fn from(value: Sp3RoundingReport) -> Self {
+        Self {
+            position_x_m: value.position_x_m,
+            position_y_m: value.position_y_m,
+            position_z_m: value.position_z_m,
+            velocity_x_m_s: value.velocity_x_m_s,
+            velocity_y_m_s: value.velocity_y_m_s,
+            velocity_z_m_s: value.velocity_z_m_s,
+            clock_s: value.clock_s,
+            clock_rate_s_s: value.clock_rate_s_s,
+        }
+    }
+}
+
 /// An owned record of one SP3 write: the text on success, or the typed refusal
 /// with its owned text parts. The result owns every string it reports, so they
 /// stay readable after the product is freed and after later failing calls have
@@ -982,6 +1021,8 @@ pub struct SidereonSp3WriteResult {
     pub(crate) field: String,
     /// The text value a refusal carries; empty when it carries none.
     pub(crate) text_value: String,
+    /// Present only for a successful opt-in rounded write.
+    pub(crate) rounding: Option<SidereonSp3RoundingReport>,
 }
 
 fn exact_sp3_coverage_to_c(coverage: CoreExactSp3Coverage) -> SidereonExactSp3Coverage {
@@ -3306,6 +3347,31 @@ pub unsafe extern "C" fn sidereon_sp3_to_sp3_text_result(
     })
 }
 
+/// Write a rounded copy of the product as SP3 text and retain the typed
+/// outcome plus the rounding report on success. The source product is unchanged.
+/// Read the result with the existing write-result getters and
+/// `sidereon_sp3_write_result_get_rounding_report`.
+///
+/// Safety: the pointer requirements are identical to
+/// `sidereon_sp3_to_sp3_text_result`.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sp3_to_sp3_text_with_rounding_result(
+    sp3: *const SidereonSp3,
+    out_result: *mut *mut SidereonSp3WriteResult,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_sp3_to_sp3_text_with_rounding_result";
+    sp3_operation_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let out_result = c_try!(require_out(out_result, FN_NAME, "out_result"));
+        *out_result = ptr::null_mut();
+        let sp3 = c_try!(require_ref(sp3, FN_NAME, "sp3"));
+        write_boxed_handle(
+            out_result,
+            sp3_write_result_with_rounding(FN_NAME, &sp3.inner),
+        );
+        SidereonStatus::Ok
+    })
+}
+
 /// Release an owned SP3 write result. Passing NULL is a no-op.
 ///
 /// Safety: `result` may be NULL; otherwise it must be a live
@@ -3341,6 +3407,34 @@ pub unsafe extern "C" fn sidereon_sp3_write_result_get_outcome(
         };
         let result = c_try!(require_ref(result, FN_NAME, "result"));
         *out_outcome = result.outcome;
+        SidereonStatus::Ok
+    })
+}
+
+/// Copy the rounding report from an opt-in rounded write result. `has_report`
+/// is false for ordinary write results and refused rounded writes; in those
+/// cases `out_report` is zeroed. The call itself still succeeds.
+///
+/// Safety: `result`, `out_has_report`, and `out_report` must point to a live
+/// result and writable, aligned outputs respectively; the outputs must not
+/// alias one another.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sp3_write_result_get_rounding_report(
+    result: *const SidereonSp3WriteResult,
+    out_has_report: *mut bool,
+    out_report: *mut SidereonSp3RoundingReport,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_sp3_write_result_get_rounding_report";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let out_has_report = c_try!(require_out(out_has_report, FN_NAME, "out_has_report"));
+        let out_report = c_try!(require_out(out_report, FN_NAME, "out_report"));
+        *out_has_report = false;
+        *out_report = SidereonSp3RoundingReport::default();
+        let result = c_try!(require_ref(result, FN_NAME, "result"));
+        if let Some(report) = result.rounding {
+            *out_has_report = true;
+            *out_report = report;
+        }
         SidereonStatus::Ok
     })
 }
@@ -6542,8 +6636,23 @@ fn sp3_write_refusal(error: &Sp3WriteError) -> Sp3WriteRefusal {
 /// Write `sp3` and record the whole outcome: the text, or the typed refusal and
 /// its text parts. Nothing partial is kept from a refused write.
 fn sp3_write_result(fn_name: &str, sp3: &Sp3) -> SidereonSp3WriteResult {
-    match sp3.to_sp3_string() {
-        Ok(text) => SidereonSp3WriteResult {
+    sp3_write_result_from(fn_name, sp3.to_sp3_string().map(|text| (text, None)))
+}
+
+fn sp3_write_result_with_rounding(fn_name: &str, sp3: &Sp3) -> SidereonSp3WriteResult {
+    sp3_write_result_from(
+        fn_name,
+        sp3.to_sp3_string_with_rounding()
+            .map(|(text, report)| (text, Some(report.into()))),
+    )
+}
+
+fn sp3_write_result_from(
+    fn_name: &str,
+    result: Result<(String, Option<SidereonSp3RoundingReport>), Sp3WriteError>,
+) -> SidereonSp3WriteResult {
+    match result {
+        Ok((text, rounding)) => SidereonSp3WriteResult {
             outcome: SidereonSp3WriteOutcome {
                 is_ok: true,
                 status: SidereonStatus::Ok,
@@ -6553,6 +6662,7 @@ fn sp3_write_result(fn_name: &str, sp3: &Sp3) -> SidereonSp3WriteResult {
             message: String::new(),
             field: String::new(),
             text_value: String::new(),
+            rounding,
         },
         Err(err) => {
             let mut refusal = sp3_write_refusal(&err);
@@ -6568,6 +6678,7 @@ fn sp3_write_result(fn_name: &str, sp3: &Sp3) -> SidereonSp3WriteResult {
                 message: format!("{fn_name}: {err}"),
                 field: refusal.field.unwrap_or_default().to_owned(),
                 text_value: refusal.text_value.unwrap_or_default(),
+                rounding: None,
             }
         }
     }
@@ -7765,6 +7876,80 @@ EOF
                 sp3.inner.to_sp3_string().expect("the fixture writes back")
             );
             assert!(owned.message.is_empty());
+            let mut has_report = true;
+            let mut report = SidereonSp3RoundingReport {
+                position_x_m: f64::NAN,
+                ..SidereonSp3RoundingReport::default()
+            };
+            assert_eq!(
+                sidereon_sp3_write_result_get_rounding_report(result, &mut has_report, &mut report),
+                SidereonStatus::Ok
+            );
+            assert!(!has_report);
+            assert_eq!(report.position_x_m, 0.0);
+            sidereon_sp3_write_result_free(result);
+        }
+    }
+
+    #[test]
+    fn rounded_write_returns_report_without_mutating_product_and_keeps_typed_refusal() {
+        let sp3 = load(SP3C_FILE);
+        assert!(sp3.inner.to_sp3_string().is_ok());
+        let original_clock = sp3
+            .inner
+            .state(sp3.inner.header.satellites[0], 0)
+            .expect("state")
+            .clock_s
+            .expect("clock");
+
+        unsafe {
+            let mut result = ptr::null_mut();
+            assert_eq!(
+                sidereon_sp3_to_sp3_text_with_rounding_result(&sp3, &mut result),
+                SidereonStatus::Ok
+            );
+            let owned = &*result;
+            assert!(owned.outcome.is_ok);
+            let report = owned.rounding.expect("rounded success carries report");
+            assert_eq!(report, SidereonSp3RoundingReport::default());
+            let text = Sp3::parse(owned.text.as_bytes()).expect("rounded text reparses");
+            assert_eq!(
+                text.state(text.header.satellites[0], 0)
+                    .expect("reparsed state")
+                    .clock_s,
+                Some(original_clock)
+            );
+            assert_eq!(
+                sp3.inner
+                    .state(sp3.inner.header.satellites[0], 0)
+                    .expect("source state")
+                    .clock_s,
+                Some(original_clock),
+                "rounded write leaves its source product untouched"
+            );
+            let mut has_report = false;
+            let mut copied = SidereonSp3RoundingReport::default();
+            assert_eq!(
+                sidereon_sp3_write_result_get_rounding_report(result, &mut has_report, &mut copied,),
+                SidereonStatus::Ok
+            );
+            assert!(has_report);
+            assert_eq!(copied.clock_s, report.clock_s);
+            sidereon_sp3_write_result_free(result);
+
+            let refused = load(&SP3C_FILE.replacen(" 1.2500000", "1.25000001", 1));
+            let mut result = ptr::null_mut();
+            assert_eq!(
+                sidereon_sp3_to_sp3_text_with_rounding_result(&refused, &mut result),
+                SidereonStatus::Ok
+            );
+            let owned = &*result;
+            assert!(!owned.outcome.is_ok);
+            assert_eq!(
+                owned.outcome.error.kind,
+                SidereonSp3WriteErrorKind::PrecisionNotRepresentable
+            );
+            assert!(owned.rounding.is_none());
             sidereon_sp3_write_result_free(result);
         }
     }

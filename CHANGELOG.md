@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+## 3.0.5 - 2026-10-30
+
+### Changed
+
+- Coordinate with sidereon-core 3.0.5 at
+  `da59d0eba8e273cc37821eac5535662e5d991126`. This update includes stable
+  normalization for quaternions with large finite components and enforces the open `(0, 1)`
+  domain for estimation NIS confidence and CA-CFAR false-alarm probabilities,
+  including rejection of positive and negative zero.
+- Add an opt-in SP3 text writer that quantizes a copy to record columns and
+  reports the maximum absolute change in each of eight SI fields. The existing
+  strict writer and its typed refusal remain available.
+
+### Fixed
+
+- Keep SP3 merge and clock-alignment output on the record grid when all inputs
+  are representable there, including arithmetic mean residuals, while preserving
+  interpolation caches and strict refusals for overflow and sentinel collisions.
+
 ## 3.0.4 - 2026-10-18
 
 ### Fixed
