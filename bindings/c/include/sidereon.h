@@ -26353,15 +26353,42 @@ typedef struct SidereonSp3WriteOutcome {
     struct SidereonSp3WriteError error;
 } SidereonSp3WriteOutcome;
 
-/** Maximum absolute changes made while quantizing SP3 record values. */
+/**
+ * Maximum absolute changes made when record values are quantized to SP3
+ * columns. Values use the product's SI units.
+ */
 typedef struct SidereonSp3RoundingReport {
+    /**
+     * Maximum position X change, meters.
+     */
     double position_x_m;
+    /**
+     * Maximum position Y change, meters.
+     */
     double position_y_m;
+    /**
+     * Maximum position Z change, meters.
+     */
     double position_z_m;
+    /**
+     * Maximum velocity X change, meters per second.
+     */
     double velocity_x_m_s;
+    /**
+     * Maximum velocity Y change, meters per second.
+     */
     double velocity_y_m_s;
+    /**
+     * Maximum velocity Z change, meters per second.
+     */
     double velocity_z_m_s;
+    /**
+     * Maximum clock offset change, seconds.
+     */
     double clock_s;
+    /**
+     * Maximum clock-rate change, seconds per second.
+     */
     double clock_rate_s_s;
 } SidereonSp3RoundingReport;
 
@@ -48692,10 +48719,17 @@ enum SidereonStatus sidereon_sp3_to_sp3_text(const struct SidereonSp3 *sp3,
 enum SidereonStatus sidereon_sp3_to_sp3_text_result(const struct SidereonSp3 *sp3,
                                                     struct SidereonSp3WriteResult **out_result);
 
-/** Write a quantized copy, keeping a typed outcome and a report on success. */
-enum SidereonStatus sidereon_sp3_to_sp3_text_with_rounding_result(
-    const struct SidereonSp3 *sp3,
-    struct SidereonSp3WriteResult **out_result);
+/**
+ * Write a rounded copy of the product as SP3 text and retain the typed
+ * outcome plus the rounding report on success. The source product is unchanged.
+ * Read the result with the existing write-result getters and
+ * `sidereon_sp3_write_result_get_rounding_report`.
+ *
+ * Safety: the pointer requirements are identical to
+ * `sidereon_sp3_to_sp3_text_result`.
+ */
+enum SidereonStatus sidereon_sp3_to_sp3_text_with_rounding_result(const struct SidereonSp3 *sp3,
+                                                                  struct SidereonSp3WriteResult **out_result);
 
 /**
  * Validate an already parsed SP3 product against an exact request.
@@ -48760,11 +48794,18 @@ enum SidereonStatus sidereon_sp3_write_result_get_message(const struct SidereonS
 enum SidereonStatus sidereon_sp3_write_result_get_outcome(const struct SidereonSp3WriteResult *result,
                                                           struct SidereonSp3WriteOutcome *out_outcome);
 
-/** Copy the rounding report; has_report is false for ordinary or refused writes. */
-enum SidereonStatus sidereon_sp3_write_result_get_rounding_report(
-    const struct SidereonSp3WriteResult *result,
-    bool *out_has_report,
-    struct SidereonSp3RoundingReport *out_report);
+/**
+ * Copy the rounding report from an opt-in rounded write result. `has_report`
+ * is false for ordinary write results and refused rounded writes; in those
+ * cases `out_report` is zeroed. The call itself still succeeds.
+ *
+ * Safety: `result`, `out_has_report`, and `out_report` must point to a live
+ * result and writable, aligned outputs respectively; the outputs must not
+ * alias one another.
+ */
+enum SidereonStatus sidereon_sp3_write_result_get_rounding_report(const struct SidereonSp3WriteResult *result,
+                                                                  bool *out_has_report,
+                                                                  struct SidereonSp3RoundingReport *out_report);
 
 /**
  * Copy the SP3 text of an owned write result. Uses the variable-length output
