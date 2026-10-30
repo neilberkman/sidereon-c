@@ -486,8 +486,6 @@ int main(int argc, char **argv) {
 
     sidereon_sp3_write_result_free(rounded);
     sidereon_sp3_free(merged);
-    sidereon_sp3_free(a);
-    sidereon_sp3_free(b);
     if (check_unbased_pair(argv[3], argv[4], false) != 0 ||
         check_unbased_pair(argv[3], argv[4], true) != 0)
         return 14;
