@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 3.0.6 - 2026-10-30
+
+### Added
+
+- Add an opt-in conservative SP3 accuracy-sigma writer with a separate report
+  for position, velocity, clock, and clock-rate sigma increases. The existing
+  strict writer and record-value rounding report retain their contracts.
+
+### Fixed
+
+- Preserve a merge output accuracy base when retained source codes cannot be
+  represented exactly under one shared base; the strict writer reports the
+  refusal and the explicit accuracy writer can conservatively convert it.
+
 ## 3.0.5 - 2026-10-30
 
 ### Changed

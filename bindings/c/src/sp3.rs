@@ -6,9 +6,9 @@ use sidereon_core::ephemeris::{
     ContinuityOptions, ContinuityOptionsError, EpochWindow,
     ExactSp3Coverage as CoreExactSp3Coverage, ExactSp3Request as CoreExactSp3Request,
     ExactSp3ValidationError, MergeContinuityViolation, MergeToleranceError, MergeToleranceField,
-    OrbitClass, Sp3EpochIntervalError, Sp3EpochIntervalRejection, Sp3RoundingReport, Sp3WriteError,
-    SpeedBound, StencilExtent, UnusableSampleReason, WindowContinuityDecision,
-    WindowContinuityVerdict,
+    OrbitClass, Sp3AccuracyRoundingPolicy, Sp3AccuracyRoundingReport, Sp3DetailedRoundingReport,
+    Sp3EpochIntervalError, Sp3EpochIntervalRejection, Sp3RoundingReport, Sp3WriteError, SpeedBound,
+    StencilExtent, UnusableSampleReason, WindowContinuityDecision, WindowContinuityVerdict,
 };
 
 const SP3_FRAME_LABEL_MAX_BYTES: usize = 64;
@@ -989,6 +989,51 @@ pub struct SidereonSp3RoundingReport {
     pub clock_rate_s_s: f64,
 }
 
+/// Accuracy sigma quantization policy for the explicit accuracy-rounding writer.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidereonSp3AccuracyRoundingPolicy {
+    /// Select the smallest legal output sigma that is at least the source sigma.
+    Conservative = 0,
+}
+
+/// Maximum absolute changes to decoded SP3 accuracy sigmas, in SI units.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct SidereonSp3AccuracyRoundingReport {
+    /// Maximum position X sigma increase, meters.
+    pub position_sigma_x_m: f64,
+    /// Maximum position Y sigma increase, meters.
+    pub position_sigma_y_m: f64,
+    /// Maximum position Z sigma increase, meters.
+    pub position_sigma_z_m: f64,
+    /// Maximum velocity X sigma increase, meters per second.
+    pub velocity_sigma_x_m_s: f64,
+    /// Maximum velocity Y sigma increase, meters per second.
+    pub velocity_sigma_y_m_s: f64,
+    /// Maximum velocity Z sigma increase, meters per second.
+    pub velocity_sigma_z_m_s: f64,
+    /// Maximum clock sigma increase, meters.
+    pub clock_sigma_m: f64,
+    /// Maximum clock-rate sigma increase, meters per second.
+    pub clock_rate_sigma_m_s: f64,
+}
+
+impl From<Sp3AccuracyRoundingReport> for SidereonSp3AccuracyRoundingReport {
+    fn from(value: Sp3AccuracyRoundingReport) -> Self {
+        Self {
+            position_sigma_x_m: value.position_sigma_x_m,
+            position_sigma_y_m: value.position_sigma_y_m,
+            position_sigma_z_m: value.position_sigma_z_m,
+            velocity_sigma_x_m_s: value.velocity_sigma_x_m_s,
+            velocity_sigma_y_m_s: value.velocity_sigma_y_m_s,
+            velocity_sigma_z_m_s: value.velocity_sigma_z_m_s,
+            clock_sigma_m: value.clock_sigma_m,
+            clock_rate_sigma_m_s: value.clock_rate_sigma_m_s,
+        }
+    }
+}
+
 impl From<Sp3RoundingReport> for SidereonSp3RoundingReport {
     fn from(value: Sp3RoundingReport) -> Self {
         Self {
@@ -1023,6 +1068,8 @@ pub struct SidereonSp3WriteResult {
     pub(crate) text_value: String,
     /// Present only for a successful opt-in rounded write.
     pub(crate) rounding: Option<SidereonSp3RoundingReport>,
+    /// Present only for a successful opt-in accuracy-rounded write.
+    pub(crate) accuracy_rounding: Option<SidereonSp3AccuracyRoundingReport>,
 }
 
 fn exact_sp3_coverage_to_c(coverage: CoreExactSp3Coverage) -> SidereonExactSp3Coverage {
@@ -3372,6 +3419,45 @@ pub unsafe extern "C" fn sidereon_sp3_to_sp3_text_with_rounding_result(
     })
 }
 
+/// Write an SP3 product while conservatively quantizing its accuracy sigmas.
+/// The policy is required and must be a `SidereonSp3AccuracyRoundingPolicy`.
+/// Unknown values return `SIDEREON_STATUS_INVALID_ARGUMENT`; they never select
+/// a default policy. The result contains the ordinary record-value report and
+/// a separate accuracy-sigma report read with
+/// `sidereon_sp3_write_result_get_accuracy_rounding_report`.
+///
+/// Safety: the pointer requirements are identical to
+/// `sidereon_sp3_to_sp3_text_result`.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sp3_to_sp3_text_with_accuracy_rounding_result(
+    sp3: *const SidereonSp3,
+    policy: u32,
+    out_result: *mut *mut SidereonSp3WriteResult,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_sp3_to_sp3_text_with_accuracy_rounding_result";
+    sp3_operation_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let out_result = c_try!(require_out(out_result, FN_NAME, "out_result"));
+        *out_result = ptr::null_mut();
+        let sp3 = c_try!(require_ref(sp3, FN_NAME, "sp3"));
+        let policy = match policy {
+            value if value == SidereonSp3AccuracyRoundingPolicy::Conservative as u32 => {
+                Sp3AccuracyRoundingPolicy::Conservative
+            }
+            other => {
+                set_last_error(format!(
+                    "{FN_NAME}: unknown accuracy rounding policy {other}"
+                ));
+                return SidereonStatus::InvalidArgument;
+            }
+        };
+        write_boxed_handle(
+            out_result,
+            sp3_write_result_with_accuracy_rounding(FN_NAME, &sp3.inner, policy),
+        );
+        SidereonStatus::Ok
+    })
+}
+
 /// Release an owned SP3 write result. Passing NULL is a no-op.
 ///
 /// Safety: `result` may be NULL; otherwise it must be a live
@@ -3432,6 +3518,34 @@ pub unsafe extern "C" fn sidereon_sp3_write_result_get_rounding_report(
         *out_report = SidereonSp3RoundingReport::default();
         let result = c_try!(require_ref(result, FN_NAME, "result"));
         if let Some(report) = result.rounding {
+            *out_has_report = true;
+            *out_report = report;
+        }
+        SidereonStatus::Ok
+    })
+}
+
+/// Copy the accuracy-sigma report from a successful opt-in accuracy-rounded
+/// write result. For ordinary write results and refusals, `has_report` is
+/// false and `out_report` is zeroed. The legacy eight-value record report and
+/// its getter remain unchanged.
+///
+/// Safety: pointer requirements match
+/// `sidereon_sp3_write_result_get_rounding_report`.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sp3_write_result_get_accuracy_rounding_report(
+    result: *const SidereonSp3WriteResult,
+    out_has_report: *mut bool,
+    out_report: *mut SidereonSp3AccuracyRoundingReport,
+) -> SidereonStatus {
+    const FN_NAME: &str = "sidereon_sp3_write_result_get_accuracy_rounding_report";
+    ffi_boundary(FN_NAME, SidereonStatus::Panic, || {
+        let out_has_report = c_try!(require_out(out_has_report, FN_NAME, "out_has_report"));
+        let out_report = c_try!(require_out(out_report, FN_NAME, "out_report"));
+        *out_has_report = false;
+        *out_report = SidereonSp3AccuracyRoundingReport::default();
+        let result = c_try!(require_ref(result, FN_NAME, "result"));
+        if let Some(report) = result.accuracy_rounding {
             *out_has_report = true;
             *out_report = report;
         }
@@ -6636,23 +6750,49 @@ fn sp3_write_refusal(error: &Sp3WriteError) -> Sp3WriteRefusal {
 /// Write `sp3` and record the whole outcome: the text, or the typed refusal and
 /// its text parts. Nothing partial is kept from a refused write.
 fn sp3_write_result(fn_name: &str, sp3: &Sp3) -> SidereonSp3WriteResult {
-    sp3_write_result_from(fn_name, sp3.to_sp3_string().map(|text| (text, None)))
+    sp3_write_result_from(fn_name, sp3.to_sp3_string().map(|text| (text, None, None)))
 }
 
 fn sp3_write_result_with_rounding(fn_name: &str, sp3: &Sp3) -> SidereonSp3WriteResult {
     sp3_write_result_from(
         fn_name,
         sp3.to_sp3_string_with_rounding()
-            .map(|(text, report)| (text, Some(report.into()))),
+            .map(|(text, report)| (text, Some(report.into()), None)),
+    )
+}
+
+fn sp3_write_result_with_accuracy_rounding(
+    fn_name: &str,
+    sp3: &Sp3,
+    policy: Sp3AccuracyRoundingPolicy,
+) -> SidereonSp3WriteResult {
+    sp3_write_result_from(
+        fn_name,
+        sp3.to_sp3_string_with_accuracy_rounding(policy).map(
+            |(text, report): (String, Sp3DetailedRoundingReport)| {
+                (
+                    text,
+                    Some(report.record_values.into()),
+                    Some(report.accuracy_sigmas.into()),
+                )
+            },
+        ),
     )
 }
 
 fn sp3_write_result_from(
     fn_name: &str,
-    result: Result<(String, Option<SidereonSp3RoundingReport>), Sp3WriteError>,
+    result: Result<
+        (
+            String,
+            Option<SidereonSp3RoundingReport>,
+            Option<SidereonSp3AccuracyRoundingReport>,
+        ),
+        Sp3WriteError,
+    >,
 ) -> SidereonSp3WriteResult {
     match result {
-        Ok((text, rounding)) => SidereonSp3WriteResult {
+        Ok((text, rounding, accuracy_rounding)) => SidereonSp3WriteResult {
             outcome: SidereonSp3WriteOutcome {
                 is_ok: true,
                 status: SidereonStatus::Ok,
@@ -6663,6 +6803,7 @@ fn sp3_write_result_from(
             field: String::new(),
             text_value: String::new(),
             rounding,
+            accuracy_rounding,
         },
         Err(err) => {
             let mut refusal = sp3_write_refusal(&err);
@@ -6679,6 +6820,7 @@ fn sp3_write_result_from(
                 field: refusal.field.unwrap_or_default().to_owned(),
                 text_value: refusal.text_value.unwrap_or_default(),
                 rounding: None,
+                accuracy_rounding: None,
             }
         }
     }
