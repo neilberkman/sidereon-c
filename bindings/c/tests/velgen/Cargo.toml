@@ -21,5 +21,5 @@ publish = false
 [dependencies]
 # Exact Git candidate engine source; tests/run_generators.sh verifies its locked
 # provenance against tests/CORE_REVISION.
-sidereon-core = { git = "https://github.com/neilberkman/sidereon", rev = "ae9ce1a0f532c90fccb33cd6922b2188828ddb42" }
+sidereon-core = { git = "https://github.com/neilberkman/sidereon", rev = "7ff9b0afb6c799fd7321f2743973a9d826a9932b" }
 serde_json = "1"
