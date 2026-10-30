@@ -15,7 +15,7 @@ from pathlib import Path
 
 REGISTRY = "registry+https://github.com/rust-lang/crates.io-index"
 GIT_PREFIX = "git+https://github.com/neilberkman/sidereon?rev="
-VERSION = "3.0.5"
+VERSION = "3.0.6"
 GENERATORS = ("fbgen", "velgen", "rinexgen", "sppgen", "pingen", "rtkgen", "valgen")
 
 
