@@ -15,8 +15,7 @@ target_dir="$(cargo metadata --format-version 1 --quiet \
 lib_dir="${target_dir}/release"
 python3 "${here}/gen_sp3_terminal_record_fixture.py" \
     --output "${target_dir}/sp3_terminal_record_fixture.h"
-generated_header="$(mktemp "${TMPDIR:-/tmp}/sidereon-header.XXXXXX")"
-trap 'rm -f "${generated_header}"' EXIT
+generated_header="${lib_dir}/sidereon.generated.h"
 
 cbindgen --quiet --config cbindgen.toml --crate sidereon-c --output "${generated_header}"
 if ! cmp -s include/sidereon.h "${generated_header}"; then

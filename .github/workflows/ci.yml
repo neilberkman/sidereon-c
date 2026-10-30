@@ -166,6 +166,13 @@ jobs:
             target/release/libsidereon.a
             bindings/c/include/sidereon.h
           if-no-files-found: error
+      - name: Upload cbindgen output for header review
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sidereon-c-generated-header-${{ runner.os }}-${{ runner.arch }}
+          path: target/release/sidereon.generated.h
+          if-no-files-found: warn
       # Every golden the smoke tests compare against must match the generator
       # output from the revision bindings/c/tests/CORE_REVISION names.
       - name: Regenerated goldens match the committed ones
