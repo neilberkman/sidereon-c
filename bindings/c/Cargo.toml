@@ -18,16 +18,16 @@ crate-type = ["cdylib", "staticlib"]
 # The thin ergonomic engine surface this binding marshals to. No modeling logic
 # lives here: every solve delegates to a `sidereon` entry point, which in turn
 # delegates to `sidereon-core`. The numbers are exactly what the engine produces.
-# Exact Git candidate shared by the facade, core, and trust-region crate so
-# every binding uses one set of public engine types during release validation.
-sidereon = { version = "=3.0.5", git = "https://github.com/neilberkman/sidereon", rev = "7970b1a3332ceba70088b64b4849b12b6d2b4874" }
-sidereon-core = { version = "=3.0.5", features = ["mmap"], git = "https://github.com/neilberkman/sidereon", rev = "7970b1a3332ceba70088b64b4849b12b6d2b4874" }
+# Published 3.0.5 registry packages keep the facade, core, and trust-region
+# crate on one verified release source.
+sidereon = { version = "=3.0.5" }
+sidereon-core = { version = "=3.0.5", features = ["mmap"] }
 serde_json = "1"
 serde = "1"
 # The generic data-driven trust-region least-squares engine the headline TRLS
 # entry points marshal to. Not re-exported by the `sidereon` facade, so it is a
 # direct dependency.
-trust-region-least-squares = { version = "=0.11.0", git = "https://github.com/neilberkman/sidereon", rev = "7970b1a3332ceba70088b64b4849b12b6d2b4874" }
+trust-region-least-squares = { version = "=0.11.0" }
 # `nalgebra` (pinned to the core's version) builds the dense `DMatrix` the
 # covariance/Hessian-trace primitives take by reference; this binding owns no
 # modeling math, it only marshals the caller's row-major buffer into the matrix

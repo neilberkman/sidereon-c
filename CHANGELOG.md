@@ -7,7 +7,7 @@
 ### Changed
 
 - Coordinate with sidereon-core 3.0.5 at
-  `7970b1a3332ceba70088b64b4849b12b6d2b4874`. This update includes stable
+  `da59d0eba8e273cc37821eac5535662e5d991126`. This update includes stable
   normalization for quaternions with large finite components and enforces the open `(0, 1)`
   domain for estimation NIS confidence and CA-CFAR false-alarm probabilities,
   including rejection of positive and negative zero.
