@@ -107,7 +107,9 @@ static int check_report_delta(const SidereonSp3WriteResult *result, const Sidere
         source_sigma = before.p.clock_sigma_m.value;
         output_sigma = after.p.clock_sigma_m.value;
     }
-    ok = ok && fabs(reported_delta - (output_sigma - source_sigma)) <= 1e-15;
+    double expected_delta = output_sigma - source_sigma;
+    double tolerance = fmax(fabs(expected_delta) * 1e-12, 1e-300);
+    ok = ok && fabs(reported_delta - expected_delta) <= tolerance;
     sidereon_sp3_free(reparsed);
     return ok;
 }
@@ -412,8 +414,6 @@ int main(int argc, char **argv) {
     if (sidereon_sp3_load(a_bytes, a_len, &a) != SIDEREON_STATUS_OK ||
         sidereon_sp3_load(b_bytes, b_len, &b) != SIDEREON_STATUS_OK)
         return fail("parse source fixtures", 3);
-    free(a_bytes);
-    free(b_bytes);
     if (!check_strict_source(a) || !check_strict_source(b))
         return fail("accuracy source strict writer", 32);
     if (!check_direct_rounding(b))
@@ -422,6 +422,8 @@ int main(int argc, char **argv) {
         check_exponent_boundaries(a_bytes, a_len, b_bytes, b_len) != 0 ||
         check_sentinel_and_invalid_base(a_bytes, a_len, b_bytes, b_len) != 0)
         return 34;
+    free(a_bytes);
+    free(b_bytes);
 
     SidereonSp3MergeOptions options;
     if (sidereon_sp3_merge_options_init(&options) != SIDEREON_STATUS_OK)
