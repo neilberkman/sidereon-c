@@ -76,8 +76,8 @@
 
 #define SIDEREON_VERSION_MAJOR 3
 #define SIDEREON_VERSION_MINOR 0
-#define SIDEREON_VERSION_PATCH 4
-#define SIDEREON_VERSION_STRING "3.0.4"
+#define SIDEREON_VERSION_PATCH 5
+#define SIDEREON_VERSION_STRING "3.0.5"
 
 #define ANALYSIS_CENTER_C_BYTES 32
 
@@ -26353,6 +26353,18 @@ typedef struct SidereonSp3WriteOutcome {
     struct SidereonSp3WriteError error;
 } SidereonSp3WriteOutcome;
 
+/** Maximum absolute changes made while quantizing SP3 record values. */
+typedef struct SidereonSp3RoundingReport {
+    double position_x_m;
+    double position_y_m;
+    double position_z_m;
+    double velocity_x_m_s;
+    double velocity_y_m_s;
+    double velocity_z_m_s;
+    double clock_s;
+    double clock_rate_s_s;
+} SidereonSp3RoundingReport;
+
 typedef struct SidereonSpaceWeatherPolicy {
     bool allow_interpolated;
     /**
@@ -48680,6 +48692,11 @@ enum SidereonStatus sidereon_sp3_to_sp3_text(const struct SidereonSp3 *sp3,
 enum SidereonStatus sidereon_sp3_to_sp3_text_result(const struct SidereonSp3 *sp3,
                                                     struct SidereonSp3WriteResult **out_result);
 
+/** Write a quantized copy, keeping a typed outcome and a report on success. */
+enum SidereonStatus sidereon_sp3_to_sp3_text_with_rounding_result(
+    const struct SidereonSp3 *sp3,
+    struct SidereonSp3WriteResult **out_result);
+
 /**
  * Validate an already parsed SP3 product against an exact request.
  *
@@ -48742,6 +48759,12 @@ enum SidereonStatus sidereon_sp3_write_result_get_message(const struct SidereonS
  */
 enum SidereonStatus sidereon_sp3_write_result_get_outcome(const struct SidereonSp3WriteResult *result,
                                                           struct SidereonSp3WriteOutcome *out_outcome);
+
+/** Copy the rounding report; has_report is false for ordinary or refused writes. */
+enum SidereonStatus sidereon_sp3_write_result_get_rounding_report(
+    const struct SidereonSp3WriteResult *result,
+    bool *out_has_report,
+    struct SidereonSp3RoundingReport *out_report);
 
 /**
  * Copy the SP3 text of an owned write result. Uses the variable-length output

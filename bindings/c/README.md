@@ -235,7 +235,7 @@ the caller releases:
 
 | Writer | Result route | Result type, release |
 | --- | --- | --- |
-| SP3 | `sidereon_sp3_to_sp3_text_result` | `SidereonSp3WriteResult`, `sidereon_sp3_write_result_free` |
+| SP3 | `sidereon_sp3_to_sp3_text_result`, `sidereon_sp3_to_sp3_text_with_rounding_result` | `SidereonSp3WriteResult`, `sidereon_sp3_write_result_free` |
 | RINEX observation | `sidereon_rinex_obs_to_rinex_text_result` | `SidereonRinexObsWriteResult`, `sidereon_rinex_obs_write_result_free` |
 | ANTEX | `sidereon_antex_encode_result` | `SidereonAntexResult`, `sidereon_antex_result_free` |
 | RINEX clock | `sidereon_rinex_clock_to_text_result` | `SidereonRinexClockResult`, `sidereon_rinex_clock_result_free` |
@@ -248,6 +248,14 @@ typed error. `SidereonSp3WriteError` names every `Sp3WriteError` variant through
 columns, decimals, counts, time scales and numbers, each behind a present flag
 with NaN for an absent number; the field name and the text value are copied
 with `sidereon_sp3_write_result_get_field` and `_get_text_value`.
+`sidereon_sp3_to_sp3_text_with_rounding_result` is the opt-in counterpart. It
+quantizes a copy of the product to SP3 record columns and returns the same
+typed write outcome. On success,
+`sidereon_sp3_write_result_get_rounding_report` provides the maximum absolute
+change per position, velocity, clock, and clock-rate component in SI units;
+the input handle is unchanged. A refused rounded write retains its typed error
+and has no rounding report. The committed public header is updated alongside
+the Rust ABI source; CI's cbindgen comparison remains the generator check.
 `SidereonRinexObsWriteError` does the same for `RinexObsWriteError`, with the
 observation code and the detail text (the unreadable event record, the
 `LEAP SECONDS` time system, or the field that would read back changed) copied

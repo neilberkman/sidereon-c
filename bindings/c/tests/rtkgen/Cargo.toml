@@ -21,6 +21,6 @@ publish = false
 [workspace]
 
 [dependencies]
-# Exact registry engine release; tests/run_generators.sh verifies its locked
+# Exact Git candidate engine source; tests/run_generators.sh verifies its locked
 # provenance against tests/CORE_REVISION.
-sidereon-core = "=3.0.4"
+sidereon-core = { version = "=3.0.5", git = "https://github.com/neilberkman/sidereon", rev = "7970b1a3332ceba70088b64b4849b12b6d2b4874" }
