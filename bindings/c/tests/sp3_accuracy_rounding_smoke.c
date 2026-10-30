@@ -130,7 +130,9 @@ static int check_basis_matrix(const uint8_t *a_bytes, size_t a_len,
                               const uint8_t *b_bytes, size_t b_len) {
     char *a_text = copy_text(a_bytes, a_len), *b_text = copy_text(b_bytes, b_len);
     if (a_text == NULL || b_text == NULL) return fail("copy basis fixtures", 40);
-    if (!replace_fixed(b_text, "1.2500000  1.025000000", "2.0000000  2.000000000"))
+    if (!replace_fixed(b_text, "1.2500000  1.025000000", "4.0000000  4.000000000") ||
+        !set_record_codes(a_text, "PG01", 2, 2, 2, 2) ||
+        !set_record_codes(b_text, "PG12", 1, 1, 1, 1))
         return fail("make compatible bases", 41);
     SidereonSp3 *a = load_text(a_text), *b = load_text(b_text), *merged = NULL;
     if (a == NULL || b == NULL || !merge_two(a, b, &merged) || !check_strict_source(merged))
