@@ -142,6 +142,18 @@ cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
 
 cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -I"${binding_root}/include" \
+    "${here}/sp3_accuracy_rounding_smoke.c" \
+    -L"${lib_dir}" \
+    -lsidereon \
+    -Wl,-rpath,"${lib_dir}" \
+    -lm \
+    -o "${target_dir}/sp3_accuracy_rounding_smoke_ci"
+"${target_dir}/sp3_accuracy_rounding_smoke_ci" \
+    "${here}/fixtures/sp3_accuracy_306/A.sp3" \
+    "${here}/fixtures/sp3_accuracy_306/B.sp3"
+
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
+    -I"${binding_root}/include" \
     "${here}/rinex_qc_interval_smoke.c" \
     -L"${lib_dir}" \
     -lsidereon \

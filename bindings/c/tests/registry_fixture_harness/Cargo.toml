@@ -7,7 +7,7 @@ publish = false
 [workspace]
 
 [dependencies]
-sidereon-core = "=3.0.5"
+sidereon-core = { git = "https://github.com/neilberkman/sidereon", rev = "1b66c9431b02084f39aa5ac010cd41c0cae988cd" }
 serde_json = "1"
 nalgebra = "=0.33.3"
 libm = "0.2"
