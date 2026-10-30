@@ -25660,7 +25660,7 @@ typedef struct SidereonSp3DroppedInputEpoch {
 
 /**
  * Per-epoch aggregate of the merge agreement metric: how tightly the consensus
- * sources clustered about the combined value written to the merged product,
+ * sources clustered about the combined value before final column rounding,
  * pooled over the multi-source satellites at one output epoch. Mirrors
  * sidereon_core::ephemeris::EpochAgreement. Copied with
  * sidereon_sp3_merge_report_epoch_agreement; the entries are in output-epoch
