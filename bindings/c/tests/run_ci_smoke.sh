@@ -26,6 +26,13 @@ fi
 
 cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -I"${binding_root}/include" \
+    "${here}/tdm_parity_smoke.c" \
+    -L"${lib_dir}" -lsidereon -Wl,-rpath,"${lib_dir}" -lm \
+    -o "${target_dir}/tdm_parity_smoke_ci"
+"${target_dir}/tdm_parity_smoke_ci" "${here}/fixtures/tdm/annex_e_18.kvn"
+
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
+    -I"${binding_root}/include" \
     "${here}/rinex_obs_complete_smoke.c" \
     -L"${lib_dir}" \
     -lsidereon \

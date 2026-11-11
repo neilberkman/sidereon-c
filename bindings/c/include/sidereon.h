@@ -220,6 +220,16 @@
 #define SIDEREON_SP3_TIME_SYSTEM_C_BYTES 4
 
 /**
+ * Accept and report a TDM departure.
+ */
+#define SIDEREON_TDM_LENIENCY_FORGIVE 1
+
+/**
+ * Refuse a TDM departure.
+ */
+#define SIDEREON_TDM_LENIENCY_STRICT 0
+
+/**
  * Bytes of a terrain field name or short field text and its terminator.
  */
 #define SIDEREON_TERRAIN_ERROR_FIELD_C_BYTES 32
@@ -7773,6 +7783,16 @@ typedef struct SidereonStaticReferenceStationSolution SidereonStaticReferenceSta
  * with sidereon_tdm_free.
  */
 typedef struct SidereonTdm SidereonTdm;
+
+/**
+ * Owned departures returned by policy-aware writing or validation.
+ */
+typedef struct SidereonTdmDepartures SidereonTdmDepartures;
+
+/**
+ * Owned warnings returned by policy-aware parsing.
+ */
+typedef struct SidereonTdmWarnings SidereonTdmWarnings;
 
 /**
  * A standalone regular-grid vertical-TEC source.
@@ -27283,6 +27303,117 @@ typedef struct SidereonSurfacePoint {
 } SidereonSurfacePoint;
 
 /**
+ * Borrowed UTF-8 input text. A NULL pointer is valid only when len is zero.
+ */
+typedef struct SidereonTdmText {
+    const uint8_t *data;
+    size_t len;
+} SidereonTdmText;
+
+/**
+ * Ordered key/value field input. Mutation functions read only these fields.
+ */
+typedef struct SidereonTdmFieldInput {
+    struct SidereonTdmText key;
+    struct SidereonTdmText value;
+} SidereonTdmFieldInput;
+
+/**
+ * Positioned comment input. Mutation functions read only these fields.
+ */
+typedef struct SidereonTdmCommentInput {
+    struct SidereonTdmText text;
+    size_t before_record;
+} SidereonTdmCommentInput;
+
+/**
+ * Lossless input for constructing or inserting a TDM data record.
+ */
+typedef struct SidereonTdmDataRecordInput {
+    uint32_t observable;
+    bool has_observable_participant;
+    uint8_t observable_participant;
+    struct SidereonTdmText observable_name;
+    uint32_t unit;
+    struct SidereonTdmText unit_label;
+    struct SidereonTdmText keyword;
+    struct SidereonTdmText epoch;
+    struct SidereonTdmText value_text;
+    double value;
+} SidereonTdmDataRecordInput;
+
+/**
+ * Policy for encoding or validating a TDM.
+ */
+typedef struct SidereonTdmWritePolicy {
+    uint32_t non_printable;
+    uint32_t missing_keywords;
+    uint32_t long_lines;
+    uint32_t empty_data_sections;
+    uint32_t record_order;
+    uint32_t duplicate_records;
+    uint32_t keyword_order;
+    uint32_t final_terminator;
+    uint32_t repeated_keywords;
+} SidereonTdmWritePolicy;
+
+/**
+ * Positioned TDM comment summary. Read its lossless text by row index.
+ */
+typedef struct SidereonTdmComment {
+    size_t segment_index;
+    /**
+     * 0 header, 1 metadata, 2 data.
+     */
+    uint32_t section;
+    size_t before_record;
+    size_t text_len;
+} SidereonTdmComment;
+
+/**
+ * Raw ordered TDM field summary. Read its lossless key/value by row index.
+ */
+typedef struct SidereonTdmField {
+    size_t segment_index;
+    /**
+     * 0 header, 1 metadata.
+     */
+    uint32_t section;
+    size_t key_len;
+    size_t value_len;
+} SidereonTdmField;
+
+/**
+ * Complete TDM header summary. Read scalar text with sidereon_tdm_header_text.
+ */
+typedef struct SidereonTdmHeader {
+    size_t version_len;
+    bool has_creation_date;
+    size_t creation_date_len;
+    bool has_originator;
+    size_t originator_len;
+    bool has_message_id;
+    size_t message_id_len;
+    size_t comment_count;
+    size_t field_count;
+    size_t segment_count;
+} SidereonTdmHeader;
+
+/**
+ * Policy for parsing TDM KVN.
+ */
+typedef struct SidereonTdmPolicy {
+    uint32_t non_printable;
+    uint32_t missing_keywords;
+    uint32_t long_lines;
+    uint32_t empty_data_sections;
+    uint32_t record_order;
+    uint32_t duplicate_records;
+    uint32_t keyword_order;
+    uint32_t final_terminator;
+} SidereonTdmPolicy;
+
+/**
  * One TDM participant metadata entry.
  */
 typedef struct SidereonTdmParticipant {
@@ -27423,6 +27554,24 @@ typedef struct SidereonTdmSegmentSummary {
      */
     size_t record_count;
 } SidereonTdmSegmentSummary;
+
+/**
+ * Optional borrowed UTF-8 input text.
+ */
+typedef struct SidereonTdmOptionalText {
+    bool has_value;
+    struct SidereonTdmText value;
+} SidereonTdmOptionalText;
+
+/**
+ * Lossless scalar header input.
+ */
+typedef struct SidereonTdmHeaderInput {
+    struct SidereonTdmText version;
+    struct SidereonTdmOptionalText creation_date;
+    struct SidereonTdmOptionalText originator;
+    struct SidereonTdmOptionalText message_id;
+} SidereonTdmHeaderInput;
 
 /**
  * Typed detail of a standalone TEC-grid failure.
@@ -50419,11 +50568,120 @@ enum SidereonStatus sidereon_tca_collision_probability(const struct SidereonTcaC
 enum SidereonStatus sidereon_tca_finder_options_init(struct SidereonTcaFinderOptions *out_options);
 
 /**
+ * Append a segment from raw metadata fields, positioned metadata/data comments,
+ * and data records. Core validation is atomic and uses the supplied policy.
+ */
+enum SidereonStatus sidereon_tdm_append_segment(struct SidereonTdm *tdm,
+                                                const struct SidereonTdmFieldInput *fields,
+                                                size_t field_count,
+                                                const struct SidereonTdmCommentInput *metadata_comments,
+                                                size_t metadata_comment_count,
+                                                const struct SidereonTdmCommentInput *data_comments,
+                                                size_t data_comment_count,
+                                                const struct SidereonTdmDataRecordInput *records,
+                                                size_t record_count,
+                                                struct SidereonTdmWritePolicy policy,
+                                                struct SidereonTdmDepartures **out_departures);
+
+/**
+ * Copy the lossless text of a row returned by sidereon_tdm_comments.
+ */
+enum SidereonStatus sidereon_tdm_comment_text(const struct SidereonTdm *tdm,
+                                              size_t row_index,
+                                              uint8_t *out,
+                                              size_t len,
+                                              size_t *out_written,
+                                              size_t *out_required);
+
+/**
+ * Copy all positioned comments (header, metadata, then data).
+ */
+enum SidereonStatus sidereon_tdm_comments(const struct SidereonTdm *tdm,
+                                          struct SidereonTdmComment *out,
+                                          size_t len,
+                                          size_t *out_written,
+                                          size_t *out_required);
+
+/**
+ * Construct an empty mutable TDM with the supplied version. Segments may be
+ * appended before encoding; strict encoding refuses an incomplete message.
+ */
+enum SidereonStatus sidereon_tdm_create(const uint8_t *version,
+                                        size_t version_len,
+                                        struct SidereonTdm **out_tdm);
+
+/**
+ * Copy one departure as UTF-8 JSON containing its kind, typed fields, and message.
+ */
+enum SidereonStatus sidereon_tdm_departure_detail(const struct SidereonTdmDepartures *departures,
+                                                  size_t index,
+                                                  uint8_t *out,
+                                                  size_t len,
+                                                  size_t *out_written,
+                                                  size_t *out_required);
+
+/**
+ * Number of retained write/validation departures.
+ */
+enum SidereonStatus sidereon_tdm_departures_count(const struct SidereonTdmDepartures *departures,
+                                                  size_t *out_count);
+
+/**
+ * Release a departure list. NULL is allowed.
+ */
+void sidereon_tdm_departures_free(struct SidereonTdmDepartures *departures);
+
+/**
+ * Copy a lossless key or value from a row returned by sidereon_tdm_fields.
+ * part 0 selects the key and part 1 selects the value.
+ */
+enum SidereonStatus sidereon_tdm_field_text(const struct SidereonTdm *tdm,
+                                            size_t row_index,
+                                            uint32_t part,
+                                            uint8_t *out,
+                                            size_t len,
+                                            size_t *out_written,
+                                            size_t *out_required);
+
+/**
+ * Copy all raw fields (header, then each metadata block).
+ */
+enum SidereonStatus sidereon_tdm_fields(const struct SidereonTdm *tdm,
+                                        struct SidereonTdmField *out,
+                                        size_t len,
+                                        size_t *out_written,
+                                        size_t *out_required);
+
+/**
  * Release a TDM handle. Passing NULL is a no-op.
  *
  * Safety: tdm must be NULL or a live handle from sidereon_tdm_parse_kvn.
  */
 void sidereon_tdm_free(struct SidereonTdm *tdm);
+
+/**
+ * Read the complete header summary.
+ */
+enum SidereonStatus sidereon_tdm_header(const struct SidereonTdm *tdm,
+                                        struct SidereonTdmHeader *out_header);
+
+/**
+ * Copy one scalar header text: 0 version, 1 creation date, 2 originator, 3 message ID.
+ */
+enum SidereonStatus sidereon_tdm_header_text(const struct SidereonTdm *tdm,
+                                             uint32_t field,
+                                             uint8_t *out,
+                                             size_t len,
+                                             size_t *out_written,
+                                             size_t *out_required);
+
+/**
+ * Insert a data record in one segment.
+ */
+enum SidereonStatus sidereon_tdm_insert_record(struct SidereonTdm *tdm,
+                                               size_t segment_index,
+                                               size_t record_index,
+                                               struct SidereonTdmDataRecordInput record);
 
 /**
  * Parse a CCSDS TDM in KVN form. On success writes a newly owned handle to
@@ -50435,6 +50693,16 @@ void sidereon_tdm_free(struct SidereonTdm *tdm);
 enum SidereonStatus sidereon_tdm_parse_kvn(const uint8_t *data,
                                            size_t len,
                                            struct SidereonTdm **out_tdm);
+
+/**
+ * Parse KVN under an explicit policy and return an owned warning list.
+ * Both output handles are initialized to NULL on failure.
+ */
+enum SidereonStatus sidereon_tdm_parse_kvn_with_policy(const uint8_t *data,
+                                                       size_t len,
+                                                       struct SidereonTdmPolicy policy,
+                                                       struct SidereonTdm **out_tdm,
+                                                       struct SidereonTdmWarnings **out_warnings);
 
 /**
  * Copy parsed TDM participant entries across all segments.
@@ -50461,11 +50729,38 @@ enum SidereonStatus sidereon_tdm_paths(const struct SidereonTdm *tdm,
                                        size_t *out_required);
 
 /**
+ * Return the default read policy.
+ */
+struct SidereonTdmPolicy sidereon_tdm_policy_default(void);
+
+/**
+ * Return the fully lenient read policy.
+ */
+struct SidereonTdmPolicy sidereon_tdm_policy_lenient(void);
+
+/**
+ * Return the strict/default read policy.
+ */
+struct SidereonTdmPolicy sidereon_tdm_policy_strict(void);
+
+/**
  * Write the total number of TDM data records to *out_count.
  *
  * Safety: tdm must be live; out_count must point to size_t storage.
  */
 enum SidereonStatus sidereon_tdm_record_count(const struct SidereonTdm *tdm, size_t *out_count);
+
+/**
+ * Copy lossless text for a flattened record row. Parts: 0 keyword, 1 epoch,
+ * 2 exact value token, 3 Other observable name, 4 canonical unit label.
+ */
+enum SidereonStatus sidereon_tdm_record_text(const struct SidereonTdm *tdm,
+                                             size_t row_index,
+                                             uint32_t part,
+                                             uint8_t *out,
+                                             size_t len,
+                                             size_t *out_written,
+                                             size_t *out_required);
 
 /**
  * Copy flattened TDM data records across all segments.
@@ -50478,6 +50773,49 @@ enum SidereonStatus sidereon_tdm_records(const struct SidereonTdm *tdm,
                                          size_t len,
                                          size_t *out_written,
                                          size_t *out_required);
+
+/**
+ * Remove a data record from one segment.
+ */
+enum SidereonStatus sidereon_tdm_remove_record(struct SidereonTdm *tdm,
+                                               size_t segment_index,
+                                               size_t record_index);
+
+/**
+ * Remove a complete segment.
+ */
+enum SidereonStatus sidereon_tdm_remove_segment(struct SidereonTdm *tdm, size_t segment_index);
+
+/**
+ * Atomically replace a segment's data comments and records.
+ */
+enum SidereonStatus sidereon_tdm_replace_data(struct SidereonTdm *tdm,
+                                              size_t segment_index,
+                                              const struct SidereonTdmCommentInput *comments,
+                                              size_t comment_count,
+                                              const struct SidereonTdmDataRecordInput *records,
+                                              size_t record_count);
+
+/**
+ * Replace header comments and raw header fields. Scalar header values and segments are retained.
+ */
+enum SidereonStatus sidereon_tdm_replace_header_raw(struct SidereonTdm *tdm,
+                                                    const struct SidereonTdmCommentInput *comments,
+                                                    size_t comment_count,
+                                                    const struct SidereonTdmFieldInput *fields,
+                                                    size_t field_count);
+
+/**
+ * Atomically replace one segment's raw metadata and return validation departures.
+ */
+enum SidereonStatus sidereon_tdm_replace_metadata(struct SidereonTdm *tdm,
+                                                  size_t segment_index,
+                                                  const struct SidereonTdmFieldInput *fields,
+                                                  size_t field_count,
+                                                  const struct SidereonTdmCommentInput *comments,
+                                                  size_t comment_count,
+                                                  struct SidereonTdmWritePolicy policy,
+                                                  struct SidereonTdmDepartures **out_departures);
 
 /**
  * Write the number of TDM segments to *out_count.
@@ -50499,6 +50837,12 @@ enum SidereonStatus sidereon_tdm_segments(const struct SidereonTdm *tdm,
                                           size_t *out_required);
 
 /**
+ * Atomically replace scalar header values. Comments, fields, and segments are retained.
+ */
+enum SidereonStatus sidereon_tdm_set_header(struct SidereonTdm *tdm,
+                                            struct SidereonTdmHeaderInput header);
+
+/**
  * Serialize a TDM to KVN text. The output is not null-terminated.
  *
  * Safety: tdm must be a live handle; out must point to len writable bytes or
@@ -50510,6 +50854,60 @@ enum SidereonStatus sidereon_tdm_to_kvn(const struct SidereonTdm *tdm,
                                         size_t len,
                                         size_t *out_written,
                                         size_t *out_required);
+
+/**
+ * Encode KVN under an explicit write policy and return owned departures.
+ * The output text is not null-terminated and follows the two-call buffer contract.
+ */
+enum SidereonStatus sidereon_tdm_to_kvn_with_policy(const struct SidereonTdm *tdm,
+                                                    struct SidereonTdmWritePolicy policy,
+                                                    uint8_t *out,
+                                                    size_t len,
+                                                    size_t *out_written,
+                                                    size_t *out_required,
+                                                    struct SidereonTdmDepartures **out_departures);
+
+/**
+ * Copy one warning as UTF-8 JSON containing its kind, typed fields, and message.
+ */
+enum SidereonStatus sidereon_tdm_warning_detail(const struct SidereonTdmWarnings *warnings,
+                                                size_t index,
+                                                uint8_t *out,
+                                                size_t len,
+                                                size_t *out_written,
+                                                size_t *out_required);
+
+/**
+ * Number of retained parse warnings.
+ */
+enum SidereonStatus sidereon_tdm_warnings_count(const struct SidereonTdmWarnings *warnings,
+                                                size_t *out_count);
+
+/**
+ * Release a warning list. NULL is allowed.
+ */
+void sidereon_tdm_warnings_free(struct SidereonTdmWarnings *warnings);
+
+/**
+ * Convert a write policy to its matching read policy.
+ */
+enum SidereonStatus sidereon_tdm_write_policy_as_read(struct SidereonTdmWritePolicy policy,
+                                                      struct SidereonTdmPolicy *out_policy);
+
+/**
+ * Return the default write policy.
+ */
+struct SidereonTdmWritePolicy sidereon_tdm_write_policy_default(void);
+
+/**
+ * Return the fully lenient write policy.
+ */
+struct SidereonTdmWritePolicy sidereon_tdm_write_policy_lenient(void);
+
+/**
+ * Return the strict/default write policy.
+ */
+struct SidereonTdmWritePolicy sidereon_tdm_write_policy_strict(void);
 
 /**
  * Write the axis lengths and the flat value count of a standalone TecGrid.

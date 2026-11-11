@@ -522,6 +522,15 @@ echo "== running wave2_smoke program =="
 "${wave2_out}" "${geodtest_one_path}" "${egm2008_crop_path}" "${tdm_annex_path}" \
     "${prior_sp3_path}"
 
+echo "== compiling TDM parity smoke program =="
+tdm_parity_out="${target_dir}/tdm_parity_smoke"
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
+    -I"${binding_root}/include" \
+    "${here}/tdm_parity_smoke.c" \
+    -L"${lib_dir}" -lsidereon -Wl,-rpath,"${lib_dir}" -lm \
+    -o "${tdm_parity_out}"
+"${tdm_parity_out}" "${tdm_annex_path}"
+
 # 0.12 core capabilities: Allan-family clock stability, terrain batch lookup,
 # IONEX sample construction/extraction, SBAS decoded payload accessors, ARAIM,
 # and coordinate angular separation / position angle. Uses the IONEX binding
