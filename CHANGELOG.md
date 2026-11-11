@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Added
+
+- Bring the CCSDS TDM C API to mutable, policy-aware parity: strict and lenient
+  read/write policies, typed warning and departure lists, complete raw fields and
+  positioned comments, header access, message/segment construction, atomic
+  metadata replacement, data mutation, and parse/write/validation error classes.
+
 ## 3.0.6 - 2026-10-30
 
 ### Added

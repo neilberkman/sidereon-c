@@ -94,6 +94,34 @@ notes.
 
 ## Public parity routes
 
+### CCSDS TDM
+
+`sidereon_tdm_parse_kvn` and `sidereon_tdm_to_kvn` remain the strict convenience
+routes. `sidereon_tdm_parse_kvn_with_policy` returns the parsed handle and an
+owned `SidereonTdmWarnings`; `sidereon_tdm_to_kvn_with_policy` returns text and
+an owned `SidereonTdmDepartures`. Start from
+`sidereon_tdm_policy_strict`/`_lenient` or the corresponding write-policy
+presets (including `_default`) and change individual validated `uint32_t`
+fields using `SIDEREON_TDM_LENIENCY_STRICT` or `_FORGIVE`. Warning and departure detail is
+lossless UTF-8 JSON copied with the normal two-call buffer convention.
+
+Parsed messages expose their header, every raw header/metadata field, positioned
+header/metadata/data comment, participant, path, and data record. New text is
+never stored in fixed arrays: mutation inputs use `SidereonTdmText` pointer/length
+views, while header, comment, field and record text accessors use the two-call
+buffer convention. This includes unknown unit and observable labels. The legacy
+`SidereonTdmDataRecord` layout is unchanged.
+`sidereon_tdm_create`, `sidereon_tdm_append_segment`, raw header replacement,
+atomic policy-aware metadata replacement, whole data-section replacement, and
+record insertion/removal provide the mutable surface. Record removal returns
+only status; read any record and its lossless text before removing it. All parsing, formatting,
+and metadata validation is delegated to the engine. Release TDM, warning, and
+departure handles with their matching `_free` functions.
+
+TDM failures use `SIDEREON_ENGINE_ERROR_FAMILY_TDM`. The Schema 1 error node
+includes `operation_class` with `parse`, `write`, or `validation`, corresponding
+to the distinct failure contexts exposed by higher-level bindings.
+
 The generated header exposes the fixed-value and policy helpers directly:
 `sidereon_covariance6_*` covers construction, validation, unit conversion, PSD
 interpolation, and ECI/RTN transforms; `sidereon_second_of_day`,
