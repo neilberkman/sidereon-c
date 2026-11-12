@@ -50632,6 +50632,16 @@ enum SidereonStatus sidereon_tdm_departures_count(const struct SidereonTdmDepart
 void sidereon_tdm_departures_free(struct SidereonTdmDepartures *departures);
 
 /**
+ * Compare two complete TDM values using the engine's value equality.
+ *
+ * Safety: a and b must be live handles and out_equal must point to writable
+ * bool storage that does not overlap either handle.
+ */
+enum SidereonStatus sidereon_tdm_equal(const struct SidereonTdm *a,
+                                       const struct SidereonTdm *b,
+                                       bool *out_equal);
+
+/**
  * Copy a lossless key or value from a row returned by sidereon_tdm_fields.
  * part 0 selects the key and part 1 selects the value.
  */

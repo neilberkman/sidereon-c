@@ -2126,6 +2126,40 @@ pub unsafe extern "C" fn sidereon_tdm_record_text(
     })
 }
 
+/// Compare two complete TDM values using the engine's value equality.
+///
+/// Safety: a and b must be live handles and out_equal must point to writable
+/// bool storage that does not overlap either handle.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_tdm_equal(
+    a: *const SidereonTdm,
+    b: *const SidereonTdm,
+    out_equal: *mut bool,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_tdm_equal", SidereonStatus::Panic, || {
+        c_try!(reject_output_overlaps_handle(
+            "sidereon_tdm_equal",
+            out_equal,
+            "out_equal",
+            a,
+            "a"
+        ));
+        c_try!(reject_output_overlaps_handle(
+            "sidereon_tdm_equal",
+            out_equal,
+            "out_equal",
+            b,
+            "b"
+        ));
+        let out = c_try!(require_out(out_equal, "sidereon_tdm_equal", "out_equal"));
+        *out = false;
+        let a = c_try!(require_ref(a, "sidereon_tdm_equal", "a"));
+        let b = c_try!(require_ref(b, "sidereon_tdm_equal", "b"));
+        *out = a.inner == b.inner;
+        SidereonStatus::Ok
+    })
+}
+
 /// Release a TDM handle. Passing NULL is a no-op.
 ///
 /// Safety: tdm must be NULL or a live handle from sidereon_tdm_parse_kvn.
@@ -3593,5 +3627,44 @@ mod tests {
                 .unwrap(),
             TdmWritePolicy::lenient()
         );
+    }
+
+    #[test]
+    fn complete_tdm_value_equality_handles_edits_and_nulls() {
+        unsafe {
+            let mut a = ptr::null_mut();
+            let mut b = ptr::null_mut();
+            assert_eq!(
+                sidereon_tdm_parse_kvn(TDM_KVN_FIXTURE.as_ptr(), TDM_KVN_FIXTURE.len(), &mut a),
+                SidereonStatus::Ok
+            );
+            assert_eq!(
+                sidereon_tdm_parse_kvn(TDM_KVN_FIXTURE.as_ptr(), TDM_KVN_FIXTURE.len(), &mut b),
+                SidereonStatus::Ok
+            );
+
+            let mut equal = false;
+            assert_eq!(sidereon_tdm_equal(a, b, &mut equal), SidereonStatus::Ok);
+            assert!(equal);
+
+            assert_eq!(sidereon_tdm_remove_record(b, 0, 0), SidereonStatus::Ok);
+            assert_eq!(sidereon_tdm_equal(a, b, &mut equal), SidereonStatus::Ok);
+            assert!(!equal);
+
+            equal = true;
+            assert_eq!(
+                sidereon_tdm_equal(ptr::null(), b, &mut equal),
+                SidereonStatus::NullPointer
+            );
+            assert!(!equal);
+
+            assert_eq!(
+                sidereon_tdm_equal(a, b, a.cast()),
+                SidereonStatus::InvalidArgument
+            );
+
+            sidereon_tdm_free(a);
+            sidereon_tdm_free(b);
+        }
     }
 }

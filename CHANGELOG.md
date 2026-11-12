@@ -8,6 +8,7 @@
   read/write policies, typed warning and departure lists, complete raw fields and
   positioned comments, header access, message/segment construction, atomic
   metadata replacement, data mutation, and parse/write/validation error classes.
+- Add complete value equality for opaque CCSDS TDM handles.
 
 ## 3.0.6 - 2026-10-30
 
