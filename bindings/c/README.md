@@ -1259,6 +1259,61 @@ typedef struct {
 
 ## Precise-positioning velocity
 
+## Total electron content
+
+The precise-positioning TEC API exposes the core dual-frequency code and phase
+geometry-free combinations, slant and vertical TEC conversion, phase-code arc
+leveling, thin-shell mapping, ionospheric pierce points, and ordered multi-epoch
+estimation. `SidereonTecLevelingResult` and `SidereonTecEstimate` are owned
+handles with value-equality functions and matching `_free` functions. Variable
+length identifiers and arrays use the binding's size-query contract and are not
+truncated. Refusals retain a complete `SIDEREON_ENGINE_ERROR_FAMILY_TEC` JSON
+detail record.
+
+## Precise-positioning RAIM
+
+The snapshot PPP integrity API exposes core RAIM configuration defaults, global
+tests with and without geometry, per-satellite standardized residuals,
+protection levels, and the one-epoch solve/FDE drivers. Results and
+identification records use owned handles with core-backed equality and matching
+free functions. Satellite and ambiguity identifiers use lossless UTF-8 input
+and size-query output contracts. RAIM, nested DOP, float-solve, and FDE
+refusals retain their complete causes under
+`SIDEREON_ENGINE_ERROR_FAMILY_PPP_RAIM`.
+
+## Precise-positioning cycle-slip detection
+
+The dual-frequency PPP cycle-slip API exposes the engine configuration,
+Melbourne-Wubbena and geometry-free combinations, stateful update operations,
+and ordered multi-epoch detection. `SidereonPppRunningMeanVariance` and
+`SidereonPppSatelliteCycleSlipState` are mutable owned engine-state handles;
+their accessors expose every stored field, and their equality and reset/update
+operations delegate to the core. Detection results are owned handles with
+lossless satellite identifiers, deterministic reason accessors, core-backed
+equality, and matching free functions. Refusals retain nested configuration
+causes under `SIDEREON_ENGINE_ERROR_FAMILY_PPP_CYCLE_SLIP`.
+
+## Precise-positioning ambiguity preparation
+
+The PPP preparation API exposes the core wide-lane/narrow-lane fixed-ambiguity
+pipeline and float ambiguity-id cycle-slip tagging. Prepared epochs, ordered
+maps, dropped-satellite lists, and split-arc metadata are retained in owned
+handles with lossless identifier accessors, core-backed equality, overlap
+guards, and matching free functions. Cycle-slip policy values are validated
+before conversion. Wide-lane and ionosphere-free refusals retain every variant
+field and nested cause under `SIDEREON_ENGINE_ERROR_FAMILY_PPP_PREP`.
+
+## Kinematic precise point positioning
+
+The kinematic PPP API exposes the core default configuration, validated motion
+and process-noise models, and an owned mutable state carrying the full sorted
+ambiguity map and covariance. Predict, correct, and ordered solve operations
+delegate to the core EKF. Owned update summaries and epoch results expose state,
+covariance, used satellites, SSR-bias exclusions, unplaced observations,
+statuses, lossless identifiers, core-backed equality, and matching free
+functions. Refusals retain complete variant fields and nested causes under
+`SIDEREON_ENGINE_ERROR_FAMILY_PPP_KINEMATIC`.
+
 The low-level precise-positioning range-rate model is available independently
 of an SP3 handle. Initialize `SidereonPppVelocityConfig` with
 `sidereon_ppp_velocity_config_init`, predict a row with

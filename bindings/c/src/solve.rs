@@ -1698,7 +1698,7 @@ pub(crate) unsafe fn ppp_epochs_from_c(
     Ok(out)
 }
 
-unsafe fn ppp_float_state_from_c(
+pub(crate) unsafe fn ppp_float_state_from_c(
     fn_name: &str,
     state: &SidereonPppFloatState,
     epoch_count: usize,
@@ -1733,7 +1733,7 @@ unsafe fn ppp_float_state_from_c(
     })
 }
 
-unsafe fn ppp_float_config_from_c(
+pub(crate) unsafe fn ppp_float_config_from_c(
     fn_name: &str,
     config: &SidereonPppFloatConfig,
 ) -> Result<PppFloatSolveConfigInner, SidereonStatus> {
@@ -2718,7 +2718,9 @@ unsafe fn ppp_f64_map_from_c(
     Ok(out)
 }
 
-fn ppp_weights_from_c(weights: &SidereonPppMeasurementWeights) -> PppMeasurementWeightsInner {
+pub(crate) fn ppp_weights_from_c(
+    weights: &SidereonPppMeasurementWeights,
+) -> PppMeasurementWeightsInner {
     PppMeasurementWeightsInner {
         code: weights.code,
         phase: weights.phase,
@@ -2726,7 +2728,7 @@ fn ppp_weights_from_c(weights: &SidereonPppMeasurementWeights) -> PppMeasurement
     }
 }
 
-fn ppp_tropo_from_c(
+pub(crate) fn ppp_tropo_from_c(
     fn_name: &str,
     tropo: &SidereonPppTroposphereOptions,
 ) -> Result<PppTroposphereOptionsInner, SidereonStatus> {
@@ -2754,7 +2756,7 @@ fn ppp_tropo_from_c(
     }
 }
 
-unsafe fn ppp_range_corrections_from_c(
+pub(crate) unsafe fn ppp_range_corrections_from_c(
     fn_name: &str,
     corrections: &SidereonPppRangeCorrections,
 ) -> Result<RangeCorrections, SidereonStatus> {

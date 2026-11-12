@@ -155,6 +155,16 @@ pub enum SidereonEngineErrorFamily {
     TimeModel = 72,
     /// Low-level precise-positioning velocity solve failure.
     PppVelocity = 73,
+    /// Precise-positioning total electron content estimation failure.
+    Tec = 74,
+    /// Precise-positioning snapshot RAIM and FDE failure.
+    PppRaim = 75,
+    /// Precise-positioning dual-frequency cycle-slip detection failure.
+    PppCycleSlip = 76,
+    /// Precise-positioning dual-frequency ambiguity preparation failure.
+    PppPrep = 77,
+    /// Precise-positioning kinematic EKF failure.
+    PppKinematic = 78,
     /// A family introduced by a later library version.
     Unknown = 999,
 }
@@ -270,6 +280,11 @@ impl SidereonEngineErrorFamily {
             Self::TimeOffset => "time_offset",
             Self::TimeModel => "time_model",
             Self::PppVelocity => "ppp_velocity",
+            Self::Tec => "tec",
+            Self::PppRaim => "ppp_raim",
+            Self::PppCycleSlip => "ppp_cycle_slip",
+            Self::PppPrep => "ppp_prep",
+            Self::PppKinematic => "ppp_kinematic",
             Self::Unknown => "unknown",
         }
     }
