@@ -316,3 +316,65 @@ cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     "${here}/fixtures/omm/25544.json" \
     "${here}/fixtures/omm/24876.xml" \
     "${here}/fixtures/omm/24876.kvn"
+
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
+    -I"${binding_root}/include" \
+    "${here}/ppp_tec_smoke.c" \
+    -L"${lib_dir}" \
+    -lsidereon \
+    -Wl,-rpath,"${lib_dir}" \
+    -lm \
+    -o "${target_dir}/ppp_tec_smoke_ci"
+"${target_dir}/ppp_tec_smoke_ci"
+
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
+    -I"${binding_root}/include" \
+    "${here}/ppp_raim_smoke.c" \
+    -L"${lib_dir}" \
+    -lsidereon \
+    -Wl,-rpath,"${lib_dir}" \
+    -lm \
+    -o "${target_dir}/ppp_raim_smoke_ci"
+"${target_dir}/ppp_raim_smoke_ci"
+
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
+    -I"${binding_root}/include" -I"${here}" \
+    "${here}/ppp_raim_fde_smoke.c" \
+    -L"${lib_dir}" \
+    -lsidereon \
+    -Wl,-rpath,"${lib_dir}" \
+    -lm \
+    -o "${target_dir}/ppp_raim_fde_smoke_ci"
+"${target_dir}/ppp_raim_fde_smoke_ci" \
+    "${here}/fixtures/sp3/GBM0MGXRAP_20201770000_01D_05M_ORB_120epoch.sp3"
+
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
+    -I"${binding_root}/include" \
+    "${here}/ppp_cycle_slip_smoke.c" \
+    -L"${lib_dir}" \
+    -lsidereon \
+    -Wl,-rpath,"${lib_dir}" \
+    -lm \
+    -o "${target_dir}/ppp_cycle_slip_smoke_ci"
+"${target_dir}/ppp_cycle_slip_smoke_ci"
+
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
+    -I"${binding_root}/include" \
+    "${here}/ppp_prep_smoke.c" \
+    -L"${lib_dir}" \
+    -lsidereon \
+    -Wl,-rpath,"${lib_dir}" \
+    -lm \
+    -o "${target_dir}/ppp_prep_smoke_ci"
+"${target_dir}/ppp_prep_smoke_ci"
+
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
+    -I"${binding_root}/include" \
+    "${here}/ppp_kinematic_smoke.c" \
+    -L"${lib_dir}" \
+    -lsidereon \
+    -Wl,-rpath,"${lib_dir}" \
+    -lm \
+    -o "${target_dir}/ppp_kinematic_smoke_ci"
+"${target_dir}/ppp_kinematic_smoke_ci" \
+    "${here}/fixtures/sp3/GBM0MGXRAP_20201770000_01D_05M_ORB_120epoch.sp3"

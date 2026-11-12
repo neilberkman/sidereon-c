@@ -4035,7 +4035,7 @@ fn ppp_float_solve_options_to_c(
     }
 }
 
-fn ppp_ssr_bias_exclusion_to_c(
+pub(crate) fn ppp_ssr_bias_exclusion_to_c(
     fn_name: &str,
     value: &sidereon_core::precise_positioning::SsrBiasExclusion,
 ) -> Result<SidereonPppSsrBiasExclusion, SidereonStatus> {
@@ -4097,7 +4097,7 @@ fn ppp_unplaced_observations_to_c(
         .collect()
 }
 
-fn ppp_unplaced_observations_v2_to_c(
+pub(crate) fn ppp_unplaced_observations_v2_to_c(
     fn_name: &str,
     values: &[sidereon_core::precise_positioning::UnplacedObservation],
 ) -> Result<Vec<SidereonPppUnplacedObservationV2>, SidereonStatus> {

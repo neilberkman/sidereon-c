@@ -4,6 +4,17 @@
 
 ### Added
 
+- Add the precise-positioning dual-frequency TEC estimation, arc-leveling,
+  thin-shell mapping, and ionospheric pierce-point C API.
+- Add precise-positioning snapshot RAIM global testing, residual
+  identification, protection levels, and one-epoch PPP fault detection and
+  exclusion to the C API.
+- Add precise-positioning dual-frequency cycle-slip detection, mutable
+  per-satellite detector state, and running-statistic state to the C API.
+- Add precise-positioning wide-lane/narrow-lane epoch preparation and float
+  ambiguity cycle-slip tagging to the C API.
+- Add precise-positioning kinematic PPP configuration, mutable EKF state,
+  predict/correct operations, and ordered-epoch solving to the C API.
 - Bring the CCSDS TDM C API to mutable, policy-aware parity: strict and lenient
   read/write policies, typed warning and departure lists, complete raw fields and
   positioned comments, header access, message/segment construction, atomic

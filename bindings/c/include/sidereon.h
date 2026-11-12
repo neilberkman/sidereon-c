@@ -236,6 +236,21 @@
 #define SIDEREON_TDM_LENIENCY_STRICT 0
 
 /**
+ * Default thin-shell ionospheric height, in metres.
+ */
+#define SIDEREON_TEC_DEFAULT_IONOSPHERIC_SHELL_HEIGHT_M 350000.0
+
+/**
+ * Number of electrons per square metre in one TECU.
+ */
+#define SIDEREON_TEC_ELECTRONS_PER_TECU_M2 1.0e16
+
+/**
+ * TEC group-delay coefficient for frequencies expressed in hertz.
+ */
+#define SIDEREON_TEC_GROUP_DELAY_COEFFICIENT 4.0308e17
+
+/**
  * Bytes of a terrain field name or short field text and its terminator.
  */
 #define SIDEREON_TERRAIN_ERROR_FIELD_C_BYTES 32
@@ -1629,6 +1644,26 @@ typedef enum SidereonEngineErrorFamily {
      */
     SIDEREON_ENGINE_ERROR_FAMILY_PPP_VELOCITY = 73,
     /**
+     * Precise-positioning total electron content estimation failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_TEC = 74,
+    /**
+     * Precise-positioning snapshot RAIM and FDE failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_PPP_RAIM = 75,
+    /**
+     * Precise-positioning dual-frequency cycle-slip detection failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_PPP_CYCLE_SLIP = 76,
+    /**
+     * Precise-positioning dual-frequency ambiguity preparation failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_PPP_PREP = 77,
+    /**
+     * Precise-positioning kinematic EKF failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_PPP_KINEMATIC = 78,
+    /**
      * A family introduced by a later library version.
      */
     SIDEREON_ENGINE_ERROR_FAMILY_UNKNOWN = 999,
@@ -1818,6 +1853,106 @@ typedef enum SidereonPppCorrectionsErrorKind {
 } SidereonPppCorrectionsErrorKind;
 
 /**
+ * Cycle-slip configuration refusal kind.
+ */
+typedef enum SidereonPppCycleSlipConfigErrorKind {
+    /**
+     * Invalid Melbourne-Wubbena threshold.
+     */
+    SIDEREON_PPP_CYCLE_SLIP_CONFIG_ERROR_KIND_INVALID_MELBOURNE_WUBBENA_THRESHOLD = 0,
+    /**
+     * Invalid geometry-free threshold.
+     */
+    SIDEREON_PPP_CYCLE_SLIP_CONFIG_ERROR_KIND_INVALID_GEOMETRY_FREE_THRESHOLD = 1,
+    /**
+     * Zero minimum arc length.
+     */
+    SIDEREON_PPP_CYCLE_SLIP_CONFIG_ERROR_KIND_INVALID_MINIMUM_ARC_LENGTH = 2,
+    /**
+     * Invalid running-statistic multiplier.
+     */
+    SIDEREON_PPP_CYCLE_SLIP_CONFIG_ERROR_KIND_INVALID_RUNNING_STATISTIC_K_FACTOR = 3,
+    /**
+     * Invalid maximum gap.
+     */
+    SIDEREON_PPP_CYCLE_SLIP_CONFIG_ERROR_KIND_INVALID_MAXIMUM_GAP = 4,
+} SidereonPppCycleSlipConfigErrorKind;
+
+/**
+ * Cycle-slip reason.
+ */
+typedef enum SidereonPppCycleSlipReason {
+    /**
+     * Loss-of-lock bit 0 was set.
+     */
+    SIDEREON_PPP_CYCLE_SLIP_REASON_LLI = 0,
+    /**
+     * A data gap reset the arc.
+     */
+    SIDEREON_PPP_CYCLE_SLIP_REASON_DATA_GAP = 1,
+    /**
+     * Geometry-free phase changed beyond its threshold.
+     */
+    SIDEREON_PPP_CYCLE_SLIP_REASON_GEOMETRY_FREE = 2,
+    /**
+     * Melbourne-Wubbena changed beyond its threshold.
+     */
+    SIDEREON_PPP_CYCLE_SLIP_REASON_MELBOURNE_WUBBENA = 3,
+} SidereonPppCycleSlipReason;
+
+/**
+ * Carrier-phase error input for the core cycle-slip error conversion.
+ */
+typedef enum SidereonPppCycleSlipCarrierPhaseErrorKind {
+    /**
+     * Frequencies were effectively equal.
+     */
+    SIDEREON_PPP_CYCLE_SLIP_CARRIER_PHASE_ERROR_KIND_EQUAL_FREQUENCIES = 0,
+    /**
+     * A frequency was invalid.
+     */
+    SIDEREON_PPP_CYCLE_SLIP_CARRIER_PHASE_ERROR_KIND_INVALID_FREQUENCY = 1,
+    /**
+     * An observation was invalid.
+     */
+    SIDEREON_PPP_CYCLE_SLIP_CARRIER_PHASE_ERROR_KIND_INVALID_OBSERVATION = 2,
+    /**
+     * A threshold was invalid.
+     */
+    SIDEREON_PPP_CYCLE_SLIP_CARRIER_PHASE_ERROR_KIND_INVALID_THRESHOLD = 3,
+} SidereonPppCycleSlipCarrierPhaseErrorKind;
+
+/**
+ * Cycle-slip operation refusal kind.
+ */
+typedef enum SidereonPppCycleSlipErrorKind {
+    /**
+     * Invalid detector configuration.
+     */
+    SIDEREON_PPP_CYCLE_SLIP_ERROR_KIND_INVALID_CONFIG = 0,
+    /**
+     * Non-finite observation scalar.
+     */
+    SIDEREON_PPP_CYCLE_SLIP_ERROR_KIND_NON_FINITE_OBSERVATION = 1,
+    /**
+     * Non-finite seconds coordinate.
+     */
+    SIDEREON_PPP_CYCLE_SLIP_ERROR_KIND_NON_FINITE_EPOCH_TIME = 2,
+    /**
+     * Epochs were not ordered.
+     */
+    SIDEREON_PPP_CYCLE_SLIP_ERROR_KIND_EPOCHS_NOT_ORDERED = 3,
+    /**
+     * Invalid carrier frequency.
+     */
+    SIDEREON_PPP_CYCLE_SLIP_ERROR_KIND_INVALID_FREQUENCY = 4,
+    /**
+     * Carrier frequencies were effectively equal.
+     */
+    SIDEREON_PPP_CYCLE_SLIP_ERROR_KIND_EQUAL_FREQUENCIES = 5,
+} SidereonPppCycleSlipErrorKind;
+
+/**
  * Terminal status of a PPP float or fixed least-squares solve.
  */
 typedef enum SidereonPppSolveStatus {
@@ -1867,6 +2002,106 @@ typedef enum SidereonPppUnplacedObservationReason {
      */
     SIDEREON_PPP_UNPLACED_OBSERVATION_REASON_SSR_CORRECTION_EXCEEDS_LIMIT = 1,
 } SidereonPppUnplacedObservationReason;
+
+/**
+ * Per-epoch kinematic status.
+ */
+typedef enum SidereonPppKinematicEpochStatus {
+    SIDEREON_PPP_KINEMATIC_EPOCH_STATUS_UPDATED = 0,
+    SIDEREON_PPP_KINEMATIC_EPOCH_STATUS_PREDICTED_ONLY = 1,
+} SidereonPppKinematicEpochStatus;
+
+/**
+ * Kinematic solve error kind.
+ */
+typedef enum SidereonPppKinematicSolveErrorKind {
+    SIDEREON_PPP_KINEMATIC_SOLVE_ERROR_KIND_NO_EPHEMERIS = 0,
+    SIDEREON_PPP_KINEMATIC_SOLVE_ERROR_KIND_SINGULAR_GEOMETRY = 1,
+    SIDEREON_PPP_KINEMATIC_SOLVE_ERROR_KIND_INVALID_SOLVE_OPTION = 2,
+    SIDEREON_PPP_KINEMATIC_SOLVE_ERROR_KIND_INVALID_INPUT = 3,
+    SIDEREON_PPP_KINEMATIC_SOLVE_ERROR_KIND_MISSING_CORRECTION = 4,
+    SIDEREON_PPP_KINEMATIC_SOLVE_ERROR_KIND_UT1_OUTSIDE_COVERAGE = 5,
+} SidereonPppKinematicSolveErrorKind;
+
+/**
+ * PPP RAIM refusal kind. Values correspond one-to-one with core variants.
+ */
+typedef enum SidereonPppRaimErrorKind {
+    /**
+     * Configuration field refusal.
+     */
+    SIDEREON_PPP_RAIM_ERROR_KIND_INVALID_CONFIG = 0,
+    /**
+     * Residual field refusal.
+     */
+    SIDEREON_PPP_RAIM_ERROR_KIND_INVALID_RESIDUAL = 1,
+    /**
+     * Geometry field refusal.
+     */
+    SIDEREON_PPP_RAIM_ERROR_KIND_INVALID_GEOMETRY = 2,
+    /**
+     * Nested DOP refusal.
+     */
+    SIDEREON_PPP_RAIM_ERROR_KIND_DOP = 3,
+    /**
+     * Singular geometry.
+     */
+    SIDEREON_PPP_RAIM_ERROR_KIND_SINGULAR_GEOMETRY = 4,
+} SidereonPppRaimErrorKind;
+
+/**
+ * PPP RAIM/FDE refusal kind.
+ */
+typedef enum SidereonPppRaimFdeErrorKind {
+    /**
+     * Underlying float solve refusal.
+     */
+    SIDEREON_PPP_RAIM_FDE_ERROR_KIND_SOLVE = 0,
+    /**
+     * RAIM refusal.
+     */
+    SIDEREON_PPP_RAIM_FDE_ERROR_KIND_RAIM = 1,
+} SidereonPppRaimFdeErrorKind;
+
+/**
+ * Terminal PPP RAIM/FDE status.
+ */
+typedef enum SidereonPppRaimFdeStatus {
+    /**
+     * The first solution passed.
+     */
+    SIDEREON_PPP_RAIM_FDE_STATUS_CLEAN = 0,
+    /**
+     * Exclusion restored integrity.
+     */
+    SIDEREON_PPP_RAIM_FDE_STATUS_RESTORED = 1,
+    /**
+     * Exclusion would exhaust redundancy.
+     */
+    SIDEREON_PPP_RAIM_FDE_STATUS_CANNOT_EXCLUDE = 2,
+    /**
+     * No valid exclusion restored integrity.
+     */
+    SIDEREON_PPP_RAIM_FDE_STATUS_INTEGRITY_NOT_RESTORED = 3,
+} SidereonPppRaimFdeStatus;
+
+/**
+ * PPP RAIM global-test status.
+ */
+typedef enum SidereonPppRaimStatus {
+    /**
+     * The test passed.
+     */
+    SIDEREON_PPP_RAIM_STATUS_PASSED = 0,
+    /**
+     * The test statistic exceeded its threshold.
+     */
+    SIDEREON_PPP_RAIM_STATUS_FAULT_DETECTED = 1,
+    /**
+     * The residual set had no positive redundancy.
+     */
+    SIDEREON_PPP_RAIM_STATUS_NOT_ENOUGH_REDUNDANCY = 2,
+} SidereonPppRaimStatus;
 
 typedef enum SidereonPreciseSamplesErrorKind {
     SIDEREON_PRECISE_SAMPLES_ERROR_KIND_NONE = 0,
@@ -3322,6 +3557,76 @@ typedef enum SidereonStationTideInputErrorKind {
 } SidereonStationTideInputErrorKind;
 
 /**
+ * TEC refusal kind. Values correspond one-to-one with the core error variants.
+ */
+typedef enum SidereonTecErrorKind {
+    /**
+     * One or more observation scalars were not finite.
+     */
+    SIDEREON_TEC_ERROR_KIND_NON_FINITE_OBSERVATION = 0,
+    /**
+     * Shell height was invalid.
+     */
+    SIDEREON_TEC_ERROR_KIND_INVALID_SHELL_HEIGHT = 1,
+    /**
+     * Earth radius was invalid.
+     */
+    SIDEREON_TEC_ERROR_KIND_INVALID_EARTH_RADIUS = 2,
+    /**
+     * A carrier frequency was invalid.
+     */
+    SIDEREON_TEC_ERROR_KIND_INVALID_FREQUENCY = 3,
+    /**
+     * Carrier frequencies were equal or too close.
+     */
+    SIDEREON_TEC_ERROR_KIND_EQUAL_FREQUENCIES = 4,
+    /**
+     * Receiver latitude was invalid.
+     */
+    SIDEREON_TEC_ERROR_KIND_INVALID_RECEIVER_LATITUDE = 5,
+    /**
+     * Receiver longitude was invalid.
+     */
+    SIDEREON_TEC_ERROR_KIND_INVALID_RECEIVER_LONGITUDE = 6,
+    /**
+     * Elevation was invalid.
+     */
+    SIDEREON_TEC_ERROR_KIND_INVALID_ELEVATION = 7,
+    /**
+     * Azimuth was invalid.
+     */
+    SIDEREON_TEC_ERROR_KIND_INVALID_AZIMUTH = 8,
+    /**
+     * A TEC value was not finite.
+     */
+    SIDEREON_TEC_ERROR_KIND_NON_FINITE_TEC = 9,
+    /**
+     * A leveling arc was empty.
+     */
+    SIDEREON_TEC_ERROR_KIND_EMPTY_ARC = 10,
+    /**
+     * The epoch stream was empty.
+     */
+    SIDEREON_TEC_ERROR_KIND_NO_EPOCHS = 11,
+    /**
+     * The epoch stream contained no observations.
+     */
+    SIDEREON_TEC_ERROR_KIND_NO_OBSERVATIONS = 12,
+    /**
+     * An epoch time was not finite.
+     */
+    SIDEREON_TEC_ERROR_KIND_NON_FINITE_EPOCH_TIME = 13,
+    /**
+     * Epochs were not ordered.
+     */
+    SIDEREON_TEC_ERROR_KIND_EPOCHS_NOT_ORDERED = 14,
+    /**
+     * An arc had fewer than two samples.
+     */
+    SIDEREON_TEC_ERROR_KIND_INSUFFICIENT_ARC_SAMPLES = 15,
+} SidereonTecErrorKind;
+
+/**
  * Which failure a standalone TEC-grid construction or query reported.
  */
 typedef enum SidereonTecGridErrorKind {
@@ -3557,6 +3862,40 @@ typedef enum SidereonTleRecordIssue {
      */
     SIDEREON_TLE_RECORD_ISSUE_ORPHAN_NAME = 3,
 } SidereonTleRecordIssue;
+
+/**
+ * Cycle-slip policy for PPP ambiguity preparation.
+ */
+typedef enum SidereonPppPrepCycleSlipPolicy {
+    /**
+     * Refuse a detected slip.
+     */
+    SIDEREON_PPP_PREP_CYCLE_SLIP_POLICY_ERROR = 0,
+    /**
+     * Drop the affected satellite.
+     */
+    SIDEREON_PPP_PREP_CYCLE_SLIP_POLICY_DROP_SATELLITE = 1,
+    /**
+     * Split the ambiguity arc.
+     */
+    SIDEREON_PPP_PREP_CYCLE_SLIP_POLICY_SPLIT_ARC = 2,
+} SidereonPppPrepCycleSlipPolicy;
+
+/**
+ * Deterministic motion-model tag.
+ */
+typedef enum SidereonPppKinematicMotionModelKind {
+    SIDEREON_PPP_KINEMATIC_MOTION_MODEL_KIND_HOLD = 0,
+    SIDEREON_PPP_KINEMATIC_MOTION_MODEL_KIND_CONSTANT_VELOCITY = 1,
+} SidereonPppKinematicMotionModelKind;
+
+/**
+ * Position process-noise model tag.
+ */
+typedef enum SidereonPppKinematicPositionProcessNoiseKind {
+    SIDEREON_PPP_KINEMATIC_POSITION_PROCESS_NOISE_KIND_RANDOM_WALK = 0,
+    SIDEREON_PPP_KINEMATIC_POSITION_PROCESS_NOISE_KIND_WHITE_NOISE_ACCELERATION = 1,
+} SidereonPppKinematicPositionProcessNoiseKind;
 
 /**
  * Standard GNSS product family.
@@ -7366,10 +7705,20 @@ typedef struct SidereonPppCorrectionLookup SidereonPppCorrectionLookup;
 typedef struct SidereonPppCorrections SidereonPppCorrections;
 
 /**
+ * Owned cycle-slip detection result.
+ */
+typedef struct SidereonPppCycleSlipDetection SidereonPppCycleSlipDetection;
+
+/**
  * The result of a PPP fixed solve. Opaque to C. Create with
  * sidereon_solve_ppp_fixed and release with sidereon_ppp_fixed_solution_free.
  */
 typedef struct SidereonPppFixedSolution SidereonPppFixedSolution;
+
+/**
+ * Owned float ambiguity-tagging result.
+ */
+typedef struct SidereonPppFloatCycleSlipTaggedResult SidereonPppFloatCycleSlipTaggedResult;
 
 /**
  * The result of a PPP float solve. Opaque to C. Create with
@@ -7378,10 +7727,60 @@ typedef struct SidereonPppFixedSolution SidereonPppFixedSolution;
 typedef struct SidereonPppFloatSolution SidereonPppFloatSolution;
 
 /**
+ * Owned kinematic configuration.
+ */
+typedef struct SidereonPppKinematicConfig SidereonPppKinematicConfig;
+
+/**
+ * Owned ordered kinematic solve result.
+ */
+typedef struct SidereonPppKinematicResult SidereonPppKinematicResult;
+
+/**
+ * Owned mutable state and covariance driven by core predict/correct operations.
+ */
+typedef struct SidereonPppKinematicState SidereonPppKinematicState;
+
+/**
+ * Owned measurement-update summary.
+ */
+typedef struct SidereonPppKinematicUpdateSummary SidereonPppKinematicUpdateSummary;
+
+/**
+ * Owned PPP RAIM/FDE result.
+ */
+typedef struct SidereonPppRaimFdeResult SidereonPppRaimFdeResult;
+
+/**
+ * Owned per-satellite identification result.
+ */
+typedef struct SidereonPppRaimIdentification SidereonPppRaimIdentification;
+
+/**
+ * Owned global-test result.
+ */
+typedef struct SidereonPppRaimResult SidereonPppRaimResult;
+
+/**
+ * Mutable engine running-statistic state.
+ */
+typedef struct SidereonPppRunningMeanVariance SidereonPppRunningMeanVariance;
+
+/**
+ * Mutable per-satellite engine cycle-slip state.
+ */
+typedef struct SidereonPppSatelliteCycleSlipState SidereonPppSatelliteCycleSlipState;
+
+/**
  * Complete result of the low-level precise-positioning velocity solve. The
  * satellite arrays are copied through separate variable-length accessors.
  */
 typedef struct SidereonPppVelocitySolution SidereonPppVelocitySolution;
+
+/**
+ * Owned wide-lane and narrow-lane preparation result.
+ */
+typedef struct SidereonPppWideLanePrepResult SidereonPppWideLanePrepResult;
 
 /**
  * A build-once precise-ephemeris interpolant with cached per-satellite nodes.
@@ -7840,6 +8239,16 @@ typedef struct SidereonTdmDepartures SidereonTdmDepartures;
 typedef struct SidereonTdmWarnings SidereonTdmWarnings;
 
 /**
+ * Owned code-derived slant TEC estimate.
+ */
+typedef struct SidereonTecCodeSlantEstimate SidereonTecCodeSlantEstimate;
+
+/**
+ * Owned TEC estimate over all continuous arcs.
+ */
+typedef struct SidereonTecEstimate SidereonTecEstimate;
+
+/**
  * A standalone regular-grid vertical-TEC source.
  *
  * The grid stores TECU values on strictly increasing epoch, latitude and
@@ -7859,6 +8268,16 @@ typedef struct SidereonTecGrid SidereonTecGrid;
  * sidereon_tec_grid_result_free.
  */
 typedef struct SidereonTecGridResult SidereonTecGridResult;
+
+/**
+ * Owned result of phase-code TEC leveling.
+ */
+typedef struct SidereonTecLevelingResult SidereonTecLevelingResult;
+
+/**
+ * Owned phase-derived slant TEC estimate.
+ */
+typedef struct SidereonTecPhaseSlantEstimate SidereonTecPhaseSlantEstimate;
 
 /**
  * An owned record of one IONEX sample construction.
@@ -17776,6 +18195,166 @@ typedef struct SidereonPppCorrectionEpoch {
 } SidereonPppCorrectionEpoch;
 
 /**
+ * PPP dual-frequency cycle-slip detector configuration. This plain value has field equality.
+ */
+typedef struct SidereonPppCycleSlipConfig {
+    /**
+     * Absolute Melbourne-Wubbena threshold, in wide-lane cycles.
+     */
+    double melbourne_wubbena_threshold_cycles;
+    /**
+     * Geometry-free phase-step threshold, in metres.
+     */
+    double geometry_free_threshold_m;
+    /**
+     * Minimum usable sample count for an initialized arc.
+     */
+    size_t minimum_arc_length;
+    /**
+     * Running-statistic sigma multiplier.
+     */
+    double running_statistic_k_factor;
+    /**
+     * Maximum continuous-arc gap, in seconds.
+     */
+    double maximum_gap_s;
+} SidereonPppCycleSlipConfig;
+
+/**
+ * Fixed fields for one flagged output epoch.
+ */
+typedef struct SidereonPppCycleSlipFlagEpochInfo {
+    /**
+     * Whether `gap_time_s` is present.
+     */
+    bool has_gap_time_s;
+    /**
+     * Comparable seconds coordinate.
+     */
+    double gap_time_s;
+    /**
+     * Whether an exact epoch is present.
+     */
+    bool has_gap_epoch;
+    /**
+     * Number of observation flags.
+     */
+    size_t observation_count;
+} SidereonPppCycleSlipFlagEpochInfo;
+
+/**
+ * Fixed fields for one flagged observation.
+ */
+typedef struct SidereonPppCycleSlipFlagObservationInfo {
+    /**
+     * Whether any detector classified a slip.
+     */
+    bool slip;
+    /**
+     * Number of reasons.
+     */
+    size_t reason_count;
+} SidereonPppCycleSlipFlagObservationInfo;
+
+/**
+ * Lossless result of converting another core error to a cycle-slip error.
+ */
+typedef struct SidereonPppCycleSlipConvertedError {
+    /**
+     * Converted cycle-slip error kind.
+     */
+    enum SidereonPppCycleSlipErrorKind kind;
+    /**
+     * Whether an invalid-config cause is present.
+     */
+    bool has_config_cause;
+    /**
+     * Invalid-config cause when present.
+     */
+    enum SidereonPppCycleSlipConfigErrorKind config_cause;
+} SidereonPppCycleSlipConvertedError;
+
+/**
+ * Raw dual-frequency PPP observation used by cycle-slip detection.
+ */
+typedef struct SidereonPppCycleSlipObservation {
+    /**
+     * Null-terminated UTF-8 satellite identifier.
+     */
+    const char *satellite_id;
+    /**
+     * Null-terminated UTF-8 ambiguity identifier.
+     */
+    const char *ambiguity_id;
+    /**
+     * First-band code pseudorange, in metres.
+     */
+    double p1_m;
+    /**
+     * Second-band code pseudorange, in metres.
+     */
+    double p2_m;
+    /**
+     * First-band carrier phase, in cycles.
+     */
+    double phi1_cyc;
+    /**
+     * Second-band carrier phase, in cycles.
+     */
+    double phi2_cyc;
+    /**
+     * First carrier frequency, in hertz.
+     */
+    double f1_hz;
+    /**
+     * Second carrier frequency, in hertz.
+     */
+    double f2_hz;
+    /**
+     * Whether `lli1` is present.
+     */
+    bool has_lli1;
+    /**
+     * First-band loss-of-lock indicator.
+     */
+    int64_t lli1;
+    /**
+     * Whether `lli2` is present.
+     */
+    bool has_lli2;
+    /**
+     * Second-band loss-of-lock indicator.
+     */
+    int64_t lli2;
+} SidereonPppCycleSlipObservation;
+
+/**
+ * One dual-frequency PPP epoch used by cycle-slip detection.
+ */
+typedef struct SidereonPppCycleSlipEpoch {
+    /**
+     * Whether `gap_time_s` is present.
+     */
+    bool has_gap_time_s;
+    /**
+     * Comparable epoch coordinate, in seconds.
+     */
+    double gap_time_s;
+    /**
+     * Optional exact epoch handle; borrowed for the call.
+     */
+    const struct SidereonExactEpoch *gap_epoch;
+    /**
+     * Observation array.
+     */
+    const struct SidereonPppCycleSlipObservation *observations;
+    /**
+     * Number of observations.
+     */
+    size_t observation_count;
+} SidereonPppCycleSlipEpoch;
+
+/**
  * One PPP string-to-f64 map entry, used for ambiguity, wavelength, and offset
  * maps.
  */
@@ -18791,6 +19370,60 @@ typedef struct SidereonPppFloatConfigV2 {
 } SidereonPppFloatConfigV2;
 
 /**
+ * One float observation with optional raw dual-frequency detector input.
+ */
+typedef struct SidereonPppFloatCycleSlipObservation {
+    /**
+     * Null-terminated UTF-8 satellite identifier.
+     */
+    const char *satellite_id;
+    /**
+     * Null-terminated UTF-8 input ambiguity identifier.
+     */
+    const char *ambiguity_id;
+    /**
+     * Optional borrowed raw dual-frequency observation.
+     */
+    const struct SidereonPppCycleSlipObservation *raw;
+} SidereonPppFloatCycleSlipObservation;
+
+/**
+ * One float epoch for ambiguity tagging.
+ */
+typedef struct SidereonPppFloatCycleSlipEpoch {
+    /**
+     * Whether `gap_time_s` is present.
+     */
+    bool has_gap_time_s;
+    /**
+     * Comparable seconds coordinate.
+     */
+    double gap_time_s;
+    /**
+     * Optional borrowed exact epoch.
+     */
+    const struct SidereonExactEpoch *gap_epoch;
+    /**
+     * Float observation array.
+     */
+    const struct SidereonPppFloatCycleSlipObservation *observations;
+    /**
+     * Number of float observations.
+     */
+    size_t observation_count;
+} SidereonPppFloatCycleSlipEpoch;
+
+/**
+ * Summary for tagged float epochs.
+ */
+typedef struct SidereonPppFloatCycleSlipTaggedEpochInfo {
+    /**
+     * Number of tagged observations.
+     */
+    size_t observation_count;
+} SidereonPppFloatCycleSlipTaggedEpochInfo;
+
+/**
  * One PPP float ambiguity estimate in meters.
  */
 typedef struct SidereonPppAmbiguity {
@@ -18934,6 +19567,92 @@ typedef struct SidereonPppFloatResidual {
 } SidereonPppFloatResidual;
 
 /**
+ * Deterministic motion model. `kind` is validated before conversion.
+ */
+typedef struct SidereonPppKinematicMotionModel {
+    uint32_t kind;
+    double velocity_m_s[3];
+} SidereonPppKinematicMotionModel;
+
+/**
+ * Position process-noise model. `kind` is validated before conversion.
+ */
+typedef struct SidereonPppKinematicPositionProcessNoise {
+    uint32_t kind;
+    double spectral_density;
+} SidereonPppKinematicPositionProcessNoise;
+
+/**
+ * Kinematic EKF process-noise controls. This plain value has field equality.
+ */
+typedef struct SidereonPppKinematicProcessNoise {
+    struct SidereonPppKinematicPositionProcessNoise position;
+    double clock_white_m2_s;
+    double ztd_random_walk_m2_s;
+    double ambiguity_hold_m2_s;
+} SidereonPppKinematicProcessNoise;
+
+/**
+ * Fixed configuration fields.
+ */
+typedef struct SidereonPppKinematicConfigInfo {
+    struct SidereonPppKinematicMotionModel motion;
+    struct SidereonPppKinematicProcessNoise process_noise;
+    double new_ambiguity_variance_m2;
+    struct SidereonPppMeasurementWeights weights;
+    bool tropo_enabled;
+    bool estimate_ztd;
+    bool estimate_tropo_gradients;
+    size_t initial_covariance_element_count;
+} SidereonPppKinematicConfigInfo;
+
+/**
+ * Fixed fields of one epoch solution.
+ */
+typedef struct SidereonPppKinematicEpochSolutionInfo {
+    double position_m[3];
+    double clock_m;
+    double ztd_residual_m;
+    double position_covariance_m2[3][3];
+    double innovation_rms_m;
+    enum SidereonPppKinematicEpochStatus status;
+    size_t ambiguity_count;
+    size_t used_satellite_count;
+    size_t ssr_bias_exclusion_count;
+    size_t unplaced_observation_count;
+} SidereonPppKinematicEpochSolutionInfo;
+
+/**
+ * Fixed fields of a kinematic state.
+ */
+typedef struct SidereonPppKinematicStateInfo {
+    double position_m[3];
+    double clock_m;
+    double ztd_residual_m;
+    size_t ambiguity_count;
+    size_t dimension;
+    size_t covariance_element_count;
+} SidereonPppKinematicStateInfo;
+
+/**
+ * Input ambiguity value.
+ */
+typedef struct SidereonPppKinematicAmbiguity {
+    const char *ambiguity_id;
+    double value_m;
+} SidereonPppKinematicAmbiguity;
+
+/**
+ * Update summary fixed fields.
+ */
+typedef struct SidereonPppKinematicUpdateSummaryInfo {
+    double innovation_rms_m;
+    size_t used_satellite_count;
+    size_t ssr_bias_exclusion_count;
+    size_t unplaced_observation_count;
+} SidereonPppKinematicUpdateSummaryInfo;
+
+/**
  * One low-level satellite range-rate observation. This is plain C value data;
  * the satellite token is compared by pointed-to text when constructing core values.
  */
@@ -18999,6 +19718,266 @@ typedef struct SidereonPppRangeRatePrediction {
 } SidereonPppRangeRatePrediction;
 
 /**
+ * Wide-lane preparation controls. This plain value has field equality.
+ */
+typedef struct SidereonPppWideLanePrepOptions {
+    /**
+     * Minimum samples required for an ambiguity arc.
+     */
+    size_t min_epochs;
+    /**
+     * Maximum distance from the nearest integer, in cycles.
+     */
+    double tolerance_cycles;
+} SidereonPppWideLanePrepOptions;
+
+/**
+ * PPP snapshot RAIM configuration. This plain C value has field equality.
+ */
+typedef struct SidereonPppRaimConfig {
+    /**
+     * False-alarm probability used to derive the chi-square threshold.
+     */
+    double false_alarm_probability;
+    /**
+     * Missed-detection probability used for protection-level scaling.
+     */
+    double missed_detection_probability;
+    /**
+     * Residual sigma in metres, applied after solver row weights.
+     */
+    double measurement_sigma_m;
+    /**
+     * Whether `chi_square_threshold` is present.
+     */
+    bool has_chi_square_threshold;
+    /**
+     * Optional fixed chi-square threshold.
+     */
+    double chi_square_threshold;
+} SidereonPppRaimConfig;
+
+/**
+ * Fixed metadata for an owned FDE result.
+ */
+typedef struct SidereonPppRaimFdeInfo {
+    /**
+     * Terminal FDE status.
+     */
+    enum SidereonPppRaimFdeStatus status;
+    /**
+     * Number of excluded satellite identifiers.
+     */
+    size_t excluded_satellite_count;
+} SidereonPppRaimFdeInfo;
+
+/**
+ * One lossless PPP snapshot geometry row.
+ */
+typedef struct SidereonPppRaimGeometryRow {
+    /**
+     * Null-terminated UTF-8 satellite identifier.
+     */
+    const char *satellite_id;
+    /**
+     * Receiver-to-satellite ECEF line of sight.
+     */
+    struct SidereonLineOfSight line_of_sight;
+} SidereonPppRaimGeometryRow;
+
+/**
+ * One lossless PPP float residual input row.
+ */
+typedef struct SidereonPppRaimResidual {
+    /**
+     * Zero-based input epoch index.
+     */
+    size_t epoch_index;
+    /**
+     * Null-terminated UTF-8 satellite identifier.
+     */
+    const char *satellite_id;
+    /**
+     * Null-terminated UTF-8 ambiguity identifier.
+     */
+    const char *ambiguity_id;
+    /**
+     * Code prefit residual, in metres.
+     */
+    double code_m;
+    /**
+     * Phase prefit residual, in metres.
+     */
+    double phase_m;
+    /**
+     * Code inverse-sigma row weight.
+     */
+    double code_weight;
+    /**
+     * Phase inverse-sigma row weight.
+     */
+    double phase_weight;
+} SidereonPppRaimResidual;
+
+/**
+ * Fixed fields of one per-satellite statistic.
+ */
+typedef struct SidereonPppRaimSatelliteStatistic {
+    /**
+     * Standardized absolute code residual.
+     */
+    double code;
+    /**
+     * Standardized absolute phase residual.
+     */
+    double phase;
+    /**
+     * Maximum testable component.
+     */
+    double statistic;
+    /**
+     * Whether the code row is testable.
+     */
+    bool code_testable;
+    /**
+     * Whether the phase row is testable.
+     */
+    bool phase_testable;
+} SidereonPppRaimSatelliteStatistic;
+
+/**
+ * Horizontal and vertical protection levels. This plain value has field equality.
+ */
+typedef struct SidereonPppRaimProtectionLevels {
+    /**
+     * Horizontal protection level, in metres.
+     */
+    double hpl_m;
+    /**
+     * Vertical protection level, in metres.
+     */
+    double vpl_m;
+} SidereonPppRaimProtectionLevels;
+
+/**
+ * Fixed fields of a PPP RAIM result.
+ */
+typedef struct SidereonPppRaimResultInfo {
+    /**
+     * Global-test status.
+     */
+    enum SidereonPppRaimStatus status;
+    /**
+     * Whether a fault was detected.
+     */
+    bool detected;
+    /**
+     * Sum of squared weighted residuals.
+     */
+    double test_statistic;
+    /**
+     * Whether a threshold is present.
+     */
+    bool has_threshold;
+    /**
+     * Chi-square threshold.
+     */
+    double threshold;
+    /**
+     * Residual redundancy.
+     */
+    ptrdiff_t redundancy;
+    /**
+     * Number of satellite statistics.
+     */
+    size_t satellite_statistic_count;
+    /**
+     * Whether a most-likely-fault identifier is present.
+     */
+    bool has_most_likely_fault;
+    /**
+     * Whether HPL is present.
+     */
+    bool has_hpl_m;
+    /**
+     * Horizontal protection level, in metres.
+     */
+    double hpl_m;
+    /**
+     * Whether VPL is present.
+     */
+    bool has_vpl_m;
+    /**
+     * Vertical protection level, in metres.
+     */
+    double vpl_m;
+} SidereonPppRaimResultInfo;
+
+/**
+ * Snapshot of a running mean and variance.
+ */
+typedef struct SidereonPppRunningMeanVarianceInfo {
+    /**
+     * Accumulated sample count.
+     */
+    size_t sample_count;
+    /**
+     * Sample mean.
+     */
+    double mean;
+    /**
+     * Sample variance.
+     */
+    double variance;
+    /**
+     * Whether a sample standard deviation is available.
+     */
+    bool has_standard_deviation;
+    /**
+     * Sample standard deviation when available.
+     */
+    double standard_deviation;
+} SidereonPppRunningMeanVarianceInfo;
+
+/**
+ * Snapshot of one satellite cycle-slip state.
+ */
+typedef struct SidereonPppSatelliteCycleSlipStateInfo {
+    /**
+     * Whether a previous seconds coordinate is present.
+     */
+    bool has_previous_epoch_time_s;
+    /**
+     * Previous seconds coordinate.
+     */
+    double previous_epoch_time_s;
+    /**
+     * Whether an exact previous epoch is present.
+     */
+    bool has_previous_epoch;
+    /**
+     * Whether a previous Melbourne-Wubbena value is present.
+     */
+    bool has_previous_melbourne_wubbena_cycles;
+    /**
+     * Previous Melbourne-Wubbena value, in cycles.
+     */
+    double previous_melbourne_wubbena_cycles;
+    /**
+     * Embedded running-statistic snapshot.
+     */
+    struct SidereonPppRunningMeanVarianceInfo melbourne_wubbena;
+    /**
+     * Whether a previous geometry-free value is present.
+     */
+    bool has_previous_geometry_free_m;
+    /**
+     * Previous geometry-free value, in metres.
+     */
+    double previous_geometry_free_m;
+} SidereonPppSatelliteCycleSlipStateInfo;
+
+/**
  * Robust controls for the low-level precise-positioning velocity solve. This
  * is plain C value data and therefore has value equality field by field.
  */
@@ -19040,6 +20019,114 @@ typedef struct SidereonPppVelocityConfig {
      */
     struct SidereonPppVelocityRobustConfig robust;
 } SidereonPppVelocityConfig;
+
+/**
+ * Geometry-free state-update result. This plain value has field equality.
+ */
+typedef struct SidereonPppGeometryFreeUpdate {
+    /**
+     * Geometry-free phase combination, in metres.
+     */
+    double geometry_free_m;
+    /**
+     * Whether the detector classified a slip.
+     */
+    bool slip;
+    /**
+     * Whether a long gap reset the arc.
+     */
+    bool reset;
+} SidereonPppGeometryFreeUpdate;
+
+/**
+ * Melbourne-Wubbena state-update result. This plain value has field equality.
+ */
+typedef struct SidereonPppMelbourneWubbenaUpdate {
+    /**
+     * Melbourne-Wubbena combination, in wide-lane cycles.
+     */
+    double melbourne_wubbena_cycles;
+    /**
+     * Whether the detector classified a slip.
+     */
+    bool slip;
+} SidereonPppMelbourneWubbenaUpdate;
+
+/**
+ * Fixed fields for one prepared float epoch.
+ */
+typedef struct SidereonPppPreparedFloatEpochInfo {
+    /**
+     * Original input epoch index.
+     */
+    size_t epoch_index;
+    /**
+     * Number of prepared observations.
+     */
+    size_t observation_count;
+} SidereonPppPreparedFloatEpochInfo;
+
+/**
+ * Summary counts for a wide-lane preparation result.
+ */
+typedef struct SidereonPppWideLanePrepResultInfo {
+    /**
+     * Number of prepared epochs.
+     */
+    size_t epoch_count;
+    /**
+     * Number of wavelength entries.
+     */
+    size_t wavelength_count;
+    /**
+     * Number of offset entries.
+     */
+    size_t offset_count;
+    /**
+     * Number of fixed wide-lane integers.
+     */
+    size_t wide_lane_count;
+    /**
+     * Number of dropped satellites.
+     */
+    size_t dropped_satellite_count;
+    /**
+     * Number of retained split arcs.
+     */
+    size_t split_arc_count;
+} SidereonPppWideLanePrepResultInfo;
+
+/**
+ * Numeric fields for one prepared float observation.
+ */
+typedef struct SidereonPppPreparedFloatObservationInfo {
+    /**
+     * Ionosphere-free code, in metres.
+     */
+    double code_m;
+    /**
+     * Ionosphere-free phase, in metres.
+     */
+    double phase_m;
+} SidereonPppPreparedFloatObservationInfo;
+
+/**
+ * Fixed fields for one split ambiguity arc.
+ */
+typedef struct SidereonPppSplitArcInfo {
+    /**
+     * Original first epoch index.
+     */
+    size_t start_epoch_index;
+    /**
+     * Original final epoch index.
+     */
+    size_t end_epoch_index;
+    /**
+     * Retained sample count.
+     */
+    size_t n_epochs;
+} SidereonPppSplitArcInfo;
 
 typedef struct SidereonPreciseEphemerisSampleV2 {
     struct SidereonSatelliteToken sat;
@@ -27851,6 +28938,212 @@ typedef struct SidereonTdmHeaderInput {
 } SidereonTdmHeaderInput;
 
 /**
+ * Raw dual-frequency observation shared by TEC and PPP preparation.
+ */
+typedef struct SidereonPppDualFrequencyObservation {
+    /**
+     * Null-terminated UTF-8 satellite identifier.
+     */
+    const char *satellite_id;
+    /**
+     * Null-terminated UTF-8 ambiguity identifier.
+     */
+    const char *ambiguity_id;
+    /**
+     * First code pseudorange, in metres.
+     */
+    double p1_m;
+    /**
+     * Second code pseudorange, in metres.
+     */
+    double p2_m;
+    /**
+     * First carrier phase, in cycles.
+     */
+    double phi1_cyc;
+    /**
+     * Second carrier phase, in cycles.
+     */
+    double phi2_cyc;
+    /**
+     * First carrier frequency, in hertz.
+     */
+    double f1_hz;
+    /**
+     * Second carrier frequency, in hertz.
+     */
+    double f2_hz;
+    /**
+     * Whether `lli1` is present.
+     */
+    bool has_lli1;
+    /**
+     * First-band loss-of-lock indicator.
+     */
+    int64_t lli1;
+    /**
+     * Whether `lli2` is present.
+     */
+    bool has_lli2;
+    /**
+     * Second-band loss-of-lock indicator.
+     */
+    int64_t lli2;
+} SidereonPppDualFrequencyObservation;
+
+/**
+ * Fixed numeric fields of a code-derived slant TEC estimate.
+ */
+typedef struct SidereonTecCodeSlantEstimateInfo {
+    /**
+     * Code geometry-free combination, in metres.
+     */
+    double code_geometry_free_m;
+    /**
+     * Slant TEC, in TECU.
+     */
+    double slant_tec_tecu;
+} SidereonTecCodeSlantEstimateInfo;
+
+/**
+ * Thin-shell TEC configuration. This plain C value compares field-by-field.
+ */
+typedef struct SidereonTecConfig {
+    /**
+     * Ionospheric shell height above the spherical Earth, in metres.
+     */
+    double shell_height_m;
+    /**
+     * Spherical Earth radius used by the mapping function, in metres.
+     */
+    double earth_radius_m;
+} SidereonTecConfig;
+
+/**
+ * One dual-frequency TEC observation with topocentric geometry.
+ */
+typedef struct SidereonTecObservation {
+    /**
+     * Raw observation.
+     */
+    struct SidereonPppDualFrequencyObservation observation;
+    /**
+     * Satellite elevation, in radians.
+     */
+    double elevation_rad;
+    /**
+     * Satellite azimuth clockwise from north, in radians.
+     */
+    double azimuth_rad;
+} SidereonTecObservation;
+
+/**
+ * One TEC epoch.
+ */
+typedef struct SidereonTecEpoch {
+    /**
+     * Comparable epoch coordinate, in seconds.
+     */
+    double time_s;
+    /**
+     * Receiver geodetic latitude, in radians.
+     */
+    double receiver_latitude_rad;
+    /**
+     * Receiver geodetic longitude, in radians.
+     */
+    double receiver_longitude_rad;
+    /**
+     * Pointer to `observation_count` observations.
+     */
+    const struct SidereonTecObservation *observations;
+    /**
+     * Number of observations.
+     */
+    size_t observation_count;
+} SidereonTecEpoch;
+
+/**
+ * Thin-shell ionospheric pierce point. This plain C value has value equality.
+ */
+typedef struct SidereonTecIonosphericPiercePoint {
+    /**
+     * Latitude, in radians.
+     */
+    double latitude_rad;
+    /**
+     * Longitude in `[-pi, pi)`, in radians.
+     */
+    double longitude_rad;
+    /**
+     * Latitude, in degrees.
+     */
+    double latitude_deg;
+    /**
+     * Longitude in `[-180, 180)`, in degrees.
+     */
+    double longitude_deg;
+    /**
+     * Earth-central receiver-to-pierce-point angle, in radians.
+     */
+    double earth_central_angle_rad;
+    /**
+     * Shell height, in metres.
+     */
+    double shell_height_m;
+} SidereonTecIonosphericPiercePoint;
+
+/**
+ * Fixed scalar fields for one TEC estimate sample.
+ */
+typedef struct SidereonTecEstimateSample {
+    /**
+     * Epoch coordinate, in seconds.
+     */
+    double time_s;
+    /**
+     * Elevation, in radians.
+     */
+    double elevation_rad;
+    /**
+     * Azimuth, in radians.
+     */
+    double azimuth_rad;
+    /**
+     * Code geometry-free combination, in metres.
+     */
+    double code_geometry_free_m;
+    /**
+     * Phase geometry-free combination, in metres.
+     */
+    double phase_geometry_free_m;
+    /**
+     * Code-derived slant TEC, in TECU.
+     */
+    double code_slant_tec_tecu;
+    /**
+     * Biased phase-derived slant TEC, in TECU.
+     */
+    double phase_slant_tec_tecu;
+    /**
+     * Leveled slant TEC, in TECU.
+     */
+    double leveled_slant_tec_tecu;
+    /**
+     * Thin-shell mapping function.
+     */
+    double mapping_function;
+    /**
+     * Vertical TEC, in TECU.
+     */
+    double vertical_tec_tecu;
+    /**
+     * Ionospheric pierce point.
+     */
+    struct SidereonTecIonosphericPiercePoint pierce_point;
+} SidereonTecEstimateSample;
+
+/**
  * Typed detail of a standalone TEC-grid failure.
  *
  * Only the fields the kind names carry meaning. The engine's full text is
@@ -27944,6 +29237,64 @@ typedef struct SidereonTecGridOutcome {
      */
     struct SidereonTecGridError error;
 } SidereonTecGridOutcome;
+
+/**
+ * One phase-code leveling input sample. This plain C value has value equality.
+ */
+typedef struct SidereonTecLevelingSample {
+    /**
+     * Code-derived slant TEC, in TECU.
+     */
+    double code_slant_tec_tecu;
+    /**
+     * Biased phase-derived slant TEC, in TECU.
+     */
+    double phase_slant_tec_tecu;
+    /**
+     * Satellite elevation, in radians.
+     */
+    double elevation_rad;
+} SidereonTecLevelingSample;
+
+/**
+ * One leveled output sample. This plain C value has value equality.
+ */
+typedef struct SidereonTecLeveledSample {
+    /**
+     * Code-derived slant TEC input, in TECU.
+     */
+    double code_slant_tec_tecu;
+    /**
+     * Phase-derived slant TEC input, in TECU.
+     */
+    double phase_slant_tec_tecu;
+    /**
+     * Leveled phase-derived slant TEC, in TECU.
+     */
+    double leveled_slant_tec_tecu;
+    /**
+     * Thin-shell mapping function.
+     */
+    double mapping_function;
+    /**
+     * Leveled vertical TEC, in TECU.
+     */
+    double vertical_tec_tecu;
+} SidereonTecLeveledSample;
+
+/**
+ * Fixed numeric fields of a phase-derived slant TEC estimate.
+ */
+typedef struct SidereonTecPhaseSlantEstimateInfo {
+    /**
+     * Phase geometry-free combination, in metres.
+     */
+    double phase_geometry_free_m;
+    /**
+     * Biased slant TEC, in TECU.
+     */
+    double slant_tec_tecu;
+} SidereonTecPhaseSlantEstimateInfo;
 
 /**
  * Typed detail of a failed IONEX sample construction.
@@ -39543,6 +40894,16 @@ enum SidereonStatus sidereon_ppp_auto_init_options_init(struct SidereonPppAutoIn
 enum SidereonStatus sidereon_ppp_auto_init_strategy_default(enum SidereonPppAutoInitStrategy *out_strategy);
 
 /**
+ * Correct a mutable state with one PPP epoch through the core.
+ */
+enum SidereonStatus sidereon_ppp_correct_kinematic_state(const struct SidereonSp3 *sp3,
+                                                         size_t epoch_index,
+                                                         const struct SidereonPppEpoch *epoch,
+                                                         struct SidereonPppKinematicState *state,
+                                                         const struct SidereonPppKinematicConfig *config,
+                                                         struct SidereonPppKinematicUpdateSummary **out);
+
+/**
  * Copy clock-datum code-bias values from a PPP correction lookup.
  */
 enum SidereonStatus sidereon_ppp_correction_lookup_code_bias(const struct SidereonPppCorrectionLookup *lookup,
@@ -39772,6 +41133,128 @@ enum SidereonStatus sidereon_ppp_corrections_windup(const struct SidereonPppCorr
                                                     size_t len,
                                                     size_t *out_written,
                                                     size_t *out_required);
+
+/**
+ * Return the engine default cycle-slip configuration.
+ */
+enum SidereonStatus sidereon_ppp_cycle_slip_config_default(struct SidereonPppCycleSlipConfig *out);
+
+/**
+ * Return core display text for a configuration error kind.
+ */
+enum SidereonStatus sidereon_ppp_cycle_slip_config_error_text(enum SidereonPppCycleSlipConfigErrorKind kind,
+                                                              uint8_t *out,
+                                                              size_t out_len,
+                                                              size_t *out_written,
+                                                              size_t *out_required);
+
+/**
+ * Validate cycle-slip configuration through the engine.
+ */
+enum SidereonStatus sidereon_ppp_cycle_slip_config_validate(struct SidereonPppCycleSlipConfig config);
+
+/**
+ * Return the number of flagged epochs.
+ */
+enum SidereonStatus sidereon_ppp_cycle_slip_detection_epoch_count(const struct SidereonPppCycleSlipDetection *result,
+                                                                  size_t *out);
+
+/**
+ * Clone an exact epoch from one flagged epoch, or return null when absent.
+ */
+enum SidereonStatus sidereon_ppp_cycle_slip_detection_epoch_exact_epoch(const struct SidereonPppCycleSlipDetection *result,
+                                                                        size_t epoch_index,
+                                                                        struct SidereonExactEpoch **out);
+
+/**
+ * Read fixed fields for one flagged epoch.
+ */
+enum SidereonStatus sidereon_ppp_cycle_slip_detection_epoch_info(const struct SidereonPppCycleSlipDetection *result,
+                                                                 size_t epoch_index,
+                                                                 struct SidereonPppCycleSlipFlagEpochInfo *out);
+
+/**
+ * Compare two detection results by engine value equality.
+ */
+enum SidereonStatus sidereon_ppp_cycle_slip_detection_equal(const struct SidereonPppCycleSlipDetection *left,
+                                                            const struct SidereonPppCycleSlipDetection *right,
+                                                            bool *out_equal);
+
+/**
+ * Free a detection result. Null is accepted.
+ */
+void sidereon_ppp_cycle_slip_detection_free(struct SidereonPppCycleSlipDetection *result);
+
+/**
+ * Read fixed fields for one flagged observation.
+ */
+enum SidereonStatus sidereon_ppp_cycle_slip_detection_observation_info(const struct SidereonPppCycleSlipDetection *result,
+                                                                       size_t epoch_index,
+                                                                       size_t observation_index,
+                                                                       struct SidereonPppCycleSlipFlagObservationInfo *out);
+
+/**
+ * Read one deterministic cycle-slip reason.
+ */
+enum SidereonStatus sidereon_ppp_cycle_slip_detection_observation_reason(const struct SidereonPppCycleSlipDetection *result,
+                                                                         size_t epoch_index,
+                                                                         size_t observation_index,
+                                                                         size_t reason_index,
+                                                                         enum SidereonPppCycleSlipReason *out);
+
+/**
+ * Copy one flagged observation's satellite identifier losslessly.
+ */
+enum SidereonStatus sidereon_ppp_cycle_slip_detection_observation_satellite_id(const struct SidereonPppCycleSlipDetection *result,
+                                                                               size_t epoch_index,
+                                                                               size_t observation_index,
+                                                                               uint8_t *out,
+                                                                               size_t out_len,
+                                                                               size_t *out_written,
+                                                                               size_t *out_required);
+
+/**
+ * Convert a core carrier-phase error to its cycle-slip error through `From`.
+ */
+enum SidereonStatus sidereon_ppp_cycle_slip_error_from_carrier_phase(enum SidereonPppCycleSlipCarrierPhaseErrorKind kind,
+                                                                     struct SidereonPppCycleSlipConvertedError *out);
+
+/**
+ * Convert a core configuration error to its cycle-slip error through `From`.
+ */
+enum SidereonStatus sidereon_ppp_cycle_slip_error_from_config(enum SidereonPppCycleSlipConfigErrorKind kind,
+                                                              struct SidereonPppCycleSlipConvertedError *out);
+
+/**
+ * Return core display text for a cycle-slip error kind.
+ */
+enum SidereonStatus sidereon_ppp_cycle_slip_error_text(enum SidereonPppCycleSlipErrorKind kind,
+                                                       uint8_t *out,
+                                                       size_t out_len,
+                                                       size_t *out_written,
+                                                       size_t *out_required);
+
+/**
+ * Detect cycle slips across ordered dual-frequency PPP epochs.
+ */
+enum SidereonStatus sidereon_ppp_detect_cycle_slips(const struct SidereonPppCycleSlipEpoch *epochs,
+                                                    size_t epoch_count,
+                                                    struct SidereonPppCycleSlipConfig config,
+                                                    struct SidereonPppCycleSlipDetection **out);
+
+/**
+ * Compare two dual-frequency epochs using core value equality.
+ */
+enum SidereonStatus sidereon_ppp_dual_frequency_epoch_equal(const struct SidereonPppCycleSlipEpoch *left,
+                                                            const struct SidereonPppCycleSlipEpoch *right,
+                                                            bool *out_equal);
+
+/**
+ * Compare two dual-frequency observations using core value equality.
+ */
+enum SidereonStatus sidereon_ppp_dual_frequency_observation_equal(const struct SidereonPppCycleSlipObservation *left,
+                                                                  const struct SidereonPppCycleSlipObservation *right,
+                                                                  bool *out_equal);
 
 /**
  * Compare two PPP epochs by complete core value and pointed-to observations.
@@ -40041,6 +41524,67 @@ enum SidereonStatus sidereon_ppp_float_config_v2_equal(const struct SidereonPppF
                                                        bool *out_equal);
 
 /**
+ * Compare two float cycle-slip epochs using core value equality.
+ */
+enum SidereonStatus sidereon_ppp_float_cycle_slip_epoch_equal(const struct SidereonPppFloatCycleSlipEpoch *left,
+                                                              const struct SidereonPppFloatCycleSlipEpoch *right,
+                                                              bool *out_equal);
+
+/**
+ * Compare two float cycle-slip observations using core value equality.
+ */
+enum SidereonStatus sidereon_ppp_float_cycle_slip_observation_equal(const struct SidereonPppFloatCycleSlipObservation *left,
+                                                                    const struct SidereonPppFloatCycleSlipObservation *right,
+                                                                    bool *out_equal);
+
+/**
+ * Copy one tagged ambiguity identifier.
+ */
+enum SidereonStatus sidereon_ppp_float_cycle_slip_tagged_result_ambiguity_id(const struct SidereonPppFloatCycleSlipTaggedResult *result,
+                                                                             size_t epoch_index,
+                                                                             size_t observation_index,
+                                                                             uint8_t *out,
+                                                                             size_t len,
+                                                                             size_t *out_written,
+                                                                             size_t *out_required);
+
+/**
+ * Return the number of tagged float epochs.
+ */
+enum SidereonStatus sidereon_ppp_float_cycle_slip_tagged_result_epoch_count(const struct SidereonPppFloatCycleSlipTaggedResult *result,
+                                                                            size_t *out);
+
+/**
+ * Read one tagged epoch's observation count.
+ */
+enum SidereonStatus sidereon_ppp_float_cycle_slip_tagged_result_epoch_info(const struct SidereonPppFloatCycleSlipTaggedResult *result,
+                                                                           size_t index,
+                                                                           struct SidereonPppFloatCycleSlipTaggedEpochInfo *out);
+
+/**
+ * Compare tagged float results using core value equality.
+ */
+enum SidereonStatus sidereon_ppp_float_cycle_slip_tagged_result_equal(const struct SidereonPppFloatCycleSlipTaggedResult *left,
+                                                                      const struct SidereonPppFloatCycleSlipTaggedResult *right,
+                                                                      bool *out_equal);
+
+/**
+ * Free a tagged float result. Null is accepted.
+ */
+void sidereon_ppp_float_cycle_slip_tagged_result_free(struct SidereonPppFloatCycleSlipTaggedResult *result);
+
+/**
+ * Copy one tagged satellite identifier.
+ */
+enum SidereonStatus sidereon_ppp_float_cycle_slip_tagged_result_satellite_id(const struct SidereonPppFloatCycleSlipTaggedResult *result,
+                                                                             size_t epoch_index,
+                                                                             size_t observation_index,
+                                                                             uint8_t *out,
+                                                                             size_t len,
+                                                                             size_t *out_written,
+                                                                             size_t *out_required);
+
+/**
  * Compare PPP float solve options by core value.
  */
 enum SidereonStatus sidereon_ppp_float_options_equal(const struct SidereonPppFloatOptions *left,
@@ -40300,6 +41844,244 @@ enum SidereonStatus sidereon_ppp_float_solution_used_sat_ids(const struct Sidere
                                                              size_t *out_required);
 
 /**
+ * Compute geometry-free phase in metres through the engine.
+ */
+enum SidereonStatus sidereon_ppp_geometry_free_m(const struct SidereonPppCycleSlipObservation *observation,
+                                                 double *out);
+
+/**
+ * Allocate the core default kinematic configuration.
+ */
+enum SidereonStatus sidereon_ppp_kinematic_config_default(struct SidereonPppKinematicConfig **out);
+
+/**
+ * Compare configurations using core value equality.
+ */
+enum SidereonStatus sidereon_ppp_kinematic_config_equal(const struct SidereonPppKinematicConfig *left,
+                                                        const struct SidereonPppKinematicConfig *right,
+                                                        bool *out_equal);
+
+/**
+ * Free a configuration. Null is accepted.
+ */
+void sidereon_ppp_kinematic_config_free(struct SidereonPppKinematicConfig *config);
+
+/**
+ * Read fixed configuration fields.
+ */
+enum SidereonStatus sidereon_ppp_kinematic_config_info(const struct SidereonPppKinematicConfig *config,
+                                                       struct SidereonPppKinematicConfigInfo *out);
+
+/**
+ * Clone the configured initial state and covariance.
+ */
+enum SidereonStatus sidereon_ppp_kinematic_config_initial_state(const struct SidereonPppKinematicConfig *config,
+                                                                struct SidereonPppKinematicState **out);
+
+/**
+ * Set motion and process noise after validating their tags.
+ */
+enum SidereonStatus sidereon_ppp_kinematic_config_set_dynamics(struct SidereonPppKinematicConfig *config,
+                                                               struct SidereonPppKinematicMotionModel motion,
+                                                               struct SidereonPppKinematicProcessNoise noise,
+                                                               double new_ambiguity_variance_m2);
+
+/**
+ * Copy a state and covariance into the configuration's initial condition.
+ */
+enum SidereonStatus sidereon_ppp_kinematic_config_set_initial_state(struct SidereonPppKinematicConfig *config,
+                                                                    const struct SidereonPppKinematicState *state);
+
+/**
+ * Set measurement weights, troposphere, and corrections from the existing lossless PPP config.
+ */
+enum SidereonStatus sidereon_ppp_kinematic_config_set_measurement_config(struct SidereonPppKinematicConfig *config,
+                                                                         const struct SidereonPppFloatConfig *input);
+
+/**
+ * Copy one epoch ambiguity id losslessly.
+ */
+enum SidereonStatus sidereon_ppp_kinematic_result_ambiguity_id(const struct SidereonPppKinematicResult *result,
+                                                               size_t epoch,
+                                                               size_t index,
+                                                               uint8_t *out,
+                                                               size_t len,
+                                                               size_t *out_written,
+                                                               size_t *out_required);
+
+/**
+ * Read one epoch ambiguity value.
+ */
+enum SidereonStatus sidereon_ppp_kinematic_result_ambiguity_m(const struct SidereonPppKinematicResult *result,
+                                                              size_t epoch,
+                                                              size_t index,
+                                                              double *out);
+
+/**
+ * Return the number of epoch solutions.
+ */
+enum SidereonStatus sidereon_ppp_kinematic_result_epoch_count(const struct SidereonPppKinematicResult *result,
+                                                              size_t *out);
+
+/**
+ * Read one epoch solution's fixed fields.
+ */
+enum SidereonStatus sidereon_ppp_kinematic_result_epoch_info(const struct SidereonPppKinematicResult *result,
+                                                             size_t index,
+                                                             struct SidereonPppKinematicEpochSolutionInfo *out);
+
+/**
+ * Compare ordered solve results using core value equality.
+ */
+enum SidereonStatus sidereon_ppp_kinematic_result_equal(const struct SidereonPppKinematicResult *left,
+                                                        const struct SidereonPppKinematicResult *right,
+                                                        bool *out_equal);
+
+/**
+ * Free a solve result. Null is accepted.
+ */
+void sidereon_ppp_kinematic_result_free(struct SidereonPppKinematicResult *result);
+
+/**
+ * Read one epoch SSR-bias exclusion.
+ */
+enum SidereonStatus sidereon_ppp_kinematic_result_ssr_bias_exclusion(const struct SidereonPppKinematicResult *result,
+                                                                     size_t epoch,
+                                                                     size_t index,
+                                                                     struct SidereonPppSsrBiasExclusion *out);
+
+/**
+ * Read one epoch unplaced observation.
+ */
+enum SidereonStatus sidereon_ppp_kinematic_result_unplaced_observation(const struct SidereonPppKinematicResult *result,
+                                                                       size_t epoch,
+                                                                       size_t index,
+                                                                       struct SidereonPppUnplacedObservationV2 *out);
+
+/**
+ * Copy one epoch used-satellite id losslessly.
+ */
+enum SidereonStatus sidereon_ppp_kinematic_result_used_satellite(const struct SidereonPppKinematicResult *result,
+                                                                 size_t epoch,
+                                                                 size_t index,
+                                                                 uint8_t *out,
+                                                                 size_t len,
+                                                                 size_t *out_written,
+                                                                 size_t *out_required);
+
+/**
+ * Return core Display text for a representative error kind.
+ */
+enum SidereonStatus sidereon_ppp_kinematic_solve_error_text(enum SidereonPppKinematicSolveErrorKind kind,
+                                                            uint8_t *out,
+                                                            size_t len,
+                                                            size_t *out_written,
+                                                            size_t *out_required);
+
+/**
+ * Copy one ambiguity id losslessly.
+ */
+enum SidereonStatus sidereon_ppp_kinematic_state_ambiguity_id(const struct SidereonPppKinematicState *state,
+                                                              size_t index,
+                                                              uint8_t *out,
+                                                              size_t len,
+                                                              size_t *out_written,
+                                                              size_t *out_required);
+
+/**
+ * Read one ambiguity value.
+ */
+enum SidereonStatus sidereon_ppp_kinematic_state_ambiguity_m(const struct SidereonPppKinematicState *state,
+                                                             size_t index,
+                                                             double *out);
+
+/**
+ * Copy row-major covariance with the standard size-query contract.
+ */
+enum SidereonStatus sidereon_ppp_kinematic_state_covariance(const struct SidereonPppKinematicState *state,
+                                                            double *out,
+                                                            size_t len,
+                                                            size_t *out_written,
+                                                            size_t *out_required);
+
+/**
+ * Allocate the default state with the core default covariance.
+ */
+enum SidereonStatus sidereon_ppp_kinematic_state_default(struct SidereonPppKinematicState **out);
+
+/**
+ * Compare states and covariance using core state equality and value equality.
+ */
+enum SidereonStatus sidereon_ppp_kinematic_state_equal(const struct SidereonPppKinematicState *left,
+                                                       const struct SidereonPppKinematicState *right,
+                                                       bool *out_equal);
+
+/**
+ * Free a state. Null is accepted.
+ */
+void sidereon_ppp_kinematic_state_free(struct SidereonPppKinematicState *state);
+
+/**
+ * Read fixed state fields and counts.
+ */
+enum SidereonStatus sidereon_ppp_kinematic_state_info(const struct SidereonPppKinematicState *state,
+                                                      struct SidereonPppKinematicStateInfo *out);
+
+/**
+ * Allocate a state from every state field and a row-major covariance.
+ */
+enum SidereonStatus sidereon_ppp_kinematic_state_new(const double *position_m,
+                                                     double clock_m,
+                                                     double ztd_residual_m,
+                                                     const struct SidereonPppKinematicAmbiguity *ambiguities,
+                                                     size_t ambiguity_count,
+                                                     const double *covariance_m2,
+                                                     size_t covariance_count,
+                                                     struct SidereonPppKinematicState **out);
+
+/**
+ * Compare update summaries using core value equality.
+ */
+enum SidereonStatus sidereon_ppp_kinematic_update_summary_equal(const struct SidereonPppKinematicUpdateSummary *left,
+                                                                const struct SidereonPppKinematicUpdateSummary *right,
+                                                                bool *out_equal);
+
+/**
+ * Free an update summary. Null is accepted.
+ */
+void sidereon_ppp_kinematic_update_summary_free(struct SidereonPppKinematicUpdateSummary *summary);
+
+/**
+ * Read update summary fields and counts.
+ */
+enum SidereonStatus sidereon_ppp_kinematic_update_summary_info(const struct SidereonPppKinematicUpdateSummary *summary,
+                                                               struct SidereonPppKinematicUpdateSummaryInfo *out);
+
+/**
+ * Read one complete SSR-bias exclusion using the existing PPP value representation.
+ */
+enum SidereonStatus sidereon_ppp_kinematic_update_summary_ssr_bias_exclusion(const struct SidereonPppKinematicUpdateSummary *summary,
+                                                                             size_t index,
+                                                                             struct SidereonPppSsrBiasExclusion *out);
+
+/**
+ * Read one complete unplaced observation using the additive PPP representation.
+ */
+enum SidereonStatus sidereon_ppp_kinematic_update_summary_unplaced_observation(const struct SidereonPppKinematicUpdateSummary *summary,
+                                                                               size_t index,
+                                                                               struct SidereonPppUnplacedObservationV2 *out);
+
+/**
+ * Copy one used-satellite id losslessly.
+ */
+enum SidereonStatus sidereon_ppp_kinematic_update_summary_used_satellite(const struct SidereonPppKinematicUpdateSummary *summary,
+                                                                         size_t index,
+                                                                         uint8_t *out,
+                                                                         size_t len,
+                                                                         size_t *out_written,
+                                                                         size_t *out_required);
+
+/**
  * Compare PPP measurement weights by core value.
  */
 enum SidereonStatus sidereon_ppp_measurement_weights_equal(const struct SidereonPppMeasurementWeights *left,
@@ -40314,11 +42096,26 @@ enum SidereonStatus sidereon_ppp_measurement_weights_equal(const struct Sidereon
 enum SidereonStatus sidereon_ppp_measurement_weights_init(struct SidereonPppMeasurementWeights *out_weights);
 
 /**
+ * Compute Melbourne-Wubbena in wide-lane cycles through the engine.
+ */
+enum SidereonStatus sidereon_ppp_melbourne_wubbena_cycles(const struct SidereonPppCycleSlipObservation *observation,
+                                                          double *out);
+
+/**
  * Compare two PPP observations by complete core value, including signal codes.
  */
 enum SidereonStatus sidereon_ppp_observation_equal(const struct SidereonPppObservation *left,
                                                    const struct SidereonPppObservation *right,
                                                    bool *out_equal);
+
+/**
+ * Predict a mutable state and covariance through the core.
+ */
+enum SidereonStatus sidereon_ppp_predict_kinematic_state(struct SidereonPppKinematicState *state,
+                                                         double dt_s,
+                                                         const char *const *active_ambiguity_ids,
+                                                         size_t active_ambiguity_count,
+                                                         const struct SidereonPppKinematicConfig *config);
 
 /**
  * Predict range rate for one low-level observation. Coincident or non-finite
@@ -40327,6 +42124,221 @@ enum SidereonStatus sidereon_ppp_observation_equal(const struct SidereonPppObser
 enum SidereonStatus sidereon_ppp_predict_range_rate_m_s(const struct SidereonPppVelocityObservation *observation,
                                                         const struct SidereonPppReceiverVelocityState *receiver,
                                                         struct SidereonPppRangeRatePrediction *out_prediction);
+
+/**
+ * Prepare dual-frequency epochs for fixed wide-lane/narrow-lane PPP.
+ */
+enum SidereonStatus sidereon_ppp_prepare_widelane_fixed_epochs(const struct SidereonPppCycleSlipEpoch *epochs,
+                                                               size_t epoch_count,
+                                                               struct SidereonPppWideLanePrepOptions wide_lane,
+                                                               uint32_t cycle_slip_policy,
+                                                               struct SidereonCycleSlipOptions cycle_slip_options,
+                                                               struct SidereonPppWideLanePrepResult **out);
+
+/**
+ * Initialize RAIM configuration from the core default.
+ */
+enum SidereonStatus sidereon_ppp_raim_config_default(struct SidereonPppRaimConfig *out);
+
+/**
+ * Copy representative core Display text for a PPP RAIM error kind.
+ */
+enum SidereonStatus sidereon_ppp_raim_error_text(enum SidereonPppRaimErrorKind kind,
+                                                 uint8_t *out,
+                                                 size_t len,
+                                                 size_t *out_written,
+                                                 size_t *out_required);
+
+/**
+ * Copy representative core Display text for a PPP RAIM/FDE error kind.
+ */
+enum SidereonStatus sidereon_ppp_raim_fde_error_text(enum SidereonPppRaimFdeErrorKind kind,
+                                                     uint8_t *out,
+                                                     size_t len,
+                                                     size_t *out_written,
+                                                     size_t *out_required);
+
+/**
+ * Run one-epoch PPP RAIM fault detection and exclusion.
+ */
+enum SidereonStatus sidereon_ppp_raim_fde_float_epoch(const struct SidereonSp3 *sp3,
+                                                      const struct SidereonPppFloatConfigV2 *config,
+                                                      struct SidereonPppRaimConfig raim_config,
+                                                      struct SidereonPppRaimFdeResult **out);
+
+/**
+ * Compare two FDE results by core value equality.
+ */
+enum SidereonStatus sidereon_ppp_raim_fde_result_equal(const struct SidereonPppRaimFdeResult *left,
+                                                       const struct SidereonPppRaimFdeResult *right,
+                                                       bool *out_equal);
+
+/**
+ * Copy one excluded satellite identifier without truncation.
+ */
+enum SidereonStatus sidereon_ppp_raim_fde_result_excluded_satellite(const struct SidereonPppRaimFdeResult *result,
+                                                                    size_t index,
+                                                                    uint8_t *out,
+                                                                    size_t len,
+                                                                    size_t *out_written,
+                                                                    size_t *out_required);
+
+/**
+ * Release an FDE result. NULL is allowed.
+ */
+void sidereon_ppp_raim_fde_result_free(struct SidereonPppRaimFdeResult *result);
+
+/**
+ * Read fixed FDE metadata.
+ */
+enum SidereonStatus sidereon_ppp_raim_fde_result_info(const struct SidereonPppRaimFdeResult *result,
+                                                      struct SidereonPppRaimFdeInfo *out);
+
+/**
+ * Clone the final RAIM result into an owned RAIM handle.
+ */
+enum SidereonStatus sidereon_ppp_raim_fde_result_raim(const struct SidereonPppRaimFdeResult *result,
+                                                      struct SidereonPppRaimResult **out);
+
+/**
+ * Clone the final float solution into its standard owned C handle.
+ */
+enum SidereonStatus sidereon_ppp_raim_fde_result_solution(const struct SidereonPppRaimFdeResult *result,
+                                                          struct SidereonPppFloatSolution **out);
+
+/**
+ * Compare two PPP RAIM geometry rows using the engine's value equality.
+ */
+enum SidereonStatus sidereon_ppp_raim_geometry_row_equal(const struct SidereonPppRaimGeometryRow *left,
+                                                         const struct SidereonPppRaimGeometryRow *right,
+                                                         bool *out_equal);
+
+/**
+ * Run the PPP RAIM global test over float residual rows.
+ */
+enum SidereonStatus sidereon_ppp_raim_global_test(const struct SidereonPppRaimResidual *residuals,
+                                                  size_t residual_count,
+                                                  size_t n_states,
+                                                  struct SidereonPppRaimConfig config,
+                                                  struct SidereonPppRaimResult **out);
+
+/**
+ * Run the PPP RAIM global test with snapshot geometry and identification.
+ */
+enum SidereonStatus sidereon_ppp_raim_global_test_with_geometry(const struct SidereonPppRaimResidual *residuals,
+                                                                size_t residual_count,
+                                                                const struct SidereonPppRaimGeometryRow *geometry,
+                                                                size_t geometry_count,
+                                                                struct SidereonPppRaimConfig config,
+                                                                struct SidereonPppRaimResult **out);
+
+/**
+ * Compare two identification results by core value equality.
+ */
+enum SidereonStatus sidereon_ppp_raim_identification_equal(const struct SidereonPppRaimIdentification *left,
+                                                           const struct SidereonPppRaimIdentification *right,
+                                                           bool *out_equal);
+
+/**
+ * Release an identification result. NULL is allowed.
+ */
+void sidereon_ppp_raim_identification_free(struct SidereonPppRaimIdentification *identification);
+
+/**
+ * Return fixed metadata from an identification result.
+ */
+enum SidereonStatus sidereon_ppp_raim_identification_info(const struct SidereonPppRaimIdentification *identification,
+                                                          size_t *out_statistic_count,
+                                                          bool *out_has_most_likely_fault);
+
+/**
+ * Copy the identification's optional most-likely-fault identifier.
+ */
+enum SidereonStatus sidereon_ppp_raim_identification_most_likely_fault(const struct SidereonPppRaimIdentification *identification,
+                                                                       uint8_t *out,
+                                                                       size_t len,
+                                                                       size_t *out_written,
+                                                                       size_t *out_required);
+
+/**
+ * Copy an identification statistic's satellite identifier.
+ */
+enum SidereonStatus sidereon_ppp_raim_identification_satellite_id(const struct SidereonPppRaimIdentification *identification,
+                                                                  size_t index,
+                                                                  uint8_t *out,
+                                                                  size_t len,
+                                                                  size_t *out_written,
+                                                                  size_t *out_required);
+
+/**
+ * Read one statistic from an identification result.
+ */
+enum SidereonStatus sidereon_ppp_raim_identification_statistic(const struct SidereonPppRaimIdentification *identification,
+                                                               size_t index,
+                                                               struct SidereonPppRaimSatelliteStatistic *out);
+
+/**
+ * Compute per-satellite standardized residual statistics.
+ */
+enum SidereonStatus sidereon_ppp_raim_per_satellite_statistics(const struct SidereonPppRaimResidual *residuals,
+                                                               size_t residual_count,
+                                                               const struct SidereonPppRaimGeometryRow *geometry,
+                                                               size_t geometry_count,
+                                                               struct SidereonPppRaimConfig config,
+                                                               struct SidereonPppRaimIdentification **out);
+
+/**
+ * Compute PPP RAIM horizontal and vertical protection levels.
+ */
+enum SidereonStatus sidereon_ppp_raim_protection_levels(const struct SidereonPppRaimGeometryRow *geometry,
+                                                        size_t geometry_count,
+                                                        struct SidereonGeodetic receiver,
+                                                        struct SidereonPppRaimConfig config,
+                                                        struct SidereonPppRaimProtectionLevels *out);
+
+/**
+ * Compare two RAIM results by core value equality.
+ */
+enum SidereonStatus sidereon_ppp_raim_result_equal(const struct SidereonPppRaimResult *left,
+                                                   const struct SidereonPppRaimResult *right,
+                                                   bool *out_equal);
+
+/**
+ * Release a RAIM result. NULL is allowed.
+ */
+void sidereon_ppp_raim_result_free(struct SidereonPppRaimResult *result);
+
+/**
+ * Read fixed metadata from a RAIM result.
+ */
+enum SidereonStatus sidereon_ppp_raim_result_info(const struct SidereonPppRaimResult *result,
+                                                  struct SidereonPppRaimResultInfo *out);
+
+/**
+ * Copy the optional most-likely-fault identifier without truncation.
+ */
+enum SidereonStatus sidereon_ppp_raim_result_most_likely_fault(const struct SidereonPppRaimResult *result,
+                                                               uint8_t *out,
+                                                               size_t len,
+                                                               size_t *out_written,
+                                                               size_t *out_required);
+
+/**
+ * Copy one statistic's satellite identifier without truncation.
+ */
+enum SidereonStatus sidereon_ppp_raim_result_satellite_id(const struct SidereonPppRaimResult *result,
+                                                          size_t index,
+                                                          uint8_t *out,
+                                                          size_t len,
+                                                          size_t *out_written,
+                                                          size_t *out_required);
+
+/**
+ * Read one per-satellite statistic from a RAIM result.
+ */
+enum SidereonStatus sidereon_ppp_raim_result_satellite_statistic(const struct SidereonPppRaimResult *result,
+                                                                 size_t index,
+                                                                 struct SidereonPppRaimSatelliteStatistic *out);
 
 /**
  * Compare PPP range-correction inputs by complete core value.
@@ -40363,6 +42375,86 @@ enum SidereonStatus sidereon_ppp_receiver_velocity_state_stationary_at(const dou
                                                                        struct SidereonPppReceiverVelocityState *out_state);
 
 /**
+ * Compare two running-statistic handles by engine value equality.
+ */
+enum SidereonStatus sidereon_ppp_running_mean_variance_equal(const struct SidereonPppRunningMeanVariance *left,
+                                                             const struct SidereonPppRunningMeanVariance *right,
+                                                             bool *out_equal);
+
+/**
+ * Free a running-statistic handle. Null is accepted.
+ */
+void sidereon_ppp_running_mean_variance_free(struct SidereonPppRunningMeanVariance *state);
+
+/**
+ * Read a running-statistic snapshot.
+ */
+enum SidereonStatus sidereon_ppp_running_mean_variance_info(const struct SidereonPppRunningMeanVariance *state,
+                                                            struct SidereonPppRunningMeanVarianceInfo *out);
+
+/**
+ * Allocate an empty engine running statistic.
+ */
+enum SidereonStatus sidereon_ppp_running_mean_variance_new(struct SidereonPppRunningMeanVariance **out);
+
+/**
+ * Push one value into a mutable engine running statistic.
+ */
+enum SidereonStatus sidereon_ppp_running_mean_variance_push(struct SidereonPppRunningMeanVariance *state,
+                                                            double value);
+
+/**
+ * Compare two per-satellite states by engine value equality.
+ */
+enum SidereonStatus sidereon_ppp_satellite_cycle_slip_state_equal(const struct SidereonPppSatelliteCycleSlipState *left,
+                                                                  const struct SidereonPppSatelliteCycleSlipState *right,
+                                                                  bool *out_equal);
+
+/**
+ * Free a per-satellite cycle-slip state. Null is accepted.
+ */
+void sidereon_ppp_satellite_cycle_slip_state_free(struct SidereonPppSatelliteCycleSlipState *state);
+
+/**
+ * Read a per-satellite cycle-slip state snapshot.
+ */
+enum SidereonStatus sidereon_ppp_satellite_cycle_slip_state_info(const struct SidereonPppSatelliteCycleSlipState *state,
+                                                                 struct SidereonPppSatelliteCycleSlipStateInfo *out);
+
+/**
+ * Allocate an empty per-satellite cycle-slip state.
+ */
+enum SidereonStatus sidereon_ppp_satellite_cycle_slip_state_new(struct SidereonPppSatelliteCycleSlipState **out);
+
+/**
+ * Clone the previous exact epoch from a cycle-slip state.
+ */
+enum SidereonStatus sidereon_ppp_satellite_cycle_slip_state_previous_epoch(const struct SidereonPppSatelliteCycleSlipState *state,
+                                                                           struct SidereonExactEpoch **out);
+
+/**
+ * Reset a per-satellite cycle-slip state through the engine.
+ */
+enum SidereonStatus sidereon_ppp_satellite_cycle_slip_state_reset_arc(struct SidereonPppSatelliteCycleSlipState *state);
+
+/**
+ * Solve one float epoch with PPP RAIM/FDE.
+ */
+enum SidereonStatus sidereon_ppp_solve_float_epoch_with_raim(const struct SidereonSp3 *sp3,
+                                                             const struct SidereonPppFloatConfigV2 *config,
+                                                             struct SidereonPppRaimConfig raim_config,
+                                                             struct SidereonPppRaimFdeResult **out);
+
+/**
+ * Solve ordered PPP epochs with the core kinematic EKF.
+ */
+enum SidereonStatus sidereon_ppp_solve_kinematic_ppp(const struct SidereonSp3 *sp3,
+                                                     const struct SidereonPppEpoch *epochs,
+                                                     size_t epoch_count,
+                                                     const struct SidereonPppKinematicConfig *config,
+                                                     struct SidereonPppKinematicResult **out);
+
+/**
  * Solve receiver velocity and range-rate clock drift from precomputed satellite states.
  */
 enum SidereonStatus sidereon_ppp_solve_velocity_least_squares(const struct SidereonPppVelocityObservation *observations,
@@ -40370,6 +42462,14 @@ enum SidereonStatus sidereon_ppp_solve_velocity_least_squares(const struct Sider
                                                               const double *receiver_position_m,
                                                               const struct SidereonPppVelocityConfig *config,
                                                               struct SidereonPppVelocitySolution **out_solution);
+
+/**
+ * Split float ambiguity identifiers at dual-frequency cycle slips.
+ */
+enum SidereonStatus sidereon_ppp_split_float_cycle_slip_epochs(const struct SidereonPppFloatCycleSlipEpoch *epochs,
+                                                               size_t epoch_count,
+                                                               struct SidereonCycleSlipOptions cycle_slip_options,
+                                                               struct SidereonPppFloatCycleSlipTaggedResult **out);
 
 /**
  * Compare PPP troposphere options by core value after enum validation.
@@ -40384,6 +42484,25 @@ enum SidereonStatus sidereon_ppp_troposphere_options_equal(const struct Sidereon
  * Safety: out_options must point to a SidereonPppTroposphereOptions.
  */
 enum SidereonStatus sidereon_ppp_troposphere_options_init(struct SidereonPppTroposphereOptions *out_options);
+
+/**
+ * Update mutable geometry-free detector state through the engine.
+ */
+enum SidereonStatus sidereon_ppp_update_geometry_free(struct SidereonPppSatelliteCycleSlipState *state,
+                                                      const struct SidereonPppCycleSlipObservation *observation,
+                                                      bool has_epoch_time_s,
+                                                      double epoch_time_s,
+                                                      const struct SidereonExactEpoch *epoch,
+                                                      struct SidereonPppCycleSlipConfig config,
+                                                      struct SidereonPppGeometryFreeUpdate *out);
+
+/**
+ * Update mutable Melbourne-Wubbena detector state through the engine.
+ */
+enum SidereonStatus sidereon_ppp_update_melbourne_wubbena(struct SidereonPppSatelliteCycleSlipState *state,
+                                                          const struct SidereonPppCycleSlipObservation *observation,
+                                                          struct SidereonPppCycleSlipConfig config,
+                                                          struct SidereonPppMelbourneWubbenaUpdate *out);
 
 /**
  * Compare low-level velocity configurations by complete core value.
@@ -40456,6 +42575,156 @@ enum SidereonStatus sidereon_ppp_velocity_solution_values(const struct SidereonP
                                                           size_t *out_robust_iterations,
                                                           bool *out_has_robust_scale,
                                                           double *out_robust_scale_m_s);
+
+/**
+ * Construct wide-lane preparation options through the core constructor.
+ */
+enum SidereonStatus sidereon_ppp_wide_lane_prep_options_new(size_t min_epochs,
+                                                            double tolerance_cycles,
+                                                            struct SidereonPppWideLanePrepOptions *out);
+
+/**
+ * Copy one dropped satellite identifier losslessly.
+ */
+enum SidereonStatus sidereon_ppp_wide_lane_prep_result_dropped_satellite(const struct SidereonPppWideLanePrepResult *result,
+                                                                         size_t index,
+                                                                         uint8_t *out,
+                                                                         size_t len,
+                                                                         size_t *out_written,
+                                                                         size_t *out_required);
+
+/**
+ * Read one prepared epoch's fixed fields.
+ */
+enum SidereonStatus sidereon_ppp_wide_lane_prep_result_epoch_info(const struct SidereonPppWideLanePrepResult *result,
+                                                                  size_t index,
+                                                                  struct SidereonPppPreparedFloatEpochInfo *out);
+
+/**
+ * Compare wide-lane preparation results using core value equality.
+ */
+enum SidereonStatus sidereon_ppp_wide_lane_prep_result_equal(const struct SidereonPppWideLanePrepResult *left,
+                                                             const struct SidereonPppWideLanePrepResult *right,
+                                                             bool *out_equal);
+
+/**
+ * Free a wide-lane preparation result. Null is accepted.
+ */
+void sidereon_ppp_wide_lane_prep_result_free(struct SidereonPppWideLanePrepResult *result);
+
+/**
+ * Read summary counts from a wide-lane preparation result.
+ */
+enum SidereonStatus sidereon_ppp_wide_lane_prep_result_info(const struct SidereonPppWideLanePrepResult *result,
+                                                            struct SidereonPppWideLanePrepResultInfo *out);
+
+/**
+ * Copy one prepared observation's ambiguity identifier losslessly.
+ */
+enum SidereonStatus sidereon_ppp_wide_lane_prep_result_observation_ambiguity_id(const struct SidereonPppWideLanePrepResult *result,
+                                                                                size_t epoch_index,
+                                                                                size_t observation_index,
+                                                                                uint8_t *out,
+                                                                                size_t len,
+                                                                                size_t *out_written,
+                                                                                size_t *out_required);
+
+/**
+ * Read one prepared observation's numeric fields.
+ */
+enum SidereonStatus sidereon_ppp_wide_lane_prep_result_observation_info(const struct SidereonPppWideLanePrepResult *result,
+                                                                        size_t epoch_index,
+                                                                        size_t observation_index,
+                                                                        struct SidereonPppPreparedFloatObservationInfo *out);
+
+/**
+ * Copy one prepared observation's satellite identifier losslessly.
+ */
+enum SidereonStatus sidereon_ppp_wide_lane_prep_result_observation_satellite_id(const struct SidereonPppWideLanePrepResult *result,
+                                                                                size_t epoch_index,
+                                                                                size_t observation_index,
+                                                                                uint8_t *out,
+                                                                                size_t len,
+                                                                                size_t *out_written,
+                                                                                size_t *out_required);
+
+/**
+ * Copy one narrow-lane offset map key.
+ */
+enum SidereonStatus sidereon_ppp_wide_lane_prep_result_offset_key(const struct SidereonPppWideLanePrepResult *result,
+                                                                  size_t index,
+                                                                  uint8_t *out,
+                                                                  size_t len,
+                                                                  size_t *out_written,
+                                                                  size_t *out_required);
+
+/**
+ * Read one narrow-lane offset.
+ */
+enum SidereonStatus sidereon_ppp_wide_lane_prep_result_offset_m(const struct SidereonPppWideLanePrepResult *result,
+                                                                size_t index,
+                                                                double *out);
+
+/**
+ * Copy one split arc's ambiguity identifier.
+ */
+enum SidereonStatus sidereon_ppp_wide_lane_prep_result_split_arc_ambiguity_id(const struct SidereonPppWideLanePrepResult *result,
+                                                                              size_t index,
+                                                                              uint8_t *out,
+                                                                              size_t len,
+                                                                              size_t *out_written,
+                                                                              size_t *out_required);
+
+/**
+ * Read one split arc's fixed fields.
+ */
+enum SidereonStatus sidereon_ppp_wide_lane_prep_result_split_arc_info(const struct SidereonPppWideLanePrepResult *result,
+                                                                      size_t index,
+                                                                      struct SidereonPppSplitArcInfo *out);
+
+/**
+ * Copy one split arc's satellite identifier.
+ */
+enum SidereonStatus sidereon_ppp_wide_lane_prep_result_split_arc_satellite_id(const struct SidereonPppWideLanePrepResult *result,
+                                                                              size_t index,
+                                                                              uint8_t *out,
+                                                                              size_t len,
+                                                                              size_t *out_written,
+                                                                              size_t *out_required);
+
+/**
+ * Copy one narrow-lane wavelength map key.
+ */
+enum SidereonStatus sidereon_ppp_wide_lane_prep_result_wavelength_key(const struct SidereonPppWideLanePrepResult *result,
+                                                                      size_t index,
+                                                                      uint8_t *out,
+                                                                      size_t len,
+                                                                      size_t *out_written,
+                                                                      size_t *out_required);
+
+/**
+ * Read one narrow-lane wavelength.
+ */
+enum SidereonStatus sidereon_ppp_wide_lane_prep_result_wavelength_m(const struct SidereonPppWideLanePrepResult *result,
+                                                                    size_t index,
+                                                                    double *out);
+
+/**
+ * Read one fixed wide-lane integer.
+ */
+enum SidereonStatus sidereon_ppp_wide_lane_prep_result_wide_lane_cycles(const struct SidereonPppWideLanePrepResult *result,
+                                                                        size_t index,
+                                                                        int64_t *out);
+
+/**
+ * Copy one fixed wide-lane map key.
+ */
+enum SidereonStatus sidereon_ppp_wide_lane_prep_result_wide_lane_key(const struct SidereonPppWideLanePrepResult *result,
+                                                                     size_t index,
+                                                                     uint8_t *out,
+                                                                     size_t len,
+                                                                     size_t *out_written,
+                                                                     size_t *out_required);
 
 /**
  * ICRS-to-J2000 frame-bias matrix, row-major in out_matrix (infallible).
@@ -51646,6 +53915,148 @@ struct SidereonTdmWritePolicy sidereon_tdm_write_policy_lenient(void);
 struct SidereonTdmWritePolicy sidereon_tdm_write_policy_strict(void);
 
 /**
+ * Compute the code geometry-free combination for one raw observation.
+ */
+enum SidereonStatus sidereon_tec_code_geometry_free_m(const struct SidereonPppDualFrequencyObservation *observation,
+                                                      double *out);
+
+/**
+ * Copy a code estimate's ambiguity identifier without truncation.
+ */
+enum SidereonStatus sidereon_tec_code_slant_estimate_ambiguity_id(const struct SidereonTecCodeSlantEstimate *estimate,
+                                                                  uint8_t *out,
+                                                                  size_t len,
+                                                                  size_t *out_written,
+                                                                  size_t *out_required);
+
+/**
+ * Compare code-derived slant estimates by core value equality.
+ */
+enum SidereonStatus sidereon_tec_code_slant_estimate_equal(const struct SidereonTecCodeSlantEstimate *left,
+                                                           const struct SidereonTecCodeSlantEstimate *right,
+                                                           bool *out_equal);
+
+/**
+ * Release a code-derived slant estimate. NULL is allowed.
+ */
+void sidereon_tec_code_slant_estimate_free(struct SidereonTecCodeSlantEstimate *estimate);
+
+/**
+ * Read the numeric fields of a code-derived slant estimate.
+ */
+enum SidereonStatus sidereon_tec_code_slant_estimate_info(const struct SidereonTecCodeSlantEstimate *estimate,
+                                                          struct SidereonTecCodeSlantEstimateInfo *out);
+
+/**
+ * Copy a code estimate's satellite identifier without truncation.
+ */
+enum SidereonStatus sidereon_tec_code_slant_estimate_satellite_id(const struct SidereonTecCodeSlantEstimate *estimate,
+                                                                  uint8_t *out,
+                                                                  size_t len,
+                                                                  size_t *out_written,
+                                                                  size_t *out_required);
+
+/**
+ * Initialize a TEC configuration from the core default.
+ */
+enum SidereonStatus sidereon_tec_config_default(struct SidereonTecConfig *out);
+
+/**
+ * Validate a TEC configuration with the core validator.
+ */
+enum SidereonStatus sidereon_tec_config_validate(struct SidereonTecConfig config);
+
+/**
+ * Compare two TEC epochs, including every nested observation, by core value equality.
+ */
+enum SidereonStatus sidereon_tec_epoch_equal(const struct SidereonTecEpoch *left,
+                                             const struct SidereonTecEpoch *right,
+                                             bool *out_equal);
+
+/**
+ * Copy the core Display text for a TEC error kind.
+ */
+enum SidereonStatus sidereon_tec_error_text(enum SidereonTecErrorKind kind,
+                                            uint8_t *out,
+                                            size_t len,
+                                            size_t *out_written,
+                                            size_t *out_required);
+
+/**
+ * Estimate TEC for a time-ordered epoch stream and return an owned result.
+ */
+enum SidereonStatus sidereon_tec_estimate(const struct SidereonTecEpoch *epochs,
+                                          size_t epoch_count,
+                                          struct SidereonTecConfig config,
+                                          struct SidereonTecEstimate **out);
+
+/**
+ * Copy an arc's UTF-8 ambiguity identifier without truncation.
+ */
+enum SidereonStatus sidereon_tec_estimate_arc_ambiguity_id(const struct SidereonTecEstimate *estimate,
+                                                           size_t arc_index,
+                                                           uint8_t *out,
+                                                           size_t len,
+                                                           size_t *out_written,
+                                                           size_t *out_required);
+
+/**
+ * Return the number of continuous arcs in a TEC estimate.
+ */
+enum SidereonStatus sidereon_tec_estimate_arc_count(const struct SidereonTecEstimate *estimate,
+                                                    size_t *out);
+
+/**
+ * Read an arc's phase bias and sample count.
+ */
+enum SidereonStatus sidereon_tec_estimate_arc_info(const struct SidereonTecEstimate *estimate,
+                                                   size_t arc_index,
+                                                   double *out_phase_bias_tecu,
+                                                   size_t *out_sample_count);
+
+/**
+ * Copy an arc's UTF-8 satellite identifier without truncation.
+ */
+enum SidereonStatus sidereon_tec_estimate_arc_satellite_id(const struct SidereonTecEstimate *estimate,
+                                                           size_t arc_index,
+                                                           uint8_t *out,
+                                                           size_t len,
+                                                           size_t *out_written,
+                                                           size_t *out_required);
+
+/**
+ * Estimate code-derived slant TEC for one raw observation.
+ */
+enum SidereonStatus sidereon_tec_estimate_code_slant(const struct SidereonPppDualFrequencyObservation *observation,
+                                                     struct SidereonTecCodeSlantEstimate **out);
+
+/**
+ * Compare two TEC estimates by core value equality.
+ */
+enum SidereonStatus sidereon_tec_estimate_equal(const struct SidereonTecEstimate *left,
+                                                const struct SidereonTecEstimate *right,
+                                                bool *out_equal);
+
+/**
+ * Release a TEC estimate. NULL is allowed.
+ */
+void sidereon_tec_estimate_free(struct SidereonTecEstimate *estimate);
+
+/**
+ * Estimate phase-derived slant TEC for one raw observation.
+ */
+enum SidereonStatus sidereon_tec_estimate_phase_slant(const struct SidereonPppDualFrequencyObservation *observation,
+                                                      struct SidereonTecPhaseSlantEstimate **out);
+
+/**
+ * Read one sample from a TEC estimate arc.
+ */
+enum SidereonStatus sidereon_tec_estimate_sample(const struct SidereonTecEstimate *estimate,
+                                                 size_t arc_index,
+                                                 size_t sample_index,
+                                                 struct SidereonTecEstimateSample *out);
+
+/**
  * Write the axis lengths and the flat value count of a standalone TecGrid.
  *
  * Every output pointer must be non-NULL. The value count is the product of
@@ -52108,6 +54519,101 @@ enum SidereonStatus sidereon_tec_grid_vtec_at_pierce_point_result(const struct S
                                                                   struct SidereonTecGridResult **out_result);
 
 /**
+ * Compute an ionospheric pierce point with the core model.
+ */
+enum SidereonStatus sidereon_tec_ionospheric_pierce_point(double receiver_latitude_rad,
+                                                          double receiver_longitude_rad,
+                                                          double elevation_rad,
+                                                          double azimuth_rad,
+                                                          struct SidereonTecConfig config,
+                                                          struct SidereonTecIonosphericPiercePoint *out);
+
+/**
+ * Level a continuous TEC arc and return an owned result.
+ */
+enum SidereonStatus sidereon_tec_level_slant_arc(const struct SidereonTecLevelingSample *samples,
+                                                 size_t sample_count,
+                                                 struct SidereonTecConfig config,
+                                                 struct SidereonTecLevelingResult **out);
+
+/**
+ * Compare two leveling results by core value equality.
+ */
+enum SidereonStatus sidereon_tec_leveling_result_equal(const struct SidereonTecLevelingResult *left,
+                                                       const struct SidereonTecLevelingResult *right,
+                                                       bool *out_equal);
+
+/**
+ * Release a TEC leveling result. NULL is allowed.
+ */
+void sidereon_tec_leveling_result_free(struct SidereonTecLevelingResult *result);
+
+/**
+ * Read the phase bias and sample count from a leveling result.
+ */
+enum SidereonStatus sidereon_tec_leveling_result_info(const struct SidereonTecLevelingResult *result,
+                                                      double *out_phase_bias_tecu,
+                                                      size_t *out_sample_count);
+
+/**
+ * Copy leveled samples using the standard variable-length output contract.
+ */
+enum SidereonStatus sidereon_tec_leveling_result_samples(const struct SidereonTecLevelingResult *result,
+                                                         struct SidereonTecLeveledSample *out,
+                                                         size_t len,
+                                                         size_t *out_written,
+                                                         size_t *out_required);
+
+/**
+ * Compare two TEC observations by core value equality.
+ */
+enum SidereonStatus sidereon_tec_observation_equal(const struct SidereonTecObservation *left,
+                                                   const struct SidereonTecObservation *right,
+                                                   bool *out_equal);
+
+/**
+ * Compute the phase geometry-free combination for one raw observation.
+ */
+enum SidereonStatus sidereon_tec_phase_geometry_free_m(const struct SidereonPppDualFrequencyObservation *observation,
+                                                       double *out);
+
+/**
+ * Copy a phase estimate's ambiguity identifier without truncation.
+ */
+enum SidereonStatus sidereon_tec_phase_slant_estimate_ambiguity_id(const struct SidereonTecPhaseSlantEstimate *estimate,
+                                                                   uint8_t *out,
+                                                                   size_t len,
+                                                                   size_t *out_written,
+                                                                   size_t *out_required);
+
+/**
+ * Compare phase-derived slant estimates by core value equality.
+ */
+enum SidereonStatus sidereon_tec_phase_slant_estimate_equal(const struct SidereonTecPhaseSlantEstimate *left,
+                                                            const struct SidereonTecPhaseSlantEstimate *right,
+                                                            bool *out_equal);
+
+/**
+ * Release a phase-derived slant estimate. NULL is allowed.
+ */
+void sidereon_tec_phase_slant_estimate_free(struct SidereonTecPhaseSlantEstimate *estimate);
+
+/**
+ * Read the numeric fields of a phase-derived slant estimate.
+ */
+enum SidereonStatus sidereon_tec_phase_slant_estimate_info(const struct SidereonTecPhaseSlantEstimate *estimate,
+                                                           struct SidereonTecPhaseSlantEstimateInfo *out);
+
+/**
+ * Copy a phase estimate's satellite identifier without truncation.
+ */
+enum SidereonStatus sidereon_tec_phase_slant_estimate_satellite_id(const struct SidereonTecPhaseSlantEstimate *estimate,
+                                                                   uint8_t *out,
+                                                                   size_t len,
+                                                                   size_t *out_written,
+                                                                   size_t *out_required);
+
+/**
  * Release an owned IONEX sample-construction result. Passing NULL is a no-op.
  *
  * Safety: `result` may be NULL, which is a no-op; otherwise it must be a live
@@ -52160,6 +54666,37 @@ enum SidereonStatus sidereon_tec_samples_result_get_message(const struct Sidereo
  */
 enum SidereonStatus sidereon_tec_samples_result_get_outcome(const struct SidereonTecSamplesResult *result,
                                                             struct SidereonTecSamplesOutcome *out_outcome);
+
+/**
+ * Convert a code geometry-free delay to slant TEC through the core.
+ */
+enum SidereonStatus sidereon_tec_slant_from_code_geometry_free_m(double code_geometry_free_m,
+                                                                 double f1_hz,
+                                                                 double f2_hz,
+                                                                 double *out);
+
+/**
+ * Convert a phase geometry-free delay to biased slant TEC through the core.
+ */
+enum SidereonStatus sidereon_tec_slant_from_phase_geometry_free_m(double phase_geometry_free_m,
+                                                                  double f1_hz,
+                                                                  double f2_hz,
+                                                                  double *out);
+
+/**
+ * Compute the thin-shell mapping function.
+ */
+enum SidereonStatus sidereon_tec_thin_shell_mapping_function(double elevation_rad,
+                                                             struct SidereonTecConfig config,
+                                                             double *out);
+
+/**
+ * Convert slant TEC to vertical TEC using the core thin-shell model.
+ */
+enum SidereonStatus sidereon_tec_vertical_from_slant(double slant_tec_tecu,
+                                                     double elevation_rad,
+                                                     struct SidereonTecConfig config,
+                                                     double *out);
 
 /**
  * Latitude (degrees) of the day-night terminator at a query longitude, given

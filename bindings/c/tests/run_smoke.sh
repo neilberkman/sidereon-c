@@ -638,3 +638,63 @@ cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -o "${ppp_solve_lookup_out}"
 echo "== running ppp_solve_lookup_smoke program =="
 "${ppp_solve_lookup_out}" "${ppp_sp3_path}"
+
+echo "== compiling ppp_tec_smoke program =="
+ppp_tec_out="${target_dir}/ppp_tec_smoke"
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
+    -I"${binding_root}/include" \
+    "${here}/ppp_tec_smoke.c" \
+    -L"${lib_dir}" -lsidereon -Wl,-rpath,"${lib_dir}" -lm \
+    -o "${ppp_tec_out}"
+echo "== running ppp_tec_smoke program =="
+"${ppp_tec_out}"
+
+echo "== compiling ppp_raim_smoke program =="
+ppp_raim_out="${target_dir}/ppp_raim_smoke"
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
+    -I"${binding_root}/include" \
+    "${here}/ppp_raim_smoke.c" \
+    -L"${lib_dir}" -lsidereon -Wl,-rpath,"${lib_dir}" -lm \
+    -o "${ppp_raim_out}"
+echo "== running ppp_raim_smoke program =="
+"${ppp_raim_out}"
+
+echo "== compiling ppp_raim_fde_smoke program =="
+ppp_raim_fde_out="${target_dir}/ppp_raim_fde_smoke"
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
+    -I"${binding_root}/include" -I"${here}" \
+    "${here}/ppp_raim_fde_smoke.c" \
+    -L"${lib_dir}" -lsidereon -Wl,-rpath,"${lib_dir}" -lm \
+    -o "${ppp_raim_fde_out}"
+echo "== running ppp_raim_fde_smoke program =="
+"${ppp_raim_fde_out}" "${ppp_sp3_path}"
+
+echo "== compiling ppp_cycle_slip_smoke program =="
+ppp_cycle_slip_out="${target_dir}/ppp_cycle_slip_smoke"
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
+    -I"${binding_root}/include" \
+    "${here}/ppp_cycle_slip_smoke.c" \
+    -L"${lib_dir}" -lsidereon -Wl,-rpath,"${lib_dir}" -lm \
+    -o "${ppp_cycle_slip_out}"
+echo "== running ppp_cycle_slip_smoke program =="
+"${ppp_cycle_slip_out}"
+
+echo "== compiling ppp_prep_smoke program =="
+ppp_prep_out="${target_dir}/ppp_prep_smoke"
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
+    -I"${binding_root}/include" \
+    "${here}/ppp_prep_smoke.c" \
+    -L"${lib_dir}" -lsidereon -Wl,-rpath,"${lib_dir}" -lm \
+    -o "${ppp_prep_out}"
+echo "== running ppp_prep_smoke program =="
+"${ppp_prep_out}"
+
+echo "== compiling ppp_kinematic_smoke program =="
+ppp_kinematic_out="${target_dir}/ppp_kinematic_smoke"
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
+    -I"${binding_root}/include" \
+    "${here}/ppp_kinematic_smoke.c" \
+    -L"${lib_dir}" -lsidereon -Wl,-rpath,"${lib_dir}" -lm \
+    -o "${ppp_kinematic_out}"
+echo "== running ppp_kinematic_smoke program =="
+"${ppp_kinematic_out}" "${ppp_sp3_path}"

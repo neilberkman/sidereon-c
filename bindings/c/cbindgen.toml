@@ -98,7 +98,13 @@ rename_variants = "QualifiedScreamingSnakeCase"
 
 [export]
 include = [
+    "SIDEREON_TEC_DEFAULT_IONOSPHERIC_SHELL_HEIGHT_M",
+    "SIDEREON_TEC_ELECTRONS_PER_TECU_M2",
+    "SIDEREON_TEC_GROUP_DELAY_COEFFICIENT",
     "SidereonStatus",
+    "SidereonPppPrepCycleSlipPolicy",
+    "SidereonPppKinematicMotionModelKind",
+    "SidereonPppKinematicPositionProcessNoiseKind",
     "SidereonDegradeReason",
     "SidereonDigestProvenance",
     "SidereonProductFamily",
