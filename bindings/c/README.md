@@ -1257,6 +1257,30 @@ typedef struct {
 } SidereonTecSamplesOutcome;
 ```
 
+## Precise-positioning velocity
+
+The low-level precise-positioning range-rate model is available independently
+of an SP3 handle. Initialize `SidereonPppVelocityConfig` with
+`sidereon_ppp_velocity_config_init`, predict a row with
+`sidereon_ppp_predict_range_rate_m_s`, or solve precomputed satellite states
+with `sidereon_ppp_solve_velocity_least_squares`. Solutions retain the engine's
+used/downweighted satellite lists and robust-solve metadata and are released
+with `sidereon_ppp_velocity_solution_free`. PPP auto-initialization also accepts
+the reference or canonical strategy through the additive `_with_strategy`
+entry points.
+
+The additive `SidereonPppFloatConfigV2` and `SidereonPppFixedConfigV2` inputs
+carry residual-ionosphere estimation without changing the released config
+layouts. `sidereon_solve_ppp_float_epoch` delegates a single epoch to the core
+epoch solver. Low-level correction tables are built with
+`sidereon_build_ppp_lookup` or `sidereon_build_ppp_lookup_with_validity`, then
+read through the owned `SidereonPppCorrectionLookup` accessors and released
+with `sidereon_ppp_correction_lookup_free`. Fixed solutions similarly expose
+the complete ambiguity-search vectors and row-major matrices through an owned
+`SidereonPppAmbiguitySearch` handle. Opaque PPP solutions and these new handles
+have explicit core-backed equality functions; the documented plain-data PPP
+structs compare field by field.
+
 ## Integrity
 
 The direct post-solve integrity APIs are available without ephemeris handles or

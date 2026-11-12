@@ -618,3 +618,23 @@ cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
 
 echo "== running format_contracts_smoke program =="
 "${format_contracts_out}" "${antex_path}"
+
+echo "== compiling ppp_velocity_smoke program =="
+ppp_velocity_out="${target_dir}/ppp_velocity_smoke"
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
+    -I"${binding_root}/include" \
+    "${here}/ppp_velocity_smoke.c" \
+    -L"${lib_dir}" -lsidereon -Wl,-rpath,"${lib_dir}" -lm \
+    -o "${ppp_velocity_out}"
+echo "== running ppp_velocity_smoke program =="
+"${ppp_velocity_out}"
+
+echo "== compiling ppp_solve_lookup_smoke program =="
+ppp_solve_lookup_out="${target_dir}/ppp_solve_lookup_smoke"
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
+    -I"${binding_root}/include" -I"${here}" \
+    "${here}/ppp_solve_lookup_smoke.c" \
+    -L"${lib_dir}" -lsidereon -Wl,-rpath,"${lib_dir}" -lm \
+    -o "${ppp_solve_lookup_out}"
+echo "== running ppp_solve_lookup_smoke program =="
+"${ppp_solve_lookup_out}" "${ppp_sp3_path}"

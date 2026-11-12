@@ -12,6 +12,38 @@ pub struct SidereonPppFixedSolution {
     pub(crate) inner: PppFixedSolutionInner,
 }
 
+/// Owned ambiguity-search metadata extracted from a fixed PPP solution. Create
+/// with sidereon_ppp_fixed_solution_ambiguity_search and release with
+/// sidereon_ppp_ambiguity_search_free.
+pub struct SidereonPppAmbiguitySearch {
+    inner: sidereon_core::precise_positioning::AmbiguitySearch,
+}
+
+unsafe fn ppp_reject_equal_overlap<L, R>(
+    fn_name: &str,
+    left: *const L,
+    right: *const R,
+    out_equal: *mut bool,
+) -> Result<(), SidereonStatus> {
+    reject_output_overlaps_handle(fn_name, out_equal, "out_equal", left, "left")?;
+    reject_output_overlaps_handle(fn_name, out_equal, "out_equal", right, "right")?;
+    Ok(())
+}
+
+unsafe fn ppp_reject_copy_outputs_overlap_handle<H, O>(
+    fn_name: &str,
+    handle: *const H,
+    handle_name: &str,
+    out: *mut O,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> Result<(), SidereonStatus> {
+    reject_output_overlaps_handle(fn_name, out, "out", handle, handle_name)?;
+    reject_output_overlaps_handle(fn_name, out_written, "out_written", handle, handle_name)?;
+    reject_output_overlaps_handle(fn_name, out_required, "out_required", handle, handle_name)?;
+    Ok(())
+}
+
 /// Fixed-size null-terminated PPP ambiguity id storage. Values returned by
 /// Sidereon are always null-terminated.
 #[repr(C)]
@@ -161,6 +193,18 @@ pub struct SidereonPppMeasurementWeights {
 /// the static assertion below guarantees it tracks the engine constant).
 pub const SIDEREON_PPP_VMF_SITE_MAX_SAMPLES: usize = 8;
 
+const _: [(); SIDEREON_PPP_VMF_SITE_MAX_SAMPLES] =
+    [(); sidereon_core::precise_positioning::VMF_SITE_MAX_SAMPLES];
+
+/// Maximum distance in days for clamping a single VMF site sample. Mirrors the
+/// engine's VMF_SITE_SINGLE_SAMPLE_CLAMP_DAYS exactly.
+pub const SIDEREON_PPP_VMF_SITE_SINGLE_SAMPLE_CLAMP_DAYS: f64 = 0.25;
+
+const _: () = assert!(
+    SIDEREON_PPP_VMF_SITE_SINGLE_SAMPLE_CLAMP_DAYS.to_bits()
+        == sidereon_core::precise_positioning::VMF_SITE_SINGLE_SAMPLE_CLAMP_DAYS.to_bits()
+);
+
 /// Tropospheric mapping-function selection for a PPP solve. Pass as a uint32_t
 /// in SidereonPppTroposphereOptions.mapping.
 #[repr(C)]
@@ -309,6 +353,17 @@ pub struct SidereonPppFloatConfig {
     pub residual_screen: bool,
 }
 
+/// Additive PPP float configuration carrying fields introduced after the 3.0.6
+/// caller-allocated layout. `legacy` is read in full; the additional flag is
+/// passed to the engine without changing SidereonPppFloatConfig.
+#[repr(C)]
+pub struct SidereonPppFloatConfigV2 {
+    /// Released PPP float configuration.
+    pub legacy: SidereonPppFloatConfig,
+    /// Estimate one residual-ionosphere state per ambiguity arc.
+    pub estimate_residual_ionosphere: bool,
+}
+
 /// Integer ambiguity controls for PPP fixed solving.
 #[repr(C)]
 pub struct SidereonPppFixedAmbiguityOptions {
@@ -345,6 +400,16 @@ pub struct SidereonPppFixedConfig {
     pub elevation_cutoff_deg: f64,
     /// Integer ambiguity controls.
     pub ambiguity: SidereonPppFixedAmbiguityOptions,
+}
+
+/// Additive PPP fixed configuration carrying fields introduced after the 3.0.6
+/// caller-allocated layout.
+#[repr(C)]
+pub struct SidereonPppFixedConfigV2 {
+    /// Released PPP fixed configuration.
+    pub legacy: SidereonPppFixedConfig,
+    /// Estimate one residual-ionosphere state per ambiguity arc in the re-solve.
+    pub estimate_residual_ionosphere: bool,
 }
 
 /// PPP position covariance outputs for static PPP solutions.
@@ -415,6 +480,37 @@ pub struct SidereonPppAmbiguity {
     pub value_m: f64,
 }
 
+/// One PPP residual row, including the exact inverse-sigma weights used by the
+/// engine. This is plain C value data and therefore compares field by field.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonPppFloatResidual {
+    /// Zero-based input epoch index.
+    pub epoch_index: usize,
+    /// Satellite identifier.
+    pub satellite_id: SidereonPppId,
+    /// Ambiguity-state identifier.
+    pub ambiguity_id: SidereonPppId,
+    /// Code prefit residual, in meters.
+    pub code_m: f64,
+    /// Phase prefit residual, in meters.
+    pub phase_m: f64,
+    /// Code inverse-sigma row weight.
+    pub code_weight: f64,
+    /// Phase inverse-sigma row weight.
+    pub phase_weight: f64,
+}
+
+/// One estimated residual-ionosphere state keyed by ambiguity arc.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonPppResidualIonosphere {
+    /// Ambiguity-state identifier.
+    pub ambiguity_id: SidereonPppId,
+    /// Estimated residual ionosphere, in meters.
+    pub value_m: f64,
+}
+
 /// One PPP fixed integer ambiguity estimate.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -425,6 +521,16 @@ pub struct SidereonPppFixedAmbiguity {
     pub cycles: i64,
     /// Fixed ambiguity in meters after wavelength and offset scaling.
     pub value_m: f64,
+}
+
+/// One float ambiguity value in carrier cycles, in lattice-search order.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonPppFloatAmbiguityCycles {
+    /// Ambiguity identifier.
+    pub id: SidereonPppId,
+    /// Float ambiguity in carrier cycles.
+    pub value_cycles: f64,
 }
 
 /// Summary scalars for a PPP float solution.
@@ -2321,6 +2427,32 @@ pub struct SidereonPppCorrections {
     pub(crate) degraded: SidereonPppCorrectionsDegradeReason,
 }
 
+/// Indexed correction lookup consumed by precise-positioning solves. This
+/// owned handle exposes the non-SSR correction tables; SSR bias tables are not
+/// yet exposed.
+pub struct SidereonPppCorrectionLookup {
+    pub(crate) inner: sidereon_core::precise_positioning::PppCorrectionLookup,
+    pub(crate) degraded: SidereonPppCorrectionsDegradeReason,
+}
+
+/// Non-SSR correction-table enablement copied from a PPP correction lookup.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonPppCorrectionLookupFlags {
+    /// Solid-Earth tide entries are required.
+    pub tide_enabled: bool,
+    /// Pole-tide entries are required.
+    pub pole_tide_enabled: bool,
+    /// Ocean-loading entries are required.
+    pub ocean_loading_enabled: bool,
+    /// Phase wind-up entries are required.
+    pub windup_enabled: bool,
+    /// Satellite PCO and PCV entries are required.
+    pub satellite_antenna_enabled: bool,
+    /// Clock-datum code-bias entries are required.
+    pub code_bias_enabled: bool,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SidereonPppCorrectionsDegradeReason {
@@ -2502,6 +2634,183 @@ pub unsafe extern "C" fn sidereon_ppp_corrections_build_with_validity_and_tide_c
     })
 }
 
+/// Create an empty, all-disabled indexed PPP correction lookup.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_correction_lookup_default(
+    out_lookup: *mut *mut SidereonPppCorrectionLookup,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_correction_lookup_default";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out_lookup, FN, "out_lookup"));
+        *out = ptr::null_mut();
+        write_boxed_handle(
+            out,
+            SidereonPppCorrectionLookup {
+                inner: sidereon_core::precise_positioning::PppCorrectionLookup::default(),
+                degraded: SidereonPppCorrectionsDegradeReason::None,
+            },
+        );
+        SidereonStatus::Ok
+    })
+}
+
+/// Convert precomputed PPP correction tables into an indexed lookup. Enablement
+/// is inferred by the core From implementation from non-empty tables.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_correction_lookup_from_corrections(
+    corrections: *const SidereonPppCorrections,
+    out_lookup: *mut *mut SidereonPppCorrectionLookup,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_correction_lookup_from_corrections";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        c_try!(reject_output_overlaps_handle(
+            FN,
+            out_lookup,
+            "out_lookup",
+            corrections,
+            "corrections"
+        ));
+        let out = c_try!(require_out(out_lookup, FN, "out_lookup"));
+        *out = ptr::null_mut();
+        let corrections = c_try!(require_ref(corrections, FN, "corrections"));
+        write_boxed_handle(
+            out,
+            SidereonPppCorrectionLookup {
+                inner: corrections.inner.clone().into(),
+                degraded: corrections.degraded,
+            },
+        );
+        SidereonStatus::Ok
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn ppp_correction_lookup_build_impl(
+    fn_name: &str,
+    sp3: *const SidereonSp3,
+    epochs: *const SidereonPppEpoch,
+    epoch_count: usize,
+    receiver_ecef_m: *const f64,
+    options: *const SidereonPppCorrectionsOptions,
+    validity_mode: Option<u32>,
+    out_lookup: *mut *mut SidereonPppCorrectionLookup,
+) -> SidereonStatus {
+    let out = c_try!(require_out(out_lookup, fn_name, "out_lookup"));
+    *out = ptr::null_mut();
+    let sp3 = c_try!(require_ref(sp3, fn_name, "sp3"));
+    let epochs = c_try!(ppp_epochs_from_c(fn_name, epochs, epoch_count));
+    let receiver = c_try!(read_vec3(fn_name, "receiver_ecef_m", receiver_ecef_m));
+    let options = c_try!(require_ref(options, fn_name, "options"));
+    let options = c_try!(ppp_corrections_options_from_c(fn_name, options));
+    let result = if let Some(mode) = validity_mode {
+        let mode = match mode {
+            value if value == SidereonStationTideValidityMode::Strict as u32 => {
+                sidereon_core::astro::time::ValidityMode::Strict
+            }
+            value if value == SidereonStationTideValidityMode::Permissive as u32 => {
+                sidereon_core::astro::time::ValidityMode::Permissive
+            }
+            other => {
+                set_last_error(format!("{fn_name}: invalid validity_mode {other}"));
+                return SidereonStatus::InvalidArgument;
+            }
+        };
+        sidereon_core::precise_positioning::build_ppp_lookup_with_validity(
+            &sp3.inner, &epochs, receiver, &options, mode,
+        )
+    } else {
+        sidereon_core::precise_positioning::build_ppp_lookup(
+            &sp3.inner, &epochs, receiver, &options,
+        )
+        .map(|inner| sidereon_core::astro::time::Validated {
+            value: inner,
+            degraded: None,
+        })
+    };
+    match result {
+        Ok(validated) => {
+            let degraded = match validated.degraded {
+                None => SidereonPppCorrectionsDegradeReason::None,
+                Some(sidereon_core::astro::time::DegradeReason::BeforeCoverage) => {
+                    SidereonPppCorrectionsDegradeReason::BeforeCoverage
+                }
+                Some(sidereon_core::astro::time::DegradeReason::AfterCoverage) => {
+                    SidereonPppCorrectionsDegradeReason::AfterCoverage
+                }
+            };
+            write_boxed_handle(
+                out,
+                SidereonPppCorrectionLookup {
+                    inner: validated.value,
+                    degraded,
+                },
+            );
+            SidereonStatus::Ok
+        }
+        Err(error) => {
+            set_last_error(format!("{fn_name}: {error}"));
+            if ut1_refusal(&error) {
+                SidereonStatus::Ut1OutsideCoverage
+            } else {
+                SidereonStatus::InvalidArgument
+            }
+        }
+    }
+}
+
+/// Build indexed PPP correction lookups at the supplied receiver seed position.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_build_ppp_lookup(
+    sp3: *const SidereonSp3,
+    epochs: *const SidereonPppEpoch,
+    epoch_count: usize,
+    receiver_ecef_m: *const f64,
+    options: *const SidereonPppCorrectionsOptions,
+    out_lookup: *mut *mut SidereonPppCorrectionLookup,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_build_ppp_lookup", SidereonStatus::Panic, || {
+        ppp_correction_lookup_build_impl(
+            "sidereon_build_ppp_lookup",
+            sp3,
+            epochs,
+            epoch_count,
+            receiver_ecef_m,
+            options,
+            None,
+            out_lookup,
+        )
+    })
+}
+
+/// Build indexed PPP correction lookups under an explicit UT1 validity mode.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_build_ppp_lookup_with_validity(
+    sp3: *const SidereonSp3,
+    epochs: *const SidereonPppEpoch,
+    epoch_count: usize,
+    receiver_ecef_m: *const f64,
+    options: *const SidereonPppCorrectionsOptions,
+    validity_mode: u32,
+    out_lookup: *mut *mut SidereonPppCorrectionLookup,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_build_ppp_lookup_with_validity",
+        SidereonStatus::Panic,
+        || {
+            ppp_correction_lookup_build_impl(
+                "sidereon_build_ppp_lookup_with_validity",
+                sp3,
+                epochs,
+                epoch_count,
+                receiver_ecef_m,
+                options,
+                Some(validity_mode),
+                out_lookup,
+            )
+        },
+    )
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_ppp_corrections_degraded_reason(
     corrections: *const SidereonPppCorrections,
@@ -2515,6 +2824,344 @@ pub unsafe extern "C" fn sidereon_ppp_corrections_degraded_reason(
         *out = corrections.degraded;
         SidereonStatus::Ok
     })
+}
+
+/// Read lookup validity degradation and non-SSR enablement flags.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_correction_lookup_info(
+    lookup: *const SidereonPppCorrectionLookup,
+    out_degraded: *mut SidereonPppCorrectionsDegradeReason,
+    out_flags: *mut SidereonPppCorrectionLookupFlags,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_correction_lookup_info";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        c_try!(reject_output_overlaps_handle(
+            FN,
+            out_degraded,
+            "out_degraded",
+            lookup,
+            "lookup"
+        ));
+        c_try!(reject_output_overlaps_handle(
+            FN,
+            out_flags,
+            "out_flags",
+            lookup,
+            "lookup"
+        ));
+        let degraded = c_try!(require_out(out_degraded, FN, "out_degraded"));
+        *degraded = SidereonPppCorrectionsDegradeReason::None;
+        let flags = c_try!(require_out(out_flags, FN, "out_flags"));
+        *flags = SidereonPppCorrectionLookupFlags {
+            tide_enabled: false,
+            pole_tide_enabled: false,
+            ocean_loading_enabled: false,
+            windup_enabled: false,
+            satellite_antenna_enabled: false,
+            code_bias_enabled: false,
+        };
+        let lookup = c_try!(require_ref(lookup, FN, "lookup"));
+        *degraded = lookup.degraded;
+        *flags = SidereonPppCorrectionLookupFlags {
+            tide_enabled: lookup.inner.tide_enabled,
+            pole_tide_enabled: lookup.inner.pole_tide_enabled,
+            ocean_loading_enabled: lookup.inner.ocean_loading_enabled,
+            windup_enabled: lookup.inner.windup_enabled,
+            satellite_antenna_enabled: lookup.inner.satellite_antenna_enabled,
+            code_bias_enabled: lookup.inner.code_bias_enabled,
+        };
+        SidereonStatus::Ok
+    })
+}
+
+/// Compare two indexed correction lookups by complete core value.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_correction_lookup_equal(
+    left: *const SidereonPppCorrectionLookup,
+    right: *const SidereonPppCorrectionLookup,
+    out_equal: *mut bool,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_correction_lookup_equal";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        c_try!(ppp_reject_equal_overlap(FN, left, right, out_equal));
+        let out = c_try!(require_out(out_equal, FN, "out_equal"));
+        *out = false;
+        let left = c_try!(require_ref(left, FN, "left"));
+        let right = c_try!(require_ref(right, FN, "right"));
+        *out = left.inner == right.inner && left.degraded == right.degraded;
+        SidereonStatus::Ok
+    })
+}
+
+unsafe fn ppp_lookup_vector_table(
+    fn_name: &str,
+    table: &BTreeMap<usize, [f64; 3]>,
+    out: *mut SidereonEpochVectorCorrection,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    let values: Vec<_> = table
+        .iter()
+        .map(|(epoch_index, vector_m)| SidereonEpochVectorCorrection {
+            epoch_index: *epoch_index,
+            vector_m: *vector_m,
+        })
+        .collect();
+    c_try!(copy_prefix_to_c(
+        fn_name,
+        "out",
+        &values,
+        out,
+        len,
+        out_written,
+        out_required
+    ));
+    SidereonStatus::Ok
+}
+
+unsafe fn ppp_lookup_scalar_table(
+    fn_name: &str,
+    table: &BTreeMap<(GnssSatelliteId, usize), f64>,
+    out: *mut SidereonSatScalarCorrection,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    let values: Vec<_> = table
+        .iter()
+        .map(
+            |((sat, epoch_index), value_m)| SidereonSatScalarCorrection {
+                sat_id: satellite_token(*sat).bytes,
+                epoch_index: *epoch_index,
+                value_m: *value_m,
+            },
+        )
+        .collect();
+    c_try!(copy_prefix_to_c(
+        fn_name,
+        "out",
+        &values,
+        out,
+        len,
+        out_written,
+        out_required
+    ));
+    SidereonStatus::Ok
+}
+
+unsafe fn ppp_lookup_vector_sat_table(
+    fn_name: &str,
+    table: &BTreeMap<(GnssSatelliteId, usize), [f64; 3]>,
+    out: *mut SidereonSatVectorCorrection,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    let values: Vec<_> = table
+        .iter()
+        .map(
+            |((sat, epoch_index), vector_m)| SidereonSatVectorCorrection {
+                sat_id: satellite_token(*sat).bytes,
+                epoch_index: *epoch_index,
+                vector_m: *vector_m,
+            },
+        )
+        .collect();
+    c_try!(copy_prefix_to_c(
+        fn_name,
+        "out",
+        &values,
+        out,
+        len,
+        out_written,
+        out_required
+    ));
+    SidereonStatus::Ok
+}
+
+unsafe fn ppp_lookup_vector_access(
+    fn_name: &str,
+    lookup: *const SidereonPppCorrectionLookup,
+    table: u8,
+    out: *mut SidereonEpochVectorCorrection,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    c_try!(ppp_reject_copy_outputs_overlap_handle(
+        fn_name,
+        lookup,
+        "lookup",
+        out,
+        out_written,
+        out_required
+    ));
+    c_try!(init_copy_counts(fn_name, out_written, out_required));
+    let lookup = c_try!(require_ref(lookup, fn_name, "lookup"));
+    let values = match table {
+        0 => &lookup.inner.tide,
+        1 => &lookup.inner.pole_tide,
+        _ => &lookup.inner.ocean_loading,
+    };
+    ppp_lookup_vector_table(fn_name, values, out, len, out_written, out_required)
+}
+
+/// Copy solid-Earth tide vectors from a PPP correction lookup.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_correction_lookup_tide(
+    lookup: *const SidereonPppCorrectionLookup,
+    out: *mut SidereonEpochVectorCorrection,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_correction_lookup_tide";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        ppp_lookup_vector_access(FN, lookup, 0, out, len, out_written, out_required)
+    })
+}
+
+/// Copy pole-tide vectors from a PPP correction lookup.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_correction_lookup_pole_tide(
+    lookup: *const SidereonPppCorrectionLookup,
+    out: *mut SidereonEpochVectorCorrection,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_correction_lookup_pole_tide";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        ppp_lookup_vector_access(FN, lookup, 1, out, len, out_written, out_required)
+    })
+}
+
+/// Copy ocean-loading vectors from a PPP correction lookup.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_correction_lookup_ocean_loading(
+    lookup: *const SidereonPppCorrectionLookup,
+    out: *mut SidereonEpochVectorCorrection,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_correction_lookup_ocean_loading";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        ppp_lookup_vector_access(FN, lookup, 2, out, len, out_written, out_required)
+    })
+}
+
+unsafe fn ppp_lookup_scalar_access(
+    fn_name: &str,
+    lookup: *const SidereonPppCorrectionLookup,
+    table: u8,
+    out: *mut SidereonSatScalarCorrection,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    c_try!(ppp_reject_copy_outputs_overlap_handle(
+        fn_name,
+        lookup,
+        "lookup",
+        out,
+        out_written,
+        out_required
+    ));
+    c_try!(init_copy_counts(fn_name, out_written, out_required));
+    let lookup = c_try!(require_ref(lookup, fn_name, "lookup"));
+    let values = match table {
+        0 => &lookup.inner.windup_m,
+        1 => &lookup.inner.sat_pcv_m,
+        _ => &lookup.inner.code_bias_m,
+    };
+    ppp_lookup_scalar_table(fn_name, values, out, len, out_written, out_required)
+}
+
+/// Copy phase wind-up values from a PPP correction lookup.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_correction_lookup_windup(
+    lookup: *const SidereonPppCorrectionLookup,
+    out: *mut SidereonSatScalarCorrection,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_correction_lookup_windup";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        ppp_lookup_scalar_access(FN, lookup, 0, out, len, out_written, out_required)
+    })
+}
+
+/// Copy satellite PCV values from a PPP correction lookup.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_correction_lookup_sat_pcv(
+    lookup: *const SidereonPppCorrectionLookup,
+    out: *mut SidereonSatScalarCorrection,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_correction_lookup_sat_pcv";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        ppp_lookup_scalar_access(FN, lookup, 1, out, len, out_written, out_required)
+    })
+}
+
+/// Copy clock-datum code-bias values from a PPP correction lookup.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_correction_lookup_code_bias(
+    lookup: *const SidereonPppCorrectionLookup,
+    out: *mut SidereonSatScalarCorrection,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_correction_lookup_code_bias";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        ppp_lookup_scalar_access(FN, lookup, 2, out, len, out_written, out_required)
+    })
+}
+
+/// Copy satellite/epoch PCO vectors from a PPP correction lookup.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_correction_lookup_sat_pco_ecef(
+    lookup: *const SidereonPppCorrectionLookup,
+    out: *mut SidereonSatVectorCorrection,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_correction_lookup_sat_pco_ecef";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        c_try!(ppp_reject_copy_outputs_overlap_handle(
+            FN,
+            lookup,
+            "lookup",
+            out,
+            out_written,
+            out_required
+        ));
+        c_try!(init_copy_counts(FN, out_written, out_required));
+        let lookup = c_try!(require_ref(lookup, FN, "lookup"));
+        ppp_lookup_vector_sat_table(
+            FN,
+            &lookup.inner.sat_pco_ecef,
+            out,
+            len,
+            out_written,
+            out_required,
+        )
+    })
+}
+
+/// Release an indexed PPP correction lookup. NULL is a no-op.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_correction_lookup_free(
+    lookup: *mut SidereonPppCorrectionLookup,
+) {
+    free_boxed(lookup);
 }
 
 fn ppp_corrections_error_kind(
@@ -2814,6 +3461,459 @@ pub unsafe extern "C" fn sidereon_ppp_corrections_sat_pco_ecef(
     )
 }
 
+/// Write the float solution's posterior variance factor.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_float_solution_posterior_variance_factor(
+    solution: *const SidereonPppFloatSolution,
+    out_value: *mut f64,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_float_solution_posterior_variance_factor";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        c_try!(reject_output_overlaps_handle(
+            FN,
+            out_value,
+            "out_value",
+            solution,
+            "solution"
+        ));
+        let out = c_try!(require_out(out_value, FN, "out_value"));
+        *out = 0.0;
+        *out = c_try!(require_ref(solution, FN, "solution"))
+            .inner
+            .posterior_variance_factor;
+        SidereonStatus::Ok
+    })
+}
+
+/// Compare two opaque PPP float solutions using the core's value equality.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_float_solution_equal(
+    left: *const SidereonPppFloatSolution,
+    right: *const SidereonPppFloatSolution,
+    out_equal: *mut bool,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_float_solution_equal";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        c_try!(ppp_reject_equal_overlap(FN, left, right, out_equal));
+        let out = c_try!(require_out(out_equal, FN, "out_equal"));
+        *out = false;
+        *out = c_try!(require_ref(left, FN, "left")).inner
+            == c_try!(require_ref(right, FN, "right")).inner;
+        SidereonStatus::Ok
+    })
+}
+
+/// Write the fixed solution's posterior variance factor.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_fixed_solution_posterior_variance_factor(
+    solution: *const SidereonPppFixedSolution,
+    out_value: *mut f64,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_fixed_solution_posterior_variance_factor";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        c_try!(reject_output_overlaps_handle(
+            FN,
+            out_value,
+            "out_value",
+            solution,
+            "solution"
+        ));
+        let out = c_try!(require_out(out_value, FN, "out_value"));
+        *out = 0.0;
+        *out = c_try!(require_ref(solution, FN, "solution"))
+            .inner
+            .posterior_variance_factor;
+        SidereonStatus::Ok
+    })
+}
+
+/// Compare two opaque PPP fixed solutions using the core's value equality.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_fixed_solution_equal(
+    left: *const SidereonPppFixedSolution,
+    right: *const SidereonPppFixedSolution,
+    out_equal: *mut bool,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_fixed_solution_equal";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        c_try!(ppp_reject_equal_overlap(FN, left, right, out_equal));
+        let out = c_try!(require_out(out_equal, FN, "out_equal"));
+        *out = false;
+        *out = c_try!(require_ref(left, FN, "left")).inner
+            == c_try!(require_ref(right, FN, "right")).inner;
+        SidereonStatus::Ok
+    })
+}
+
+/// Clone the complete integer ambiguity-search metadata from a fixed solution.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_fixed_solution_ambiguity_search(
+    solution: *const SidereonPppFixedSolution,
+    out_search: *mut *mut SidereonPppAmbiguitySearch,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_fixed_solution_ambiguity_search";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        c_try!(reject_output_overlaps_handle(
+            FN,
+            out_search,
+            "out_search",
+            solution,
+            "solution"
+        ));
+        let out = c_try!(require_out(out_search, FN, "out_search"));
+        *out = ptr::null_mut();
+        let solution = c_try!(require_ref(solution, FN, "solution"));
+        write_boxed_handle(
+            out,
+            SidereonPppAmbiguitySearch {
+                inner: solution.inner.integer.ambiguity_search.clone(),
+            },
+        );
+        SidereonStatus::Ok
+    })
+}
+
+/// Compare two ambiguity-search handles by complete core value.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_ambiguity_search_equal(
+    left: *const SidereonPppAmbiguitySearch,
+    right: *const SidereonPppAmbiguitySearch,
+    out_equal: *mut bool,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_ambiguity_search_equal";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        c_try!(ppp_reject_equal_overlap(FN, left, right, out_equal));
+        let out = c_try!(require_out(out_equal, FN, "out_equal"));
+        *out = false;
+        *out = c_try!(require_ref(left, FN, "left")).inner
+            == c_try!(require_ref(right, FN, "right")).inner;
+        SidereonStatus::Ok
+    })
+}
+
+/// Copy float ambiguities in the exact order supplied to the lattice search.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_ambiguity_search_float_cycles(
+    search: *const SidereonPppAmbiguitySearch,
+    out: *mut SidereonPppFloatAmbiguityCycles,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_ambiguity_search_float_cycles";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        c_try!(ppp_reject_copy_outputs_overlap_handle(
+            FN,
+            search,
+            "search",
+            out,
+            out_written,
+            out_required
+        ));
+        c_try!(init_copy_counts(FN, out_written, out_required));
+        let search = c_try!(require_ref(search, FN, "search"));
+        let mut values = Vec::with_capacity(search.inner.order.len());
+        for id in &search.inner.order {
+            let Some(value_cycles) = search.inner.float_cycles.get(id) else {
+                set_last_error(format!(
+                    "{FN}: core ambiguity search omitted float value for {id}"
+                ));
+                return SidereonStatus::Solve;
+            };
+            values.push(SidereonPppFloatAmbiguityCycles {
+                id: c_try!(ppp_id_checked(FN, "ambiguity_id", id)),
+                value_cycles: *value_cycles,
+            });
+        }
+        c_try!(copy_prefix_to_c(
+            FN,
+            "out",
+            &values,
+            out,
+            len,
+            out_written,
+            out_required
+        ));
+        SidereonStatus::Ok
+    })
+}
+
+unsafe fn ppp_ambiguity_search_matrix(
+    fn_name: &str,
+    search: *const SidereonPppAmbiguitySearch,
+    inverse: bool,
+    out: *mut f64,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    c_try!(ppp_reject_copy_outputs_overlap_handle(
+        fn_name,
+        search,
+        "search",
+        out,
+        out_written,
+        out_required
+    ));
+    c_try!(init_copy_counts(fn_name, out_written, out_required));
+    let search = c_try!(require_ref(search, fn_name, "search"));
+    let matrix = if inverse {
+        &search.inner.covariance_inverse_cycles
+    } else {
+        &search.inner.covariance_cycles
+    };
+    let dimension = search.inner.order.len();
+    if matrix.len() != dimension || matrix.iter().any(|row| row.len() != dimension) {
+        set_last_error(format!(
+            "{fn_name}: core ambiguity matrix is not {dimension} by {dimension}"
+        ));
+        return SidereonStatus::Solve;
+    }
+    let values: Vec<f64> = matrix.iter().flat_map(|row| row.iter().copied()).collect();
+    c_try!(copy_prefix_to_c(
+        fn_name,
+        "out",
+        &values,
+        out,
+        len,
+        out_written,
+        out_required
+    ));
+    SidereonStatus::Ok
+}
+
+/// Copy the row-major ambiguity covariance matrix in cycles squared. Its
+/// dimension is the required count from float_cycles; the output length is n*n.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_ambiguity_search_covariance_cycles(
+    search: *const SidereonPppAmbiguitySearch,
+    out: *mut f64,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_ppp_ambiguity_search_covariance_cycles",
+        SidereonStatus::Panic,
+        || {
+            ppp_ambiguity_search_matrix(
+                "sidereon_ppp_ambiguity_search_covariance_cycles",
+                search,
+                false,
+                out,
+                len,
+                out_written,
+                out_required,
+            )
+        },
+    )
+}
+
+/// Copy the row-major inverse ambiguity covariance matrix in inverse cycles squared.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_ambiguity_search_covariance_inverse_cycles(
+    search: *const SidereonPppAmbiguitySearch,
+    out: *mut f64,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_ppp_ambiguity_search_covariance_inverse_cycles",
+        SidereonStatus::Panic,
+        || {
+            ppp_ambiguity_search_matrix(
+                "sidereon_ppp_ambiguity_search_covariance_inverse_cycles",
+                search,
+                true,
+                out,
+                len,
+                out_written,
+                out_required,
+            )
+        },
+    )
+}
+
+/// Release an ambiguity-search handle. NULL is a no-op.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_ambiguity_search_free(
+    search: *mut SidereonPppAmbiguitySearch,
+) {
+    free_boxed(search);
+}
+
+/// Write the float solution's residual decorrelation time in epoch spacings.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_float_solution_decorrelation_time_epochs(
+    solution: *const SidereonPppFloatSolution,
+    out_value: *mut f64,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_float_solution_decorrelation_time_epochs";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        c_try!(reject_output_overlaps_handle(
+            FN,
+            out_value,
+            "out_value",
+            solution,
+            "solution"
+        ));
+        let out = c_try!(require_out(out_value, FN, "out_value"));
+        *out = 0.0;
+        *out = c_try!(require_ref(solution, FN, "solution"))
+            .inner
+            .temporal_correlation
+            .decorrelation_time_epochs;
+        SidereonStatus::Ok
+    })
+}
+
+unsafe fn ppp_residuals_to_c(
+    fn_name: &str,
+    values: &[sidereon_core::precise_positioning::FloatResidual],
+) -> Result<Vec<SidereonPppFloatResidual>, SidereonStatus> {
+    values
+        .iter()
+        .map(|value| {
+            Ok(SidereonPppFloatResidual {
+                epoch_index: value.epoch_index,
+                satellite_id: ppp_id_checked(fn_name, "satellite_id", &value.satellite_id)?,
+                ambiguity_id: ppp_id_checked(fn_name, "ambiguity_id", &value.ambiguity_id)?,
+                code_m: value.code_m,
+                phase_m: value.phase_m,
+                code_weight: value.code_weight,
+                phase_weight: value.phase_weight,
+            })
+        })
+        .collect()
+}
+
+/// Copy all float residual rows, including code and phase weights.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_float_solution_residuals(
+    solution: *const SidereonPppFloatSolution,
+    out: *mut SidereonPppFloatResidual,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_float_solution_residuals";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        c_try!(ppp_reject_copy_outputs_overlap_handle(
+            FN,
+            solution,
+            "solution",
+            out,
+            out_written,
+            out_required
+        ));
+        c_try!(init_copy_counts(FN, out_written, out_required));
+        let solution = c_try!(require_ref(solution, FN, "solution"));
+        let values = c_try!(ppp_residuals_to_c(FN, &solution.inner.residuals_m));
+        c_try!(copy_prefix_to_c(
+            FN,
+            "out",
+            &values,
+            out,
+            len,
+            out_written,
+            out_required
+        ));
+        SidereonStatus::Ok
+    })
+}
+
+unsafe fn ppp_residual_ionosphere_to_c(
+    fn_name: &str,
+    values: &BTreeMap<String, f64>,
+) -> Result<Vec<SidereonPppResidualIonosphere>, SidereonStatus> {
+    values
+        .iter()
+        .map(|(id, value_m)| {
+            Ok(SidereonPppResidualIonosphere {
+                ambiguity_id: ppp_id_checked(fn_name, "ambiguity_id", id)?,
+                value_m: *value_m,
+            })
+        })
+        .collect()
+}
+
+/// Copy residual-ionosphere estimates from a float solution.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_float_solution_residual_ionosphere(
+    solution: *const SidereonPppFloatSolution,
+    out: *mut SidereonPppResidualIonosphere,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_float_solution_residual_ionosphere";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        c_try!(ppp_reject_copy_outputs_overlap_handle(
+            FN,
+            solution,
+            "solution",
+            out,
+            out_written,
+            out_required
+        ));
+        c_try!(init_copy_counts(FN, out_written, out_required));
+        let solution = c_try!(require_ref(solution, FN, "solution"));
+        let values = c_try!(ppp_residual_ionosphere_to_c(
+            FN,
+            &solution.inner.residual_ionosphere_m
+        ));
+        c_try!(copy_prefix_to_c(
+            FN,
+            "out",
+            &values,
+            out,
+            len,
+            out_written,
+            out_required
+        ));
+        SidereonStatus::Ok
+    })
+}
+
+/// Copy residual-ionosphere estimates from a fixed solution.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_fixed_solution_residual_ionosphere(
+    solution: *const SidereonPppFixedSolution,
+    out: *mut SidereonPppResidualIonosphere,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_fixed_solution_residual_ionosphere";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        c_try!(ppp_reject_copy_outputs_overlap_handle(
+            FN,
+            solution,
+            "solution",
+            out,
+            out_written,
+            out_required
+        ));
+        c_try!(init_copy_counts(FN, out_written, out_required));
+        let solution = c_try!(require_ref(solution, FN, "solution"));
+        let values = c_try!(ppp_residual_ionosphere_to_c(
+            FN,
+            &solution.inner.residual_ionosphere_m
+        ));
+        c_try!(copy_prefix_to_c(
+            FN,
+            "out",
+            &values,
+            out,
+            len,
+            out_written,
+            out_required
+        ));
+        SidereonStatus::Ok
+    })
+}
+
 // --- PPP auto-initialization driver (sidereon_core::precise_positioning) ------
 
 /// SPP-seeded auto-initialization policy for the raw-epochs PPP driver, mirroring
@@ -2841,6 +3941,49 @@ pub struct SidereonPppAutoInitOptions {
     pub spp_temperature_k: f64,
     /// SPP seed surface relative humidity, fraction in [0, 1].
     pub spp_relative_humidity: f64,
+}
+
+/// Runtime strategy for PPP auto-initialization solves. Values entering from C
+/// are validated before they are converted to the engine enum.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidereonPppAutoInitStrategy {
+    /// Reference static PPP solve path and the engine default.
+    Reference = 0,
+    /// Canonical estimation-recipe PPP solve path.
+    Canonical = 1,
+}
+
+/// Write the engine's default PPP auto-init strategy (Reference).
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_auto_init_strategy_default(
+    out_strategy: *mut SidereonPppAutoInitStrategy,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_auto_init_strategy_default";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out_strategy, FN, "out_strategy"));
+        *out = match PppAutoInitStrategy::default() {
+            PppAutoInitStrategy::Reference => SidereonPppAutoInitStrategy::Reference,
+            PppAutoInitStrategy::Canonical => SidereonPppAutoInitStrategy::Canonical,
+        };
+        SidereonStatus::Ok
+    })
+}
+
+pub(crate) fn ppp_auto_init_strategy_from_c(
+    fn_name: &str,
+    value: u32,
+) -> Result<PppAutoInitStrategy, SidereonStatus> {
+    match value {
+        0 => Ok(PppAutoInitStrategy::Reference),
+        1 => Ok(PppAutoInitStrategy::Canonical),
+        _ => {
+            set_last_error(format!(
+                "{fn_name}: strategy must be a SidereonPppAutoInitStrategy value, got {value}"
+            ));
+            Err(SidereonStatus::InvalidArgument)
+        }
+    }
 }
 
 /// Initialize SidereonPppAutoInitOptions with the engine defaults (no explicit
@@ -4064,6 +5207,50 @@ mod tests {
         let solution = SidereonPppFloatSolution {
             inner: inner.clone(),
         };
+
+        let mut posterior_variance_factor = 0.0;
+        assert_eq!(
+            unsafe {
+                sidereon_ppp_float_solution_posterior_variance_factor(
+                    &solution,
+                    &mut posterior_variance_factor,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(posterior_variance_factor, 2.5);
+
+        let mut decorrelation_time_epochs = 0.0;
+        assert_eq!(
+            unsafe {
+                sidereon_ppp_float_solution_decorrelation_time_epochs(
+                    &solution,
+                    &mut decorrelation_time_epochs,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(decorrelation_time_epochs, 1.5);
+
+        let equal_solution = SidereonPppFloatSolution {
+            inner: inner.clone(),
+        };
+        let mut unequal_inner = inner.clone();
+        unequal_inner.posterior_variance_factor = 9.0;
+        let unequal_solution = SidereonPppFloatSolution {
+            inner: unequal_inner,
+        };
+        let mut equal = false;
+        assert_eq!(
+            unsafe { sidereon_ppp_float_solution_equal(&solution, &equal_solution, &mut equal) },
+            SidereonStatus::Ok
+        );
+        assert!(equal);
+        assert_eq!(
+            unsafe { sidereon_ppp_float_solution_equal(&solution, &unequal_solution, &mut equal) },
+            SidereonStatus::Ok
+        );
+        assert!(!equal);
         let metadata = ppp_float_metadata(&solution.inner);
         assert_eq!(
             metadata.solved_epoch_count,

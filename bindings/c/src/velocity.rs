@@ -47,6 +47,84 @@ pub struct SidereonVelocitySolution {
     pub(crate) inner: VelocitySolution,
 }
 
+/// Low-level precise-positioning range-rate solve configuration. This is plain
+/// C value data and therefore has value equality field by field. Initialize it
+/// with sidereon_ppp_velocity_config_init.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonPppVelocityConfig {
+    /// Minimum observation count; the engine always requires at least four.
+    pub minimum_observations: usize,
+    /// Whether robust Huber/MAD reweighting is enabled.
+    pub has_robust: bool,
+    /// Robust configuration, read only when has_robust is true.
+    pub robust: SidereonPppVelocityRobustConfig,
+}
+
+/// Robust controls for the low-level precise-positioning velocity solve. This
+/// is plain C value data and therefore has value equality field by field.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonPppVelocityRobustConfig {
+    /// Huber tuning constant.
+    pub huber_k: f64,
+    /// Floor on the MAD residual scale, in meters per second.
+    pub scale_floor_m_s: f64,
+    /// Maximum total outer solves.
+    pub max_outer: usize,
+    /// Outer-loop state-step tolerance, in meters per second.
+    pub outer_tol_m_s: f64,
+}
+
+/// Receiver state for low-level range-rate prediction. This is plain C value
+/// data and therefore has value equality field by field.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonPppReceiverVelocityState {
+    /// Receiver position, in meters.
+    pub position_m: [f64; 3],
+    /// Receiver velocity, in meters per second.
+    pub velocity_m_s: [f64; 3],
+    /// Receiver clock drift as a range-rate bias, in meters per second.
+    pub clock_drift_m_s: f64,
+}
+
+/// One low-level satellite range-rate observation. This is plain C value data;
+/// the satellite token is compared by pointed-to text when constructing core values.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonPppVelocityObservation {
+    /// Null-terminated satellite token, for example G08.
+    pub sat_id: *const c_char,
+    /// Satellite position, in meters.
+    pub satellite_position_m: [f64; 3],
+    /// Satellite velocity, in meters per second.
+    pub satellite_velocity_m_s: [f64; 3],
+    /// Measured pseudorange rate, in meters per second.
+    pub measured_range_rate_m_s: f64,
+    /// One-sigma range-rate uncertainty, in meters per second.
+    pub sigma_m_s: f64,
+    /// Satellite clock drift as a range-rate bias, in meters per second.
+    pub satellite_clock_drift_m_s: f64,
+}
+
+/// Predicted range-rate geometry. This is plain C value data and therefore has
+/// value equality field by field.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonPppRangeRatePrediction {
+    /// Unit line-of-sight vector from receiver to satellite.
+    pub los_unit: [f64; 3],
+    /// Predicted range rate, in meters per second.
+    pub range_rate_m_s: f64,
+}
+
+/// Complete result of the low-level precise-positioning velocity solve. The
+/// satellite arrays are copied through separate variable-length accessors.
+pub struct SidereonPppVelocitySolution {
+    inner: sidereon_core::precise_positioning::VelocitySolution,
+}
+
 /// Populate *out_options with the engine's default velocity solve options
 /// (range-rate observable, light-time and Sagnac corrections on).
 ///
@@ -527,6 +605,557 @@ pub unsafe extern "C" fn sidereon_solve_velocity_broadcast(
     })
 }
 
+/// Initialize low-level precise-positioning velocity configuration with engine defaults.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_velocity_config_init(
+    out_config: *mut SidereonPppVelocityConfig,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_velocity_config_init";
+    engine_error_operation_boundary(FN, SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out_config, FN, "out_config"));
+        let config = sidereon_core::precise_positioning::VelocityConfig::default();
+        let robust = sidereon_core::precise_positioning::VelocityRobustConfig::default();
+        *out = SidereonPppVelocityConfig {
+            minimum_observations: config.minimum_observations,
+            has_robust: false,
+            robust: SidereonPppVelocityRobustConfig {
+                huber_k: robust.huber_k,
+                scale_floor_m_s: robust.scale_floor_m_s,
+                max_outer: robust.max_outer,
+                outer_tol_m_s: robust.outer_tol_m_s,
+            },
+        };
+        SidereonStatus::Ok
+    })
+}
+
+/// Initialize robust low-level velocity controls with engine defaults.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_velocity_robust_config_init(
+    out_config: *mut SidereonPppVelocityRobustConfig,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_velocity_robust_config_init";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out_config, FN, "out_config"));
+        let robust = sidereon_core::precise_positioning::VelocityRobustConfig::default();
+        *out = SidereonPppVelocityRobustConfig {
+            huber_k: robust.huber_k,
+            scale_floor_m_s: robust.scale_floor_m_s,
+            max_outer: robust.max_outer,
+            outer_tol_m_s: robust.outer_tol_m_s,
+        };
+        SidereonStatus::Ok
+    })
+}
+
+fn ppp_velocity_config_from_c(
+    value: &SidereonPppVelocityConfig,
+) -> sidereon_core::precise_positioning::VelocityConfig {
+    let robust = value.has_robust.then(|| {
+        let mut robust = sidereon_core::precise_positioning::VelocityRobustConfig::default();
+        robust.huber_k = value.robust.huber_k;
+        robust.scale_floor_m_s = value.robust.scale_floor_m_s;
+        robust.max_outer = value.robust.max_outer;
+        robust.outer_tol_m_s = value.robust.outer_tol_m_s;
+        robust
+    });
+    let mut config = sidereon_core::precise_positioning::VelocityConfig::default();
+    config.minimum_observations = value.minimum_observations;
+    config.robust = robust;
+    config
+}
+
+unsafe fn ppp_velocity_reject_equal_overlap<L, R>(
+    fn_name: &str,
+    left: *const L,
+    right: *const R,
+    out_equal: *mut bool,
+) -> Result<(), SidereonStatus> {
+    reject_output_overlaps_handle(fn_name, out_equal, "out_equal", left, "left")?;
+    reject_output_overlaps_handle(fn_name, out_equal, "out_equal", right, "right")?;
+    Ok(())
+}
+
+/// Compare low-level velocity configurations by complete core value.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_velocity_config_equal(
+    left: *const SidereonPppVelocityConfig,
+    right: *const SidereonPppVelocityConfig,
+    out_equal: *mut bool,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_velocity_config_equal";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        c_try!(ppp_velocity_reject_equal_overlap(
+            FN, left, right, out_equal
+        ));
+        let out = c_try!(require_out(out_equal, FN, "out_equal"));
+        *out = false;
+        let left = c_try!(require_ref(left, FN, "left"));
+        let right = c_try!(require_ref(right, FN, "right"));
+        *out = ppp_velocity_config_from_c(left) == ppp_velocity_config_from_c(right);
+        SidereonStatus::Ok
+    })
+}
+
+/// Compare robust velocity controls by complete core value.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_velocity_robust_config_equal(
+    left: *const SidereonPppVelocityRobustConfig,
+    right: *const SidereonPppVelocityRobustConfig,
+    out_equal: *mut bool,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_velocity_robust_config_equal";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        c_try!(ppp_velocity_reject_equal_overlap(
+            FN, left, right, out_equal
+        ));
+        let out = c_try!(require_out(out_equal, FN, "out_equal"));
+        *out = false;
+        let left = c_try!(require_ref(left, FN, "left"));
+        let right = c_try!(require_ref(right, FN, "right"));
+        *out = left.huber_k == right.huber_k
+            && left.scale_floor_m_s == right.scale_floor_m_s
+            && left.max_outer == right.max_outer
+            && left.outer_tol_m_s == right.outer_tol_m_s;
+        SidereonStatus::Ok
+    })
+}
+
+/// Construct a stationary receiver state at position_m.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_receiver_velocity_state_stationary_at(
+    position_m: *const f64,
+    out_state: *mut SidereonPppReceiverVelocityState,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_receiver_velocity_state_stationary_at";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        let position = c_try!(require_slice(position_m, 3, FN, "position_m"));
+        let out = c_try!(require_out(out_state, FN, "out_state"));
+        let state = sidereon_core::precise_positioning::ReceiverVelocityState::stationary_at([
+            position[0],
+            position[1],
+            position[2],
+        ]);
+        *out = SidereonPppReceiverVelocityState {
+            position_m: state.position_m,
+            velocity_m_s: state.velocity_m_s,
+            clock_drift_m_s: state.clock_drift_m_s,
+        };
+        SidereonStatus::Ok
+    })
+}
+
+/// Compare receiver velocity states by complete core value.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_receiver_velocity_state_equal(
+    left: *const SidereonPppReceiverVelocityState,
+    right: *const SidereonPppReceiverVelocityState,
+    out_equal: *mut bool,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_receiver_velocity_state_equal";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        c_try!(ppp_velocity_reject_equal_overlap(
+            FN, left, right, out_equal
+        ));
+        let out = c_try!(require_out(out_equal, FN, "out_equal"));
+        *out = false;
+        let left = c_try!(require_ref(left, FN, "left"));
+        let right = c_try!(require_ref(right, FN, "right"));
+        let convert = |value: &SidereonPppReceiverVelocityState| {
+            sidereon_core::precise_positioning::ReceiverVelocityState {
+                position_m: value.position_m,
+                velocity_m_s: value.velocity_m_s,
+                clock_drift_m_s: value.clock_drift_m_s,
+            }
+        };
+        *out = convert(left) == convert(right);
+        SidereonStatus::Ok
+    })
+}
+
+unsafe fn ppp_velocity_observation_from_c(
+    fn_name: &str,
+    value: &SidereonPppVelocityObservation,
+) -> Result<sidereon_core::precise_positioning::VelocityObservation, SidereonStatus> {
+    Ok(sidereon_core::precise_positioning::VelocityObservation {
+        sat: parse_satellite_token(fn_name, value.sat_id)?,
+        satellite_position_m: value.satellite_position_m,
+        satellite_velocity_m_s: value.satellite_velocity_m_s,
+        measured_range_rate_m_s: value.measured_range_rate_m_s,
+        sigma_m_s: value.sigma_m_s,
+        satellite_clock_drift_m_s: value.satellite_clock_drift_m_s,
+    })
+}
+
+/// Compare low-level velocity observations by complete core value.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_velocity_observation_equal(
+    left: *const SidereonPppVelocityObservation,
+    right: *const SidereonPppVelocityObservation,
+    out_equal: *mut bool,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_velocity_observation_equal";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        c_try!(ppp_velocity_reject_equal_overlap(
+            FN, left, right, out_equal
+        ));
+        let out = c_try!(require_out(out_equal, FN, "out_equal"));
+        *out = false;
+        let left = c_try!(require_ref(left, FN, "left"));
+        let right = c_try!(require_ref(right, FN, "right"));
+        *out = c_try!(ppp_velocity_observation_from_c(FN, left))
+            == c_try!(ppp_velocity_observation_from_c(FN, right));
+        SidereonStatus::Ok
+    })
+}
+
+/// Predict range rate for one low-level observation. Coincident or non-finite
+/// geometry is refused with InvalidArgument.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_predict_range_rate_m_s(
+    observation: *const SidereonPppVelocityObservation,
+    receiver: *const SidereonPppReceiverVelocityState,
+    out_prediction: *mut SidereonPppRangeRatePrediction,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_predict_range_rate_m_s";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out_prediction, FN, "out_prediction"));
+        *out = SidereonPppRangeRatePrediction {
+            los_unit: [0.0; 3],
+            range_rate_m_s: 0.0,
+        };
+        let observation = c_try!(require_ref(observation, FN, "observation"));
+        let observation = c_try!(ppp_velocity_observation_from_c(FN, observation));
+        let receiver = c_try!(require_ref(receiver, FN, "receiver"));
+        let receiver = sidereon_core::precise_positioning::ReceiverVelocityState {
+            position_m: receiver.position_m,
+            velocity_m_s: receiver.velocity_m_s,
+            clock_drift_m_s: receiver.clock_drift_m_s,
+        };
+        let Some(prediction) =
+            sidereon_core::precise_positioning::predict_range_rate_m_s(&observation, receiver)
+        else {
+            set_last_error(format!(
+                "{FN}: receiver and satellite geometry must be finite and non-coincident"
+            ));
+            return SidereonStatus::InvalidArgument;
+        };
+        *out = SidereonPppRangeRatePrediction {
+            los_unit: prediction.los_unit,
+            range_rate_m_s: prediction.range_rate_m_s,
+        };
+        SidereonStatus::Ok
+    })
+}
+
+/// Compare range-rate predictions by complete core value.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_range_rate_prediction_equal(
+    left: *const SidereonPppRangeRatePrediction,
+    right: *const SidereonPppRangeRatePrediction,
+    out_equal: *mut bool,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_range_rate_prediction_equal";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        c_try!(ppp_velocity_reject_equal_overlap(
+            FN, left, right, out_equal
+        ));
+        let out = c_try!(require_out(out_equal, FN, "out_equal"));
+        *out = false;
+        let left = c_try!(require_ref(left, FN, "left"));
+        let right = c_try!(require_ref(right, FN, "right"));
+        let convert = |value: &SidereonPppRangeRatePrediction| {
+            sidereon_core::precise_positioning::RangeRatePrediction {
+                los_unit: value.los_unit,
+                range_rate_m_s: value.range_rate_m_s,
+            }
+        };
+        *out = convert(left) == convert(right);
+        SidereonStatus::Ok
+    })
+}
+
+/// Solve receiver velocity and range-rate clock drift from precomputed satellite states.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_solve_velocity_least_squares(
+    observations: *const SidereonPppVelocityObservation,
+    count: usize,
+    receiver_position_m: *const f64,
+    config: *const SidereonPppVelocityConfig,
+    out_solution: *mut *mut SidereonPppVelocitySolution,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_solve_velocity_least_squares";
+    engine_error_operation_boundary(FN, SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out_solution, FN, "out_solution"));
+        *out = ptr::null_mut();
+        let rows = c_try!(require_slice(observations, count, FN, "observations"));
+        let position = c_try!(require_slice(
+            receiver_position_m,
+            3,
+            FN,
+            "receiver_position_m"
+        ));
+        let config = c_try!(require_ref(config, FN, "config"));
+        let mut parsed = Vec::with_capacity(rows.len());
+        for row in rows {
+            parsed.push(c_try!(ppp_velocity_observation_from_c(FN, row)));
+        }
+        let core_config = ppp_velocity_config_from_c(config);
+        let result = sidereon_core::precise_positioning::solve_velocity(
+            &parsed,
+            [position[0], position[1], position[2]],
+            core_config,
+        );
+        match result {
+            Ok(inner) => write_boxed_handle(out, SidereonPppVelocitySolution { inner }),
+            Err(error) => {
+                crate::engine_error::record_engine_error(
+                    crate::engine_error::SidereonEngineErrorFamily::PppVelocity,
+                    FN,
+                    crate::engine_error::ppp_velocity_solve_error_value(&error),
+                );
+                set_last_error(format!("{FN}: {error}"));
+                return SidereonStatus::Solve;
+            }
+        }
+        SidereonStatus::Ok
+    })
+}
+
+/// Copy scalar and vector results from a low-level precise-positioning velocity solution.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_velocity_solution_values(
+    solution: *const SidereonPppVelocitySolution,
+    out_velocity_m_s: *mut f64,
+    out_clock_drift_m_s: *mut f64,
+    out_residual_rms_m_s: *mut f64,
+    out_robust_iterations: *mut usize,
+    out_has_robust_scale: *mut bool,
+    out_robust_scale_m_s: *mut f64,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_velocity_solution_values";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        c_try!(reject_output_overlaps_handle(
+            FN,
+            out_velocity_m_s,
+            "out_velocity_m_s",
+            solution,
+            "solution"
+        ));
+        c_try!(reject_output_overlaps_handle(
+            FN,
+            out_clock_drift_m_s,
+            "out_clock_drift_m_s",
+            solution,
+            "solution"
+        ));
+        c_try!(reject_output_overlaps_handle(
+            FN,
+            out_residual_rms_m_s,
+            "out_residual_rms_m_s",
+            solution,
+            "solution"
+        ));
+        c_try!(reject_output_overlaps_handle(
+            FN,
+            out_robust_iterations,
+            "out_robust_iterations",
+            solution,
+            "solution"
+        ));
+        c_try!(reject_output_overlaps_handle(
+            FN,
+            out_has_robust_scale,
+            "out_has_robust_scale",
+            solution,
+            "solution"
+        ));
+        c_try!(reject_output_overlaps_handle(
+            FN,
+            out_robust_scale_m_s,
+            "out_robust_scale_m_s",
+            solution,
+            "solution"
+        ));
+        c_try!(require_out(out_velocity_m_s, FN, "out_velocity_m_s"));
+        let velocity = slice::from_raw_parts_mut(out_velocity_m_s, 3);
+        velocity.fill(0.0);
+        let clock = c_try!(require_out(out_clock_drift_m_s, FN, "out_clock_drift_m_s"));
+        *clock = 0.0;
+        let rms = c_try!(require_out(
+            out_residual_rms_m_s,
+            FN,
+            "out_residual_rms_m_s"
+        ));
+        *rms = 0.0;
+        let iterations = c_try!(require_out(
+            out_robust_iterations,
+            FN,
+            "out_robust_iterations"
+        ));
+        *iterations = 0;
+        let has_scale = c_try!(require_out(
+            out_has_robust_scale,
+            FN,
+            "out_has_robust_scale"
+        ));
+        *has_scale = false;
+        let scale = c_try!(require_out(
+            out_robust_scale_m_s,
+            FN,
+            "out_robust_scale_m_s"
+        ));
+        *scale = 0.0;
+        let solution = c_try!(require_ref(solution, FN, "solution"));
+        velocity.copy_from_slice(&solution.inner.velocity_m_s);
+        *clock = solution.inner.clock_drift_m_s;
+        *rms = solution.inner.residual_rms_m_s;
+        *iterations = solution.inner.robust_iterations;
+        *has_scale = solution.inner.robust_scale_m_s.is_some();
+        *scale = solution.inner.robust_scale_m_s.unwrap_or(0.0);
+        SidereonStatus::Ok
+    })
+}
+
+/// Compare two low-level precise-positioning velocity solutions by core value.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_velocity_solution_equal(
+    left: *const SidereonPppVelocitySolution,
+    right: *const SidereonPppVelocitySolution,
+    out_equal: *mut bool,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_velocity_solution_equal";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        c_try!(ppp_velocity_reject_equal_overlap(
+            FN, left, right, out_equal
+        ));
+        let out = c_try!(require_out(out_equal, FN, "out_equal"));
+        *out = false;
+        let left = c_try!(require_ref(left, FN, "left"));
+        let right = c_try!(require_ref(right, FN, "right"));
+        *out = left.inner == right.inner;
+        SidereonStatus::Ok
+    })
+}
+
+unsafe fn ppp_velocity_solution_satellites(
+    fn_name: &str,
+    values: &[GnssSatelliteId],
+    out: *mut SidereonSatelliteToken,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    c_try!(init_copy_counts(fn_name, out_written, out_required));
+    let values: Vec<_> = values.iter().copied().map(satellite_token).collect();
+    c_try!(copy_prefix_to_c(
+        fn_name,
+        "out",
+        &values,
+        out,
+        len,
+        out_written,
+        out_required
+    ));
+    SidereonStatus::Ok
+}
+
+/// Copy satellites retained by the low-level velocity solve.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_velocity_solution_used_sats(
+    solution: *const SidereonPppVelocitySolution,
+    out: *mut SidereonSatelliteToken,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_velocity_solution_used_sats";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        c_try!(reject_output_overlaps_handle(
+            FN, out, "out", solution, "solution"
+        ));
+        c_try!(reject_output_overlaps_handle(
+            FN,
+            out_written,
+            "out_written",
+            solution,
+            "solution"
+        ));
+        c_try!(reject_output_overlaps_handle(
+            FN,
+            out_required,
+            "out_required",
+            solution,
+            "solution"
+        ));
+        let solution = c_try!(require_ref(solution, FN, "solution"));
+        ppp_velocity_solution_satellites(
+            FN,
+            &solution.inner.used_sats,
+            out,
+            len,
+            out_written,
+            out_required,
+        )
+    })
+}
+
+/// Copy satellites downweighted by robust low-level velocity solving.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_velocity_solution_downweighted_sats(
+    solution: *const SidereonPppVelocitySolution,
+    out: *mut SidereonSatelliteToken,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_velocity_solution_downweighted_sats";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        c_try!(reject_output_overlaps_handle(
+            FN, out, "out", solution, "solution"
+        ));
+        c_try!(reject_output_overlaps_handle(
+            FN,
+            out_written,
+            "out_written",
+            solution,
+            "solution"
+        ));
+        c_try!(reject_output_overlaps_handle(
+            FN,
+            out_required,
+            "out_required",
+            solution,
+            "solution"
+        ));
+        let solution = c_try!(require_ref(solution, FN, "solution"));
+        ppp_velocity_solution_satellites(
+            FN,
+            &solution.inner.downweighted_sats,
+            out,
+            len,
+            out_written,
+            out_required,
+        )
+    })
+}
+
+/// Release a low-level precise-positioning velocity solution. NULL is a no-op.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_velocity_solution_free(
+    solution: *mut SidereonPppVelocitySolution,
+) {
+    ffi_boundary("sidereon_ppp_velocity_solution_free", (), || {
+        if !solution.is_null() {
+            drop(Box::from_raw(solution));
+        }
+    });
+}
+
+// ===========================================================================
+// Reduced-orbit (compact mean-element) fit / evaluation / drift. Delegates to
+// sidereon_core::orbit::{fit_with_model, position, position_velocity, drift}.
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -912,7 +1541,3 @@ mod tests {
         clear_engine_error();
     }
 }
-
-// ===========================================================================
-// Reduced-orbit (compact mean-element) fit / evaluation / drift. Delegates to
-// sidereon_core::orbit::{fit_with_model, position, position_velocity, drift}.

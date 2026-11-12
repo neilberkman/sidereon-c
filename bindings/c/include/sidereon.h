@@ -174,6 +174,12 @@
 #define SIDEREON_PPP_VMF_SITE_MAX_SAMPLES 8
 
 /**
+ * Maximum distance in days for clamping a single VMF site sample. Mirrors the
+ * engine's VMF_SITE_SINGLE_SAMPLE_CLAMP_DAYS exactly.
+ */
+#define SIDEREON_PPP_VMF_SITE_SINGLE_SAMPLE_CLAMP_DAYS 0.25
+
+/**
  * Drop reason: the satellite appeared more than once in at least one band.
  */
 #define SIDEREON_PSEUDORANGE_DROP_DUPLICATE_OBSERVATION 2
@@ -1619,6 +1625,10 @@ typedef enum SidereonEngineErrorFamily {
      */
     SIDEREON_ENGINE_ERROR_FAMILY_TIME_MODEL = 72,
     /**
+     * Low-level precise-positioning velocity solve failure.
+     */
+    SIDEREON_ENGINE_ERROR_FAMILY_PPP_VELOCITY = 73,
+    /**
      * A family introduced by a later library version.
      */
     SIDEREON_ENGINE_ERROR_FAMILY_UNKNOWN = 999,
@@ -1773,6 +1783,27 @@ typedef enum SidereonNmeaDiagnosticKind {
     SIDEREON_NMEA_DIAGNOSTIC_KIND_WARNING = 1,
 } SidereonNmeaDiagnosticKind;
 
+/**
+ * Runtime strategy for PPP auto-initialization solves. Values entering from C
+ * are validated before they are converted to the engine enum.
+ */
+typedef enum SidereonPppAutoInitStrategy {
+    /**
+     * Reference static PPP solve path and the engine default.
+     */
+    SIDEREON_PPP_AUTO_INIT_STRATEGY_REFERENCE = 0,
+    /**
+     * Canonical estimation-recipe PPP solve path.
+     */
+    SIDEREON_PPP_AUTO_INIT_STRATEGY_CANONICAL = 1,
+} SidereonPppAutoInitStrategy;
+
+typedef enum SidereonPppCorrectionsDegradeReason {
+    SIDEREON_PPP_CORRECTIONS_DEGRADE_REASON_NONE = 0,
+    SIDEREON_PPP_CORRECTIONS_DEGRADE_REASON_BEFORE_COVERAGE = 1,
+    SIDEREON_PPP_CORRECTIONS_DEGRADE_REASON_AFTER_COVERAGE = 2,
+} SidereonPppCorrectionsDegradeReason;
+
 typedef enum SidereonPppCorrectionsErrorKind {
     SIDEREON_PPP_CORRECTIONS_ERROR_KIND_NONE = 0,
     SIDEREON_PPP_CORRECTIONS_ERROR_KIND_INVALID_INPUT = 1,
@@ -1785,12 +1816,6 @@ typedef enum SidereonPppCorrectionsErrorKind {
     SIDEREON_PPP_CORRECTIONS_ERROR_KIND_BIAS = 8,
     SIDEREON_PPP_CORRECTIONS_ERROR_KIND_CODE_BIAS_OBSERVABLE = 9,
 } SidereonPppCorrectionsErrorKind;
-
-typedef enum SidereonPppCorrectionsDegradeReason {
-    SIDEREON_PPP_CORRECTIONS_DEGRADE_REASON_NONE = 0,
-    SIDEREON_PPP_CORRECTIONS_DEGRADE_REASON_BEFORE_COVERAGE = 1,
-    SIDEREON_PPP_CORRECTIONS_DEGRADE_REASON_AFTER_COVERAGE = 2,
-} SidereonPppCorrectionsDegradeReason;
 
 /**
  * Terminal status of a PPP float or fixed least-squares solve.
@@ -7320,6 +7345,20 @@ typedef struct SidereonPassList SidereonPassList;
 typedef struct SidereonPowerLawNoiseFit SidereonPowerLawNoiseFit;
 
 /**
+ * Owned ambiguity-search metadata extracted from a fixed PPP solution. Create
+ * with sidereon_ppp_fixed_solution_ambiguity_search and release with
+ * sidereon_ppp_ambiguity_search_free.
+ */
+typedef struct SidereonPppAmbiguitySearch SidereonPppAmbiguitySearch;
+
+/**
+ * Indexed correction lookup consumed by precise-positioning solves. This
+ * owned handle exposes the non-SSR correction tables; SSR bias tables are not
+ * yet exposed.
+ */
+typedef struct SidereonPppCorrectionLookup SidereonPppCorrectionLookup;
+
+/**
  * Precomputed PPP correction tables. Opaque to C. Create with
  * sidereon_ppp_corrections_build and release with
  * sidereon_ppp_corrections_free.
@@ -7337,6 +7376,12 @@ typedef struct SidereonPppFixedSolution SidereonPppFixedSolution;
  * sidereon_solve_ppp_float and release with sidereon_ppp_float_solution_free.
  */
 typedef struct SidereonPppFloatSolution SidereonPppFloatSolution;
+
+/**
+ * Complete result of the low-level precise-positioning velocity solve. The
+ * satellite arrays are copied through separate variable-length accessors.
+ */
+typedef struct SidereonPppVelocitySolution SidereonPppVelocitySolution;
 
 /**
  * A build-once precise-ephemeris interpolant with cached per-satellite nodes.
@@ -10261,6 +10306,382 @@ typedef struct SidereonRtkRinexDualArcOptions {
      */
     bool include_prediction_time;
 } SidereonRtkRinexDualArcOptions;
+
+/**
+ * Civil timestamp for one PPP epoch.
+ */
+typedef struct SidereonPppCivilDateTime {
+    /**
+     * Calendar year.
+     */
+    int32_t year;
+    /**
+     * Calendar month, 1 through 12.
+     */
+    uint8_t month;
+    /**
+     * Calendar day, 1 through 31.
+     */
+    uint8_t day;
+    /**
+     * Hour of day.
+     */
+    uint8_t hour;
+    /**
+     * Minute of hour.
+     */
+    uint8_t minute;
+    /**
+     * Seconds of minute.
+     */
+    double second;
+} SidereonPppCivilDateTime;
+
+/**
+ * One ionosphere-free code/phase observation in a PPP epoch.
+ */
+typedef struct SidereonPppObservation {
+    /**
+     * Null-terminated satellite token, for example G08.
+     */
+    const char *sat_id;
+    /**
+     * Null-terminated ambiguity id. Split arcs may use ids like G08#2.
+     */
+    const char *ambiguity_id;
+    /**
+     * Ionosphere-free code observable in meters.
+     */
+    double code_m;
+    /**
+     * Ionosphere-free carrier phase observable in meters.
+     */
+    double phase_m;
+    /**
+     * First raw carrier frequency in Hz, or 0 when not supplied.
+     */
+    double freq1_hz;
+    /**
+     * Second raw carrier frequency in Hz, or 0 when not supplied.
+     */
+    double freq2_hz;
+    /**
+     * Tracking code of the first pseudorange as a null-terminated RINEX 3
+     * band and attribute ("1C") or observation code ("C1C"), in the RINEX
+     * 3.04 convention. The four signal fields are all NULL, which leaves the
+     * observation's signals unstated, or all set. An SSR/HAS bias applies
+     * only to an observation formed from the bias's exact signal, so an
+     * observation with unstated signals receives none.
+     */
+    const char *code1_signal;
+    /**
+     * Tracking code of the second pseudorange, as code1_signal.
+     */
+    const char *code2_signal;
+    /**
+     * Tracking code of the first carrier phase, as code1_signal.
+     */
+    const char *phase1_signal;
+    /**
+     * Tracking code of the second carrier phase, as code1_signal.
+     */
+    const char *phase2_signal;
+    /**
+     * Whether `glonass_channel` is set.
+     */
+    bool has_glonass_channel;
+    /**
+     * GLONASS FDMA frequency channel of the satellite, which resolves its
+     * carriers where the frequencies are not given.
+     */
+    int8_t glonass_channel;
+} SidereonPppObservation;
+
+/**
+ * One static PPP epoch.
+ */
+typedef struct SidereonPppEpoch {
+    /**
+     * Civil timestamp used by the PPP correction model.
+     */
+    struct SidereonPppCivilDateTime civil;
+    /**
+     * Julian date whole-day part.
+     */
+    double jd_whole;
+    /**
+     * Julian date fractional-day part.
+     */
+    double jd_fraction;
+    /**
+     * Receive time as J2000 seconds.
+     */
+    double t_rx_j2000_s;
+    /**
+     * Pointer to observation_count observations.
+     */
+    const struct SidereonPppObservation *observations;
+    /**
+     * Number of observations in this epoch.
+     */
+    size_t observation_count;
+} SidereonPppEpoch;
+
+/**
+ * Solid-Earth pole-tide options, mirroring
+ * sidereon_core::ppp_corrections::PoleTideOptions.
+ */
+typedef struct SidereonPoleTideOptions {
+    /**
+     * IERS polar motion x of the date (arcsec).
+     */
+    double xp_arcsec;
+    /**
+     * IERS polar motion y of the date (arcsec).
+     */
+    double yp_arcsec;
+} SidereonPoleTideOptions;
+
+/**
+ * A UTC-like civil calendar instant, mirroring
+ * sidereon_core::ppp_corrections::CivilDateTime.
+ */
+typedef struct SidereonCivilDateTime {
+    /**
+     * Calendar year.
+     */
+    int32_t year;
+    /**
+     * Month (1-12).
+     */
+    uint8_t month;
+    /**
+     * Day of month.
+     */
+    uint8_t day;
+    /**
+     * Hour (0-23).
+     */
+    uint8_t hour;
+    /**
+     * Minute (0-59).
+     */
+    uint8_t minute;
+    /**
+     * Second (fractional).
+     */
+    double second;
+} SidereonCivilDateTime;
+
+/**
+ * One non-azimuthal PCV sample pair (the two-tuple in
+ * SatelliteAntennaFrequency::noazi_pcv_m).
+ */
+typedef struct SidereonNoaziPcvSample {
+    /**
+     * First tuple element (zenith-angle node, degrees).
+     */
+    double a;
+    /**
+     * Second tuple element (PCV value, meters).
+     */
+    double b;
+} SidereonNoaziPcvSample;
+
+/**
+ * Frequency-dependent satellite antenna calibration, mirroring
+ * sidereon_core::ppp_corrections::SatelliteAntennaFrequency.
+ */
+typedef struct SidereonSatelliteAntennaFrequency {
+    /**
+     * Null-terminated frequency label, for example "G01".
+     */
+    const char *label;
+    /**
+     * Phase-center offset, meters.
+     */
+    double pco_m[3];
+    /**
+     * Pointer to noazi_count SidereonNoaziPcvSample.
+     */
+    const struct SidereonNoaziPcvSample *noazi_pcv;
+    /**
+     * Number of PCV samples.
+     */
+    size_t noazi_count;
+} SidereonSatelliteAntennaFrequency;
+
+/**
+ * Satellite antenna block selected by PRN and validity window, mirroring
+ * sidereon_core::ppp_corrections::SatelliteAntenna.
+ */
+typedef struct SidereonSatelliteAntenna {
+    /**
+     * Null-terminated satellite token.
+     */
+    const char *sat_id;
+    /**
+     * Whether valid_from is set.
+     */
+    bool has_valid_from;
+    /**
+     * Start of the validity window (used when has_valid_from).
+     */
+    struct SidereonCivilDateTime valid_from;
+    /**
+     * Whether valid_until is set.
+     */
+    bool has_valid_until;
+    /**
+     * End of the validity window (used when has_valid_until).
+     */
+    struct SidereonCivilDateTime valid_until;
+    /**
+     * Pointer to frequency_count SidereonSatelliteAntennaFrequency.
+     */
+    const struct SidereonSatelliteAntennaFrequency *frequencies;
+    /**
+     * Number of frequency calibrations.
+     */
+    size_t frequency_count;
+} SidereonSatelliteAntenna;
+
+/**
+ * Satellite antenna correction options, mirroring
+ * sidereon_core::ppp_corrections::SatelliteAntennaOptions.
+ */
+typedef struct SidereonSatelliteAntennaOptions {
+    /**
+     * Null-terminated band-1 label.
+     */
+    const char *freq1_label;
+    /**
+     * Band-1 carrier frequency, Hz.
+     */
+    double freq1_hz;
+    /**
+     * Null-terminated band-2 label.
+     */
+    const char *freq2_label;
+    /**
+     * Band-2 carrier frequency, Hz.
+     */
+    double freq2_hz;
+    /**
+     * Pointer to antenna_count SidereonSatelliteAntenna.
+     */
+    const struct SidereonSatelliteAntenna *antennas;
+    /**
+     * Number of antenna blocks.
+     */
+    size_t antenna_count;
+} SidereonSatelliteAntennaOptions;
+
+typedef struct SidereonPppCodeBiasSystemPair {
+    /**
+     * GNSS system code, one of SidereonGnssSystem.
+     */
+    uint32_t system;
+    /**
+     * First RINEX observable code.
+     */
+    const char *obs1;
+    /**
+     * Second RINEX observable code.
+     */
+    const char *obs2;
+} SidereonPppCodeBiasSystemPair;
+
+typedef struct SidereonPppCodeBiasSatellitePair {
+    /**
+     * Null-terminated satellite token.
+     */
+    const char *sat_id;
+    /**
+     * First RINEX observable code.
+     */
+    const char *obs1;
+    /**
+     * Second RINEX observable code.
+     */
+    const char *obs2;
+} SidereonPppCodeBiasSatellitePair;
+
+/**
+ * PPP correction precompute switches, mirroring
+ * sidereon_core::ppp_corrections::PppCorrectionsOptions. The has_* flags gate
+ * each optional sub-structure.
+ */
+typedef struct SidereonPppCorrectionsOptions {
+    /**
+     * Enable the solid-Earth tide.
+     */
+    bool solid_earth_tide;
+    /**
+     * Whether pole_tide is enabled.
+     */
+    bool has_pole_tide;
+    /**
+     * Pole-tide options when has_pole_tide.
+     */
+    struct SidereonPoleTideOptions pole_tide;
+    /**
+     * Whether ocean_loading is enabled.
+     */
+    bool has_ocean_loading;
+    /**
+     * Ocean-loading BLQ block when has_ocean_loading.
+     */
+    struct SidereonOceanLoadingBlq ocean_loading;
+    /**
+     * Enable carrier phase wind-up.
+     */
+    bool phase_windup;
+    /**
+     * Whether satellite_antenna is enabled.
+     */
+    bool has_satellite_antenna;
+    /**
+     * Pointer to a SidereonSatelliteAntennaOptions when has_satellite_antenna.
+     */
+    const struct SidereonSatelliteAntennaOptions *satellite_antenna;
+    /**
+     * Whether code_bias is enabled.
+     */
+    bool has_code_bias;
+    /**
+     * Parsed Bias-SINEX or DCB product when has_code_bias.
+     */
+    const struct SidereonBiasSet *code_bias;
+    /**
+     * System default observable pairs.
+     */
+    const struct SidereonPppCodeBiasSystemPair *code_bias_system_pairs;
+    /**
+     * Number of system default observable pairs.
+     */
+    size_t code_bias_system_pair_count;
+    /**
+     * Per-satellite observable-pair overrides.
+     */
+    const struct SidereonPppCodeBiasSatellitePair *code_bias_satellite_pairs;
+    /**
+     * Number of per-satellite observable-pair overrides.
+     */
+    size_t code_bias_satellite_pair_count;
+    /**
+     * Whether code_bias_clock_reference_pairs overrides the product metadata.
+     */
+    bool has_code_bias_clock_reference;
+    /**
+     * Optional clock-reference observable pairs by system.
+     */
+    const struct SidereonPppCodeBiasSystemPair *code_bias_clock_reference_pairs;
+    /**
+     * Number of clock-reference observable pairs.
+     */
+    size_t code_bias_clock_reference_pair_count;
+} SidereonPppCorrectionsOptions;
 
 /**
  * One RINEX code/carrier pair used to build a single-frequency RTK arc.
@@ -17154,6 +17575,31 @@ typedef struct SidereonSatellitePass {
 } SidereonSatellitePass;
 
 /**
+ * Fixed-size null-terminated PPP ambiguity id storage. Values returned by
+ * Sidereon are always null-terminated.
+ */
+typedef struct SidereonPppId {
+    /**
+     * Null-terminated id bytes.
+     */
+    char bytes[65];
+} SidereonPppId;
+
+/**
+ * One float ambiguity value in carrier cycles, in lattice-search order.
+ */
+typedef struct SidereonPppFloatAmbiguityCycles {
+    /**
+     * Ambiguity identifier.
+     */
+    struct SidereonPppId id;
+    /**
+     * Float ambiguity in carrier cycles.
+     */
+    double value_cycles;
+} SidereonPppFloatAmbiguityCycles;
+
+/**
  * SPP-seeded auto-initialization policy for the raw-epochs PPP driver, mirroring
  * sidereon_core::precise_positioning::PppAutoInitOptions. Initialize with
  * sidereon_ppp_auto_init_options_init, then override fields.
@@ -17197,35 +17643,87 @@ typedef struct SidereonPppAutoInitOptions {
 } SidereonPppAutoInitOptions;
 
 /**
- * A UTC-like civil calendar instant, mirroring
- * sidereon_core::ppp_corrections::CivilDateTime.
+ * An epoch-indexed per-satellite scalar correction, mirroring
+ * sidereon_core::ppp_corrections::SatScalarCorrection.
  */
-typedef struct SidereonCivilDateTime {
+typedef struct SidereonSatScalarCorrection {
     /**
-     * Calendar year.
+     * Null-terminated satellite token.
      */
-    int32_t year;
+    char sat_id[17];
     /**
-     * Month (1-12).
+     * Index into the input epoch slice.
      */
-    uint8_t month;
+    size_t epoch_index;
     /**
-     * Day of month.
+     * Correction value, meters.
      */
-    uint8_t day;
+    double value_m;
+} SidereonSatScalarCorrection;
+
+/**
+ * Non-SSR correction-table enablement copied from a PPP correction lookup.
+ */
+typedef struct SidereonPppCorrectionLookupFlags {
     /**
-     * Hour (0-23).
+     * Solid-Earth tide entries are required.
      */
-    uint8_t hour;
+    bool tide_enabled;
     /**
-     * Minute (0-59).
+     * Pole-tide entries are required.
      */
-    uint8_t minute;
+    bool pole_tide_enabled;
     /**
-     * Second (fractional).
+     * Ocean-loading entries are required.
      */
-    double second;
-} SidereonCivilDateTime;
+    bool ocean_loading_enabled;
+    /**
+     * Phase wind-up entries are required.
+     */
+    bool windup_enabled;
+    /**
+     * Satellite PCO and PCV entries are required.
+     */
+    bool satellite_antenna_enabled;
+    /**
+     * Clock-datum code-bias entries are required.
+     */
+    bool code_bias_enabled;
+} SidereonPppCorrectionLookupFlags;
+
+/**
+ * An epoch-indexed vector correction, mirroring
+ * sidereon_core::ppp_corrections::EpochVectorCorrection.
+ */
+typedef struct SidereonEpochVectorCorrection {
+    /**
+     * Index into the input epoch slice.
+     */
+    size_t epoch_index;
+    /**
+     * Correction vector, meters (ECEF).
+     */
+    double vector_m[3];
+} SidereonEpochVectorCorrection;
+
+/**
+ * An epoch-indexed per-satellite vector correction, mirroring
+ * sidereon_core::ppp_corrections::SatVectorCorrection.
+ */
+typedef struct SidereonSatVectorCorrection {
+    /**
+     * Null-terminated satellite token.
+     */
+    char sat_id[17];
+    /**
+     * Index into the input epoch slice.
+     */
+    size_t epoch_index;
+    /**
+     * Correction vector, meters (ECEF).
+     */
+    double vector_m[3];
+} SidereonSatVectorCorrection;
 
 /**
  * One satellite observation row for the PPP correction precompute, mirroring
@@ -17278,284 +17776,6 @@ typedef struct SidereonPppCorrectionEpoch {
 } SidereonPppCorrectionEpoch;
 
 /**
- * Solid-Earth pole-tide options, mirroring
- * sidereon_core::ppp_corrections::PoleTideOptions.
- */
-typedef struct SidereonPoleTideOptions {
-    /**
-     * IERS polar motion x of the date (arcsec).
-     */
-    double xp_arcsec;
-    /**
-     * IERS polar motion y of the date (arcsec).
-     */
-    double yp_arcsec;
-} SidereonPoleTideOptions;
-
-/**
- * One non-azimuthal PCV sample pair (the two-tuple in
- * SatelliteAntennaFrequency::noazi_pcv_m).
- */
-typedef struct SidereonNoaziPcvSample {
-    /**
-     * First tuple element (zenith-angle node, degrees).
-     */
-    double a;
-    /**
-     * Second tuple element (PCV value, meters).
-     */
-    double b;
-} SidereonNoaziPcvSample;
-
-/**
- * Frequency-dependent satellite antenna calibration, mirroring
- * sidereon_core::ppp_corrections::SatelliteAntennaFrequency.
- */
-typedef struct SidereonSatelliteAntennaFrequency {
-    /**
-     * Null-terminated frequency label, for example "G01".
-     */
-    const char *label;
-    /**
-     * Phase-center offset, meters.
-     */
-    double pco_m[3];
-    /**
-     * Pointer to noazi_count SidereonNoaziPcvSample.
-     */
-    const struct SidereonNoaziPcvSample *noazi_pcv;
-    /**
-     * Number of PCV samples.
-     */
-    size_t noazi_count;
-} SidereonSatelliteAntennaFrequency;
-
-/**
- * Satellite antenna block selected by PRN and validity window, mirroring
- * sidereon_core::ppp_corrections::SatelliteAntenna.
- */
-typedef struct SidereonSatelliteAntenna {
-    /**
-     * Null-terminated satellite token.
-     */
-    const char *sat_id;
-    /**
-     * Whether valid_from is set.
-     */
-    bool has_valid_from;
-    /**
-     * Start of the validity window (used when has_valid_from).
-     */
-    struct SidereonCivilDateTime valid_from;
-    /**
-     * Whether valid_until is set.
-     */
-    bool has_valid_until;
-    /**
-     * End of the validity window (used when has_valid_until).
-     */
-    struct SidereonCivilDateTime valid_until;
-    /**
-     * Pointer to frequency_count SidereonSatelliteAntennaFrequency.
-     */
-    const struct SidereonSatelliteAntennaFrequency *frequencies;
-    /**
-     * Number of frequency calibrations.
-     */
-    size_t frequency_count;
-} SidereonSatelliteAntenna;
-
-/**
- * Satellite antenna correction options, mirroring
- * sidereon_core::ppp_corrections::SatelliteAntennaOptions.
- */
-typedef struct SidereonSatelliteAntennaOptions {
-    /**
-     * Null-terminated band-1 label.
-     */
-    const char *freq1_label;
-    /**
-     * Band-1 carrier frequency, Hz.
-     */
-    double freq1_hz;
-    /**
-     * Null-terminated band-2 label.
-     */
-    const char *freq2_label;
-    /**
-     * Band-2 carrier frequency, Hz.
-     */
-    double freq2_hz;
-    /**
-     * Pointer to antenna_count SidereonSatelliteAntenna.
-     */
-    const struct SidereonSatelliteAntenna *antennas;
-    /**
-     * Number of antenna blocks.
-     */
-    size_t antenna_count;
-} SidereonSatelliteAntennaOptions;
-
-typedef struct SidereonPppCodeBiasSystemPair {
-    /**
-     * GNSS system code, one of SidereonGnssSystem.
-     */
-    uint32_t system;
-    /**
-     * First RINEX observable code.
-     */
-    const char *obs1;
-    /**
-     * Second RINEX observable code.
-     */
-    const char *obs2;
-} SidereonPppCodeBiasSystemPair;
-
-typedef struct SidereonPppCodeBiasSatellitePair {
-    /**
-     * Null-terminated satellite token.
-     */
-    const char *sat_id;
-    /**
-     * First RINEX observable code.
-     */
-    const char *obs1;
-    /**
-     * Second RINEX observable code.
-     */
-    const char *obs2;
-} SidereonPppCodeBiasSatellitePair;
-
-/**
- * PPP correction precompute switches, mirroring
- * sidereon_core::ppp_corrections::PppCorrectionsOptions. The has_* flags gate
- * each optional sub-structure.
- */
-typedef struct SidereonPppCorrectionsOptions {
-    /**
-     * Enable the solid-Earth tide.
-     */
-    bool solid_earth_tide;
-    /**
-     * Whether pole_tide is enabled.
-     */
-    bool has_pole_tide;
-    /**
-     * Pole-tide options when has_pole_tide.
-     */
-    struct SidereonPoleTideOptions pole_tide;
-    /**
-     * Whether ocean_loading is enabled.
-     */
-    bool has_ocean_loading;
-    /**
-     * Ocean-loading BLQ block when has_ocean_loading.
-     */
-    struct SidereonOceanLoadingBlq ocean_loading;
-    /**
-     * Enable carrier phase wind-up.
-     */
-    bool phase_windup;
-    /**
-     * Whether satellite_antenna is enabled.
-     */
-    bool has_satellite_antenna;
-    /**
-     * Pointer to a SidereonSatelliteAntennaOptions when has_satellite_antenna.
-     */
-    const struct SidereonSatelliteAntennaOptions *satellite_antenna;
-    /**
-     * Whether code_bias is enabled.
-     */
-    bool has_code_bias;
-    /**
-     * Parsed Bias-SINEX or DCB product when has_code_bias.
-     */
-    const struct SidereonBiasSet *code_bias;
-    /**
-     * System default observable pairs.
-     */
-    const struct SidereonPppCodeBiasSystemPair *code_bias_system_pairs;
-    /**
-     * Number of system default observable pairs.
-     */
-    size_t code_bias_system_pair_count;
-    /**
-     * Per-satellite observable-pair overrides.
-     */
-    const struct SidereonPppCodeBiasSatellitePair *code_bias_satellite_pairs;
-    /**
-     * Number of per-satellite observable-pair overrides.
-     */
-    size_t code_bias_satellite_pair_count;
-    /**
-     * Whether code_bias_clock_reference_pairs overrides the product metadata.
-     */
-    bool has_code_bias_clock_reference;
-    /**
-     * Optional clock-reference observable pairs by system.
-     */
-    const struct SidereonPppCodeBiasSystemPair *code_bias_clock_reference_pairs;
-    /**
-     * Number of clock-reference observable pairs.
-     */
-    size_t code_bias_clock_reference_pair_count;
-} SidereonPppCorrectionsOptions;
-
-/**
- * An epoch-indexed per-satellite scalar correction, mirroring
- * sidereon_core::ppp_corrections::SatScalarCorrection.
- */
-typedef struct SidereonSatScalarCorrection {
-    /**
-     * Null-terminated satellite token.
-     */
-    char sat_id[17];
-    /**
-     * Index into the input epoch slice.
-     */
-    size_t epoch_index;
-    /**
-     * Correction value, meters.
-     */
-    double value_m;
-} SidereonSatScalarCorrection;
-
-/**
- * An epoch-indexed vector correction, mirroring
- * sidereon_core::ppp_corrections::EpochVectorCorrection.
- */
-typedef struct SidereonEpochVectorCorrection {
-    /**
-     * Index into the input epoch slice.
-     */
-    size_t epoch_index;
-    /**
-     * Correction vector, meters (ECEF).
-     */
-    double vector_m[3];
-} SidereonEpochVectorCorrection;
-
-/**
- * An epoch-indexed per-satellite vector correction, mirroring
- * sidereon_core::ppp_corrections::SatVectorCorrection.
- */
-typedef struct SidereonSatVectorCorrection {
-    /**
-     * Null-terminated satellite token.
-     */
-    char sat_id[17];
-    /**
-     * Index into the input epoch slice.
-     */
-    size_t epoch_index;
-    /**
-     * Correction vector, meters (ECEF).
-     */
-    double vector_m[3];
-} SidereonSatVectorCorrection;
-
-/**
  * One PPP string-to-f64 map entry, used for ambiguity, wavelength, and offset
  * maps.
  */
@@ -17597,15 +17817,316 @@ typedef struct SidereonPppFixedAmbiguityOptions {
 } SidereonPppFixedAmbiguityOptions;
 
 /**
- * Fixed-size null-terminated PPP ambiguity id storage. Values returned by
- * Sidereon are always null-terminated.
+ * PPP measurement weights. Values are inverse sigmas matching the engine.
  */
-typedef struct SidereonPppId {
+typedef struct SidereonPppMeasurementWeights {
     /**
-     * Null-terminated id bytes.
+     * Code inverse sigma.
      */
-    char bytes[65];
-} SidereonPppId;
+    double code;
+    /**
+     * Carrier phase inverse sigma.
+     */
+    double phase;
+    /**
+     * Whether to use elevation weighting.
+     */
+    bool elevation_weighting;
+} SidereonPppMeasurementWeights;
+
+/**
+ * One VMF1 site-wise sample: the a coefficients at a single epoch. Used only
+ * when SidereonPppTroposphereOptions.mapping is SIDEREON_PPP_TROPO_MAPPING_VMF1.
+ */
+typedef struct SidereonPppVmfSiteSample {
+    /**
+     * Modified Julian date of the sample (VMF nodes are 00/06/12/18 UT).
+     */
+    double mjd;
+    /**
+     * Hydrostatic a coefficient from the VMF data product.
+     */
+    double ah;
+    /**
+     * Wet a coefficient from the VMF data product.
+     */
+    double aw;
+} SidereonPppVmfSiteSample;
+
+/**
+ * PPP troposphere controls.
+ */
+typedef struct SidereonPppTroposphereOptions {
+    /**
+     * Enable troposphere correction.
+     */
+    bool enabled;
+    /**
+     * Estimate zenith troposphere residual as a state component.
+     */
+    bool estimate_ztd;
+    /**
+     * Estimate north/east horizontal troposphere gradient states.
+     */
+    bool estimate_tropo_gradients;
+    /**
+     * Surface pressure in hPa.
+     */
+    double pressure_hpa;
+    /**
+     * Surface temperature in kelvin.
+     */
+    double temperature_k;
+    /**
+     * Relative humidity, 0 to 1.
+     */
+    double relative_humidity;
+    /**
+     * Mapping function, a SidereonPppTropoMapping value.
+     */
+    uint32_t mapping;
+    /**
+     * Number of valid entries in vmf_samples (1..=SIDEREON_PPP_VMF_SITE_MAX_SAMPLES);
+     * used only when mapping is VMF1. Samples must be strictly increasing in mjd
+     * with positive, finite a coefficients.
+     */
+    size_t vmf_sample_count;
+    /**
+     * VMF1 site-wise a-coefficient series, ascending in mjd.
+     */
+    struct SidereonPppVmfSiteSample vmf_samples[SIDEREON_PPP_VMF_SITE_MAX_SAMPLES];
+} SidereonPppTroposphereOptions;
+
+/**
+ * One receiver-antenna no-azimuth PCV sample in meters.
+ */
+typedef struct SidereonReceiverAntennaNoaziPcvSample {
+    /**
+     * Zenith angle in degrees.
+     */
+    double zenith_deg;
+    /**
+     * PCV correction in meters.
+     */
+    double value_m;
+} SidereonReceiverAntennaNoaziPcvSample;
+
+/**
+ * One receiver-antenna azimuth-dependent PCV sample in meters.
+ */
+typedef struct SidereonReceiverAntennaAzimuthPcvSample {
+    /**
+     * Azimuth angle in degrees.
+     */
+    double azimuth_deg;
+    /**
+     * Zenith angle in degrees.
+     */
+    double zenith_deg;
+    /**
+     * PCV correction in meters.
+     */
+    double value_m;
+} SidereonReceiverAntennaAzimuthPcvSample;
+
+/**
+ * Receiver-antenna calibration for one frequency. The PCO vector is local
+ * north/east/up in meters. Set noazi_pcv_m or azimuth_pcv_m to NULL only when
+ * the corresponding count is zero.
+ */
+typedef struct SidereonReceiverAntennaCalibration {
+    /**
+     * Phase-center offset in local north/east/up meters.
+     */
+    double pco_neu_m[3];
+    /**
+     * Pointer to noazi_pcv_count no-azimuth PCV samples.
+     */
+    const struct SidereonReceiverAntennaNoaziPcvSample *noazi_pcv_m;
+    /**
+     * Number of no-azimuth PCV samples.
+     */
+    size_t noazi_pcv_count;
+    /**
+     * Pointer to azimuth_pcv_count azimuth-dependent PCV samples.
+     */
+    const struct SidereonReceiverAntennaAzimuthPcvSample *azimuth_pcv_m;
+    /**
+     * Number of azimuth-dependent PCV samples.
+     */
+    size_t azimuth_pcv_count;
+} SidereonReceiverAntennaCalibration;
+
+/**
+ * PPP receiver-antenna correction options for the ionosphere-free frequency
+ * pair. Set SidereonPppRangeCorrections.receiver_antenna to NULL to disable.
+ */
+typedef struct SidereonPppReceiverAntennaOptions {
+    /**
+     * Null-terminated label for the first frequency calibration.
+     */
+    const char *freq1_label;
+    /**
+     * First carrier frequency in Hz.
+     */
+    double freq1_hz;
+    /**
+     * First frequency receiver-antenna calibration.
+     */
+    struct SidereonReceiverAntennaCalibration freq1;
+    /**
+     * Null-terminated label for the second frequency calibration.
+     */
+    const char *freq2_label;
+    /**
+     * Second carrier frequency in Hz.
+     */
+    double freq2_hz;
+    /**
+     * Second frequency receiver-antenna calibration.
+     */
+    struct SidereonReceiverAntennaCalibration freq2;
+} SidereonPppReceiverAntennaOptions;
+
+/**
+ * One precise satellite-clock sample. Values are keyed by satellite and GPS
+ * seconds, and the clock value is seconds.
+ */
+typedef struct SidereonPppSatelliteClockRecord {
+    /**
+     * Null-terminated satellite token, for example G08.
+     */
+    const char *sat_id;
+    /**
+     * GPS seconds for this clock sample.
+     */
+    double gps_seconds;
+    /**
+     * Satellite clock value in seconds.
+     */
+    double clock_s;
+} SidereonPppSatelliteClockRecord;
+
+/**
+ * PPP range-correction controls. Tractable corrections are applied directly:
+ * receiver_antenna, sat_clock_relativity, and satellite_clock_records. Tide,
+ * phase windup, and satellite ANTEX corrections require precomputed tables
+ * that this C ABI cannot yet represent; setting those flags returns
+ * SIDEREON_STATUS_INVALID_ARGUMENT rather than silently ignoring them.
+ */
+typedef struct SidereonPppRangeCorrections {
+    /**
+     * Optional receiver-antenna options, or NULL to disable.
+     */
+    const struct SidereonPppReceiverAntennaOptions *receiver_antenna;
+    /**
+     * Enable relativistic satellite-clock correction.
+     */
+    bool sat_clock_relativity;
+    /**
+     * Pointer to satellite_clock_record_count satellite-clock samples.
+     */
+    const struct SidereonPppSatelliteClockRecord *satellite_clock_records;
+    /**
+     * Number of satellite-clock samples.
+     */
+    size_t satellite_clock_record_count;
+    /**
+     * Unsupported in this C ABI; true returns InvalidArgument.
+     */
+    bool solid_earth_tide;
+    /**
+     * Unsupported in this C ABI; true returns InvalidArgument.
+     */
+    bool phase_windup;
+    /**
+     * Unsupported in this C ABI; true returns InvalidArgument.
+     */
+    bool satellite_antenna;
+} SidereonPppRangeCorrections;
+
+/**
+ * PPP iteration and convergence controls.
+ */
+typedef struct SidereonPppFloatOptions {
+    /**
+     * Maximum solver iterations.
+     */
+    size_t max_iterations;
+    /**
+     * Position update tolerance in meters.
+     */
+    double position_tolerance_m;
+    /**
+     * Clock update tolerance in meters.
+     */
+    double clock_tolerance_m;
+    /**
+     * Ambiguity update tolerance in meters.
+     */
+    double ambiguity_tolerance_m;
+    /**
+     * Zenith troposphere update tolerance in meters.
+     */
+    double ztd_tolerance_m;
+} SidereonPppFloatOptions;
+
+/**
+ * Complete typed input bundle for a PPP fixed solve.
+ */
+typedef struct SidereonPppFixedConfig {
+    /**
+     * Pointer to epoch_count epochs.
+     */
+    const struct SidereonPppEpoch *epochs;
+    /**
+     * Number of epochs.
+     */
+    size_t epoch_count;
+    /**
+     * Measurement weights.
+     */
+    struct SidereonPppMeasurementWeights weights;
+    /**
+     * Troposphere controls.
+     */
+    struct SidereonPppTroposphereOptions tropo;
+    /**
+     * Range-correction controls.
+     */
+    struct SidereonPppRangeCorrections corrections;
+    /**
+     * Fixed re-solve options.
+     */
+    struct SidereonPppFloatOptions options;
+    /**
+     * Whether elevation_cutoff_deg is present.
+     */
+    bool has_elevation_cutoff_deg;
+    /**
+     * Optional PPP observation elevation cutoff in degrees.
+     */
+    double elevation_cutoff_deg;
+    /**
+     * Integer ambiguity controls.
+     */
+    struct SidereonPppFixedAmbiguityOptions ambiguity;
+} SidereonPppFixedConfig;
+
+/**
+ * Additive PPP fixed configuration carrying fields introduced after the 3.0.6
+ * caller-allocated layout.
+ */
+typedef struct SidereonPppFixedConfigV2 {
+    /**
+     * Released PPP fixed configuration.
+     */
+    struct SidereonPppFixedConfig legacy;
+    /**
+     * Estimate one residual-ionosphere state per ambiguity arc in the re-solve.
+     */
+    bool estimate_residual_ionosphere;
+} SidereonPppFixedConfigV2;
 
 /**
  * One PPP fixed integer ambiguity estimate.
@@ -17741,6 +18262,20 @@ typedef struct SidereonPppPositionCovariances {
      */
     double temporal_scale_factor;
 } SidereonPppPositionCovariances;
+
+/**
+ * One estimated residual-ionosphere state keyed by ambiguity arc.
+ */
+typedef struct SidereonPppResidualIonosphere {
+    /**
+     * Ambiguity-state identifier.
+     */
+    struct SidereonPppId ambiguity_id;
+    /**
+     * Estimated residual ionosphere, in meters.
+     */
+    double value_m;
+} SidereonPppResidualIonosphere;
 
 /**
  * An SSR orbit/clock/bias solution identity.
@@ -18156,30 +18691,104 @@ typedef struct SidereonPppUnplacedObservationV2 {
 } SidereonPppUnplacedObservationV2;
 
 /**
- * PPP iteration and convergence controls.
+ * Initial static-arc PPP state.
  */
-typedef struct SidereonPppFloatOptions {
+typedef struct SidereonPppFloatState {
     /**
-     * Maximum solver iterations.
+     * Initial receiver ECEF position in meters.
      */
-    size_t max_iterations;
+    double position_m[3];
     /**
-     * Position update tolerance in meters.
+     * Pointer to clock_count receiver-clock values in meters.
      */
-    double position_tolerance_m;
+    const double *clocks_m;
     /**
-     * Clock update tolerance in meters.
+     * Number of receiver-clock values. Must equal epoch_count.
      */
-    double clock_tolerance_m;
+    size_t clock_count;
     /**
-     * Ambiguity update tolerance in meters.
+     * Pointer to ambiguity_count float ambiguity entries in meters.
      */
-    double ambiguity_tolerance_m;
+    const struct SidereonPppFloatMapEntry *ambiguities_m;
     /**
-     * Zenith troposphere update tolerance in meters.
+     * Number of float ambiguity entries.
      */
-    double ztd_tolerance_m;
-} SidereonPppFloatOptions;
+    size_t ambiguity_count;
+    /**
+     * Initial zenith troposphere residual in meters.
+     */
+    double ztd_m;
+    /**
+     * Initial north horizontal troposphere gradient state in meters.
+     */
+    double tropo_gradient_north_m;
+    /**
+     * Initial east horizontal troposphere gradient state in meters.
+     */
+    double tropo_gradient_east_m;
+} SidereonPppFloatState;
+
+/**
+ * Complete typed input bundle for a PPP float solve.
+ */
+typedef struct SidereonPppFloatConfig {
+    /**
+     * Pointer to epoch_count epochs.
+     */
+    const struct SidereonPppEpoch *epochs;
+    /**
+     * Number of epochs.
+     */
+    size_t epoch_count;
+    /**
+     * Initial PPP state.
+     */
+    struct SidereonPppFloatState initial_state;
+    /**
+     * Measurement weights.
+     */
+    struct SidereonPppMeasurementWeights weights;
+    /**
+     * Troposphere controls.
+     */
+    struct SidereonPppTroposphereOptions tropo;
+    /**
+     * Range-correction controls.
+     */
+    struct SidereonPppRangeCorrections corrections;
+    /**
+     * Float solve options.
+     */
+    struct SidereonPppFloatOptions options;
+    /**
+     * Whether elevation_cutoff_deg is present.
+     */
+    bool has_elevation_cutoff_deg;
+    /**
+     * Optional PPP observation elevation cutoff in degrees.
+     */
+    double elevation_cutoff_deg;
+    /**
+     * Enable residual screening.
+     */
+    bool residual_screen;
+} SidereonPppFloatConfig;
+
+/**
+ * Additive PPP float configuration carrying fields introduced after the 3.0.6
+ * caller-allocated layout. `legacy` is read in full; the additional flag is
+ * passed to the engine without changing SidereonPppFloatConfig.
+ */
+typedef struct SidereonPppFloatConfigV2 {
+    /**
+     * Released PPP float configuration.
+     */
+    struct SidereonPppFloatConfig legacy;
+    /**
+     * Estimate one residual-ionosphere state per ambiguity arc.
+     */
+    bool estimate_residual_ionosphere;
+} SidereonPppFloatConfigV2;
 
 /**
  * One PPP float ambiguity estimate in meters.
@@ -18290,233 +18899,147 @@ typedef struct SidereonPppEpochObservation {
 } SidereonPppEpochObservation;
 
 /**
- * PPP measurement weights. Values are inverse sigmas matching the engine.
+ * One PPP residual row, including the exact inverse-sigma weights used by the
+ * engine. This is plain C value data and therefore compares field by field.
  */
-typedef struct SidereonPppMeasurementWeights {
+typedef struct SidereonPppFloatResidual {
     /**
-     * Code inverse sigma.
+     * Zero-based input epoch index.
      */
-    double code;
+    size_t epoch_index;
     /**
-     * Carrier phase inverse sigma.
+     * Satellite identifier.
      */
-    double phase;
+    struct SidereonPppId satellite_id;
     /**
-     * Whether to use elevation weighting.
+     * Ambiguity-state identifier.
      */
-    bool elevation_weighting;
-} SidereonPppMeasurementWeights;
+    struct SidereonPppId ambiguity_id;
+    /**
+     * Code prefit residual, in meters.
+     */
+    double code_m;
+    /**
+     * Phase prefit residual, in meters.
+     */
+    double phase_m;
+    /**
+     * Code inverse-sigma row weight.
+     */
+    double code_weight;
+    /**
+     * Phase inverse-sigma row weight.
+     */
+    double phase_weight;
+} SidereonPppFloatResidual;
 
 /**
- * One receiver-antenna no-azimuth PCV sample in meters.
+ * One low-level satellite range-rate observation. This is plain C value data;
+ * the satellite token is compared by pointed-to text when constructing core values.
  */
-typedef struct SidereonReceiverAntennaNoaziPcvSample {
-    /**
-     * Zenith angle in degrees.
-     */
-    double zenith_deg;
-    /**
-     * PCV correction in meters.
-     */
-    double value_m;
-} SidereonReceiverAntennaNoaziPcvSample;
-
-/**
- * One receiver-antenna azimuth-dependent PCV sample in meters.
- */
-typedef struct SidereonReceiverAntennaAzimuthPcvSample {
-    /**
-     * Azimuth angle in degrees.
-     */
-    double azimuth_deg;
-    /**
-     * Zenith angle in degrees.
-     */
-    double zenith_deg;
-    /**
-     * PCV correction in meters.
-     */
-    double value_m;
-} SidereonReceiverAntennaAzimuthPcvSample;
-
-/**
- * Receiver-antenna calibration for one frequency. The PCO vector is local
- * north/east/up in meters. Set noazi_pcv_m or azimuth_pcv_m to NULL only when
- * the corresponding count is zero.
- */
-typedef struct SidereonReceiverAntennaCalibration {
-    /**
-     * Phase-center offset in local north/east/up meters.
-     */
-    double pco_neu_m[3];
-    /**
-     * Pointer to noazi_pcv_count no-azimuth PCV samples.
-     */
-    const struct SidereonReceiverAntennaNoaziPcvSample *noazi_pcv_m;
-    /**
-     * Number of no-azimuth PCV samples.
-     */
-    size_t noazi_pcv_count;
-    /**
-     * Pointer to azimuth_pcv_count azimuth-dependent PCV samples.
-     */
-    const struct SidereonReceiverAntennaAzimuthPcvSample *azimuth_pcv_m;
-    /**
-     * Number of azimuth-dependent PCV samples.
-     */
-    size_t azimuth_pcv_count;
-} SidereonReceiverAntennaCalibration;
-
-/**
- * PPP receiver-antenna correction options for the ionosphere-free frequency
- * pair. Set SidereonPppRangeCorrections.receiver_antenna to NULL to disable.
- */
-typedef struct SidereonPppReceiverAntennaOptions {
-    /**
-     * Null-terminated label for the first frequency calibration.
-     */
-    const char *freq1_label;
-    /**
-     * First carrier frequency in Hz.
-     */
-    double freq1_hz;
-    /**
-     * First frequency receiver-antenna calibration.
-     */
-    struct SidereonReceiverAntennaCalibration freq1;
-    /**
-     * Null-terminated label for the second frequency calibration.
-     */
-    const char *freq2_label;
-    /**
-     * Second carrier frequency in Hz.
-     */
-    double freq2_hz;
-    /**
-     * Second frequency receiver-antenna calibration.
-     */
-    struct SidereonReceiverAntennaCalibration freq2;
-} SidereonPppReceiverAntennaOptions;
-
-/**
- * One precise satellite-clock sample. Values are keyed by satellite and GPS
- * seconds, and the clock value is seconds.
- */
-typedef struct SidereonPppSatelliteClockRecord {
+typedef struct SidereonPppVelocityObservation {
     /**
      * Null-terminated satellite token, for example G08.
      */
     const char *sat_id;
     /**
-     * GPS seconds for this clock sample.
+     * Satellite position, in meters.
      */
-    double gps_seconds;
+    double satellite_position_m[3];
     /**
-     * Satellite clock value in seconds.
+     * Satellite velocity, in meters per second.
      */
-    double clock_s;
-} SidereonPppSatelliteClockRecord;
+    double satellite_velocity_m_s[3];
+    /**
+     * Measured pseudorange rate, in meters per second.
+     */
+    double measured_range_rate_m_s;
+    /**
+     * One-sigma range-rate uncertainty, in meters per second.
+     */
+    double sigma_m_s;
+    /**
+     * Satellite clock drift as a range-rate bias, in meters per second.
+     */
+    double satellite_clock_drift_m_s;
+} SidereonPppVelocityObservation;
 
 /**
- * PPP range-correction controls. Tractable corrections are applied directly:
- * receiver_antenna, sat_clock_relativity, and satellite_clock_records. Tide,
- * phase windup, and satellite ANTEX corrections require precomputed tables
- * that this C ABI cannot yet represent; setting those flags returns
- * SIDEREON_STATUS_INVALID_ARGUMENT rather than silently ignoring them.
+ * Receiver state for low-level range-rate prediction. This is plain C value
+ * data and therefore has value equality field by field.
  */
-typedef struct SidereonPppRangeCorrections {
+typedef struct SidereonPppReceiverVelocityState {
     /**
-     * Optional receiver-antenna options, or NULL to disable.
+     * Receiver position, in meters.
      */
-    const struct SidereonPppReceiverAntennaOptions *receiver_antenna;
+    double position_m[3];
     /**
-     * Enable relativistic satellite-clock correction.
+     * Receiver velocity, in meters per second.
      */
-    bool sat_clock_relativity;
+    double velocity_m_s[3];
     /**
-     * Pointer to satellite_clock_record_count satellite-clock samples.
+     * Receiver clock drift as a range-rate bias, in meters per second.
      */
-    const struct SidereonPppSatelliteClockRecord *satellite_clock_records;
-    /**
-     * Number of satellite-clock samples.
-     */
-    size_t satellite_clock_record_count;
-    /**
-     * Unsupported in this C ABI; true returns InvalidArgument.
-     */
-    bool solid_earth_tide;
-    /**
-     * Unsupported in this C ABI; true returns InvalidArgument.
-     */
-    bool phase_windup;
-    /**
-     * Unsupported in this C ABI; true returns InvalidArgument.
-     */
-    bool satellite_antenna;
-} SidereonPppRangeCorrections;
+    double clock_drift_m_s;
+} SidereonPppReceiverVelocityState;
 
 /**
- * One VMF1 site-wise sample: the a coefficients at a single epoch. Used only
- * when SidereonPppTroposphereOptions.mapping is SIDEREON_PPP_TROPO_MAPPING_VMF1.
+ * Predicted range-rate geometry. This is plain C value data and therefore has
+ * value equality field by field.
  */
-typedef struct SidereonPppVmfSiteSample {
+typedef struct SidereonPppRangeRatePrediction {
     /**
-     * Modified Julian date of the sample (VMF nodes are 00/06/12/18 UT).
+     * Unit line-of-sight vector from receiver to satellite.
      */
-    double mjd;
+    double los_unit[3];
     /**
-     * Hydrostatic a coefficient from the VMF data product.
+     * Predicted range rate, in meters per second.
      */
-    double ah;
-    /**
-     * Wet a coefficient from the VMF data product.
-     */
-    double aw;
-} SidereonPppVmfSiteSample;
+    double range_rate_m_s;
+} SidereonPppRangeRatePrediction;
 
 /**
- * PPP troposphere controls.
+ * Robust controls for the low-level precise-positioning velocity solve. This
+ * is plain C value data and therefore has value equality field by field.
  */
-typedef struct SidereonPppTroposphereOptions {
+typedef struct SidereonPppVelocityRobustConfig {
     /**
-     * Enable troposphere correction.
+     * Huber tuning constant.
      */
-    bool enabled;
+    double huber_k;
     /**
-     * Estimate zenith troposphere residual as a state component.
+     * Floor on the MAD residual scale, in meters per second.
      */
-    bool estimate_ztd;
+    double scale_floor_m_s;
     /**
-     * Estimate north/east horizontal troposphere gradient states.
+     * Maximum total outer solves.
      */
-    bool estimate_tropo_gradients;
+    size_t max_outer;
     /**
-     * Surface pressure in hPa.
+     * Outer-loop state-step tolerance, in meters per second.
      */
-    double pressure_hpa;
+    double outer_tol_m_s;
+} SidereonPppVelocityRobustConfig;
+
+/**
+ * Low-level precise-positioning range-rate solve configuration. This is plain
+ * C value data and therefore has value equality field by field. Initialize it
+ * with sidereon_ppp_velocity_config_init.
+ */
+typedef struct SidereonPppVelocityConfig {
     /**
-     * Surface temperature in kelvin.
+     * Minimum observation count; the engine always requires at least four.
      */
-    double temperature_k;
+    size_t minimum_observations;
     /**
-     * Relative humidity, 0 to 1.
+     * Whether robust Huber/MAD reweighting is enabled.
      */
-    double relative_humidity;
+    bool has_robust;
     /**
-     * Mapping function, a SidereonPppTropoMapping value.
+     * Robust configuration, read only when has_robust is true.
      */
-    uint32_t mapping;
-    /**
-     * Number of valid entries in vmf_samples (1..=SIDEREON_PPP_VMF_SITE_MAX_SAMPLES);
-     * used only when mapping is VMF1. Samples must be strictly increasing in mjd
-     * with positive, finite a coefficients.
-     */
-    size_t vmf_sample_count;
-    /**
-     * VMF1 site-wise a-coefficient series, ascending in mjd.
-     */
-    struct SidereonPppVmfSiteSample vmf_samples[SIDEREON_PPP_VMF_SITE_MAX_SAMPLES];
-} SidereonPppTroposphereOptions;
+    struct SidereonPppVelocityRobustConfig robust;
+} SidereonPppVelocityConfig;
 
 typedef struct SidereonPreciseEphemerisSampleV2 {
     struct SidereonSatelliteToken sat;
@@ -24144,252 +24667,6 @@ typedef struct SidereonMovingBaselineConfig {
 } SidereonMovingBaselineConfig;
 
 /**
- * Civil timestamp for one PPP epoch.
- */
-typedef struct SidereonPppCivilDateTime {
-    /**
-     * Calendar year.
-     */
-    int32_t year;
-    /**
-     * Calendar month, 1 through 12.
-     */
-    uint8_t month;
-    /**
-     * Calendar day, 1 through 31.
-     */
-    uint8_t day;
-    /**
-     * Hour of day.
-     */
-    uint8_t hour;
-    /**
-     * Minute of hour.
-     */
-    uint8_t minute;
-    /**
-     * Seconds of minute.
-     */
-    double second;
-} SidereonPppCivilDateTime;
-
-/**
- * One ionosphere-free code/phase observation in a PPP epoch.
- */
-typedef struct SidereonPppObservation {
-    /**
-     * Null-terminated satellite token, for example G08.
-     */
-    const char *sat_id;
-    /**
-     * Null-terminated ambiguity id. Split arcs may use ids like G08#2.
-     */
-    const char *ambiguity_id;
-    /**
-     * Ionosphere-free code observable in meters.
-     */
-    double code_m;
-    /**
-     * Ionosphere-free carrier phase observable in meters.
-     */
-    double phase_m;
-    /**
-     * First raw carrier frequency in Hz, or 0 when not supplied.
-     */
-    double freq1_hz;
-    /**
-     * Second raw carrier frequency in Hz, or 0 when not supplied.
-     */
-    double freq2_hz;
-    /**
-     * Tracking code of the first pseudorange as a null-terminated RINEX 3
-     * band and attribute ("1C") or observation code ("C1C"), in the RINEX
-     * 3.04 convention. The four signal fields are all NULL, which leaves the
-     * observation's signals unstated, or all set. An SSR/HAS bias applies
-     * only to an observation formed from the bias's exact signal, so an
-     * observation with unstated signals receives none.
-     */
-    const char *code1_signal;
-    /**
-     * Tracking code of the second pseudorange, as code1_signal.
-     */
-    const char *code2_signal;
-    /**
-     * Tracking code of the first carrier phase, as code1_signal.
-     */
-    const char *phase1_signal;
-    /**
-     * Tracking code of the second carrier phase, as code1_signal.
-     */
-    const char *phase2_signal;
-    /**
-     * Whether `glonass_channel` is set.
-     */
-    bool has_glonass_channel;
-    /**
-     * GLONASS FDMA frequency channel of the satellite, which resolves its
-     * carriers where the frequencies are not given.
-     */
-    int8_t glonass_channel;
-} SidereonPppObservation;
-
-/**
- * One static PPP epoch.
- */
-typedef struct SidereonPppEpoch {
-    /**
-     * Civil timestamp used by the PPP correction model.
-     */
-    struct SidereonPppCivilDateTime civil;
-    /**
-     * Julian date whole-day part.
-     */
-    double jd_whole;
-    /**
-     * Julian date fractional-day part.
-     */
-    double jd_fraction;
-    /**
-     * Receive time as J2000 seconds.
-     */
-    double t_rx_j2000_s;
-    /**
-     * Pointer to observation_count observations.
-     */
-    const struct SidereonPppObservation *observations;
-    /**
-     * Number of observations in this epoch.
-     */
-    size_t observation_count;
-} SidereonPppEpoch;
-
-/**
- * Initial static-arc PPP state.
- */
-typedef struct SidereonPppFloatState {
-    /**
-     * Initial receiver ECEF position in meters.
-     */
-    double position_m[3];
-    /**
-     * Pointer to clock_count receiver-clock values in meters.
-     */
-    const double *clocks_m;
-    /**
-     * Number of receiver-clock values. Must equal epoch_count.
-     */
-    size_t clock_count;
-    /**
-     * Pointer to ambiguity_count float ambiguity entries in meters.
-     */
-    const struct SidereonPppFloatMapEntry *ambiguities_m;
-    /**
-     * Number of float ambiguity entries.
-     */
-    size_t ambiguity_count;
-    /**
-     * Initial zenith troposphere residual in meters.
-     */
-    double ztd_m;
-    /**
-     * Initial north horizontal troposphere gradient state in meters.
-     */
-    double tropo_gradient_north_m;
-    /**
-     * Initial east horizontal troposphere gradient state in meters.
-     */
-    double tropo_gradient_east_m;
-} SidereonPppFloatState;
-
-/**
- * Complete typed input bundle for a PPP float solve.
- */
-typedef struct SidereonPppFloatConfig {
-    /**
-     * Pointer to epoch_count epochs.
-     */
-    const struct SidereonPppEpoch *epochs;
-    /**
-     * Number of epochs.
-     */
-    size_t epoch_count;
-    /**
-     * Initial PPP state.
-     */
-    struct SidereonPppFloatState initial_state;
-    /**
-     * Measurement weights.
-     */
-    struct SidereonPppMeasurementWeights weights;
-    /**
-     * Troposphere controls.
-     */
-    struct SidereonPppTroposphereOptions tropo;
-    /**
-     * Range-correction controls.
-     */
-    struct SidereonPppRangeCorrections corrections;
-    /**
-     * Float solve options.
-     */
-    struct SidereonPppFloatOptions options;
-    /**
-     * Whether elevation_cutoff_deg is present.
-     */
-    bool has_elevation_cutoff_deg;
-    /**
-     * Optional PPP observation elevation cutoff in degrees.
-     */
-    double elevation_cutoff_deg;
-    /**
-     * Enable residual screening.
-     */
-    bool residual_screen;
-} SidereonPppFloatConfig;
-
-/**
- * Complete typed input bundle for a PPP fixed solve.
- */
-typedef struct SidereonPppFixedConfig {
-    /**
-     * Pointer to epoch_count epochs.
-     */
-    const struct SidereonPppEpoch *epochs;
-    /**
-     * Number of epochs.
-     */
-    size_t epoch_count;
-    /**
-     * Measurement weights.
-     */
-    struct SidereonPppMeasurementWeights weights;
-    /**
-     * Troposphere controls.
-     */
-    struct SidereonPppTroposphereOptions tropo;
-    /**
-     * Range-correction controls.
-     */
-    struct SidereonPppRangeCorrections corrections;
-    /**
-     * Fixed re-solve options.
-     */
-    struct SidereonPppFloatOptions options;
-    /**
-     * Whether elevation_cutoff_deg is present.
-     */
-    bool has_elevation_cutoff_deg;
-    /**
-     * Optional PPP observation elevation cutoff in degrees.
-     */
-    double elevation_cutoff_deg;
-    /**
-     * Integer ambiguity controls.
-     */
-    struct SidereonPppFixedAmbiguityOptions ambiguity;
-} SidereonPppFixedConfig;
-
-/**
  * One raw single-frequency code/carrier observation at a receiver, mirroring
  * sidereon_core::rtk_filter::RtkArcObservation.
  */
@@ -29620,6 +29897,27 @@ enum SidereonStatus sidereon_build_dual_frequency_rinex_rtk_arc(const struct Sid
                                                                 const struct SidereonRinexObs *rover_obs,
                                                                 const struct SidereonRtkRinexDualArcOptions *options,
                                                                 struct SidereonRtkRinexDualFrequencyArc **out_arc);
+
+/**
+ * Build indexed PPP correction lookups at the supplied receiver seed position.
+ */
+enum SidereonStatus sidereon_build_ppp_lookup(const struct SidereonSp3 *sp3,
+                                              const struct SidereonPppEpoch *epochs,
+                                              size_t epoch_count,
+                                              const double *receiver_ecef_m,
+                                              const struct SidereonPppCorrectionsOptions *options,
+                                              struct SidereonPppCorrectionLookup **out_lookup);
+
+/**
+ * Build indexed PPP correction lookups under an explicit UT1 validity mode.
+ */
+enum SidereonStatus sidereon_build_ppp_lookup_with_validity(const struct SidereonSp3 *sp3,
+                                                            const struct SidereonPppEpoch *epochs,
+                                                            size_t epoch_count,
+                                                            const double *receiver_ecef_m,
+                                                            const struct SidereonPppCorrectionsOptions *options,
+                                                            uint32_t validity_mode,
+                                                            struct SidereonPppCorrectionLookup **out_lookup);
 
 /**
  * Build a single-frequency RTK arc from parsed paired RINEX observations and
@@ -39184,6 +39482,53 @@ enum SidereonStatus sidereon_position_angle_deg(double from_lon_deg,
                                                 double *out);
 
 /**
+ * Copy the row-major ambiguity covariance matrix in cycles squared. Its
+ * dimension is the required count from float_cycles; the output length is n*n.
+ */
+enum SidereonStatus sidereon_ppp_ambiguity_search_covariance_cycles(const struct SidereonPppAmbiguitySearch *search,
+                                                                    double *out,
+                                                                    size_t len,
+                                                                    size_t *out_written,
+                                                                    size_t *out_required);
+
+/**
+ * Copy the row-major inverse ambiguity covariance matrix in inverse cycles squared.
+ */
+enum SidereonStatus sidereon_ppp_ambiguity_search_covariance_inverse_cycles(const struct SidereonPppAmbiguitySearch *search,
+                                                                            double *out,
+                                                                            size_t len,
+                                                                            size_t *out_written,
+                                                                            size_t *out_required);
+
+/**
+ * Compare two ambiguity-search handles by complete core value.
+ */
+enum SidereonStatus sidereon_ppp_ambiguity_search_equal(const struct SidereonPppAmbiguitySearch *left,
+                                                        const struct SidereonPppAmbiguitySearch *right,
+                                                        bool *out_equal);
+
+/**
+ * Copy float ambiguities in the exact order supplied to the lattice search.
+ */
+enum SidereonStatus sidereon_ppp_ambiguity_search_float_cycles(const struct SidereonPppAmbiguitySearch *search,
+                                                               struct SidereonPppFloatAmbiguityCycles *out,
+                                                               size_t len,
+                                                               size_t *out_written,
+                                                               size_t *out_required);
+
+/**
+ * Release an ambiguity-search handle. NULL is a no-op.
+ */
+void sidereon_ppp_ambiguity_search_free(struct SidereonPppAmbiguitySearch *search);
+
+/**
+ * Compare two PPP auto-init option values by their complete core value.
+ */
+enum SidereonStatus sidereon_ppp_auto_init_options_equal(const struct SidereonPppAutoInitOptions *left,
+                                                         const struct SidereonPppAutoInitOptions *right,
+                                                         bool *out_equal);
+
+/**
  * Initialize SidereonPppAutoInitOptions with the engine defaults (no explicit
  * guess, an all-zero SPP cold start, the troposphere off, standard surface
  * meteorology).
@@ -39191,6 +39536,105 @@ enum SidereonStatus sidereon_position_angle_deg(double from_lon_deg,
  * Safety: options must point to a writable SidereonPppAutoInitOptions.
  */
 enum SidereonStatus sidereon_ppp_auto_init_options_init(struct SidereonPppAutoInitOptions *options);
+
+/**
+ * Write the engine's default PPP auto-init strategy (Reference).
+ */
+enum SidereonStatus sidereon_ppp_auto_init_strategy_default(enum SidereonPppAutoInitStrategy *out_strategy);
+
+/**
+ * Copy clock-datum code-bias values from a PPP correction lookup.
+ */
+enum SidereonStatus sidereon_ppp_correction_lookup_code_bias(const struct SidereonPppCorrectionLookup *lookup,
+                                                             struct SidereonSatScalarCorrection *out,
+                                                             size_t len,
+                                                             size_t *out_written,
+                                                             size_t *out_required);
+
+/**
+ * Create an empty, all-disabled indexed PPP correction lookup.
+ */
+enum SidereonStatus sidereon_ppp_correction_lookup_default(struct SidereonPppCorrectionLookup **out_lookup);
+
+/**
+ * Compare two indexed correction lookups by complete core value.
+ */
+enum SidereonStatus sidereon_ppp_correction_lookup_equal(const struct SidereonPppCorrectionLookup *left,
+                                                         const struct SidereonPppCorrectionLookup *right,
+                                                         bool *out_equal);
+
+/**
+ * Release an indexed PPP correction lookup. NULL is a no-op.
+ */
+void sidereon_ppp_correction_lookup_free(struct SidereonPppCorrectionLookup *lookup);
+
+/**
+ * Convert precomputed PPP correction tables into an indexed lookup. Enablement
+ * is inferred by the core From implementation from non-empty tables.
+ */
+enum SidereonStatus sidereon_ppp_correction_lookup_from_corrections(const struct SidereonPppCorrections *corrections,
+                                                                    struct SidereonPppCorrectionLookup **out_lookup);
+
+/**
+ * Read lookup validity degradation and non-SSR enablement flags.
+ */
+enum SidereonStatus sidereon_ppp_correction_lookup_info(const struct SidereonPppCorrectionLookup *lookup,
+                                                        enum SidereonPppCorrectionsDegradeReason *out_degraded,
+                                                        struct SidereonPppCorrectionLookupFlags *out_flags);
+
+/**
+ * Copy ocean-loading vectors from a PPP correction lookup.
+ */
+enum SidereonStatus sidereon_ppp_correction_lookup_ocean_loading(const struct SidereonPppCorrectionLookup *lookup,
+                                                                 struct SidereonEpochVectorCorrection *out,
+                                                                 size_t len,
+                                                                 size_t *out_written,
+                                                                 size_t *out_required);
+
+/**
+ * Copy pole-tide vectors from a PPP correction lookup.
+ */
+enum SidereonStatus sidereon_ppp_correction_lookup_pole_tide(const struct SidereonPppCorrectionLookup *lookup,
+                                                             struct SidereonEpochVectorCorrection *out,
+                                                             size_t len,
+                                                             size_t *out_written,
+                                                             size_t *out_required);
+
+/**
+ * Copy satellite/epoch PCO vectors from a PPP correction lookup.
+ */
+enum SidereonStatus sidereon_ppp_correction_lookup_sat_pco_ecef(const struct SidereonPppCorrectionLookup *lookup,
+                                                                struct SidereonSatVectorCorrection *out,
+                                                                size_t len,
+                                                                size_t *out_written,
+                                                                size_t *out_required);
+
+/**
+ * Copy satellite PCV values from a PPP correction lookup.
+ */
+enum SidereonStatus sidereon_ppp_correction_lookup_sat_pcv(const struct SidereonPppCorrectionLookup *lookup,
+                                                           struct SidereonSatScalarCorrection *out,
+                                                           size_t len,
+                                                           size_t *out_written,
+                                                           size_t *out_required);
+
+/**
+ * Copy solid-Earth tide vectors from a PPP correction lookup.
+ */
+enum SidereonStatus sidereon_ppp_correction_lookup_tide(const struct SidereonPppCorrectionLookup *lookup,
+                                                        struct SidereonEpochVectorCorrection *out,
+                                                        size_t len,
+                                                        size_t *out_written,
+                                                        size_t *out_required);
+
+/**
+ * Copy phase wind-up values from a PPP correction lookup.
+ */
+enum SidereonStatus sidereon_ppp_correction_lookup_windup(const struct SidereonPppCorrectionLookup *lookup,
+                                                          struct SidereonSatScalarCorrection *out,
+                                                          size_t len,
+                                                          size_t *out_written,
+                                                          size_t *out_required);
 
 /**
  * Build static PPP correction tables for a precise-orbit (SP3) arc. On success
@@ -39330,11 +39774,38 @@ enum SidereonStatus sidereon_ppp_corrections_windup(const struct SidereonPppCorr
                                                     size_t *out_required);
 
 /**
+ * Compare two PPP epochs by complete core value and pointed-to observations.
+ */
+enum SidereonStatus sidereon_ppp_epoch_equal(const struct SidereonPppEpoch *left,
+                                             const struct SidereonPppEpoch *right,
+                                             bool *out_equal);
+
+/**
+ * Compare fixed ambiguity options by complete pointed-to map content.
+ */
+enum SidereonStatus sidereon_ppp_fixed_ambiguity_options_equal(const struct SidereonPppFixedAmbiguityOptions *left,
+                                                               const struct SidereonPppFixedAmbiguityOptions *right,
+                                                               bool *out_equal);
+
+/**
  * Initialize PPP fixed ambiguity options with engine binding defaults.
  *
  * Safety: out_options must point to a SidereonPppFixedAmbiguityOptions.
  */
 enum SidereonStatus sidereon_ppp_fixed_ambiguity_options_init(struct SidereonPppFixedAmbiguityOptions *out_options);
+
+/**
+ * Compare additive PPP fixed solve configurations by complete core value.
+ */
+enum SidereonStatus sidereon_ppp_fixed_config_v2_equal(const struct SidereonPppFixedConfigV2 *left,
+                                                       const struct SidereonPppFixedConfigV2 *right,
+                                                       bool *out_equal);
+
+/**
+ * Clone the complete integer ambiguity-search metadata from a fixed solution.
+ */
+enum SidereonStatus sidereon_ppp_fixed_solution_ambiguity_search(const struct SidereonPppFixedSolution *solution,
+                                                                 struct SidereonPppAmbiguitySearch **out_search);
 
 /**
  * Copy the receiver clock, metres, of each solved epoch, in the order of
@@ -39350,6 +39821,13 @@ enum SidereonStatus sidereon_ppp_fixed_solution_epoch_clocks(const struct Sidere
                                                              size_t len,
                                                              size_t *out_written,
                                                              size_t *out_required);
+
+/**
+ * Compare two opaque PPP fixed solutions using the core's value equality.
+ */
+enum SidereonStatus sidereon_ppp_fixed_solution_equal(const struct SidereonPppFixedSolution *left,
+                                                      const struct SidereonPppFixedSolution *right,
+                                                      bool *out_equal);
 
 /**
  * Copy PPP fixed integer ambiguities. Uses the variable-length output
@@ -39413,6 +39891,21 @@ enum SidereonStatus sidereon_ppp_fixed_solution_position(const struct SidereonPp
  */
 enum SidereonStatus sidereon_ppp_fixed_solution_position_covariances(const struct SidereonPppFixedSolution *sol,
                                                                      struct SidereonPppPositionCovariances *out);
+
+/**
+ * Write the fixed solution's posterior variance factor.
+ */
+enum SidereonStatus sidereon_ppp_fixed_solution_posterior_variance_factor(const struct SidereonPppFixedSolution *solution,
+                                                                          double *out_value);
+
+/**
+ * Copy residual-ionosphere estimates from a fixed solution.
+ */
+enum SidereonStatus sidereon_ppp_fixed_solution_residual_ionosphere(const struct SidereonPppFixedSolution *solution,
+                                                                    struct SidereonPppResidualIonosphere *out,
+                                                                    size_t len,
+                                                                    size_t *out_written,
+                                                                    size_t *out_required);
 
 /**
  * Copy the input epoch index of each solved epoch, ascending. An input epoch left with no
@@ -39541,6 +40034,20 @@ enum SidereonStatus sidereon_ppp_fixed_solution_used_sat_ids(const struct Sidere
                                                              size_t *out_required);
 
 /**
+ * Compare additive PPP float solve configurations by complete core value.
+ */
+enum SidereonStatus sidereon_ppp_float_config_v2_equal(const struct SidereonPppFloatConfigV2 *left,
+                                                       const struct SidereonPppFloatConfigV2 *right,
+                                                       bool *out_equal);
+
+/**
+ * Compare PPP float solve options by core value.
+ */
+enum SidereonStatus sidereon_ppp_float_options_equal(const struct SidereonPppFloatOptions *left,
+                                                     const struct SidereonPppFloatOptions *right,
+                                                     bool *out_equal);
+
+/**
  * Initialize PPP float solve options with engine binding defaults.
  *
  * Safety: out_options must point to a SidereonPppFloatOptions.
@@ -39562,6 +40069,12 @@ enum SidereonStatus sidereon_ppp_float_solution_ambiguities(const struct Sidereo
                                                             size_t *out_required);
 
 /**
+ * Write the float solution's residual decorrelation time in epoch spacings.
+ */
+enum SidereonStatus sidereon_ppp_float_solution_decorrelation_time_epochs(const struct SidereonPppFloatSolution *solution,
+                                                                          double *out_value);
+
+/**
  * Copy the receiver clock, metres, of each solved epoch, in the order of
  * the solved epochs. Uses the variable-length output contract documented at the top of
  * the header.
@@ -39575,6 +40088,13 @@ enum SidereonStatus sidereon_ppp_float_solution_epoch_clocks(const struct Sidere
                                                              size_t len,
                                                              size_t *out_written,
                                                              size_t *out_required);
+
+/**
+ * Compare two opaque PPP float solutions using the core's value equality.
+ */
+enum SidereonStatus sidereon_ppp_float_solution_equal(const struct SidereonPppFloatSolution *left,
+                                                      const struct SidereonPppFloatSolution *right,
+                                                      bool *out_equal);
 
 /**
  * Release a PPP float solution handle. Null is a no-op. A non-null handle must
@@ -39615,6 +40135,21 @@ enum SidereonStatus sidereon_ppp_float_solution_position_covariances(const struc
                                                                      struct SidereonPppPositionCovariances *out);
 
 /**
+ * Write the float solution's posterior variance factor.
+ */
+enum SidereonStatus sidereon_ppp_float_solution_posterior_variance_factor(const struct SidereonPppFloatSolution *solution,
+                                                                          double *out_value);
+
+/**
+ * Copy residual-ionosphere estimates from a float solution.
+ */
+enum SidereonStatus sidereon_ppp_float_solution_residual_ionosphere(const struct SidereonPppFloatSolution *solution,
+                                                                    struct SidereonPppResidualIonosphere *out,
+                                                                    size_t len,
+                                                                    size_t *out_written,
+                                                                    size_t *out_required);
+
+/**
  * Copy the observations the residual screen removed from the accepted
  * solution. The fixed solve leaves them out too. Uses the variable-length output contract documented at the top of
  * the header.
@@ -39628,6 +40163,15 @@ enum SidereonStatus sidereon_ppp_float_solution_residual_screen_removals(const s
                                                                          size_t len,
                                                                          size_t *out_written,
                                                                          size_t *out_required);
+
+/**
+ * Copy all float residual rows, including code and phase weights.
+ */
+enum SidereonStatus sidereon_ppp_float_solution_residuals(const struct SidereonPppFloatSolution *solution,
+                                                          struct SidereonPppFloatResidual *out,
+                                                          size_t len,
+                                                          size_t *out_written,
+                                                          size_t *out_required);
 
 /**
  * Copy the input epoch index of each solved epoch, ascending. An input epoch left with no
@@ -39756,11 +40300,40 @@ enum SidereonStatus sidereon_ppp_float_solution_used_sat_ids(const struct Sidere
                                                              size_t *out_required);
 
 /**
+ * Compare PPP measurement weights by core value.
+ */
+enum SidereonStatus sidereon_ppp_measurement_weights_equal(const struct SidereonPppMeasurementWeights *left,
+                                                           const struct SidereonPppMeasurementWeights *right,
+                                                           bool *out_equal);
+
+/**
  * Initialize PPP measurement weights with engine binding defaults.
  *
  * Safety: out_weights must point to a SidereonPppMeasurementWeights.
  */
 enum SidereonStatus sidereon_ppp_measurement_weights_init(struct SidereonPppMeasurementWeights *out_weights);
+
+/**
+ * Compare two PPP observations by complete core value, including signal codes.
+ */
+enum SidereonStatus sidereon_ppp_observation_equal(const struct SidereonPppObservation *left,
+                                                   const struct SidereonPppObservation *right,
+                                                   bool *out_equal);
+
+/**
+ * Predict range rate for one low-level observation. Coincident or non-finite
+ * geometry is refused with InvalidArgument.
+ */
+enum SidereonStatus sidereon_ppp_predict_range_rate_m_s(const struct SidereonPppVelocityObservation *observation,
+                                                        const struct SidereonPppReceiverVelocityState *receiver,
+                                                        struct SidereonPppRangeRatePrediction *out_prediction);
+
+/**
+ * Compare PPP range-correction inputs by complete core value.
+ */
+enum SidereonStatus sidereon_ppp_range_corrections_equal(const struct SidereonPppRangeCorrections *left,
+                                                         const struct SidereonPppRangeCorrections *right,
+                                                         bool *out_equal);
 
 /**
  * Initialize PPP range corrections as disabled.
@@ -39770,11 +40343,119 @@ enum SidereonStatus sidereon_ppp_measurement_weights_init(struct SidereonPppMeas
 enum SidereonStatus sidereon_ppp_range_corrections_init(struct SidereonPppRangeCorrections *out_corrections);
 
 /**
+ * Compare range-rate predictions by complete core value.
+ */
+enum SidereonStatus sidereon_ppp_range_rate_prediction_equal(const struct SidereonPppRangeRatePrediction *left,
+                                                             const struct SidereonPppRangeRatePrediction *right,
+                                                             bool *out_equal);
+
+/**
+ * Compare receiver velocity states by complete core value.
+ */
+enum SidereonStatus sidereon_ppp_receiver_velocity_state_equal(const struct SidereonPppReceiverVelocityState *left,
+                                                               const struct SidereonPppReceiverVelocityState *right,
+                                                               bool *out_equal);
+
+/**
+ * Construct a stationary receiver state at position_m.
+ */
+enum SidereonStatus sidereon_ppp_receiver_velocity_state_stationary_at(const double *position_m,
+                                                                       struct SidereonPppReceiverVelocityState *out_state);
+
+/**
+ * Solve receiver velocity and range-rate clock drift from precomputed satellite states.
+ */
+enum SidereonStatus sidereon_ppp_solve_velocity_least_squares(const struct SidereonPppVelocityObservation *observations,
+                                                              size_t count,
+                                                              const double *receiver_position_m,
+                                                              const struct SidereonPppVelocityConfig *config,
+                                                              struct SidereonPppVelocitySolution **out_solution);
+
+/**
+ * Compare PPP troposphere options by core value after enum validation.
+ */
+enum SidereonStatus sidereon_ppp_troposphere_options_equal(const struct SidereonPppTroposphereOptions *left,
+                                                           const struct SidereonPppTroposphereOptions *right,
+                                                           bool *out_equal);
+
+/**
  * Initialize PPP troposphere options with engine binding defaults.
  *
  * Safety: out_options must point to a SidereonPppTroposphereOptions.
  */
 enum SidereonStatus sidereon_ppp_troposphere_options_init(struct SidereonPppTroposphereOptions *out_options);
+
+/**
+ * Compare low-level velocity configurations by complete core value.
+ */
+enum SidereonStatus sidereon_ppp_velocity_config_equal(const struct SidereonPppVelocityConfig *left,
+                                                       const struct SidereonPppVelocityConfig *right,
+                                                       bool *out_equal);
+
+/**
+ * Initialize low-level precise-positioning velocity configuration with engine defaults.
+ */
+enum SidereonStatus sidereon_ppp_velocity_config_init(struct SidereonPppVelocityConfig *out_config);
+
+/**
+ * Compare low-level velocity observations by complete core value.
+ */
+enum SidereonStatus sidereon_ppp_velocity_observation_equal(const struct SidereonPppVelocityObservation *left,
+                                                            const struct SidereonPppVelocityObservation *right,
+                                                            bool *out_equal);
+
+/**
+ * Compare robust velocity controls by complete core value.
+ */
+enum SidereonStatus sidereon_ppp_velocity_robust_config_equal(const struct SidereonPppVelocityRobustConfig *left,
+                                                              const struct SidereonPppVelocityRobustConfig *right,
+                                                              bool *out_equal);
+
+/**
+ * Initialize robust low-level velocity controls with engine defaults.
+ */
+enum SidereonStatus sidereon_ppp_velocity_robust_config_init(struct SidereonPppVelocityRobustConfig *out_config);
+
+/**
+ * Copy satellites downweighted by robust low-level velocity solving.
+ */
+enum SidereonStatus sidereon_ppp_velocity_solution_downweighted_sats(const struct SidereonPppVelocitySolution *solution,
+                                                                     struct SidereonSatelliteToken *out,
+                                                                     size_t len,
+                                                                     size_t *out_written,
+                                                                     size_t *out_required);
+
+/**
+ * Compare two low-level precise-positioning velocity solutions by core value.
+ */
+enum SidereonStatus sidereon_ppp_velocity_solution_equal(const struct SidereonPppVelocitySolution *left,
+                                                         const struct SidereonPppVelocitySolution *right,
+                                                         bool *out_equal);
+
+/**
+ * Release a low-level precise-positioning velocity solution. NULL is a no-op.
+ */
+void sidereon_ppp_velocity_solution_free(struct SidereonPppVelocitySolution *solution);
+
+/**
+ * Copy satellites retained by the low-level velocity solve.
+ */
+enum SidereonStatus sidereon_ppp_velocity_solution_used_sats(const struct SidereonPppVelocitySolution *solution,
+                                                             struct SidereonSatelliteToken *out,
+                                                             size_t len,
+                                                             size_t *out_written,
+                                                             size_t *out_required);
+
+/**
+ * Copy scalar and vector results from a low-level precise-positioning velocity solution.
+ */
+enum SidereonStatus sidereon_ppp_velocity_solution_values(const struct SidereonPppVelocitySolution *solution,
+                                                          double *out_velocity_m_s,
+                                                          double *out_clock_drift_m_s,
+                                                          double *out_residual_rms_m_s,
+                                                          size_t *out_robust_iterations,
+                                                          bool *out_has_robust_scale,
+                                                          double *out_robust_scale_m_s);
 
 /**
  * ICRS-to-J2000 frame-bias matrix, row-major in out_matrix (infallible).
@@ -46932,6 +47613,17 @@ enum SidereonStatus sidereon_solve_ppp_auto_init_fixed(const struct SidereonSp3 
                                                        struct SidereonPppFixedSolution **out_solution);
 
 /**
+ * Solve an integer-fixed PPP arc with the selected auto-init strategy. The
+ * strategy is validated before the engine performs either solve.
+ */
+enum SidereonStatus sidereon_solve_ppp_auto_init_fixed_with_strategy(const struct SidereonSp3 *sp3,
+                                                                     const struct SidereonPppFloatConfig *float_config,
+                                                                     const struct SidereonPppFixedConfig *fixed_config,
+                                                                     const struct SidereonPppAutoInitOptions *options,
+                                                                     uint32_t strategy,
+                                                                     struct SidereonPppFixedSolution **out_solution);
+
+/**
  * Solve a static multi-epoch float PPP arc from raw epochs, auto-initializing
  * the float state from the SPP seed (no caller initial FloatState needed). The
  * epochs and float settings come from `float_config` (its `initial_state` is
@@ -46948,6 +47640,16 @@ enum SidereonStatus sidereon_solve_ppp_auto_init_float(const struct SidereonSp3 
                                                        struct SidereonPppFloatSolution **out_solution);
 
 /**
+ * Solve a float PPP arc with the selected auto-init strategy. The strategy is
+ * validated as a SidereonPppAutoInitStrategy value before delegation.
+ */
+enum SidereonStatus sidereon_solve_ppp_auto_init_float_with_strategy(const struct SidereonSp3 *sp3,
+                                                                     const struct SidereonPppFloatConfig *float_config,
+                                                                     const struct SidereonPppAutoInitOptions *options,
+                                                                     uint32_t strategy,
+                                                                     struct SidereonPppFloatSolution **out_solution);
+
+/**
  * Solve a static integer-fixed PPP arc from a PPP float solution. On success
  * writes a newly owned solution handle to *out_solution. Release it with
  * sidereon_ppp_fixed_solution_free.
@@ -46961,6 +47663,14 @@ enum SidereonStatus sidereon_solve_ppp_fixed(const struct SidereonSp3 *sp3,
                                              struct SidereonPppFixedSolution **out_solution);
 
 /**
+ * Solve a fixed PPP arc with the additive residual-ionosphere configuration.
+ */
+enum SidereonStatus sidereon_solve_ppp_fixed_v2(const struct SidereonSp3 *sp3,
+                                                const struct SidereonPppFloatSolution *float_solution,
+                                                const struct SidereonPppFixedConfigV2 *config,
+                                                struct SidereonPppFixedSolution **out_solution);
+
+/**
  * Solve a static multi-epoch float PPP arc. On success writes a newly owned
  * solution handle to *out_solution. Release it with
  * sidereon_ppp_float_solution_free.
@@ -46971,6 +47681,22 @@ enum SidereonStatus sidereon_solve_ppp_fixed(const struct SidereonSp3 *sp3,
 enum SidereonStatus sidereon_solve_ppp_float(const struct SidereonSp3 *sp3,
                                              const struct SidereonPppFloatConfig *config,
                                              struct SidereonPppFloatSolution **out_solution);
+
+/**
+ * Solve exactly one float PPP epoch. `config.legacy.epoch_count` must be one;
+ * unlike the multi-epoch route this delegates to the core single-epoch entry point.
+ */
+enum SidereonStatus sidereon_solve_ppp_float_epoch(const struct SidereonSp3 *sp3,
+                                                   const struct SidereonPppFloatConfigV2 *config,
+                                                   struct SidereonPppFloatSolution **out_solution);
+
+/**
+ * Solve a static multi-epoch float PPP arc with the additive residual-ionosphere
+ * configuration. This delegates to the same engine solve as the legacy route.
+ */
+enum SidereonStatus sidereon_solve_ppp_float_v2(const struct SidereonSp3 *sp3,
+                                                const struct SidereonPppFloatConfigV2 *config,
+                                                struct SidereonPppFloatSolution **out_solution);
 
 /**
  * Solve a sequential RTK baseline arc from raw rover+base epochs. On success

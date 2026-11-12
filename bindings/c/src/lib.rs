@@ -236,7 +236,10 @@ use sidereon_core::positioning::{
 };
 use sidereon_core::ppp_corrections::{CivilDateTime, CodeBiasOptions as PppCodeBiasOptions};
 use sidereon_core::precise_positioning::defaults as ppp_defaults;
-use sidereon_core::precise_positioning::{solve_ppp_auto_init_fixed, solve_ppp_auto_init_float};
+use sidereon_core::precise_positioning::{
+    solve_ppp_auto_init_fixed, solve_ppp_auto_init_fixed_with_strategy, solve_ppp_auto_init_float,
+    solve_ppp_auto_init_float_with_strategy, PppAutoInitStrategy,
+};
 use sidereon_core::precise_positioning::{
     FixedAmbiguityOptions as PppFixedAmbiguityOptionsInner, FixedSolution as PppFixedSolutionInner,
     FixedSolveConfig as PppFixedSolveConfigInner, FloatEpoch as PppFloatEpoch,
