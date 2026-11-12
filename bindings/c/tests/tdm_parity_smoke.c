@@ -207,6 +207,12 @@ int main(void) {
     SidereonTdm *parsed = NULL;
     CHECK(sidereon_tdm_parse_kvn((const uint8_t *)kvn, strlen(kvn), &parsed) == SIDEREON_STATUS_OK,
           36);
+    bool equal = false;
+    CHECK(sidereon_tdm_equal(tdm, parsed, &equal) == SIDEREON_STATUS_OK && equal,
+          136);
+    equal = true;
+    CHECK(sidereon_tdm_equal(NULL, parsed, &equal) == SIDEREON_STATUS_NULL_POINTER && !equal,
+          236);
     SidereonTdmHeader hs = {0};
     CHECK(sidereon_tdm_header(parsed, &hs) == SIDEREON_STATUS_OK, 37);
     CHECK(hs.version_len == 3 && hs.has_creation_date && hs.creation_date_len == 17 &&
@@ -234,6 +240,11 @@ int main(void) {
     CHECK(rt && strcmp(rt, "km") == 0, 42);
     free(rt);
     CHECK(sidereon_tdm_remove_record(parsed, 0, 0) == SIDEREON_STATUS_OK, 142);
+    CHECK(sidereon_tdm_equal(tdm, parsed, &equal) == SIDEREON_STATUS_OK && !equal,
+          143);
+    CHECK(sidereon_tdm_equal(tdm, parsed, (bool *)(void *)tdm) ==
+              SIDEREON_STATUS_INVALID_ARGUMENT,
+          144);
     CHECK(sidereon_tdm_insert_record(parsed, 0, 0, record) == SIDEREON_STATUS_OK, 242);
     char lcbuf[201], lvbuf[201];
     memset(lcbuf, 'C', 200);

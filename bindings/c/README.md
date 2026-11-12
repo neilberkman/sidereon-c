@@ -117,6 +117,8 @@ record insertion/removal provide the mutable surface. Record removal returns
 only status; read any record and its lossless text before removing it. All parsing, formatting,
 and metadata validation is delegated to the engine. Release TDM, warning, and
 departure handles with their matching `_free` functions.
+`sidereon_tdm_equal` compares two complete opaque messages by the engine's
+`Tdm` value equality; plain TDM value structs compare field by field.
 
 TDM failures use `SIDEREON_ENGINE_ERROR_FAMILY_TDM`. The Schema 1 error node
 includes `operation_class` with `parse`, `write`, or `validation`, corresponding
