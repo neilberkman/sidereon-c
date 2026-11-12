@@ -243,6 +243,100 @@ pub unsafe extern "C" fn sidereon_solve_ppp_float(
     })
 }
 
+/// Solve a static multi-epoch float PPP arc with the additive residual-ionosphere
+/// configuration. This delegates to the same engine solve as the legacy route.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_solve_ppp_float_v2(
+    sp3: *const SidereonSp3,
+    config: *const SidereonPppFloatConfigV2,
+    out_solution: *mut *mut SidereonPppFloatSolution,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_solve_ppp_float_v2";
+    engine_error_operation_boundary(FN, SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out_solution, FN, "out_solution"));
+        *out = ptr::null_mut();
+        c_try!(reject_output_overlaps_handle(
+            FN,
+            out,
+            "out_solution",
+            sp3,
+            "sp3"
+        ));
+        let sp3 = c_try!(require_ref(sp3, FN, "sp3"));
+        let config = c_try!(require_ref(config, FN, "config"));
+        let epochs = c_try!(ppp_epochs_from_c(
+            FN,
+            config.legacy.epochs,
+            config.legacy.epoch_count
+        ));
+        let initial_state = c_try!(ppp_float_state_from_c(
+            FN,
+            &config.legacy.initial_state,
+            epochs.len()
+        ));
+        let mut solve_config = c_try!(ppp_float_config_from_c(FN, &config.legacy));
+        solve_config.estimate_residual_ionosphere = config.estimate_residual_ionosphere;
+        let inner = match sidereon_core::precise_positioning::solve_float_epochs(
+            &sp3.inner,
+            &epochs,
+            initial_state,
+            solve_config,
+        ) {
+            Ok(inner) => inner,
+            Err(error) => return map_ppp_float_core_error(FN, &error),
+        };
+        write_boxed_handle(out, SidereonPppFloatSolution { inner });
+        SidereonStatus::Ok
+    })
+}
+
+/// Solve exactly one float PPP epoch. `config.legacy.epoch_count` must be one;
+/// unlike the multi-epoch route this delegates to the core single-epoch entry point.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_solve_ppp_float_epoch(
+    sp3: *const SidereonSp3,
+    config: *const SidereonPppFloatConfigV2,
+    out_solution: *mut *mut SidereonPppFloatSolution,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_solve_ppp_float_epoch";
+    engine_error_operation_boundary(FN, SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out_solution, FN, "out_solution"));
+        *out = ptr::null_mut();
+        c_try!(reject_output_overlaps_handle(
+            FN,
+            out,
+            "out_solution",
+            sp3,
+            "sp3"
+        ));
+        let sp3 = c_try!(require_ref(sp3, FN, "sp3"));
+        let config = c_try!(require_ref(config, FN, "config"));
+        if config.legacy.epoch_count != 1 {
+            set_last_error(format!(
+                "{FN}: config.legacy.epoch_count must be 1, got {}",
+                config.legacy.epoch_count
+            ));
+            return SidereonStatus::InvalidArgument;
+        }
+        let mut epochs = c_try!(ppp_epochs_from_c(FN, config.legacy.epochs, 1));
+        let initial_state = c_try!(ppp_float_state_from_c(FN, &config.legacy.initial_state, 1));
+        let mut solve_config = c_try!(ppp_float_config_from_c(FN, &config.legacy));
+        solve_config.estimate_residual_ionosphere = config.estimate_residual_ionosphere;
+        let epoch = epochs.pop().expect("one validated PPP epoch");
+        let inner = match sidereon_core::precise_positioning::solve_float_epoch(
+            &sp3.inner,
+            epoch,
+            initial_state,
+            solve_config,
+        ) {
+            Ok(inner) => inner,
+            Err(error) => return map_ppp_float_core_error(FN, &error),
+        };
+        write_boxed_handle(out, SidereonPppFloatSolution { inner });
+        SidereonStatus::Ok
+    })
+}
+
 /// Solve a static integer-fixed PPP arc from a PPP float solution. On success
 /// writes a newly owned solution handle to *out_solution. Release it with
 /// sidereon_ppp_fixed_solution_free.
@@ -312,6 +406,56 @@ pub unsafe extern "C" fn sidereon_solve_ppp_fixed(
                 }
             };
         write_boxed_handle(out_solution, SidereonPppFixedSolution { inner });
+        SidereonStatus::Ok
+    })
+}
+
+/// Solve a fixed PPP arc with the additive residual-ionosphere configuration.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_solve_ppp_fixed_v2(
+    sp3: *const SidereonSp3,
+    float_solution: *const SidereonPppFloatSolution,
+    config: *const SidereonPppFixedConfigV2,
+    out_solution: *mut *mut SidereonPppFixedSolution,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_solve_ppp_fixed_v2";
+    engine_error_operation_boundary(FN, SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out_solution, FN, "out_solution"));
+        *out = ptr::null_mut();
+        c_try!(reject_output_overlaps_handle(
+            FN,
+            out,
+            "out_solution",
+            sp3,
+            "sp3"
+        ));
+        c_try!(reject_output_overlaps_handle(
+            FN,
+            out,
+            "out_solution",
+            float_solution,
+            "float_solution"
+        ));
+        let sp3 = c_try!(require_ref(sp3, FN, "sp3"));
+        let float_solution = c_try!(require_ref(float_solution, FN, "float_solution"));
+        let config = c_try!(require_ref(config, FN, "config"));
+        let epochs = c_try!(ppp_epochs_from_c(
+            FN,
+            config.legacy.epochs,
+            config.legacy.epoch_count
+        ));
+        let mut solve_config = c_try!(ppp_fixed_config_from_c(FN, &config.legacy));
+        solve_config.estimate_residual_ionosphere = config.estimate_residual_ionosphere;
+        let inner = match sidereon_core::precise_positioning::solve_fixed_from_float(
+            &sp3.inner,
+            &epochs,
+            float_solution.inner.clone(),
+            solve_config,
+        ) {
+            Ok(inner) => inner,
+            Err(error) => return map_ppp_fixed_core_error(FN, &error),
+        };
+        write_boxed_handle(out, SidereonPppFixedSolution { inner });
         SidereonStatus::Ok
     })
 }
@@ -984,6 +1128,55 @@ pub unsafe extern "C" fn sidereon_solve_ppp_auto_init_float(
     )
 }
 
+/// Solve a float PPP arc with the selected auto-init strategy. The strategy is
+/// validated as a SidereonPppAutoInitStrategy value before delegation.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_solve_ppp_auto_init_float_with_strategy(
+    sp3: *const SidereonSp3,
+    float_config: *const SidereonPppFloatConfig,
+    options: *const SidereonPppAutoInitOptions,
+    strategy: u32,
+    out_solution: *mut *mut SidereonPppFloatSolution,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_solve_ppp_auto_init_float_with_strategy";
+    engine_error_operation_boundary(FN, SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out_solution, FN, "out_solution"));
+        *out = ptr::null_mut();
+        c_try!(reject_output_overlaps_handle(
+            FN,
+            out,
+            "out_solution",
+            sp3,
+            "sp3"
+        ));
+        let sp3 = c_try!(require_ref(sp3, FN, "sp3"));
+        let config = c_try!(require_ref(float_config, FN, "float_config"));
+        let options = c_try!(require_ref(options, FN, "options"));
+        let epochs = c_try!(ppp_epochs_from_c(FN, config.epochs, config.epoch_count));
+        let solve_config = c_try!(ppp_float_config_from_c(FN, config));
+        let strategy = c_try!(ppp_auto_init_strategy_from_c(FN, strategy));
+        match solve_ppp_auto_init_float_with_strategy(
+            &sp3.inner,
+            &epochs,
+            ppp_auto_init_options_from_c(options),
+            solve_config,
+            strategy,
+        ) {
+            Ok(inner) => write_boxed_handle(out, SidereonPppFloatSolution { inner }),
+            Err(error) => {
+                set_last_error(format!("{FN}: {error}"));
+                crate::engine_error::record_engine_error(
+                    crate::engine_error::SidereonEngineErrorFamily::PppAutoInit,
+                    FN,
+                    ppp_auto_init_error_value(&error),
+                );
+                return SidereonStatus::Solve;
+            }
+        }
+        SidereonStatus::Ok
+    })
+}
+
 /// Solve a static integer-fixed PPP arc from raw epochs: the SPP auto-init seed,
 /// the float solve, then the LAMBDA integer fix and ambiguity-conditioned
 /// re-solve. The epochs and float settings come from `float_config`; the
@@ -1077,6 +1270,63 @@ pub unsafe extern "C" fn sidereon_solve_ppp_auto_init_fixed(
             SidereonStatus::Ok
         },
     )
+}
+
+/// Solve an integer-fixed PPP arc with the selected auto-init strategy. The
+/// strategy is validated before the engine performs either solve.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_solve_ppp_auto_init_fixed_with_strategy(
+    sp3: *const SidereonSp3,
+    float_config: *const SidereonPppFloatConfig,
+    fixed_config: *const SidereonPppFixedConfig,
+    options: *const SidereonPppAutoInitOptions,
+    strategy: u32,
+    out_solution: *mut *mut SidereonPppFixedSolution,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_solve_ppp_auto_init_fixed_with_strategy";
+    engine_error_operation_boundary(FN, SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out_solution, FN, "out_solution"));
+        *out = ptr::null_mut();
+        c_try!(reject_output_overlaps_handle(
+            FN,
+            out,
+            "out_solution",
+            sp3,
+            "sp3"
+        ));
+        let sp3 = c_try!(require_ref(sp3, FN, "sp3"));
+        let float_config = c_try!(require_ref(float_config, FN, "float_config"));
+        let fixed_config = c_try!(require_ref(fixed_config, FN, "fixed_config"));
+        let options = c_try!(require_ref(options, FN, "options"));
+        let epochs = c_try!(ppp_epochs_from_c(
+            FN,
+            float_config.epochs,
+            float_config.epoch_count
+        ));
+        let float_solve_config = c_try!(ppp_float_config_from_c(FN, float_config));
+        let fixed_solve_config = c_try!(ppp_fixed_config_from_c(FN, fixed_config));
+        let strategy = c_try!(ppp_auto_init_strategy_from_c(FN, strategy));
+        match solve_ppp_auto_init_fixed_with_strategy(
+            &sp3.inner,
+            &epochs,
+            ppp_auto_init_options_from_c(options),
+            float_solve_config,
+            fixed_solve_config,
+            strategy,
+        ) {
+            Ok(inner) => write_boxed_handle(out, SidereonPppFixedSolution { inner }),
+            Err(error) => {
+                set_last_error(format!("{FN}: {error}"));
+                crate::engine_error::record_engine_error(
+                    crate::engine_error::SidereonEngineErrorFamily::PppAutoInit,
+                    FN,
+                    ppp_auto_init_error_value(&error),
+                );
+                return SidereonStatus::Solve;
+            }
+        }
+        SidereonStatus::Ok
+    })
 }
 
 /// Solve a sequential RTK baseline arc from raw rover+base epochs. On success
@@ -1406,7 +1656,7 @@ pub unsafe extern "C" fn sidereon_solve_data_problem_drop_one(
     )
 }
 
-unsafe fn ppp_epochs_from_c(
+pub(crate) unsafe fn ppp_epochs_from_c(
     fn_name: &str,
     epochs: *const SidereonPppEpoch,
     epoch_count: usize,
@@ -1498,6 +1748,51 @@ unsafe fn ppp_float_config_from_c(
         config.residual_screen,
         false,
     ))
+}
+
+fn map_ppp_float_core_error(
+    fn_name: &str,
+    error: &sidereon_core::precise_positioning::FloatSolveError,
+) -> SidereonStatus {
+    crate::engine_error::record_engine_error(
+        SidereonEngineErrorFamily::Facade,
+        fn_name,
+        crate::engine_error::facade_error_value(&sidereon::Error::PppFloat(error.clone())),
+    );
+    set_last_error(format!("{fn_name}: {error}"));
+    use sidereon_core::precise_positioning::FloatSolveError as Error;
+    match error {
+        Error::InvalidClockCount { .. }
+        | Error::InvalidSolveOption { .. }
+        | Error::InvalidInput { .. } => SidereonStatus::InvalidArgument,
+        Error::Ut1OutsideCoverage(_) => SidereonStatus::Ut1OutsideCoverage,
+        _ => SidereonStatus::Solve,
+    }
+}
+
+fn map_ppp_fixed_core_error(
+    fn_name: &str,
+    error: &sidereon_core::precise_positioning::FixedSolveError,
+) -> SidereonStatus {
+    crate::engine_error::record_engine_error(
+        SidereonEngineErrorFamily::Facade,
+        fn_name,
+        crate::engine_error::facade_error_value(&sidereon::Error::PppFixed(error.clone())),
+    );
+    set_last_error(format!("{fn_name}: {error}"));
+    match error {
+        sidereon_core::precise_positioning::FixedSolveError::Float(inner) => {
+            use sidereon_core::precise_positioning::FloatSolveError as Error;
+            match inner {
+                Error::InvalidClockCount { .. }
+                | Error::InvalidSolveOption { .. }
+                | Error::InvalidInput { .. } => SidereonStatus::InvalidArgument,
+                Error::Ut1OutsideCoverage(_) => SidereonStatus::Ut1OutsideCoverage,
+                _ => SidereonStatus::Solve,
+            }
+        }
+        _ => SidereonStatus::Solve,
+    }
 }
 
 unsafe fn ppp_fixed_config_from_c(
@@ -1635,6 +1930,240 @@ fn ppp_auto_init_options_from_c(options: &SidereonPppAutoInitOptions) -> PppAuto
         relative_humidity: options.spp_relative_humidity,
     };
     o
+}
+
+unsafe fn ppp_write_equal<T: PartialEq>(
+    fn_name: &str,
+    left: T,
+    right: T,
+    out_equal: *mut bool,
+) -> SidereonStatus {
+    let out = c_try!(require_out(out_equal, fn_name, "out_equal"));
+    *out = left == right;
+    SidereonStatus::Ok
+}
+
+unsafe fn ppp_reject_equal_overlap<L, R>(
+    fn_name: &str,
+    left: *const L,
+    right: *const R,
+    out_equal: *mut bool,
+) -> Result<(), SidereonStatus> {
+    reject_output_overlaps_handle(fn_name, out_equal, "out_equal", left, "left")?;
+    reject_output_overlaps_handle(fn_name, out_equal, "out_equal", right, "right")?;
+    Ok(())
+}
+
+/// Compare two PPP auto-init option values by their complete core value.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_auto_init_options_equal(
+    left: *const SidereonPppAutoInitOptions,
+    right: *const SidereonPppAutoInitOptions,
+    out_equal: *mut bool,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_auto_init_options_equal";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        c_try!(ppp_reject_equal_overlap(FN, left, right, out_equal));
+        let left = c_try!(require_ref(left, FN, "left"));
+        let right = c_try!(require_ref(right, FN, "right"));
+        ppp_write_equal(
+            FN,
+            ppp_auto_init_options_from_c(left),
+            ppp_auto_init_options_from_c(right),
+            out_equal,
+        )
+    })
+}
+
+/// Compare two PPP observations by complete core value, including signal codes.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_observation_equal(
+    left: *const SidereonPppObservation,
+    right: *const SidereonPppObservation,
+    out_equal: *mut bool,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_observation_equal";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        c_try!(ppp_reject_equal_overlap(FN, left, right, out_equal));
+        let left = c_try!(require_ref(left, FN, "left"));
+        let right = c_try!(require_ref(right, FN, "right"));
+        ppp_write_equal(
+            FN,
+            c_try!(ppp_observation_from_c(FN, left)),
+            c_try!(ppp_observation_from_c(FN, right)),
+            out_equal,
+        )
+    })
+}
+
+/// Compare two PPP epochs by complete core value and pointed-to observations.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_epoch_equal(
+    left: *const SidereonPppEpoch,
+    right: *const SidereonPppEpoch,
+    out_equal: *mut bool,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_epoch_equal";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        c_try!(ppp_reject_equal_overlap(FN, left, right, out_equal));
+        let left = c_try!(require_ref(left, FN, "left"));
+        let right = c_try!(require_ref(right, FN, "right"));
+        let left = c_try!(ppp_epochs_from_c(FN, left, 1)).remove(0);
+        let right = c_try!(ppp_epochs_from_c(FN, right, 1)).remove(0);
+        ppp_write_equal(FN, left, right, out_equal)
+    })
+}
+
+/// Compare PPP measurement weights by core value.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_measurement_weights_equal(
+    left: *const SidereonPppMeasurementWeights,
+    right: *const SidereonPppMeasurementWeights,
+    out_equal: *mut bool,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_measurement_weights_equal";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        c_try!(ppp_reject_equal_overlap(FN, left, right, out_equal));
+        let left = c_try!(require_ref(left, FN, "left"));
+        let right = c_try!(require_ref(right, FN, "right"));
+        ppp_write_equal(
+            FN,
+            ppp_weights_from_c(left),
+            ppp_weights_from_c(right),
+            out_equal,
+        )
+    })
+}
+
+/// Compare PPP float solve options by core value.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_float_options_equal(
+    left: *const SidereonPppFloatOptions,
+    right: *const SidereonPppFloatOptions,
+    out_equal: *mut bool,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_float_options_equal";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        c_try!(ppp_reject_equal_overlap(FN, left, right, out_equal));
+        let left = c_try!(require_ref(left, FN, "left"));
+        let right = c_try!(require_ref(right, FN, "right"));
+        ppp_write_equal(
+            FN,
+            ppp_float_options_from_c(left),
+            ppp_float_options_from_c(right),
+            out_equal,
+        )
+    })
+}
+
+/// Compare PPP troposphere options by core value after enum validation.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_troposphere_options_equal(
+    left: *const SidereonPppTroposphereOptions,
+    right: *const SidereonPppTroposphereOptions,
+    out_equal: *mut bool,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_troposphere_options_equal";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        c_try!(ppp_reject_equal_overlap(FN, left, right, out_equal));
+        let left = c_try!(require_ref(left, FN, "left"));
+        let right = c_try!(require_ref(right, FN, "right"));
+        ppp_write_equal(
+            FN,
+            c_try!(ppp_tropo_from_c(FN, left)),
+            c_try!(ppp_tropo_from_c(FN, right)),
+            out_equal,
+        )
+    })
+}
+
+/// Compare PPP range-correction inputs by complete core value.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_range_corrections_equal(
+    left: *const SidereonPppRangeCorrections,
+    right: *const SidereonPppRangeCorrections,
+    out_equal: *mut bool,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_range_corrections_equal";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        c_try!(ppp_reject_equal_overlap(FN, left, right, out_equal));
+        let left = c_try!(require_ref(left, FN, "left"));
+        let right = c_try!(require_ref(right, FN, "right"));
+        ppp_write_equal(
+            FN,
+            c_try!(ppp_range_corrections_from_c(FN, left)),
+            c_try!(ppp_range_corrections_from_c(FN, right)),
+            out_equal,
+        )
+    })
+}
+
+/// Compare additive PPP float solve configurations by complete core value.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_float_config_v2_equal(
+    left: *const SidereonPppFloatConfigV2,
+    right: *const SidereonPppFloatConfigV2,
+    out_equal: *mut bool,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_float_config_v2_equal";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        c_try!(ppp_reject_equal_overlap(FN, left, right, out_equal));
+        let left = c_try!(require_ref(left, FN, "left"));
+        let right = c_try!(require_ref(right, FN, "right"));
+        let mut left_core = c_try!(ppp_float_config_from_c(FN, &left.legacy));
+        let mut right_core = c_try!(ppp_float_config_from_c(FN, &right.legacy));
+        left_core.estimate_residual_ionosphere = left.estimate_residual_ionosphere;
+        right_core.estimate_residual_ionosphere = right.estimate_residual_ionosphere;
+        ppp_write_equal(FN, left_core, right_core, out_equal)
+    })
+}
+
+/// Compare fixed ambiguity options by complete pointed-to map content.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_fixed_ambiguity_options_equal(
+    left: *const SidereonPppFixedAmbiguityOptions,
+    right: *const SidereonPppFixedAmbiguityOptions,
+    out_equal: *mut bool,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_fixed_ambiguity_options_equal";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        c_try!(ppp_reject_equal_overlap(FN, left, right, out_equal));
+        let left = c_try!(require_ref(left, FN, "left"));
+        let right = c_try!(require_ref(right, FN, "right"));
+        let convert = |value: &SidereonPppFixedAmbiguityOptions| {
+            let mut core = PppFixedAmbiguityOptionsInner::new(value.ratio_threshold);
+            core.wavelengths_m = ppp_f64_map_from_c(
+                FN,
+                value.wavelengths_m,
+                value.wavelength_count,
+                "wavelengths_m",
+            )?;
+            core.offsets_m =
+                ppp_f64_map_from_c(FN, value.offsets_m, value.offset_count, "offsets_m")?;
+            Ok::<_, SidereonStatus>(core)
+        };
+        ppp_write_equal(FN, c_try!(convert(left)), c_try!(convert(right)), out_equal)
+    })
+}
+
+/// Compare additive PPP fixed solve configurations by complete core value.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_fixed_config_v2_equal(
+    left: *const SidereonPppFixedConfigV2,
+    right: *const SidereonPppFixedConfigV2,
+    out_equal: *mut bool,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_fixed_config_v2_equal";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        c_try!(ppp_reject_equal_overlap(FN, left, right, out_equal));
+        let left = c_try!(require_ref(left, FN, "left"));
+        let right = c_try!(require_ref(right, FN, "right"));
+        let mut left_core = c_try!(ppp_fixed_config_from_c(FN, &left.legacy));
+        let mut right_core = c_try!(ppp_fixed_config_from_c(FN, &right.legacy));
+        left_core.estimate_residual_ionosphere = left.estimate_residual_ionosphere;
+        right_core.estimate_residual_ionosphere = right.estimate_residual_ionosphere;
+        ppp_write_equal(FN, left_core, right_core, out_equal)
+    })
 }
 
 fn map_rtk_arc_error(

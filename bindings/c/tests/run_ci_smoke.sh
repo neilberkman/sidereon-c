@@ -17,6 +17,21 @@ python3 "${here}/gen_sp3_terminal_record_fixture.py" \
     --output "${target_dir}/sp3_terminal_record_fixture.h"
 generated_header="${lib_dir}/sidereon.generated.h"
 
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
+    -I"${binding_root}/include" \
+    "${here}/ppp_velocity_smoke.c" \
+    -L"${lib_dir}" -lsidereon -Wl,-rpath,"${lib_dir}" -lm \
+    -o "${target_dir}/ppp_velocity_smoke_ci"
+"${target_dir}/ppp_velocity_smoke_ci"
+
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
+    -I"${binding_root}/include" -I"${here}" \
+    "${here}/ppp_solve_lookup_smoke.c" \
+    -L"${lib_dir}" -lsidereon -Wl,-rpath,"${lib_dir}" -lm \
+    -o "${target_dir}/ppp_solve_lookup_smoke_ci"
+"${target_dir}/ppp_solve_lookup_smoke_ci" \
+    "${here}/fixtures/sp3/GBM0MGXRAP_20201770000_01D_05M_ORB_120epoch.sp3"
+
 cbindgen --quiet --config cbindgen.toml --crate sidereon-c --output "${generated_header}"
 if ! cmp -s include/sidereon.h "${generated_header}"; then
     echo "committed sidereon.h differs from cbindgen output" >&2

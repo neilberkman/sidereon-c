@@ -9,6 +9,10 @@
   positioned comments, header access, message/segment construction, atomic
   metadata replacement, data mutation, and parse/write/validation error classes.
 - Add complete value equality for opaque CCSDS TDM handles.
+- Add strategy-selected PPP auto-initialization, single-epoch and versioned
+  residual-ionosphere PPP solves, owned ambiguity-search and correction-lookup
+  access, complete PPP value equality, and the core low-level range-rate and
+  velocity least-squares API.
 
 ## 3.0.6 - 2026-10-30
 

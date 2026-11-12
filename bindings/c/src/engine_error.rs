@@ -153,6 +153,8 @@ pub enum SidereonEngineErrorFamily {
     TimeOffset = 71,
     /// Time-model construction failure with exact input field and reason.
     TimeModel = 72,
+    /// Low-level precise-positioning velocity solve failure.
+    PppVelocity = 73,
     /// A family introduced by a later library version.
     Unknown = 999,
 }
@@ -267,6 +269,7 @@ impl SidereonEngineErrorFamily {
             Self::StaticPositioning => "static_positioning",
             Self::TimeOffset => "time_offset",
             Self::TimeModel => "time_model",
+            Self::PppVelocity => "ppp_velocity",
             Self::Unknown => "unknown",
         }
     }
@@ -3429,6 +3432,22 @@ pub(crate) fn ppp_fixed_solve_error_value(
             "missing_fixed_ambiguity",
             json!({"ambiguity_id": ambiguity_id}),
         ),
+    }
+}
+
+pub(crate) fn ppp_velocity_solve_error_value(
+    error: &sidereon_core::precise_positioning::VelocitySolveError,
+) -> Value {
+    use sidereon_core::precise_positioning::VelocitySolveError as Error;
+    match error {
+        Error::TooFewObservations { required, actual } => rtk_node(
+            "too_few_observations",
+            json!({"required": required, "actual": actual}),
+        ),
+        Error::InvalidInput { field, reason } => {
+            rtk_node("invalid_input", json!({"field": field, "reason": reason}))
+        }
+        Error::SingularGeometry => rtk_node("singular_geometry", json!({})),
     }
 }
 
