@@ -199,6 +199,7 @@ fn main() {
     // Baarda w-test constants.
     let w = sidereon_core::quality::wtest_noncentrality_components(0.001, 0.20).expect("w-test");
     p.comment("sidereon_core::quality::wtest_noncentrality_components(0.001, 0.20).");
+    println!("/* Core 4.0.0 evaluates inverse-normal tails without forming 1 - p. */");
     p.f64("WTEST_DELTA0_BITS", w.delta0);
     p.f64("WTEST_LAMBDA0_BITS", w.lambda0);
 

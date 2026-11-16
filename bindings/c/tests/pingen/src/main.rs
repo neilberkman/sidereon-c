@@ -271,6 +271,9 @@ fn main() {
         bits(rover_g05[2])
     );
     println!();
+    println!(
+        "/* Core 4.0.0 uses RTKLIB ecef2pos/satazel arithmetic for elevation-weighted RTK. */"
+    );
     println!("/* WTZR/WTZZ carrier static reference-station solve (rtk_rinex_smoke.c):");
     println!(" * the WTZR antenna reference point it is given, the integer ratio, position");
     println!(" * and baseline (ECEF metres), position covariance (ECEF square metres,");

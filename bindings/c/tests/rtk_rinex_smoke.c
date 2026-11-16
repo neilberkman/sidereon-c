@@ -16,7 +16,6 @@
 #include "w6_rtk_rinex_pins.h"
 
 #include "sidereon.h"
-#include "rtk_rinex_pins.h"
 
 static int failures = 0;
 
@@ -195,16 +194,6 @@ static void set_wtzr_wide_lane_config(SidereonRtkRinexWideLaneFixedConfig *confi
 static void test_static_rinex_rtk(const SidereonSp3 *sp3, const SidereonRinexObs *base_obs,
                                   const SidereonRinexObs *rover_obs,
                                   const double base_arp[3], const double truth[3]) {
-    (void)W6_RTKR_STATIC_FLOAT_BASELINE_BITS;
-    (void)W6_RTKR_STATIC_FIXED_BASELINE_BITS;
-    (void)W6_RTKR_STATIC_RATIO_BITS;
-    (void)PIN_STATIC_REFERENCE_RATIO_BITS;
-    (void)PIN_STATIC_REFERENCE_POSITION_BITS;
-    (void)PIN_STATIC_REFERENCE_BASELINE_BITS;
-    (void)PIN_STATIC_REFERENCE_COVARIANCE_BITS;
-    (void)W6_RTKR_WL_FLOAT_BASELINE_BITS;
-    (void)W6_RTKR_WL_FIXED_BASELINE_BITS;
-    (void)W6_RTKR_WL_RATIO_BITS;
     SidereonRtkRinexStaticBaselineConfig config;
     set_wtzr_single_frequency_config(&config, base_arp);
 
@@ -251,9 +240,9 @@ static void test_static_rinex_rtk(const SidereonSp3 *sp3, const SidereonRinexObs
            fixed_baseline[0], fixed_baseline[1], fixed_baseline[2], fixed_err);
 
     for (int i = 0; i < 3; i++) {
-        check_exact_bits(float_baseline[i], RTK_STATIC_FLOAT[i],
+        check_exact_bits(float_baseline[i], W6_RTKR_STATIC_FLOAT_BASELINE_BITS[i],
                          "static float baseline");
-        check_exact_bits(fixed_baseline[i], RTK_STATIC_FIXED[i],
+        check_exact_bits(fixed_baseline[i], W6_RTKR_STATIC_FIXED_BASELINE_BITS[i],
                          "static fixed baseline");
     }
     check(float_meta.ambiguity_count == W6_RTKR_STATIC_AMBIGUITY_COUNT &&
@@ -263,7 +252,7 @@ static void test_static_rinex_rtk(const SidereonSp3 *sp3, const SidereonRinexObs
           "static integer status");
     check(fixed_meta.has_integer_ratio == W6_RTKR_STATIC_HAS_RATIO,
           "static ratio presence");
-    check_exact_bits(fixed_meta.integer_ratio, RTK_STATIC_RATIO, "static ratio");
+    check_exact_bits(fixed_meta.integer_ratio, W6_RTKR_STATIC_RATIO_BITS, "static ratio");
     /* Accuracy against the IGS marker coordinates (WTZR_MARKER_M and
      * WTZZ_MARKER_M in main), an external reference. */
     check(float_err < 0.08, "static float baseline within dm");
@@ -355,16 +344,16 @@ static void test_static_reference_station(const SidereonSp3 *sp3,
     check(vector_error(baseline, truth) < 0.005, "static reference baseline within 5 mm");
 
     /* RTKLIB ecef2pos/satazel elevation changes the elevation-weighted solution; the IGS survey checks accuracy. */
-    check_exact_bits(meta.carrier_integer_ratio, RTK_REF_RATIO,
+    check_exact_bits(meta.carrier_integer_ratio, PIN_STATIC_REFERENCE_RATIO_BITS,
                      "static reference ratio");
     for (int i = 0; i < 3; i++) {
-        check_exact_bits(position[i], RTK_REF_POSITION[i],
+        check_exact_bits(position[i], PIN_STATIC_REFERENCE_POSITION_BITS[i],
                          "static reference position");
-        check_exact_bits(baseline[i], RTK_REF_BASELINE[i],
+        check_exact_bits(baseline[i], PIN_STATIC_REFERENCE_BASELINE_BITS[i],
                          "static reference baseline");
     }
     for (int i = 0; i < 9; i++) {
-        check_exact_bits(covariance[i], RTK_REF_COVARIANCE[i],
+        check_exact_bits(covariance[i], PIN_STATIC_REFERENCE_COVARIANCE_BITS[i],
                          "static reference covariance");
     }
 
@@ -446,9 +435,9 @@ static void test_wide_lane_rinex_rtk(const SidereonSp3 *sp3, const SidereonRinex
            fixed_baseline[0], fixed_baseline[1], fixed_baseline[2], fixed_err);
 
     for (int i = 0; i < 3; i++) {
-        check_exact_bits(float_baseline[i], RTK_WL_FLOAT[i],
+        check_exact_bits(float_baseline[i], W6_RTKR_WL_FLOAT_BASELINE_BITS[i],
                          "wide lane float baseline");
-        check_exact_bits(fixed_baseline[i], RTK_WL_FIXED[i],
+        check_exact_bits(fixed_baseline[i], W6_RTKR_WL_FIXED_BASELINE_BITS[i],
                          "wide lane fixed baseline");
     }
     check(float_meta.ambiguity_count == W6_RTKR_WL_AMBIGUITY_COUNT &&
@@ -456,7 +445,7 @@ static void test_wide_lane_rinex_rtk(const SidereonSp3 *sp3, const SidereonRinex
           "wide lane float metadata counts");
     check(fixed_meta.integer_status == W6_RTKR_WL_INTEGER_STATUS, "wide lane integer status");
     check(fixed_meta.has_integer_ratio == W6_RTKR_WL_HAS_RATIO, "wide lane ratio presence");
-    check_exact_bits(fixed_meta.integer_ratio, RTK_WL_RATIO, "wide lane ratio");
+    check_exact_bits(fixed_meta.integer_ratio, W6_RTKR_WL_RATIO_BITS, "wide lane ratio");
     check(rinex_meta.wide_lane_fixed == W6_RTKR_WL_FIXED &&
               rinex_meta.wide_lane_ambiguity_count == W6_RTKR_WL_AMBIGUITY_CYCLE_COUNT,
           "wide lane metadata fixed");

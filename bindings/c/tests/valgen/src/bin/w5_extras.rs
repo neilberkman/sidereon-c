@@ -138,6 +138,7 @@ fn main() {
         quality::pseudorange_variance(30.0, quality::PseudorangeVarianceOptions::default())
             .expect("pseudorange variance"),
     );
+    println!("/* Core 4.0.0 corrects chi-square tails; reference: chi2_extended_mpmath.json. */");
     p.f64(
         "CHI2_INV_BITS",
         quality::chi2_inv(0.999, 1).expect("chi2 inverse"),

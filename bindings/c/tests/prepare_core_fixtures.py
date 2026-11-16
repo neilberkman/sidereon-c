@@ -65,7 +65,8 @@ def checked_source(report: dict[str, object], expected: str) -> tuple[Path, str,
     if not (candidate / "crates/sidereon-core/tests/fixtures").is_dir():
         fail(f"core fixture directory is missing under {candidate}")
     origin = git(candidate, "remote", "get-url", "origin")
-    if origin not in CANONICAL_ORIGINS:
+    # A registry archive's verified commit identifies the fixture tree independently of its remote.
+    if mode != "registry" and origin not in CANONICAL_ORIGINS:
         if not is_configured:
             fail(
                 f"auxiliary source has noncanonical origin {origin!r}; "
@@ -191,8 +192,8 @@ def registry_emitters(source: Path, scratch: Path, helper_root: Path) -> tuple[P
     lock_source = template / "Cargo.lock"
     if not lock_source.is_file():
         fail(
-            "registry-linked fixture harness has no resolved Cargo.lock yet; "
-            "resolve its exact registry graph after sidereon 3.0.6 publication"
+            "registry fixture dependency lockfile is missing; "
+            "a lockfile for sidereon-core 4.0.0 is required"
         )
     shutil.copy2(manifest_source, harness / "Cargo.toml")
     shutil.copy2(lock_source, harness / "Cargo.lock")

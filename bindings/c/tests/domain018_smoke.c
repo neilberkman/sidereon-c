@@ -914,16 +914,13 @@ static void test_fusion_recorded_rts(void) {
               update.rejected_rows == W4_D018_RECORDED_UPDATE_REJECTED_ROWS,
           "fusion recorded loose update");
     /* Core evaluates Yang adaptation and innovation gating using raw covariance before IGG III inflation. */
-    (void)W4_D018_RECORDED_UPDATE_NIS_BITS;
-    check_bits(update.nis, UINT64_C(0x4006edd9db69905b), "fusion recorded NIS bits");
+    check_bits(update.nis, W4_D018_RECORDED_UPDATE_NIS_BITS, "fusion recorded NIS bits");
 
     SidereonFusionState state;
     check(sidereon_fusion_filter_state(filter, &state) == SIDEREON_STATUS_OK,
           "fusion recorded state");
-    (void)W4_D018_RECORDED_STATE_POSITION_BITS;
     /* Raw-covariance Yang adaptation changes the recorded state. */
-    const uint64_t recorded_state_position[3] = { UINT64_C(0x415854a60d1a513e), UINT64_C(0x3fc80027ccbbcc8d), UINT64_C(0xbfb80027cc9d5eac) };
-    check_vec_bits(state.position_ecef_m, recorded_state_position, 3, "fusion recorded state position");
+    check_vec_bits(state.position_ecef_m, W4_D018_RECORDED_STATE_POSITION_BITS, 3, "fusion recorded state position");
 
     SidereonFusionRtsHistory *history = NULL;
     check(sidereon_fusion_rts_history_builder_finish(builder, &history) ==
@@ -985,12 +982,10 @@ static void test_fusion_recorded_rts(void) {
               smoothed1.has_rts_gain_to_next == W4_D018_SMOOTHED_EPOCH1_HAS_RTS_GAIN,
           "fusion recorded smoothed epoch 1 summary");
 
-    (void)W4_D018_SMOOTHED_EPOCH0_POSITION_BITS;
-    (void)W4_D018_SMOOTHED_EPOCH1_POSITION_BITS;
     /* Raw-covariance Yang adaptation changes the RTS trajectory. */
     const uint64_t *smoothed_position_bits[2] = {
-        (const uint64_t[]){ UINT64_C(0x415854a6b46f12bb), UINT64_C(0x3fb55372f3a0394b), UINT64_C(0xbfa55372f4426f40) },
-        recorded_state_position,
+        W4_D018_SMOOTHED_EPOCH0_POSITION_BITS,
+        W4_D018_SMOOTHED_EPOCH1_POSITION_BITS,
     };
     const size_t correction_len[2] = {
         W4_D018_SMOOTHED_EPOCH0_CORRECTION_LEN,
@@ -998,7 +993,7 @@ static void test_fusion_recorded_rts(void) {
     };
     /* Raw-covariance Yang adaptation changes the RTS corrections. */
     const uint64_t correction_hash[2] = {
-        UINT64_C(0x0060577e6c1c654f),
+        W4_D018_SMOOTHED_EPOCH0_CORRECTION_FNV1A64,
         W4_D018_SMOOTHED_EPOCH1_CORRECTION_FNV1A64,
     };
     const size_t covariance_len[2] = {
@@ -1007,8 +1002,8 @@ static void test_fusion_recorded_rts(void) {
     };
     /* Raw-covariance Yang adaptation changes the RTS covariance. */
     const uint64_t covariance_hash[2] = {
-        UINT64_C(0x0262735c16106064),
-        UINT64_C(0x66b570518cccdc82),
+        W4_D018_SMOOTHED_EPOCH0_COVARIANCE_FNV1A64,
+        W4_D018_SMOOTHED_EPOCH1_COVARIANCE_FNV1A64,
     };
     const size_t gain_len[2] = {
         W4_D018_SMOOTHED_EPOCH0_RTS_GAIN_LEN,

@@ -254,6 +254,7 @@ fn raim_section() {
     def_bool("RAIM_TEST_TESTABLE", test.testable);
     def_bool("RAIM_TEST_FAULT_DETECTED", test.fault_detected);
     def_bool("RAIM_TEST_HAS_THRESHOLD", test.threshold.is_some());
+    println!("/* Core 4.0.0 chi-square tail correction; reference: chi2_extended_mpmath.json. */");
     def_bits("RAIM_TEST_THRESHOLD", test.threshold.unwrap_or(0.0));
     def_bits("RAIM_TEST_WEIGHTED_SUM_SQUARES", test.weighted_sum_squares);
     def("RAIM_TEST_DOF", test.dof);
@@ -744,6 +745,7 @@ fn dual_section() {
     )
     .expect("ionosphere-free arc");
     def_count("IF_EPOCH_COUNT", iono_free.epochs.len());
+    println!("/* Core 4.0.0 includes reference carriers in the narrow-lane wavelength and zero-offset maps. */");
     def_count("IF_WAVELENGTH_COUNT", iono_free.wavelengths_m.len());
     let wavelengths: Vec<f64> = iono_free.wavelengths_m.values().copied().collect();
     def_bits_array("IF_WAVELENGTHS", &wavelengths);

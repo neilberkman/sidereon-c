@@ -1,5 +1,7 @@
 # sidereon (C)
 
+Version 4.0.0 uses the published `sidereon` and `sidereon-core` 4.0.0 APIs.
+
 A C-ABI binding over the Sidereon GNSS positioning engine. It is a thin interface
 in the C idiom: opaque handles, integer status codes, and caller-allocated output
 buffers. It adds no modeling of its own, so a solve returns exactly the numbers
@@ -1392,25 +1394,24 @@ The smoke scripts compile with `-ffp-contract=off`, so C arithmetic that
 forms an input the tests compare against engine output (the WTZR antenna
 reference point, for one) rounds each operation separately, as Rust does.
 
-## Generated goldens
+## Reference data
 
-The goldens `tests/run_generators.sh` writes come from sidereon-core at the
-revision `tests/CORE_REVISION` names. (`tests/spk_fixture.h` holds CSPICE
-reference states, not engine output, and no generator writes it.) The Rust
-generators (`fbgen`, `velgen`, `rinexgen`, `sppgen`, `pingen`, `rtkgen`, `valgen`) depend
-on sidereon-core from its git repository at that revision, with committed
-`Cargo.lock` files, and each generated file records the revision. `tests/run_generators.sh` runs
-sidereon-core's own fixture emitters, the Rust generators, the PPP expected
-block writer and the Python transcribers in order:
+Generated reference values use the published `sidereon-core =4.0.0` crate.
+Their source revision is recorded in `tests/CORE_REVISION` and agrees with the
+crate's source identity. CSPICE reference states are independent reference data.
 
-    ./tests/run_generators.sh
-    git diff --exit-code -- .
+## 4.0.0 API
 
-CI runs both commands on macOS; a committed golden the generators no longer
-reproduce fails the build. The propagation and SP3 goldens are read from the
-files sidereon-core's `SIDEREON_DUMP_FIXTURES` emitters write in the core
-checkout the generators resolve; the former `PY_FIXTURES` variable, which
-pointed the transcribers at another binding's fixture copies, is removed.
+| Area | Entry points and behavior |
+| --- | --- |
+| Coverage | `sidereon_coverage_grid_try_visible_mask`, `sidereon_coverage_grid_try_access_counts`; legacy helpers are deprecated. |
+| Quality | `sidereon_chi2_isf` accepts a survival probability directly. |
+| ARAIM | `sidereon_araim_satellite_ism_model_add_v3_0` selects the ADD v3.0 model. |
+| PPP RAIM | `sidereon_ppp_raim_protection_levels_with_weights` returns Brown fault protection; `sidereon_ppp_raim_fault_free_accuracy_bounds` returns fault-free bounds. |
+| PPP variance | Float and fixed solution `posterior_variance_factor_estimated` accessors distinguish residual estimates from a-priori scale. |
+| Receiver geometry | `sidereon_spp_solution_rtklib_single_clock_dop` returns shared-clock DOP. |
+| RTK arcs | Per-epoch masked-satellite, reference-satellite, and released-hold accessors; static arcs expose mask convergence. |
+| Fusion | Separate loose EKF, tight EKF, and UKF gate settings; inactive-kind, invalid, and conflicting settings return typed refusals. |
 
 The checked coverage helpers reject non-finite thresholds; the legacy grid helpers
 are deprecated. `sidereon_chi2_isf` takes a false-alarm tail probability directly.
@@ -1421,7 +1422,7 @@ of freedom, threshold, probability, and verdict appear in the update report.
 RTK arc epoch metadata and accessors report mask convergence, selected references,
 masked satellites, and released holds.
 
-This update changes the layouts of `SidereonSppValidationOptions`,
+Version 4.0.0 changes the layouts of `SidereonSppValidationOptions`,
 `SidereonSolutionValidationOptions`, `SidereonFusionFilterConfig`,
 `SidereonFusionUpdate`, and `SidereonRtkArcEpochMetadata`; applications must
 recompile against the matching generated header and library.
@@ -1430,7 +1431,7 @@ PPP RAIM FDE reports `SIDEREON_PPP_RAIM_FDE_STATUS_UNTESTED` when there is no
 redundancy. Structured PPP RAIM errors distinguish `unsupported_noncentrality`,
 `unsupported_dof` (with `dof` and `max`), and `numerical_protection_level`.
 ARAIM reports `unsupported_constellation` with its numeric `system`; solution
-validation reports `degenerate_geometry_gdop` with `gdop`. SPP and static
+validation reports `degenerate_geometry_gdop` with `gdop`; FDE also reports the configured `max_gdop` ceiling. SPP and static
 positioning report non-finite and non-positive pseudoranges using distinct
 rejection codes. RTK update errors retain `missing_ambiguity_column` and the
 `state.fixed_cycles` missing-input details in their structured error payloads.

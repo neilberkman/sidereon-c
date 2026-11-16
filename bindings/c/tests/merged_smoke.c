@@ -213,7 +213,7 @@ static void test_raim_fde(void) {
               test.testable == W3M_RAIM_TEST_TESTABLE &&
               test.fault_detected == W3M_RAIM_TEST_FAULT_DETECTED &&
               test.has_threshold == W3M_RAIM_TEST_HAS_THRESHOLD &&
-              f64_bits(test.threshold) == UINT64_C(0x4025a7b6c0cc8b76) &&
+              f64_bits(test.threshold) == W3M_RAIM_TEST_THRESHOLD &&
               f64_bits(test.weighted_sum_squares) == W3M_RAIM_TEST_WEIGHTED_SUM_SQUARES &&
               test.dof == W3M_RAIM_TEST_DOF,
           "range_fde global test passes on the protected set");
@@ -757,29 +757,16 @@ static void test_rtk_dual_arc_drivers(void) {
         /* Core 4.0 includes the reference wavelength c/(f1+f2) and zero offset. */
         check(sidereon_rtk_ionosphere_free_arc_solution_wavelengths_m(if_sol, wavelengths, 8,
               &written, &required) == SIDEREON_STATUS_OK && written == required &&
-              required == W3M_IF_WAVELENGTH_COUNT + 1, "ionosphere_free_rtk_arc wavelengths");
-        size_t target = 0;
-        for (size_t i = 0; i < written; i++) {
-            if (strcmp((const char *)wavelengths[i].id.bytes, (const char *)refs[0].reference_id.bytes) == 0)
-                check(fabs(wavelengths[i].value - 299792458.0 / (1575420000.0 + 1227600000.0)) < 1e-15, "reference narrow-lane wavelength");
-            else {
-                check(target < W3M_IF_WAVELENGTH_COUNT && f64_bits(wavelengths[i].value) == W3M_IF_WAVELENGTHS[target], "target wavelength");
-                target++;
-            }
-        }
+              required == W3M_IF_WAVELENGTH_COUNT, "ionosphere_free_rtk_arc wavelengths");
+        for (size_t i = 0; i < written; i++)
+            check(f64_bits(wavelengths[i].value) == W3M_IF_WAVELENGTHS[i], "narrow-lane wavelength");
         SidereonRtkMapValue offsets[8];
-        written = 0; required = 0; target = 0;
+        written = 0; required = 0;
         check(sidereon_rtk_ionosphere_free_arc_solution_offsets_m(if_sol, offsets, 8, &written,
-              &required) == SIDEREON_STATUS_OK && written == required && required == W3M_IF_OFFSET_COUNT + 1,
+              &required) == SIDEREON_STATUS_OK && written == required && required == W3M_IF_OFFSET_COUNT,
               "ionosphere_free_rtk_arc offsets");
-        for (size_t i = 0; i < written; i++) {
-            if (strcmp((const char *)offsets[i].id.bytes, (const char *)refs[0].reference_id.bytes) == 0)
-                check(offsets[i].value == 0.0, "reference offset");
-            else {
-                check(target < W3M_IF_OFFSET_COUNT && f64_bits(offsets[i].value) == W3M_IF_OFFSETS[target], "target offset");
-                target++;
-            }
-        }
+        for (size_t i = 0; i < written; i++)
+            check(f64_bits(offsets[i].value) == W3M_IF_OFFSETS[i], "narrow-lane offset");
 
         SidereonRtkArcEpochOutMetadata meta;
         check(sidereon_rtk_ionosphere_free_arc_solution_epoch_metadata(if_sol, 0, &meta) ==
