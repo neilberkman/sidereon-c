@@ -299,6 +299,34 @@ pub(crate) fn product_identity_value(identity: &ProductIdentity) -> Value {
 
 pub(crate) fn data_catalog_error_value(error: &DataCatalogError) -> Value {
     match error {
+        DataCatalogError::InvalidCelestrakGpSelector { selector, value } => catalog_node(
+            "invalid_celestrak_gp_selector",
+            serde_json::json!({"selector": selector, "value": value}),
+        ),
+        DataCatalogError::EmptyCelestrakGpResponse => {
+            catalog_node("empty_celestrak_gp_response", serde_json::json!({}))
+        }
+        DataCatalogError::CelestrakGpDataNotFound => {
+            catalog_node("celestrak_gp_data_not_found", serde_json::json!({}))
+        }
+        DataCatalogError::CelestrakGpNotModified {
+            query,
+            last_successful_download,
+        } => catalog_node(
+            "celestrak_gp_not_modified",
+            serde_json::json!({"query": query, "last_successful_download": last_successful_download}),
+        ),
+        DataCatalogError::CelestrakGpHtmlResponse => {
+            catalog_node("celestrak_gp_html_response", serde_json::json!({}))
+        }
+        DataCatalogError::InvalidCelestrakGpResponse {
+            reason,
+            line,
+            column,
+        } => catalog_node(
+            "invalid_celestrak_gp_response",
+            serde_json::json!({"reason": reason, "line": line, "column": column}),
+        ),
         DataCatalogError::UnknownCenter(center) => {
             catalog_node("unknown_center", serde_json::json!({ "center": center }))
         }
@@ -2517,6 +2545,1237 @@ pub unsafe extern "C" fn sidereon_exact_cache_free(cache: *mut SidereonExactCach
     free_boxed(cache);
 }
 
+/// CelesTrak GP output format selector.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SidereonCelestrakGpFormat {
+    /// Three-line TLE with an unprefixed name.
+    Tle = 0,
+    /// Three-line TLE with a prefixed name.
+    ThreeLine = 1,
+    /// Two-line TLE.
+    TwoLine = 2,
+    /// CCSDS XML.
+    Xml = 3,
+    /// CCSDS KVN.
+    Kvn = 4,
+    /// Compact JSON.
+    Json = 5,
+    /// Pretty JSON.
+    JsonPretty = 6,
+    /// CSV.
+    Csv = 7,
+}
+
+fn gp_format(value: u32) -> Result<core_data::CelestrakGpFormat, SidereonStatus> {
+    use core_data::CelestrakGpFormat as F;
+    match value {
+        value if value == SidereonCelestrakGpFormat::Tle as u32 => Ok(F::Tle),
+        value if value == SidereonCelestrakGpFormat::ThreeLine as u32 => Ok(F::ThreeLine),
+        value if value == SidereonCelestrakGpFormat::TwoLine as u32 => Ok(F::TwoLine),
+        value if value == SidereonCelestrakGpFormat::Xml as u32 => Ok(F::Xml),
+        value if value == SidereonCelestrakGpFormat::Kvn as u32 => Ok(F::Kvn),
+        value if value == SidereonCelestrakGpFormat::Json as u32 => Ok(F::Json),
+        value if value == SidereonCelestrakGpFormat::JsonPretty as u32 => Ok(F::JsonPretty),
+        value if value == SidereonCelestrakGpFormat::Csv as u32 => Ok(F::Csv),
+        _ => {
+            set_last_error(format!("invalid CelesTrak GP format: {value}"));
+            Err(SidereonStatus::InvalidArgument)
+        }
+    }
+}
+
+/// Copy the CelesTrak GP source entry as JSON, including protocol, host and URL.
+/// Output uses the variable-length byte buffer contract.
+///
+/// Safety: out points to out_len writable bytes or is NULL for zero; both count
+/// pointers point to writable size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_celestrak_gp_source_entry(
+    out: *mut u8,
+    out_len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_celestrak_gp_source_entry",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_celestrak_gp_source_entry",
+                out_written,
+                out_required
+            ));
+            let entry = core_data::celestrak_gp_source_entry();
+            let value = serde_json::json!({"protocol":entry.protocol.as_str(), "host":entry.host, "root_url":entry.root_url}).to_string();
+            c_try!(copy_prefix_to_c(
+                "sidereon_celestrak_gp_source_entry",
+                "out",
+                value.as_bytes(),
+                out,
+                out_len,
+                out_written,
+                out_required
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy the NAVCEN source entry as JSON, including protocol, host and URL.
+/// Output uses the variable-length byte buffer contract.
+///
+/// Safety: out points to out_len writable bytes or is NULL for zero; both count
+/// pointers point to writable size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_navcen_source_entry(
+    out: *mut u8,
+    out_len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_navcen_source_entry",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_navcen_source_entry",
+                out_written,
+                out_required
+            ));
+            let entry = core_data::navcen_source_entry();
+            let value = serde_json::json!({"protocol":entry.protocol.as_str(), "host":entry.host, "root_url":entry.root_url}).to_string();
+            c_try!(copy_prefix_to_c(
+                "sidereon_navcen_source_entry",
+                "out",
+                value.as_bytes(),
+                out,
+                out_len,
+                out_written,
+                out_required
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy NAVCEN's constellation URL as bytes using the variable-length contract.
+///
+/// Safety: out points to out_len writable bytes or is NULL for zero; both count
+/// pointers point to writable size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_navcen_constellation_url(
+    out: *mut u8,
+    out_len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_navcen_constellation_url",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_navcen_constellation_url",
+                out_written,
+                out_required
+            ));
+            c_try!(copy_prefix_to_c(
+                "sidereon_navcen_constellation_url",
+                "out",
+                core_data::navcen_constellation_url().as_bytes(),
+                out,
+                out_len,
+                out_written,
+                out_required
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Text selector for sidereon_celestrak_gp_url. Catalog numbers and special
+/// data sets use their dedicated URL functions.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SidereonCelestrakGpQueryKind {
+    /// Group name.
+    Group = 0,
+    /// International launch designator.
+    InternationalDesignator = 2,
+    /// Partial object name.
+    Name = 3,
+}
+
+/// CelesTrak GP special data set.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SidereonCelestrakGpSpecial {
+    /// GEO protected zone.
+    Gpz = 0,
+    /// Extended GEO protected zone.
+    GpzPlus = 1,
+    /// Potential decays.
+    Decaying = 2,
+}
+
+/// Build a CelesTrak GP URL for a group, international designator, or name.
+///
+/// Safety: value points to value_len readable bytes; out points to out_len
+/// writable bytes or is NULL for zero; count pointers are writable.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_celestrak_gp_url(
+    kind: u32,
+    value: *const u8,
+    value_len: usize,
+    format: u32,
+    out: *mut u8,
+    out_len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const NAME: &str = "sidereon_celestrak_gp_url";
+    engine_error_operation_boundary(NAME, SidereonStatus::Panic, || {
+        if !value.is_null() && value_len != 0 {
+            let input = c_try!(super::checked_output_range(
+                NAME,
+                value.cast_mut(),
+                value_len,
+                "value"
+            ));
+            if !out_written.is_null() {
+                let written = c_try!(super::checked_output_range(
+                    NAME,
+                    out_written,
+                    1,
+                    "out_written"
+                ));
+                c_try!(super::reject_overlapping_outputs(
+                    NAME,
+                    input,
+                    written,
+                    "value",
+                    "out_written"
+                ));
+            }
+            if !out_required.is_null() {
+                let required = c_try!(super::checked_output_range(
+                    NAME,
+                    out_required,
+                    1,
+                    "out_required"
+                ));
+                c_try!(super::reject_overlapping_outputs(
+                    NAME,
+                    input,
+                    required,
+                    "value",
+                    "out_required"
+                ));
+            }
+        }
+        c_try!(init_copy_counts(NAME, out_written, out_required));
+        let format = c_try!(gp_format(format));
+        let bytes = c_try!(require_slice(value, value_len, NAME, "value"));
+        let value = match std::str::from_utf8(bytes) {
+            Ok(value) => value,
+            Err(_) => {
+                set_last_error(format!("{NAME}: value is not valid UTF-8"));
+                return SidereonStatus::InvalidToken;
+            }
+        };
+        use core_data::CelestrakGpQuery as Q;
+        let query = match kind {
+            value_kind if value_kind == SidereonCelestrakGpQueryKind::Group as u32 => {
+                Q::Group(value)
+            }
+            value_kind
+                if value_kind == SidereonCelestrakGpQueryKind::InternationalDesignator as u32 =>
+            {
+                Q::InternationalDesignator(value)
+            }
+            value_kind if value_kind == SidereonCelestrakGpQueryKind::Name as u32 => Q::Name(value),
+            _ => {
+                set_last_error(format!("{NAME}: invalid text query kind {kind}"));
+                return SidereonStatus::InvalidArgument;
+            }
+        };
+        let url = match core_data::celestrak_gp_url(query, format) {
+            Ok(url) => url,
+            Err(error) => return map_catalog_error(NAME, error),
+        };
+        c_try!(copy_prefix_to_c(
+            NAME,
+            "out",
+            url.as_bytes(),
+            out,
+            out_len,
+            out_written,
+            out_required
+        ));
+        SidereonStatus::Ok
+    })
+}
+
+/// Build a CelesTrak GP URL for a catalog number.
+///
+/// Safety: out points to out_len writable bytes or is NULL for zero; count pointers are writable.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_celestrak_gp_catalog_number_url(
+    number: u64,
+    format: u32,
+    out: *mut u8,
+    out_len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const NAME: &str = "sidereon_celestrak_gp_catalog_number_url";
+    engine_error_operation_boundary(NAME, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(NAME, out_written, out_required));
+        let format = c_try!(gp_format(format));
+        let number = match u32::try_from(number) {
+            Ok(number) => number,
+            Err(_) => {
+                let Err(DataCatalogError::InvalidCelestrakGpSelector { selector, .. }) =
+                    core_data::celestrak_gp_url(
+                        core_data::CelestrakGpQuery::CatalogNumber(0),
+                        format,
+                    )
+                else {
+                    unreachable!("core accepted catalog number zero")
+                };
+                return map_catalog_error(
+                    NAME,
+                    DataCatalogError::InvalidCelestrakGpSelector {
+                        selector,
+                        value: number.to_string(),
+                    },
+                );
+            }
+        };
+        let url = match core_data::celestrak_gp_url(
+            core_data::CelestrakGpQuery::CatalogNumber(number),
+            format,
+        ) {
+            Ok(url) => url,
+            Err(error) => return map_catalog_error(NAME, error),
+        };
+        c_try!(copy_prefix_to_c(
+            NAME,
+            "out",
+            url.as_bytes(),
+            out,
+            out_len,
+            out_written,
+            out_required
+        ));
+        SidereonStatus::Ok
+    })
+}
+
+/// Build a CelesTrak GP URL for a special data set.
+///
+/// Safety: out points to out_len writable bytes or is NULL for zero; count pointers are writable.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_celestrak_gp_special_url(
+    special: u32,
+    format: u32,
+    out: *mut u8,
+    out_len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const NAME: &str = "sidereon_celestrak_gp_special_url";
+    engine_error_operation_boundary(NAME, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(NAME, out_written, out_required));
+        let format = c_try!(gp_format(format));
+        use core_data::CelestrakGpSpecial as S;
+        let special = match special {
+            value if value == SidereonCelestrakGpSpecial::Gpz as u32 => S::Gpz,
+            value if value == SidereonCelestrakGpSpecial::GpzPlus as u32 => S::GpzPlus,
+            value if value == SidereonCelestrakGpSpecial::Decaying as u32 => S::Decaying,
+            _ => {
+                return map_catalog_error(
+                    NAME,
+                    DataCatalogError::InvalidCelestrakGpSelector {
+                        selector: "SPECIAL",
+                        value: special.to_string(),
+                    },
+                );
+            }
+        };
+        let url = match core_data::celestrak_gp_url(
+            core_data::CelestrakGpQuery::Special(special),
+            format,
+        ) {
+            Ok(url) => url,
+            Err(error) => return map_catalog_error(NAME, error),
+        };
+        c_try!(copy_prefix_to_c(
+            NAME,
+            "out",
+            url.as_bytes(),
+            out,
+            out_len,
+            out_written,
+            out_required
+        ));
+        SidereonStatus::Ok
+    })
+}
+
+/// Parsed CelesTrak GP response, released with sidereon_celestrak_gp_response_free.
+pub struct SidereonCelestrakGpResponse {
+    inner: core_data::CelestrakGpResponse,
+}
+
+/// Parse a CelesTrak GP response in the selected format.
+///
+/// Safety: data points to len readable bytes and out points to writable handle storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_parse_celestrak_gp_response(
+    data: *const u8,
+    len: usize,
+    format: u32,
+    out: *mut *mut SidereonCelestrakGpResponse,
+) -> SidereonStatus {
+    const NAME: &str = "sidereon_parse_celestrak_gp_response";
+    engine_error_operation_boundary(NAME, SidereonStatus::Panic, || {
+        let out_range = c_try!(super::checked_output_range(NAME, out, 1, "out"));
+        if !data.is_null() && len != 0 {
+            let data_range = c_try!(super::checked_output_range(
+                NAME,
+                data.cast_mut(),
+                len,
+                "data"
+            ));
+            c_try!(super::reject_overlapping_outputs(
+                NAME, out_range, data_range, "out", "data"
+            ));
+        }
+        let out = c_try!(require_out(out, NAME, "out"));
+        *out = ptr::null_mut();
+        let data = c_try!(require_slice(data, len, NAME, "data"));
+        let format = c_try!(gp_format(format));
+        match core_data::parse_celestrak_gp_response(data, format) {
+            Ok(inner) => {
+                write_boxed_handle(out, SidereonCelestrakGpResponse { inner });
+                SidereonStatus::Ok
+            }
+            Err(error) => map_catalog_error(NAME, error),
+        }
+    })
+}
+
+/// Free a parsed CelesTrak GP response. NULL is accepted.
+///
+/// Safety: response is NULL or a handle returned by the GP parser, freed once.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_celestrak_gp_response_free(
+    response: *mut SidereonCelestrakGpResponse,
+) {
+    ffi_boundary("sidereon_celestrak_gp_response_free", (), || {
+        free_boxed(response);
+    });
+}
+
+/// Return accepted and rejected record counts.
+///
+/// Safety: response is live and both outputs point to distinct writable size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_celestrak_gp_response_counts(
+    response: *const SidereonCelestrakGpResponse,
+    records: *mut usize,
+    rejected: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_celestrak_gp_response_counts",
+        SidereonStatus::Panic,
+        || {
+            let records_range = c_try!(super::checked_output_range(
+                "sidereon_celestrak_gp_response_counts",
+                records,
+                1,
+                "records"
+            ));
+            let rejected_range = c_try!(super::checked_output_range(
+                "sidereon_celestrak_gp_response_counts",
+                rejected,
+                1,
+                "rejected"
+            ));
+            c_try!(super::reject_overlapping_outputs(
+                "sidereon_celestrak_gp_response_counts",
+                records_range,
+                rejected_range,
+                "records",
+                "rejected"
+            ));
+            let records = c_try!(require_out(
+                records,
+                "sidereon_celestrak_gp_response_counts",
+                "records"
+            ));
+            let rejected = c_try!(require_out(
+                rejected,
+                "sidereon_celestrak_gp_response_counts",
+                "rejected"
+            ));
+            c_try!(super::reject_output_overlaps_handle(
+                "sidereon_celestrak_gp_response_counts",
+                records,
+                "records",
+                response,
+                "response"
+            ));
+            c_try!(super::reject_output_overlaps_handle(
+                "sidereon_celestrak_gp_response_counts",
+                rejected,
+                "rejected",
+                response,
+                "response"
+            ));
+            let response = c_try!(require_ref(
+                response,
+                "sidereon_celestrak_gp_response_counts",
+                "response"
+            ));
+            *records = response.inner.records.len();
+            *rejected = response.inner.rejected.len();
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Compare parsed GP responses by core value.
+///
+/// Safety: both responses are live and out points to writable bool storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_celestrak_gp_response_equal(
+    left: *const SidereonCelestrakGpResponse,
+    right: *const SidereonCelestrakGpResponse,
+    out: *mut bool,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_celestrak_gp_response_equal",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(
+                out,
+                "sidereon_celestrak_gp_response_equal",
+                "out"
+            ));
+            c_try!(super::reject_output_overlaps_handle(
+                "sidereon_celestrak_gp_response_equal",
+                out,
+                "out",
+                left,
+                "left"
+            ));
+            c_try!(super::reject_output_overlaps_handle(
+                "sidereon_celestrak_gp_response_equal",
+                out,
+                "out",
+                right,
+                "right"
+            ));
+            let left = c_try!(require_ref(
+                left,
+                "sidereon_celestrak_gp_response_equal",
+                "left"
+            ));
+            let right = c_try!(require_ref(
+                right,
+                "sidereon_celestrak_gp_response_equal",
+                "right"
+            ));
+            *out = left.inner == right.inner;
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy the exact source bytes of an accepted or rejected GP record. Set
+/// rejected to select the rejected-record list. Output is not null-terminated.
+///
+/// Safety: response is live; output points to out_len writable bytes or NULL for
+/// zero; count pointers point to writable size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_celestrak_gp_response_raw(
+    response: *const SidereonCelestrakGpResponse,
+    rejected: bool,
+    index: usize,
+    out: *mut u8,
+    out_len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const NAME: &str = "sidereon_celestrak_gp_response_raw";
+    ffi_boundary(NAME, SidereonStatus::Panic, || {
+        c_try!(super::reject_outputs_overlapping_handle(
+            NAME,
+            &[
+                (out.cast(), 1, out_len, "out"),
+                (
+                    out_written.cast(),
+                    std::mem::size_of::<usize>(),
+                    1,
+                    "out_written"
+                ),
+                (
+                    out_required.cast(),
+                    std::mem::size_of::<usize>(),
+                    1,
+                    "out_required"
+                )
+            ],
+            response,
+            "response"
+        ));
+        c_try!(init_copy_counts(NAME, out_written, out_required));
+        let response = c_try!(require_ref(response, NAME, "response"));
+        let raw = if rejected {
+            response.inner.rejected.get(index).map(|r| &r.raw)
+        } else {
+            response.inner.records.get(index).map(|r| &r.raw)
+        };
+        let Some(raw) = raw else {
+            set_last_error(format!("{NAME}: record index {index} out of range"));
+            return SidereonStatus::InvalidArgument;
+        };
+        c_try!(copy_prefix_to_c(
+            NAME,
+            "out",
+            raw.as_bytes(),
+            out,
+            out_len,
+            out_written,
+            out_required
+        ));
+        SidereonStatus::Ok
+    })
+}
+
+/// Convert an accepted GP record to a newly owned OMM.
+///
+/// Safety: response is live and out points to writable handle storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_celestrak_gp_record_to_omm(
+    response: *const SidereonCelestrakGpResponse,
+    index: usize,
+    out: *mut *mut crate::omm::SidereonOmm,
+) -> SidereonStatus {
+    const NAME: &str = "sidereon_celestrak_gp_record_to_omm";
+    engine_error_operation_boundary(NAME, SidereonStatus::Panic, || {
+        c_try!(super::reject_output_overlaps_handle(
+            NAME, out, "out", response, "response"
+        ));
+        let out = c_try!(require_out(out, NAME, "out"));
+        *out = ptr::null_mut();
+        let response = c_try!(require_ref(response, NAME, "response"));
+        let Some(record) = response.inner.records.get(index) else {
+            set_last_error(format!("{NAME}: record index {index} out of range"));
+            return SidereonStatus::InvalidArgument;
+        };
+        match record.to_omm() {
+            Ok(inner) => {
+                write_boxed_handle(out, crate::omm::SidereonOmm { inner });
+                SidereonStatus::Ok
+            }
+            Err(error) => {
+                use core_data::CelestrakGpRecordError as E;
+                let (kind, cause) = match &error {
+                    E::Tle(e) => ("tle", crate::engine_error::tle_error_value(e)),
+                    E::Omm(e) => ("omm", crate::engine_error::omm_error_value(e)),
+                };
+                record_engine_error(
+                    SidereonEngineErrorFamily::Catalog,
+                    NAME,
+                    serde_json::json!({"kind": kind, "fields": {"cause": cause}}),
+                );
+                set_last_error(format!("{NAME}: {error:?}"));
+                SidereonStatus::InvalidArgument
+            }
+        }
+    })
+}
+
+/// Copy GP record metadata as JSON. Rejections include a typed reason and its
+/// complete fields; accepted records include their native payload kind.
+///
+/// Safety: response is live; out points to out_len writable bytes or NULL for
+/// zero; count pointers point to writable size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_celestrak_gp_response_record_json(
+    response: *const SidereonCelestrakGpResponse,
+    rejected: bool,
+    index: usize,
+    out: *mut u8,
+    out_len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const NAME: &str = "sidereon_celestrak_gp_response_record_json";
+    ffi_boundary(NAME, SidereonStatus::Panic, || {
+        c_try!(super::reject_outputs_overlapping_handle(
+            NAME,
+            &[
+                (out.cast(), 1, out_len, "out"),
+                (
+                    out_written.cast(),
+                    std::mem::size_of::<usize>(),
+                    1,
+                    "out_written"
+                ),
+                (
+                    out_required.cast(),
+                    std::mem::size_of::<usize>(),
+                    1,
+                    "out_required"
+                )
+            ],
+            response,
+            "response"
+        ));
+        c_try!(init_copy_counts(NAME, out_written, out_required));
+        let response = c_try!(require_ref(response, NAME, "response"));
+        let value = if rejected {
+            let Some(r) = response.inner.rejected.get(index) else {
+                set_last_error(format!("{NAME}: record index {index} out of range"));
+                return SidereonStatus::InvalidArgument;
+            };
+            use core_data::{CelestrakGpRejectionReason as R, CelestrakGpStructuralError as S};
+            let reason = match &r.reason {
+                R::Tle(e) => {
+                    serde_json::json!({"kind":"tle", "cause":crate::engine_error::tle_error_value(e)})
+                }
+                R::Omm(e) => {
+                    serde_json::json!({"kind":"omm", "cause":crate::engine_error::omm_error_value(e)})
+                }
+                R::Structural(e) => match e {
+                    S::UnexpectedContent => serde_json::json!({"kind":"unexpected_content"}),
+                    S::IncompleteRecord => serde_json::json!({"kind":"incomplete_record"}),
+                    S::InvalidTleStructure => serde_json::json!({"kind":"invalid_tle_structure"}),
+                    S::InvalidElementSet(e) => {
+                        serde_json::json!({"kind":"invalid_element_set", "cause":crate::tle::sgp4_error_value(e)})
+                    }
+                },
+            };
+            serde_json::json!({"record_index":r.record_index, "line_number":r.line_number, "reason":reason})
+        } else {
+            let Some(r) = response.inner.records.get(index) else {
+                set_last_error(format!("{NAME}: record index {index} out of range"));
+                return SidereonStatus::InvalidArgument;
+            };
+            let payload = match &r.payload {
+                core_data::CelestrakGpPayload::Tle(t) => {
+                    use sidereon_core::astro::tle::ChecksumWarningKind as K;
+                    let warnings: Vec<_> = t.checksum_warnings.iter().map(|w| {
+                        let kind = match w.kind { K::Mismatch { expected } => serde_json::json!({"kind":"mismatch", "expected": expected}), K::NotDigit { found } => serde_json::json!({"kind":"not_digit", "found":found.to_string()}), K::Missing => serde_json::json!({"kind":"missing"}) };
+                        serde_json::json!({"line_label":w.line_label, "computed":w.computed, "detail":kind})
+                    }).collect();
+                    serde_json::json!({"kind":"tle", "line1":t.line1, "line2":t.line2, "mean_motion_double_dot_text":t.elements.mean_motion_double_dot_text, "bstar_text":t.elements.bstar_text, "checksum_warnings":warnings})
+                }
+                core_data::CelestrakGpPayload::Omm(_) => serde_json::json!({"kind":"omm"}),
+            };
+            serde_json::json!({"record_index":r.record_index, "line_number":r.line_number, "object_name":r.object_name, "payload":payload})
+        };
+        let bytes = value.to_string();
+        c_try!(copy_prefix_to_c(
+            NAME,
+            "out",
+            bytes.as_bytes(),
+            out,
+            out_len,
+            out_written,
+            out_required
+        ));
+        SidereonStatus::Ok
+    })
+}
+
+/// Copy the native TLE payload into a newly owned TLE handle. OMM records are
+/// refused; use sidereon_celestrak_gp_record_to_omm for either payload kind.
+/// opsmode and policy use SidereonTleOpsMode and SidereonTlePolicy values.
+///
+/// Safety: response is live and out points to writable handle storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_celestrak_gp_record_tle(
+    response: *const SidereonCelestrakGpResponse,
+    index: usize,
+    opsmode: u32,
+    policy: u32,
+    out: *mut *mut crate::tle::SidereonTle,
+) -> SidereonStatus {
+    const NAME: &str = "sidereon_celestrak_gp_record_tle";
+    ffi_boundary(NAME, SidereonStatus::Panic, || {
+        c_try!(super::reject_output_overlaps_handle(
+            NAME, out, "out", response, "response"
+        ));
+        let out = c_try!(require_out(out, NAME, "out"));
+        *out = ptr::null_mut();
+        let response = c_try!(require_ref(response, NAME, "response"));
+        let Some(record) = response.inner.records.get(index) else {
+            set_last_error(format!("{NAME}: record index {index} out of range"));
+            return SidereonStatus::InvalidArgument;
+        };
+        let core_data::CelestrakGpPayload::Tle(record) = &record.payload else {
+            set_last_error(format!("{NAME}: payload is not TLE"));
+            return SidereonStatus::InvalidArgument;
+        };
+        let mode = c_try!(super::tle_ops_mode_from_c(NAME, opsmode));
+        let policy = c_try!(crate::tle::tle_policy_from_c(NAME, policy));
+        let parsed = match sidereon_core::astro::tle::parse_with_policy(
+            &record.line1,
+            &record.line2,
+            policy,
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                record_engine_error(
+                    SidereonEngineErrorFamily::Catalog,
+                    NAME,
+                    serde_json::json!({"kind":"tle", "fields":{"cause":crate::engine_error::tle_error_value(&error)}}),
+                );
+                set_last_error(format!("{NAME}: {error}"));
+                return SidereonStatus::InvalidArgument;
+            }
+        };
+        let satellite = match sidereon_core::astro::sgp4::Satellite::from_tle_with_policy(
+            &record.line1,
+            &record.line2,
+            mode,
+            policy,
+        ) {
+            Ok((value, _)) => value,
+            Err(error) => return crate::tle::map_sgp4_error(NAME, error),
+        };
+        write_boxed_handle(
+            out,
+            crate::tle::SidereonTle {
+                elements: parsed.elements,
+                satellite,
+                checksum_warnings: parsed.checksum_warnings,
+            },
+        );
+        SidereonStatus::Ok
+    })
+}
+
+/// Copy the CelesTrak group for a GNSS constellation as bytes.
+///
+/// Safety: out points to out_len writable bytes or is NULL for zero; count
+/// pointers point to writable size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_celestrak_group(
+    system: u32,
+    out: *mut u8,
+    out_len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const NAME: &str = "sidereon_celestrak_group";
+    ffi_boundary(NAME, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(NAME, out_written, out_required));
+        let system = c_try!(super::gnss_system_from_c_code(NAME, "system", system));
+        let group = sidereon_core::constellation::celestrak_group(system);
+        c_try!(copy_prefix_to_c(
+            NAME,
+            "out",
+            group.as_bytes(),
+            out,
+            out_len,
+            out_written,
+            out_required
+        ));
+        SidereonStatus::Ok
+    })
+}
+
+/// Build the CelesTrak GP URL for a GNSS constellation and format.
+///
+/// Safety: out points to out_len writable bytes or is NULL for zero; count
+/// pointers point to writable size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_celestrak_constellation_url(
+    system: u32,
+    format: u32,
+    out: *mut u8,
+    out_len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const NAME: &str = "sidereon_celestrak_constellation_url";
+    engine_error_operation_boundary(NAME, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(NAME, out_written, out_required));
+        let system = c_try!(super::gnss_system_from_c_code(NAME, "system", system));
+        let format = c_try!(gp_format(format));
+        let url = match core_data::celestrak_constellation_url(system, format) {
+            Ok(value) => value,
+            Err(error) => return map_catalog_error(NAME, error),
+        };
+        c_try!(copy_prefix_to_c(
+            NAME,
+            "out",
+            url.as_bytes(),
+            out,
+            out_len,
+            out_written,
+            out_required
+        ));
+        SidereonStatus::Ok
+    })
+}
+
+/// Convert an accepted GP record directly to SGP4 elements.
+///
+/// Safety: response is live and out points to writable element-set storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_celestrak_gp_record_to_element_set(
+    response: *const SidereonCelestrakGpResponse,
+    index: usize,
+    out: *mut crate::omm::SidereonOmmElementSet,
+) -> SidereonStatus {
+    const NAME: &str = "sidereon_celestrak_gp_record_to_element_set";
+    engine_error_operation_boundary(NAME, SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out, NAME, "out"));
+        c_try!(super::reject_output_overlaps_handle(
+            NAME, out, "out", response, "response"
+        ));
+        let response = c_try!(require_ref(response, NAME, "response"));
+        let Some(record) = response.inner.records.get(index) else {
+            set_last_error(format!("{NAME}: record index {index} out of range"));
+            return SidereonStatus::InvalidArgument;
+        };
+        match record.to_element_set() {
+            Ok(elements) => {
+                *out = crate::omm::omm_element_set_to_c(&elements);
+                SidereonStatus::Ok
+            }
+            Err(error) => {
+                use core_data::CelestrakGpRecordError as E;
+                let (kind, cause) = match &error {
+                    E::Tle(e) => ("tle", crate::engine_error::tle_error_value(e)),
+                    E::Omm(e) => ("omm", crate::engine_error::omm_error_value(e)),
+                };
+                record_engine_error(
+                    SidereonEngineErrorFamily::Catalog,
+                    NAME,
+                    serde_json::json!({"kind":kind,"fields":{"cause":cause}}),
+                );
+                set_last_error(format!("{NAME}: {error:?}"));
+                SidereonStatus::InvalidArgument
+            }
+        }
+    })
+}
+
+/// Copy the catalog's allow-listed hosts as a JSON array of strings.
+///
+/// Safety: out points to out_len writable bytes or is NULL for zero; count
+/// pointers point to writable size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_data_allowed_hosts(
+    out: *mut u8,
+    out_len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const NAME: &str = "sidereon_data_allowed_hosts";
+    ffi_boundary(NAME, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(NAME, out_written, out_required));
+        let json = match serde_json::to_vec(core_data::allowed_hosts()) {
+            Ok(value) => value,
+            Err(error) => return map_generic_error(NAME, error),
+        };
+        c_try!(copy_prefix_to_c(
+            NAME,
+            "out",
+            &json,
+            out,
+            out_len,
+            out_written,
+            out_required
+        ));
+        SidereonStatus::Ok
+    })
+}
+
+/// Copy the exact wire value of a CelesTrak GP format selector.
+///
+/// Safety: out points to out_len writable bytes or is NULL for zero; count
+/// pointers point to writable size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_celestrak_gp_format_as_str(
+    format: u32,
+    out: *mut u8,
+    out_len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const NAME: &str = "sidereon_celestrak_gp_format_as_str";
+    ffi_boundary(NAME, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(NAME, out_written, out_required));
+        let format = c_try!(gp_format(format));
+        c_try!(copy_prefix_to_c(
+            NAME,
+            "out",
+            format.as_str().as_bytes(),
+            out,
+            out_len,
+            out_written,
+            out_required
+        ));
+        SidereonStatus::Ok
+    })
+}
+
+/// Copy the exact wire value of a CelesTrak GP special selector.
+///
+/// Safety: out points to out_len writable bytes or is NULL for zero; count
+/// pointers point to writable size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_celestrak_gp_special_as_str(
+    special: u32,
+    out: *mut u8,
+    out_len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const NAME: &str = "sidereon_celestrak_gp_special_as_str";
+    engine_error_operation_boundary(NAME, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(NAME, out_written, out_required));
+        use core_data::CelestrakGpSpecial as S;
+        let special = match special {
+            value if value == SidereonCelestrakGpSpecial::Gpz as u32 => S::Gpz,
+            value if value == SidereonCelestrakGpSpecial::GpzPlus as u32 => S::GpzPlus,
+            value if value == SidereonCelestrakGpSpecial::Decaying as u32 => S::Decaying,
+            _ => {
+                return map_catalog_error(
+                    NAME,
+                    DataCatalogError::InvalidCelestrakGpSelector {
+                        selector: "SPECIAL",
+                        value: special.to_string(),
+                    },
+                );
+            }
+        };
+        c_try!(copy_prefix_to_c(
+            NAME,
+            "out",
+            special.as_str().as_bytes(),
+            out,
+            out_len,
+            out_written,
+            out_required
+        ));
+        SidereonStatus::Ok
+    })
+}
+
+/// Compare accepted or rejected GP records by core value.
+///
+/// Safety: both responses are live and out points to writable bool storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_celestrak_gp_record_equal(
+    left: *const SidereonCelestrakGpResponse,
+    right: *const SidereonCelestrakGpResponse,
+    rejected: bool,
+    left_index: usize,
+    right_index: usize,
+    out: *mut bool,
+) -> SidereonStatus {
+    const NAME: &str = "sidereon_celestrak_gp_record_equal";
+    ffi_boundary(NAME, SidereonStatus::Panic, || {
+        c_try!(super::reject_output_overlaps_handle(
+            NAME, out, "out", left, "left"
+        ));
+        c_try!(super::reject_output_overlaps_handle(
+            NAME, out, "out", right, "right"
+        ));
+        let out = c_try!(require_out(out, NAME, "out"));
+        let left = c_try!(require_ref(left, NAME, "left"));
+        let right = c_try!(require_ref(right, NAME, "right"));
+        let equal = if rejected {
+            left.inner
+                .rejected
+                .get(left_index)
+                .zip(right.inner.rejected.get(right_index))
+                .map(|(a, b)| a == b)
+        } else {
+            left.inner
+                .records
+                .get(left_index)
+                .zip(right.inner.records.get(right_index))
+                .map(|(a, b)| a == b)
+        };
+        let Some(equal) = equal else {
+            set_last_error(format!("{NAME}: record index out of range"));
+            return SidereonStatus::InvalidArgument;
+        };
+        *out = equal;
+        SidereonStatus::Ok
+    })
+}
+
+/// Compare native GP payloads using core value equality.
+///
+/// Safety: both responses are live and out points to writable bool storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_celestrak_gp_payload_equal(
+    left: *const SidereonCelestrakGpResponse,
+    right: *const SidereonCelestrakGpResponse,
+    left_index: usize,
+    right_index: usize,
+    out: *mut bool,
+) -> SidereonStatus {
+    const NAME: &str = "sidereon_celestrak_gp_payload_equal";
+    ffi_boundary(NAME, SidereonStatus::Panic, || {
+        c_try!(super::reject_output_overlaps_handle(
+            NAME, out, "out", left, "left"
+        ));
+        c_try!(super::reject_output_overlaps_handle(
+            NAME, out, "out", right, "right"
+        ));
+        let out = c_try!(require_out(out, NAME, "out"));
+        let left = c_try!(require_ref(left, NAME, "left"));
+        let right = c_try!(require_ref(right, NAME, "right"));
+        let Some((left, right)) = left
+            .inner
+            .records
+            .get(left_index)
+            .zip(right.inner.records.get(right_index))
+        else {
+            set_last_error(format!("{NAME}: record index out of range"));
+            return SidereonStatus::InvalidArgument;
+        };
+        *out = left.payload == right.payload;
+        SidereonStatus::Ok
+    })
+}
+
+/// Compare native TLE records using core value equality. Both payloads must be TLE.
+///
+/// Safety: both responses are live and out points to writable bool storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_celestrak_tle_record_equal(
+    left: *const SidereonCelestrakGpResponse,
+    right: *const SidereonCelestrakGpResponse,
+    left_index: usize,
+    right_index: usize,
+    out: *mut bool,
+) -> SidereonStatus {
+    const NAME: &str = "sidereon_celestrak_tle_record_equal";
+    ffi_boundary(NAME, SidereonStatus::Panic, || {
+        c_try!(super::reject_output_overlaps_handle(
+            NAME, out, "out", left, "left"
+        ));
+        c_try!(super::reject_output_overlaps_handle(
+            NAME, out, "out", right, "right"
+        ));
+        let out = c_try!(require_out(out, NAME, "out"));
+        let left = c_try!(require_ref(left, NAME, "left"));
+        let right = c_try!(require_ref(right, NAME, "right"));
+        let Some((left, right)) = left
+            .inner
+            .records
+            .get(left_index)
+            .zip(right.inner.records.get(right_index))
+        else {
+            set_last_error(format!("{NAME}: record index out of range"));
+            return SidereonStatus::InvalidArgument;
+        };
+        let (core_data::CelestrakGpPayload::Tle(left), core_data::CelestrakGpPayload::Tle(right)) =
+            (&left.payload, &right.payload)
+        else {
+            set_last_error(format!("{NAME}: payload is not TLE"));
+            return SidereonStatus::InvalidArgument;
+        };
+        *out = left == right;
+        SidereonStatus::Ok
+    })
+}
+
+/// Compare rejection reasons using core value equality.
+///
+/// Safety: both responses are live and out points to writable bool storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_celestrak_gp_rejection_reason_equal(
+    left: *const SidereonCelestrakGpResponse,
+    right: *const SidereonCelestrakGpResponse,
+    left_index: usize,
+    right_index: usize,
+    out: *mut bool,
+) -> SidereonStatus {
+    const NAME: &str = "sidereon_celestrak_gp_rejection_reason_equal";
+    ffi_boundary(NAME, SidereonStatus::Panic, || {
+        c_try!(super::reject_output_overlaps_handle(
+            NAME, out, "out", left, "left"
+        ));
+        c_try!(super::reject_output_overlaps_handle(
+            NAME, out, "out", right, "right"
+        ));
+        let out = c_try!(require_out(out, NAME, "out"));
+        let left = c_try!(require_ref(left, NAME, "left"));
+        let right = c_try!(require_ref(right, NAME, "right"));
+        let Some((left, right)) = left
+            .inner
+            .rejected
+            .get(left_index)
+            .zip(right.inner.rejected.get(right_index))
+        else {
+            set_last_error(format!("{NAME}: record index out of range"));
+            return SidereonStatus::InvalidArgument;
+        };
+        *out = left.reason == right.reason;
+        SidereonStatus::Ok
+    })
+}
+
+/// Compare structural rejection errors using core value equality. Both reasons
+/// must be structural rejections.
+///
+/// Safety: both responses are live and out points to writable bool storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_celestrak_gp_structural_error_equal(
+    left: *const SidereonCelestrakGpResponse,
+    right: *const SidereonCelestrakGpResponse,
+    left_index: usize,
+    right_index: usize,
+    out: *mut bool,
+) -> SidereonStatus {
+    const NAME: &str = "sidereon_celestrak_gp_structural_error_equal";
+    ffi_boundary(NAME, SidereonStatus::Panic, || {
+        c_try!(super::reject_output_overlaps_handle(
+            NAME, out, "out", left, "left"
+        ));
+        c_try!(super::reject_output_overlaps_handle(
+            NAME, out, "out", right, "right"
+        ));
+        let out = c_try!(require_out(out, NAME, "out"));
+        let left = c_try!(require_ref(left, NAME, "left"));
+        let right = c_try!(require_ref(right, NAME, "right"));
+        let Some((left, right)) = left
+            .inner
+            .rejected
+            .get(left_index)
+            .zip(right.inner.rejected.get(right_index))
+        else {
+            set_last_error(format!("{NAME}: record index out of range"));
+            return SidereonStatus::InvalidArgument;
+        };
+        let (
+            core_data::CelestrakGpRejectionReason::Structural(left),
+            core_data::CelestrakGpRejectionReason::Structural(right),
+        ) = (&left.reason, &right.reason)
+        else {
+            set_last_error(format!("{NAME}: reason is not structural"));
+            return SidereonStatus::InvalidArgument;
+        };
+        *out = left == right;
+        SidereonStatus::Ok
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -4538,5 +5797,1273 @@ mod tests {
 
         let _ = fs::remove_dir_all(root);
         clear_engine_error();
+    }
+}
+
+#[cfg(test)]
+mod celestrak_error_tests {
+    use super::*;
+
+    #[test]
+    fn catalog_errors_retain_gp_details() {
+        let value = data_catalog_error_value(&DataCatalogError::InvalidCelestrakGpSelector {
+            selector: "GROUP",
+            value: "bad group".into(),
+        });
+        assert_eq!(value["kind"], "invalid_celestrak_gp_selector");
+        assert_eq!(value["fields"]["selector"], "GROUP");
+        assert_eq!(value["fields"]["value"], "bad group");
+    }
+}
+
+#[cfg(test)]
+mod gp_api_tests {
+    use super::*;
+
+    #[test]
+    fn source_and_url_literals() {
+        let mut bytes = [0u8; 256];
+        let (mut written, mut required) = (0, 0);
+        assert_eq!(
+            unsafe {
+                sidereon_navcen_constellation_url(
+                    bytes.as_mut_ptr(),
+                    bytes.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(
+            &bytes[..written],
+            b"https://www.navcen.uscg.gov/gps-constellation"
+        );
+        let group = b"active";
+        assert_eq!(
+            unsafe {
+                sidereon_celestrak_gp_url(
+                    0,
+                    group.as_ptr(),
+                    group.len(),
+                    5,
+                    bytes.as_mut_ptr(),
+                    bytes.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(
+            &bytes[..written],
+            b"https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FORMAT=JSON"
+        );
+        assert_eq!(
+            unsafe {
+                sidereon_celestrak_gp_catalog_number_url(
+                    u64::MAX,
+                    5,
+                    bytes.as_mut_ptr(),
+                    bytes.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+        let (_, payload) = crate::engine_error::snapshot_engine_error_for_test().unwrap();
+        let payload: Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(payload["error"]["kind"], "invalid_celestrak_gp_selector");
+        assert_eq!(payload["error"]["fields"]["selector"], "CATNR");
+        assert_eq!(payload["error"]["fields"]["value"], "18446744073709551615");
+    }
+
+    #[test]
+    fn response_preserves_raw_record() {
+        let source = b"ISS (ZARYA)\r\n1 25544U 98067A   26095.55331950  .00008543  00000+0  16420-3 0  9998\r\n2 25544  51.6328 299.5432 0006351 274.8255  85.2008 15.48786980560492\r\n";
+        let mut response = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_parse_celestrak_gp_response(
+                    source.as_ptr(),
+                    source.len(),
+                    0,
+                    &mut response,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        let (mut records, mut rejected) = (0, 0);
+        assert_eq!(
+            unsafe { sidereon_celestrak_gp_response_counts(response, &mut records, &mut rejected) },
+            SidereonStatus::Ok
+        );
+        assert_eq!((records, rejected), (1, 0));
+        let mut bytes = vec![0; source.len()];
+        let (mut written, mut required) = (0, 0);
+        assert_eq!(
+            unsafe {
+                sidereon_celestrak_gp_response_raw(
+                    response,
+                    false,
+                    0,
+                    bytes.as_mut_ptr(),
+                    bytes.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(&bytes[..written], source);
+        let mut equal = false;
+        assert_eq!(
+            unsafe {
+                sidereon_celestrak_gp_record_equal(response, response, false, 0, 0, &mut equal)
+            },
+            SidereonStatus::Ok
+        );
+        assert!(equal);
+        let other_source = String::from_utf8(source.to_vec())
+            .unwrap()
+            .replace("ISS (ZARYA)", "ISS (OTHER)");
+        let mut other = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_parse_celestrak_gp_response(
+                    other_source.as_ptr(),
+                    other_source.len(),
+                    0,
+                    &mut other,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(
+            unsafe { sidereon_celestrak_gp_record_equal(response, other, false, 0, 0, &mut equal) },
+            SidereonStatus::Ok
+        );
+        assert!(!equal);
+        unsafe { sidereon_celestrak_gp_response_free(other) };
+        unsafe { sidereon_celestrak_gp_response_free(response) };
+    }
+}
+
+#[cfg(test)]
+mod gp_format_tests {
+    use super::*;
+
+    #[test]
+    fn every_format_uses_its_wire_value() {
+        let formats = [
+            "TLE",
+            "3LE",
+            "2LE",
+            "XML",
+            "KVN",
+            "JSON",
+            "JSON-PRETTY",
+            "CSV",
+        ];
+        for (format, expected) in formats.iter().enumerate() {
+            let mut buffer = [0; 32];
+            let (mut written, mut required) = (0, 0);
+            assert_eq!(
+                unsafe {
+                    sidereon_celestrak_gp_format_as_str(
+                        format as u32,
+                        buffer.as_mut_ptr(),
+                        buffer.len(),
+                        &mut written,
+                        &mut required,
+                    )
+                },
+                SidereonStatus::Ok
+            );
+            assert_eq!(&buffer[..written], expected.as_bytes());
+        }
+        assert_eq!(
+            unsafe { sidereon_celestrak_gp_format_as_str(8, ptr::null_mut(), 0, &mut 0, &mut 0) },
+            SidereonStatus::InvalidArgument
+        );
+    }
+}
+
+#[cfg(test)]
+mod gp_parser_format_tests {
+    use super::*;
+
+    #[test]
+    fn all_formats_accept_independent_examples() {
+        let line1 = "1 25544U 98067A   26095.55331950  .00008543  00000+0  16420-3 0  9998";
+        let line2 = "2 25544  51.6328 299.5432 0006351 274.8255  85.2008 15.48786980560492";
+        let tle = format!("ISS\n{line1}\n{line2}\n");
+        let three = format!("0 ISS\n{line1}\n{line2}\n");
+        let two = format!("{line1}\n{line2}\n");
+        let xml = include_str!("../tests/fixtures/omm/24876.xml");
+        let kvn = include_str!("../tests/fixtures/omm/24876.kvn");
+        let json = include_str!("../tests/fixtures/omm/25544.json");
+        let pretty = include_str!("../tests/fixtures/omm/25544_pretty.json");
+        let csv = "OBJECT_NAME,EPOCH,MEAN_MOTION,ECCENTRICITY,INCLINATION,RA_OF_ASC_NODE,ARG_OF_PERICENTER,MEAN_ANOMALY,BSTAR\nISS,2026-01-01T00:00:00,1,0,0,0,0,0,0";
+        for (format, source) in [
+            (0, tle.as_str()),
+            (1, three.as_str()),
+            (2, two.as_str()),
+            (3, xml),
+            (4, kvn),
+            (5, json),
+            (6, pretty),
+            (7, csv),
+        ] {
+            let mut response = ptr::null_mut();
+            assert_eq!(
+                unsafe {
+                    sidereon_parse_celestrak_gp_response(
+                        source.as_ptr(),
+                        source.len(),
+                        format,
+                        &mut response,
+                    )
+                },
+                SidereonStatus::Ok,
+                "format {format}"
+            );
+            let (mut accepted, mut rejected) = (0, 0);
+            assert_eq!(
+                unsafe {
+                    sidereon_celestrak_gp_response_counts(response, &mut accepted, &mut rejected)
+                },
+                SidereonStatus::Ok
+            );
+            assert_eq!((accepted, rejected), (1, 0), "format {format}");
+            let expected = source;
+            let mut raw = vec![0; source.len()];
+            let (mut written, mut required) = (0, 0);
+            assert_eq!(
+                unsafe {
+                    sidereon_celestrak_gp_response_raw(
+                        response,
+                        false,
+                        0,
+                        raw.as_mut_ptr(),
+                        raw.len(),
+                        &mut written,
+                        &mut required,
+                    )
+                },
+                SidereonStatus::Ok
+            );
+            assert_eq!(&raw[..written], expected.as_bytes(), "format {format}");
+            unsafe { sidereon_celestrak_gp_response_free(response) };
+        }
+    }
+}
+
+#[cfg(test)]
+mod gp_selector_tests {
+    use super::*;
+
+    #[test]
+    fn all_query_forms_and_refusals() {
+        let mut buffer = [0u8; 256];
+        let (mut written, mut required) = (0, 0);
+        for (kind, value, expected) in [
+            (0, "active", "GROUP=active"),
+            (2, "1998-067", "INTDES=1998-067"),
+            (3, "ISS ZARYA", "NAME=ISS%20ZARYA"),
+        ] {
+            assert_eq!(
+                unsafe {
+                    sidereon_celestrak_gp_url(
+                        kind,
+                        value.as_ptr(),
+                        value.len(),
+                        5,
+                        buffer.as_mut_ptr(),
+                        buffer.len(),
+                        &mut written,
+                        &mut required,
+                    )
+                },
+                SidereonStatus::Ok
+            );
+            assert_eq!(
+                std::str::from_utf8(&buffer[..written]).unwrap(),
+                format!("https://celestrak.org/NORAD/elements/gp.php?{expected}&FORMAT=JSON")
+            );
+        }
+        assert_eq!(
+            unsafe {
+                sidereon_celestrak_gp_catalog_number_url(
+                    25544,
+                    5,
+                    buffer.as_mut_ptr(),
+                    buffer.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(
+            &buffer[..written],
+            b"https://celestrak.org/NORAD/elements/gp.php?CATNR=25544&FORMAT=JSON"
+        );
+        for (special, value) in [(0, "GPZ"), (1, "GPZ-PLUS"), (2, "DECAYING")] {
+            assert_eq!(
+                unsafe {
+                    sidereon_celestrak_gp_special_url(
+                        special,
+                        5,
+                        buffer.as_mut_ptr(),
+                        buffer.len(),
+                        &mut written,
+                        &mut required,
+                    )
+                },
+                SidereonStatus::Ok
+            );
+            assert_eq!(
+                std::str::from_utf8(&buffer[..written]).unwrap(),
+                format!("https://celestrak.org/NORAD/elements/gp.php?SPECIAL={value}&FORMAT=JSON")
+            );
+        }
+        assert_eq!(
+            unsafe {
+                sidereon_celestrak_gp_url(
+                    0,
+                    b"bad group".as_ptr(),
+                    9,
+                    5,
+                    buffer.as_mut_ptr(),
+                    buffer.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+        let (_, payload) = crate::engine_error::snapshot_engine_error_for_test().unwrap();
+        let payload: Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(payload["error"]["fields"]["selector"], "GROUP");
+        assert_eq!(payload["error"]["fields"]["value"], "bad group");
+        for (kind, input, selector) in [(2, "1998-67", "INTDES"), (3, " ", "NAME")] {
+            assert_eq!(
+                unsafe {
+                    sidereon_celestrak_gp_url(
+                        kind,
+                        input.as_ptr(),
+                        input.len(),
+                        5,
+                        buffer.as_mut_ptr(),
+                        buffer.len(),
+                        &mut written,
+                        &mut required,
+                    )
+                },
+                SidereonStatus::InvalidArgument
+            );
+            let (_, payload) = crate::engine_error::snapshot_engine_error_for_test().unwrap();
+            let payload: Value = serde_json::from_str(&payload).unwrap();
+            assert_eq!(payload["error"]["kind"], "invalid_celestrak_gp_selector");
+            assert_eq!(payload["error"]["fields"]["selector"], selector);
+            assert_eq!(payload["error"]["fields"]["value"], input);
+        }
+        assert_eq!(
+            unsafe {
+                sidereon_celestrak_gp_special_url(
+                    99,
+                    5,
+                    buffer.as_mut_ptr(),
+                    buffer.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+        let (_, payload) = crate::engine_error::snapshot_engine_error_for_test().unwrap();
+        let payload: Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(payload["error"]["fields"]["selector"], "SPECIAL");
+        assert_eq!(payload["error"]["fields"]["value"], "99");
+        let mut aliased = [0u64; 2];
+        let mut separate_required = 0;
+        assert_eq!(
+            unsafe {
+                sidereon_celestrak_gp_url(
+                    0,
+                    aliased.as_ptr().cast(),
+                    8,
+                    5,
+                    buffer.as_mut_ptr(),
+                    buffer.len(),
+                    aliased.as_mut_ptr().cast(),
+                    &mut separate_required,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+    }
+}
+
+#[cfg(test)]
+mod gp_refusal_tests {
+    use super::*;
+
+    #[test]
+    fn response_errors_preserve_kinds_and_locations() {
+        for (body, expected) in [
+            (b" \r\n".as_slice(), "empty_celestrak_gp_response"),
+            (
+                b"No GP data found".as_slice(),
+                "celestrak_gp_data_not_found",
+            ),
+            (
+                b"<!DOCTYPE html><title>503</title>".as_slice(),
+                "celestrak_gp_html_response",
+            ),
+            (
+                b"\n\n\nnot json".as_slice(),
+                "invalid_celestrak_gp_response",
+            ),
+        ] {
+            let mut response = ptr::null_mut();
+            assert_eq!(
+                unsafe {
+                    sidereon_parse_celestrak_gp_response(
+                        body.as_ptr(),
+                        body.len(),
+                        5,
+                        &mut response,
+                    )
+                },
+                SidereonStatus::InvalidArgument
+            );
+            assert!(response.is_null());
+            let (_, payload) = crate::engine_error::snapshot_engine_error_for_test().unwrap();
+            let payload: Value = serde_json::from_str(&payload).unwrap();
+            assert_eq!(payload["error"]["kind"], expected);
+            if expected == "invalid_celestrak_gp_response" {
+                assert_eq!(payload["error"]["fields"]["line"], 4);
+                assert_eq!(payload["error"]["fields"]["column"], 2);
+            }
+        }
+        let body = b"GP data has not updated since your last successful\r\ndownload of GROUP=active at 2026-03-26 08:10:22 UTC.\r\nData is updated once every 2 hours.\r\n";
+        let mut response = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_parse_celestrak_gp_response(body.as_ptr(), body.len(), 0, &mut response)
+            },
+            SidereonStatus::InvalidArgument
+        );
+        let (_, payload) = crate::engine_error::snapshot_engine_error_for_test().unwrap();
+        let payload: Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(payload["error"]["kind"], "celestrak_gp_not_modified");
+        assert_eq!(payload["error"]["fields"]["query"], "GROUP=active");
+        assert_eq!(
+            payload["error"]["fields"]["last_successful_download"],
+            "2026-03-26 08:10:22 UTC"
+        );
+    }
+}
+
+#[cfg(test)]
+mod gp_access_tests {
+    use super::*;
+
+    #[test]
+    #[allow(unused_unsafe)]
+    fn all_gp_buffer_contracts() {
+        macro_rules! check {
+            ($f:expr) => {{
+                let f = $f;
+                let (mut written, mut required) = (usize::MAX, 0);
+                assert_eq!(
+                    unsafe { f(ptr::null_mut(), 0, &mut written, &mut required) },
+                    SidereonStatus::Ok
+                );
+                assert_eq!(written, 0);
+                assert!(required > 1);
+                let expected = required;
+                let mut tiny = [0u8; 1];
+                assert_eq!(
+                    unsafe { f(tiny.as_mut_ptr(), tiny.len(), &mut written, &mut required) },
+                    SidereonStatus::InvalidArgument
+                );
+                assert_eq!((written, required), (0, expected));
+            }};
+        }
+        check!(sidereon_celestrak_gp_source_entry);
+        check!(sidereon_navcen_source_entry);
+        check!(sidereon_navcen_constellation_url);
+        check!(sidereon_data_allowed_hosts);
+        check!(|o, l, w, r| unsafe { sidereon_celestrak_group(0, o, l, w, r) });
+        check!(|o, l, w, r| unsafe { sidereon_celestrak_constellation_url(0, 5, o, l, w, r) });
+        check!(|o, l, w, r| unsafe {
+            sidereon_celestrak_gp_url(0, b"active".as_ptr(), 6, 5, o, l, w, r)
+        });
+        check!(|o, l, w, r| unsafe {
+            sidereon_celestrak_gp_catalog_number_url(25544, 5, o, l, w, r)
+        });
+        check!(|o, l, w, r| unsafe { sidereon_celestrak_gp_special_url(1, 5, o, l, w, r) });
+        check!(|o, l, w, r| unsafe { sidereon_celestrak_gp_format_as_str(5, o, l, w, r) });
+        check!(|o, l, w, r| unsafe { sidereon_celestrak_gp_special_as_str(1, o, l, w, r) });
+        let body = b"ISS\n1 25544U 98067A   26095.55331950  .00008543  00000+0  16420-3 0  9998\n2 25544  51.6328 299.5432 0006351 274.8255  85.2008 15.48786980560492\n";
+        let mut response = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_parse_celestrak_gp_response(body.as_ptr(), body.len(), 0, &mut response)
+            },
+            SidereonStatus::Ok
+        );
+        check!(|o, l, w, r| unsafe {
+            sidereon_celestrak_gp_response_raw(response, false, 0, o, l, w, r)
+        });
+        check!(|o, l, w, r| unsafe {
+            sidereon_celestrak_gp_response_record_json(response, false, 0, o, l, w, r)
+        });
+        let mut omm = ptr::null_mut();
+        assert_eq!(
+            unsafe { sidereon_celestrak_gp_record_to_omm(response, 0, &mut omm) },
+            SidereonStatus::Ok
+        );
+        check!(|o, l, w, r| unsafe { crate::omm::sidereon_omm_to_kvn_lenient(omm, o, l, w, r) });
+        check!(|o, l, w, r| unsafe { crate::omm::sidereon_omm_to_xml_lenient(omm, o, l, w, r) });
+        unsafe {
+            crate::omm::sidereon_omm_free(omm);
+            sidereon_celestrak_gp_response_free(response);
+        }
+    }
+
+    #[test]
+    fn source_entries_and_host_catalog() {
+        let mut out = [0u8; 2048];
+        let (mut written, mut required) = (0, 0);
+        assert_eq!(
+            unsafe {
+                sidereon_celestrak_gp_source_entry(
+                    out.as_mut_ptr(),
+                    out.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        let source: Value = serde_json::from_slice(&out[..written]).unwrap();
+        assert_eq!(
+            source,
+            serde_json::json!({"protocol":"https", "host":"celestrak.org", "root_url":"https://celestrak.org/NORAD/elements/gp.php"})
+        );
+        assert_eq!(
+            unsafe {
+                sidereon_navcen_source_entry(
+                    out.as_mut_ptr(),
+                    out.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        let source: Value = serde_json::from_slice(&out[..written]).unwrap();
+        assert_eq!(
+            source,
+            serde_json::json!({"protocol":"https", "host":"www.navcen.uscg.gov", "root_url":"https://www.navcen.uscg.gov/gps-constellation"})
+        );
+        assert_eq!(
+            unsafe {
+                sidereon_data_allowed_hosts(
+                    out.as_mut_ptr(),
+                    out.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        let hosts: Vec<String> = serde_json::from_slice(&out[..written]).unwrap();
+        assert_eq!(
+            hosts,
+            [
+                "www.aiub.unibe.ch",
+                "download.aiub.unibe.ch",
+                "zhw-b.s3.cloud.switch.ch",
+                "navigation-office.esa.int",
+                "isdc-data.gfz.de",
+                "igs.bkg.bund.de",
+                "igs.gnsswhu.cn",
+                "s3.amazonaws.com",
+                "celestrak.org",
+                "cddis.nasa.gov",
+                "urs.earthdata.nasa.gov",
+                "www.navcen.uscg.gov"
+            ]
+        );
+        assert_eq!(
+            unsafe {
+                sidereon_celestrak_group(
+                    super::super::SidereonGnssSystem::Sbas as u32,
+                    out.as_mut_ptr(),
+                    out.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(&out[..written], b"sbas");
+        assert_eq!(
+            unsafe {
+                sidereon_celestrak_constellation_url(
+                    super::super::SidereonGnssSystem::Sbas as u32,
+                    5,
+                    out.as_mut_ptr(),
+                    out.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(
+            &out[..written],
+            b"https://celestrak.org/NORAD/elements/gp.php?GROUP=sbas&FORMAT=JSON"
+        );
+        assert_eq!(
+            unsafe {
+                sidereon_celestrak_gp_special_as_str(
+                    1,
+                    out.as_mut_ptr(),
+                    out.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(&out[..written], b"GPZ-PLUS");
+        assert_eq!(
+            unsafe {
+                sidereon_celestrak_gp_special_as_str(
+                    42,
+                    out.as_mut_ptr(),
+                    out.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+    }
+
+    #[test]
+    fn rejected_record_retains_raw_and_typed_reason() {
+        let body = b"1 25544U 98067A   26095.55331950  .00008543  00000+0  16420-3 0  9998\n2 25544  51.6328 299.5432 0006351 274.8255  85.2008 15.48786980560493\n";
+        let mut response = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_parse_celestrak_gp_response(body.as_ptr(), body.len(), 2, &mut response)
+            },
+            SidereonStatus::Ok
+        );
+        let (mut accepted, mut rejected) = (0, 0);
+        assert_eq!(
+            unsafe {
+                sidereon_celestrak_gp_response_counts(response, &mut accepted, &mut rejected)
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!((accepted, rejected), (0, 1));
+        let mut out = [0u8; 1024];
+        let (mut written, mut required) = (0, 0);
+        assert_eq!(
+            unsafe {
+                sidereon_celestrak_gp_response_raw(
+                    response,
+                    true,
+                    0,
+                    out.as_mut_ptr(),
+                    out.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(&out[..written], body);
+        assert_eq!(
+            unsafe {
+                sidereon_celestrak_gp_response_record_json(
+                    response,
+                    true,
+                    0,
+                    out.as_mut_ptr(),
+                    out.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        let value: Value = serde_json::from_slice(&out[..written]).unwrap();
+        assert_eq!(value["record_index"], 1);
+        assert_eq!(value["line_number"], 2);
+        assert_eq!(value["reason"]["kind"], "tle");
+        assert_eq!(value["reason"]["cause"]["kind"], "checksum_mismatch");
+        assert_eq!(value["reason"]["cause"]["fields"]["line_label"], "line 2");
+        assert_eq!(value["reason"]["cause"]["fields"]["expected"], 3);
+        assert_eq!(value["reason"]["cause"]["fields"]["computed"], 2);
+        unsafe { sidereon_celestrak_gp_response_free(response) };
+    }
+
+    #[test]
+    fn conversion_errors_preserve_nested_causes() {
+        let body = b"ISS\n1 25544U 98067A   26095.55331950  .00008543  00000+0  16420-3 0  9998\n2 25544  51.6328 299.5432 0006351 274.8255  85.2008 15.48786980560492\n";
+        let mut response = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_parse_celestrak_gp_response(body.as_ptr(), body.len(), 0, &mut response)
+            },
+            SidereonStatus::Ok
+        );
+        if let core_data::CelestrakGpPayload::Tle(record) =
+            &mut unsafe { &mut *response }.inner.records[0].payload
+        {
+            record.elements.epoch_day_of_year = -1.0;
+        } else {
+            panic!("expected TLE");
+        }
+        let mut omm = ptr::null_mut();
+        assert_eq!(
+            unsafe { sidereon_celestrak_gp_record_to_omm(response, 0, &mut omm) },
+            SidereonStatus::InvalidArgument
+        );
+        let (_, payload) = crate::engine_error::snapshot_engine_error_for_test().unwrap();
+        let payload: Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(payload["error"]["kind"], "tle");
+        assert_eq!(payload["error"]["fields"]["cause"]["kind"], "invalid_field");
+        assert_eq!(
+            payload["error"]["fields"]["cause"]["fields"]["field"],
+            "epoch_day_of_year"
+        );
+        let mut elements = crate::omm::SidereonOmmElementSet::default();
+        assert_eq!(
+            unsafe { sidereon_celestrak_gp_record_to_element_set(response, 0, &mut elements) },
+            SidereonStatus::InvalidArgument
+        );
+        let (_, payload) = crate::engine_error::snapshot_engine_error_for_test().unwrap();
+        let payload: Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(payload["error"]["kind"], "tle");
+        assert_eq!(
+            payload["error"]["fields"]["cause"]["fields"]["field"],
+            "epoch_day_of_year"
+        );
+        unsafe { sidereon_celestrak_gp_response_free(response) };
+        let json = include_bytes!("../tests/fixtures/omm/25544.json");
+        let mut response = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_parse_celestrak_gp_response(json.as_ptr(), json.len(), 5, &mut response)
+            },
+            SidereonStatus::Ok
+        );
+        if let core_data::CelestrakGpPayload::Omm(record) =
+            &mut unsafe { &mut *response }.inner.records[0].payload
+        {
+            record.ref_frame = Some("ICRF".into());
+        } else {
+            panic!("expected OMM");
+        }
+        assert_eq!(
+            unsafe { sidereon_celestrak_gp_record_to_element_set(response, 0, &mut elements) },
+            SidereonStatus::InvalidArgument
+        );
+        let (_, payload) = crate::engine_error::snapshot_engine_error_for_test().unwrap();
+        let payload: Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(payload["error"]["kind"], "omm");
+        assert_eq!(
+            payload["error"]["fields"]["cause"]["kind"],
+            "incompatible_metadata"
+        );
+        assert_eq!(
+            payload["error"]["fields"]["cause"]["fields"]["field"],
+            "REF_FRAME"
+        );
+        assert_eq!(
+            payload["error"]["fields"]["cause"]["fields"]["value"],
+            "ICRF"
+        );
+        unsafe { sidereon_celestrak_gp_response_free(response) };
+    }
+
+    #[test]
+    fn accepted_record_payload_and_conversions() {
+        let body = b"ISS (ZARYA)\n1 25544U 98067A   26095.55331950  .00008543  00000+0  16420-3 0  9998\n2 25544  51.6328 299.5432 0006351 274.8255  85.2008 15.48786980560492\n";
+        let mut response = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_parse_celestrak_gp_response(body.as_ptr(), body.len(), 0, &mut response)
+            },
+            SidereonStatus::Ok
+        );
+        let mut bytes = [0u8; 2048];
+        let (mut written, mut required) = (0, 0);
+        assert_eq!(
+            unsafe {
+                sidereon_celestrak_gp_response_record_json(
+                    response,
+                    false,
+                    0,
+                    bytes.as_mut_ptr(),
+                    bytes.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        let record: Value = serde_json::from_slice(&bytes[..written]).unwrap();
+        assert_eq!(record["record_index"], 1);
+        assert_eq!(record["line_number"], 1);
+        assert_eq!(record["object_name"], "ISS (ZARYA)");
+        assert_eq!(record["payload"]["kind"], "tle");
+        assert_eq!(record["payload"]["bstar_text"], " 16420-3");
+        assert_eq!(record["payload"]["mean_motion_double_dot_text"], " 00000+0");
+        assert_eq!(
+            record["payload"]["checksum_warnings"],
+            serde_json::json!([])
+        );
+        let mut equal = false;
+        assert_eq!(
+            unsafe { sidereon_celestrak_gp_response_equal(response, response, &mut equal) },
+            SidereonStatus::Ok
+        );
+        assert!(equal);
+        let json = include_str!("../tests/fixtures/omm/25544.json");
+        let mut other = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_parse_celestrak_gp_response(json.as_ptr(), json.len(), 5, &mut other)
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(
+            unsafe { sidereon_celestrak_gp_response_equal(response, other, &mut equal) },
+            SidereonStatus::Ok
+        );
+        assert!(!equal);
+        assert_eq!(
+            unsafe { sidereon_celestrak_gp_payload_equal(response, response, 0, 0, &mut equal) },
+            SidereonStatus::Ok
+        );
+        assert!(equal);
+        assert_eq!(
+            unsafe { sidereon_celestrak_gp_payload_equal(response, other, 0, 0, &mut equal) },
+            SidereonStatus::Ok
+        );
+        assert!(!equal);
+        assert_eq!(
+            unsafe { sidereon_celestrak_tle_record_equal(response, response, 0, 0, &mut equal) },
+            SidereonStatus::Ok
+        );
+        assert!(equal);
+        assert_eq!(
+            unsafe { sidereon_celestrak_tle_record_equal(response, other, 0, 0, &mut equal) },
+            SidereonStatus::InvalidArgument
+        );
+        let other_tle_body = b"POISK\n1 36086U 09060A   26095.55331950  .00008543  00000+0  16420-3 0  9996\n2 36086  51.6328 299.5432 0006351 274.8255  85.2008 15.48786980560226\n";
+        let mut other_tle = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_parse_celestrak_gp_response(
+                    other_tle_body.as_ptr(),
+                    other_tle_body.len(),
+                    0,
+                    &mut other_tle,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(
+            unsafe { sidereon_celestrak_tle_record_equal(response, other_tle, 0, 0, &mut equal) },
+            SidereonStatus::Ok
+        );
+        assert!(!equal);
+        unsafe { sidereon_celestrak_gp_response_free(other_tle) };
+        let mut wrong_tle = ptr::null_mut();
+        assert_eq!(
+            unsafe { sidereon_celestrak_gp_record_tle(other, 0, 0, 0, &mut wrong_tle) },
+            SidereonStatus::InvalidArgument
+        );
+        assert!(wrong_tle.is_null());
+        unsafe { sidereon_celestrak_gp_response_free(other) };
+        let mut tle = ptr::null_mut();
+        assert_eq!(
+            unsafe { sidereon_celestrak_gp_record_tle(response, 0, 0, 0, &mut tle) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(
+            unsafe { &*tle }.satellite.line1(),
+            "1 25544U 98067A   26095.55331950  .00008543  00000+0  16420-3 0  9998"
+        );
+        assert_eq!(
+            unsafe { &*tle }.satellite.line2(),
+            "2 25544  51.6328 299.5432 0006351 274.8255  85.2008 15.48786980560492"
+        );
+        let line1 = std::ffi::CString::new(
+            "1 25544U 98067A   26095.55331950  .00008543  00000+0  16420-3 0  9998",
+        )
+        .unwrap();
+        let line2 = std::ffi::CString::new(
+            "2 25544  51.6328 299.5432 0006351 274.8255  85.2008 15.48786980560492",
+        )
+        .unwrap();
+        let mut direct = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                crate::tle::sidereon_tle_load_with_policy(
+                    line1.as_ptr(),
+                    line2.as_ptr(),
+                    0,
+                    0,
+                    &mut direct,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(unsafe { &*tle }.elements, unsafe { &*direct }.elements);
+        let actual = unsafe { &*tle }
+            .satellite
+            .propagate(sidereon_core::astro::sgp4::MinutesSinceEpoch(10.0))
+            .unwrap();
+        let expected = unsafe { &*direct }
+            .satellite
+            .propagate(sidereon_core::astro::sgp4::MinutesSinceEpoch(10.0))
+            .unwrap();
+        assert_eq!(actual.position, expected.position);
+        unsafe { crate::tle::sidereon_tle_free(direct) };
+        let mut elements = crate::omm::SidereonOmmElementSet::default();
+        assert_eq!(
+            unsafe { sidereon_celestrak_gp_record_to_element_set(response, 0, &mut elements) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(elements.catalog_number, 25544);
+        assert_eq!(elements.mean_motion_rev_per_day, 15.48786980);
+        assert_eq!(elements.epoch_whole, 2461135.5);
+        assert_eq!(elements.epoch_fraction, 0.5533195);
+        assert_eq!(elements.bstar, 0.00016420);
+        assert!(elements.mean_motion_dot_present);
+        assert_eq!(elements.mean_motion_dot, 0.00008543);
+        assert!(elements.mean_motion_double_dot_present);
+        assert_eq!(elements.mean_motion_double_dot, 0.0);
+        assert_eq!(elements.eccentricity, 0.0006351);
+        assert_eq!(elements.argument_of_perigee_deg, 274.8255);
+        assert_eq!(elements.inclination_deg, 51.6328);
+        assert_eq!(elements.mean_anomaly_deg, 85.2008);
+        assert_eq!(elements.right_ascension_deg, 299.5432);
+        assert!(elements.catalog_number_present);
+        assert!(!elements.omm_epoch_days_present);
+        assert_eq!(elements.omm_epoch_days, 0.0);
+        let mut omm = ptr::null_mut();
+        assert_eq!(
+            unsafe { sidereon_celestrak_gp_record_to_omm(response, 0, &mut omm) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(
+            unsafe { &*omm }.inner.object_name.as_deref(),
+            Some("ISS (ZARYA)")
+        );
+        let value = &unsafe { &*omm }.inner;
+        assert_eq!(value.ccsds_omm_vers, None);
+        assert_eq!(value.classification, None);
+        assert_eq!(value.creation_date, None);
+        assert_eq!(value.originator, None);
+        assert_eq!(value.message_id, None);
+        assert_eq!(value.object_id.as_deref(), Some("1998-067A"));
+        assert_eq!(value.center_name.as_deref(), Some("EARTH"));
+        assert_eq!(value.ref_frame.as_deref(), Some("TEME"));
+        assert_eq!(value.ref_frame_epoch, None);
+        assert_eq!(value.time_system.as_deref(), Some("UTC"));
+        assert_eq!(value.mean_element_theory.as_deref(), Some("SGP4"));
+        assert_eq!(
+            (
+                value.epoch.year,
+                value.epoch.month,
+                value.epoch.day,
+                value.epoch.hour,
+                value.epoch.minute,
+                value.epoch.second,
+                value.epoch.microsecond,
+                value.epoch.femtosecond
+            ),
+            (2026, 4, 5, 13, 16, 46, 804800, 0)
+        );
+        assert_eq!(value.mean_motion, Some(15.48786980));
+        assert_eq!(value.semi_major_axis_km, None);
+        assert_eq!(value.eccentricity, 0.0006351);
+        assert_eq!(value.inclination_deg, 51.6328);
+        assert_eq!(value.ra_of_asc_node_deg, 299.5432);
+        assert_eq!(value.arg_of_pericenter_deg, 274.8255);
+        assert_eq!(value.mean_anomaly_deg, 85.2008);
+        assert_eq!(value.gm_km3_s2, None);
+        assert_eq!(value.spacecraft, None);
+        assert_eq!(value.ephemeris_type, Some(0));
+        assert_eq!(value.classification_type.as_deref(), Some("U"));
+        assert_eq!(value.norad_cat_id, Some(25544));
+        assert_eq!(value.element_set_no, Some(999));
+        assert_eq!(value.rev_at_epoch, Some(56049));
+        assert_eq!(value.bstar, Some(0.00016420));
+        assert_eq!(value.bterm_m2_kg, None);
+        assert_eq!(value.mean_motion_dot, Some(0.00008543));
+        assert_eq!(value.mean_motion_ddot, Some(0.0));
+        assert_eq!(value.agom_m2_kg, None);
+        assert_eq!(value.covariance, None);
+        assert!(value.user_defined.is_empty());
+        assert_eq!(
+            value.comments,
+            sidereon_core::astro::omm::OmmComments::default()
+        );
+        assert_eq!(value.exact_sgp4_epoch, None);
+        assert!(value.quantize_tle_derived_fields);
+        assert_eq!(
+            unsafe { sidereon_celestrak_gp_record_tle(response, 1, 0, 0, &mut ptr::null_mut()) },
+            SidereonStatus::InvalidArgument
+        );
+        assert_eq!(
+            unsafe {
+                sidereon_celestrak_gp_response_raw(
+                    response,
+                    false,
+                    1,
+                    bytes.as_mut_ptr(),
+                    bytes.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+        assert_eq!(
+            unsafe {
+                sidereon_celestrak_gp_response_record_json(
+                    response,
+                    false,
+                    1,
+                    bytes.as_mut_ptr(),
+                    bytes.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+        assert_eq!(
+            unsafe { sidereon_celestrak_gp_record_to_element_set(response, 1, &mut elements) },
+            SidereonStatus::InvalidArgument
+        );
+        let mut missing_omm = ptr::null_mut();
+        assert_eq!(
+            unsafe { sidereon_celestrak_gp_record_to_omm(response, 1, &mut missing_omm) },
+            SidereonStatus::InvalidArgument
+        );
+        assert!(missing_omm.is_null());
+        assert_eq!(
+            unsafe {
+                sidereon_celestrak_gp_record_equal(response, response, false, 1, 0, &mut equal)
+            },
+            SidereonStatus::InvalidArgument
+        );
+        assert_eq!(
+            unsafe { sidereon_celestrak_gp_payload_equal(response, response, 1, 0, &mut equal) },
+            SidereonStatus::InvalidArgument
+        );
+        assert_eq!(
+            unsafe { sidereon_celestrak_tle_record_equal(response, response, 1, 0, &mut equal) },
+            SidereonStatus::InvalidArgument
+        );
+        unsafe {
+            crate::tle::sidereon_tle_free(tle);
+            crate::omm::sidereon_omm_free(omm);
+            sidereon_celestrak_gp_response_free(response);
+        }
+    }
+}
+
+#[cfg(test)]
+mod gp_reason_tests {
+    use super::*;
+
+    #[test]
+    fn rejected_reason_variants_keep_details() {
+        use core_data::{
+            CelestrakGpRejectedRecord as R, CelestrakGpRejectionReason as E,
+            CelestrakGpStructuralError as S,
+        };
+        use sidereon_core::astro::omm::OmmError;
+        let reasons = [
+            (
+                E::Omm(OmmError::MissingField("EPOCH")),
+                serde_json::json!({"kind":"omm", "cause":{"kind":"missing_field", "fields":{"field":"EPOCH"}}}),
+            ),
+            (
+                E::Structural(S::UnexpectedContent),
+                serde_json::json!({"kind":"unexpected_content"}),
+            ),
+            (
+                E::Structural(S::IncompleteRecord),
+                serde_json::json!({"kind":"incomplete_record"}),
+            ),
+            (
+                E::Structural(S::InvalidTleStructure),
+                serde_json::json!({"kind":"invalid_tle_structure"}),
+            ),
+            (
+                E::Structural(S::InvalidElementSet(
+                    sidereon_core::astro::sgp4::Error::InvalidTle("bad element".into()),
+                )),
+                serde_json::json!({"kind":"invalid_element_set", "cause":{"kind":"invalid_tle", "fields":{"message":"bad element"}}}),
+            ),
+        ];
+        for (reason, expected) in reasons {
+            let response = SidereonCelestrakGpResponse {
+                inner: core_data::CelestrakGpResponse {
+                    records: vec![],
+                    rejected: vec![R {
+                        record_index: 7,
+                        line_number: Some(9),
+                        reason,
+                        raw: "bad\r\n".into(),
+                    }],
+                },
+            };
+            let mut bytes = [0; 1024];
+            let (mut written, mut required) = (0, 0);
+            assert_eq!(
+                unsafe {
+                    sidereon_celestrak_gp_response_record_json(
+                        &response,
+                        true,
+                        0,
+                        bytes.as_mut_ptr(),
+                        bytes.len(),
+                        &mut written,
+                        &mut required,
+                    )
+                },
+                SidereonStatus::Ok
+            );
+            let value: Value = serde_json::from_slice(&bytes[..written]).unwrap();
+            assert_eq!(value["record_index"], 7);
+            assert_eq!(value["line_number"], 9);
+            assert_eq!(value["reason"], expected);
+        }
+    }
+}
+
+#[cfg(test)]
+mod gp_reason_equality_tests {
+    use super::*;
+
+    #[test]
+    fn rejection_and_structural_equality_use_core_values() {
+        use core_data::{
+            CelestrakGpRejectedRecord as R, CelestrakGpRejectionReason as E,
+            CelestrakGpStructuralError as S,
+        };
+        let response = SidereonCelestrakGpResponse {
+            inner: core_data::CelestrakGpResponse {
+                records: vec![],
+                rejected: vec![
+                    R {
+                        record_index: 1,
+                        line_number: Some(1),
+                        reason: E::Structural(S::IncompleteRecord),
+                        raw: "a".into(),
+                    },
+                    R {
+                        record_index: 2,
+                        line_number: Some(2),
+                        reason: E::Structural(S::UnexpectedContent),
+                        raw: "b".into(),
+                    },
+                    R {
+                        record_index: 3,
+                        line_number: Some(3),
+                        reason: E::Omm(sidereon_core::astro::omm::OmmError::MissingField("EPOCH")),
+                        raw: "c".into(),
+                    },
+                ],
+            },
+        };
+        let mut equal = false;
+        assert_eq!(
+            unsafe {
+                sidereon_celestrak_gp_rejection_reason_equal(&response, &response, 0, 0, &mut equal)
+            },
+            SidereonStatus::Ok
+        );
+        assert!(equal);
+        assert_eq!(
+            unsafe {
+                sidereon_celestrak_gp_rejection_reason_equal(&response, &response, 0, 1, &mut equal)
+            },
+            SidereonStatus::Ok
+        );
+        assert!(!equal);
+        assert_eq!(
+            unsafe {
+                sidereon_celestrak_gp_structural_error_equal(&response, &response, 0, 0, &mut equal)
+            },
+            SidereonStatus::Ok
+        );
+        assert!(equal);
+        assert_eq!(
+            unsafe {
+                sidereon_celestrak_gp_structural_error_equal(&response, &response, 0, 1, &mut equal)
+            },
+            SidereonStatus::Ok
+        );
+        assert!(!equal);
+        assert_eq!(
+            unsafe {
+                sidereon_celestrak_gp_structural_error_equal(&response, &response, 0, 2, &mut equal)
+            },
+            SidereonStatus::InvalidArgument
+        );
+        assert_eq!(
+            unsafe {
+                sidereon_celestrak_gp_rejection_reason_equal(&response, &response, 0, 3, &mut equal)
+            },
+            SidereonStatus::InvalidArgument
+        );
+    }
+}
+
+#[cfg(test)]
+mod output_reset_tests {
+    use super::*;
+
+    #[test]
+    fn failed_response_outputs_are_cleared() {
+        let mut response = std::ptr::dangling_mut();
+        assert_eq!(
+            unsafe { sidereon_parse_celestrak_gp_response(ptr::null(), 0, 99, &mut response) },
+            SidereonStatus::InvalidArgument
+        );
+        assert!(response.is_null());
+        let mut omm = std::ptr::dangling_mut();
+        assert_eq!(
+            unsafe { sidereon_celestrak_gp_record_to_omm(ptr::null(), 0, &mut omm) },
+            SidereonStatus::NullPointer
+        );
+        assert!(omm.is_null());
+        let mut tle = std::ptr::dangling_mut();
+        assert_eq!(
+            unsafe { sidereon_celestrak_gp_record_tle(ptr::null(), 0, 0, 0, &mut tle) },
+            SidereonStatus::NullPointer
+        );
+        assert!(tle.is_null());
     }
 }

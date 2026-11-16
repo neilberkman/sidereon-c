@@ -559,7 +559,22 @@ selects arithmetic from the host platform.
   error envelopes against published constants.
 - **Formats.** Parsing and serialization for TLE/OMM, CCSDS (OEM/OPM/CDM/TDM),
   RINEX (observation, navigation, clock), CRINEX, SP3, IONEX, ANTEX,
-  Bias-SINEX, RTCM 3, and SBAS messages.
+  Bias-SINEX, RTCM 3, and SBAS messages. OMM KVN and XML writers require complete
+  CCSDS mandatory fields; `sidereon_omm_to_kvn_lenient` and
+  `sidereon_omm_to_xml_lenient` write partial messages.
+- **Constellation sources.** `sidereon_celestrak_gp_source_entry` and
+  `sidereon_navcen_source_entry` return source metadata. CelesTrak URL builders
+  accept group, catalog-number, international-designator, name, and special
+  selectors and the eight GP formats; `sidereon_navcen_constellation_url`
+  returns the NAVCEN page. The binding performs no network fetches.
+  `sidereon_parse_celestrak_gp_response` retains accepted and rejected records.
+  Query their metadata as JSON, copy their exact raw bytes with explicit lengths,
+  and obtain native TLEs, OMMs, or SGP4 element sets through the record accessors.
+  `sidereon_celestrak_gp_record_tle` takes the same operation mode and checksum
+  policy as the TLE loader. Record accessors select a response, then the accepted
+  or rejected list, then an index. Free a response with
+  `sidereon_celestrak_gp_response_free`. Catalog and record refusals retain their
+  typed details through the engine-error API.
 
 Every result is exactly what the engine computes; the binding adds no modeling
 of its own, and no data acquisition either: every product it consumes (orbit

@@ -166,49 +166,209 @@ pub unsafe extern "C" fn sidereon_sgp4_fit_tle(
     engine_error_operation_boundary("sidereon_sgp4_fit_tle", SidereonStatus::Panic, || {
         let out_fit = c_try!(require_out(out_fit, "sidereon_sgp4_fit_tle", "out_fit"));
         *out_fit = ptr::null_mut();
-        let raw_samples = c_try!(require_slice(
+        sgp4_fit_impl(
+            "sidereon_sgp4_fit_tle",
             samples,
             sample_count,
-            "sidereon_sgp4_fit_tle",
-            "samples"
-        ));
-        let config = c_try!(require_ref(config, "sidereon_sgp4_fit_tle", "config"));
-        let samples: Vec<_> = raw_samples
-            .iter()
-            .map(|sample| sidereon_core::astro::sgp4::FitSample {
-                epoch: sidereon_core::astro::sgp4::JulianDate(sample.jd_whole, sample.jd_fraction),
-                position_teme_km: sample.position_teme_km,
-                velocity_teme_km_s: sample
-                    .has_velocity_teme_km_s
-                    .then_some(sample.velocity_teme_km_s),
-            })
-            .collect();
-        let config = c_try!(sgp4_fit_config_from_c("sidereon_sgp4_fit_tle", config));
-        match sidereon_core::astro::sgp4::fit_tle(&samples, &config) {
-            Ok(inner) => {
-                write_boxed_handle(out_fit, SidereonSgp4TleFit { inner });
-                SidereonStatus::Ok
+            config,
+            None,
+            out_fit,
+        )
+    })
+}
+
+/// Fit a TLE while supplying the fitted OMM's CCSDS creation date and originator.
+///
+/// Safety: samples and strings point to their given lengths; config is readable
+/// and out_fit points to writable handle storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sgp4_fit_tle_with_omm_header(
+    samples: *const SidereonSgp4FitSample,
+    sample_count: usize,
+    config: *const SidereonSgp4FitConfig,
+    creation_date: *const u8,
+    creation_date_len: usize,
+    originator: *const u8,
+    originator_len: usize,
+    out_fit: *mut *mut SidereonSgp4TleFit,
+) -> SidereonStatus {
+    engine_error_operation_boundary(
+        "sidereon_sgp4_fit_tle_with_omm_header",
+        SidereonStatus::Panic,
+        || {
+            let output_range = c_try!(checked_output_range(
+                "sidereon_sgp4_fit_tle_with_omm_header",
+                out_fit,
+                1,
+                "out_fit"
+            ));
+            if !samples.is_null() && sample_count != 0 {
+                let range = c_try!(checked_output_range(
+                    "sidereon_sgp4_fit_tle_with_omm_header",
+                    samples.cast_mut(),
+                    sample_count,
+                    "samples"
+                ));
+                c_try!(reject_overlapping_outputs(
+                    "sidereon_sgp4_fit_tle_with_omm_header",
+                    output_range,
+                    range,
+                    "out_fit",
+                    "samples"
+                ));
             }
-            Err(err) => {
-                record_engine_error(
-                    SidereonEngineErrorFamily::TleFit,
-                    "sidereon_sgp4_fit_tle",
-                    tle_fit_error_value(&err),
-                );
-                set_last_error(format!("sidereon_sgp4_fit_tle: {err}"));
-                match &err {
-                    sidereon_core::astro::sgp4::TleFitError::ArcTooShort { .. }
-                    | sidereon_core::astro::sgp4::TleFitError::InvalidInput { .. }
-                    | sidereon_core::astro::sgp4::TleFitError::EpochsNotIncreasing { .. }
-                    | sidereon_core::astro::sgp4::TleFitError::EpochOutsideArc
-                    | sidereon_core::astro::sgp4::TleFitError::MixedVelocityPresence => {
-                        SidereonStatus::InvalidArgument
+            if !config.is_null() {
+                let range = c_try!(checked_output_range(
+                    "sidereon_sgp4_fit_tle_with_omm_header",
+                    config.cast_mut(),
+                    1,
+                    "config"
+                ));
+                c_try!(reject_overlapping_outputs(
+                    "sidereon_sgp4_fit_tle_with_omm_header",
+                    output_range,
+                    range,
+                    "out_fit",
+                    "config"
+                ));
+            }
+            if !config.is_null() {
+                let config_ref = &*config;
+                for (input, count, label) in [
+                    (config_ref.weights, config_ref.weight_count, "weights"),
+                    (
+                        config_ref.x_scale_values,
+                        if config_ref.x_scale_kind == SidereonSgp4XScaleKind::Values as u32 {
+                            config_ref.x_scale_value_count
+                        } else {
+                            0
+                        },
+                        "x_scale_values",
+                    ),
+                ] {
+                    if !input.is_null() && count != 0 {
+                        let range = c_try!(checked_output_range(
+                            "sidereon_sgp4_fit_tle_with_omm_header",
+                            input.cast_mut(),
+                            count,
+                            label
+                        ));
+                        c_try!(reject_overlapping_outputs(
+                            "sidereon_sgp4_fit_tle_with_omm_header",
+                            output_range,
+                            range,
+                            "out_fit",
+                            label
+                        ));
                     }
-                    _ => SidereonStatus::Solve,
                 }
             }
+            for (input, len, label) in [
+                (creation_date, creation_date_len, "creation_date"),
+                (originator, originator_len, "originator"),
+            ] {
+                if !input.is_null() && len != 0 {
+                    let range = c_try!(checked_output_range(
+                        "sidereon_sgp4_fit_tle_with_omm_header",
+                        input.cast_mut(),
+                        len,
+                        label
+                    ));
+                    c_try!(reject_overlapping_outputs(
+                        "sidereon_sgp4_fit_tle_with_omm_header",
+                        output_range,
+                        range,
+                        "out_fit",
+                        label
+                    ));
+                }
+            }
+            let out_fit = c_try!(require_out(
+                out_fit,
+                "sidereon_sgp4_fit_tle_with_omm_header",
+                "out_fit"
+            ));
+            *out_fit = ptr::null_mut();
+            let creation_date = c_try!(require_slice(
+                creation_date,
+                creation_date_len,
+                "sidereon_sgp4_fit_tle_with_omm_header",
+                "creation_date"
+            ));
+            let originator = c_try!(require_slice(
+                originator,
+                originator_len,
+                "sidereon_sgp4_fit_tle_with_omm_header",
+                "originator"
+            ));
+            let (Ok(creation_date), Ok(originator)) =
+                (str::from_utf8(creation_date), str::from_utf8(originator))
+            else {
+                set_last_error("sidereon_sgp4_fit_tle_with_omm_header: invalid UTF-8");
+                return SidereonStatus::InvalidToken;
+            };
+            let header = sidereon_core::astro::sgp4::fit::FitOmmHeader {
+                creation_date: creation_date.to_owned(),
+                originator: originator.to_owned(),
+            };
+            sgp4_fit_impl(
+                "sidereon_sgp4_fit_tle_with_omm_header",
+                samples,
+                sample_count,
+                config,
+                Some(header),
+                out_fit,
+            )
+        },
+    )
+}
+
+unsafe fn sgp4_fit_impl(
+    name: &str,
+    samples: *const SidereonSgp4FitSample,
+    sample_count: usize,
+    config: *const SidereonSgp4FitConfig,
+    header: Option<sidereon_core::astro::sgp4::fit::FitOmmHeader>,
+    out: *mut *mut SidereonSgp4TleFit,
+) -> SidereonStatus {
+    let samples = c_try!(require_slice(samples, sample_count, name, "samples"));
+    let config = c_try!(require_ref(config, name, "config"));
+    let samples: Vec<_> = samples
+        .iter()
+        .map(|sample| sidereon_core::astro::sgp4::FitSample {
+            epoch: sidereon_core::astro::sgp4::JulianDate(sample.jd_whole, sample.jd_fraction),
+            position_teme_km: sample.position_teme_km,
+            velocity_teme_km_s: sample
+                .has_velocity_teme_km_s
+                .then_some(sample.velocity_teme_km_s),
+        })
+        .collect();
+    let mut config = c_try!(sgp4_fit_config_from_c(name, config));
+    config.omm_header = header;
+    match sidereon_core::astro::sgp4::fit_tle(&samples, &config) {
+        Ok(inner) => {
+            write_boxed_handle(out, SidereonSgp4TleFit { inner });
+            SidereonStatus::Ok
         }
-    })
+        Err(err) => {
+            record_engine_error(
+                SidereonEngineErrorFamily::TleFit,
+                name,
+                tle_fit_error_value(&err),
+            );
+            set_last_error(format!("{name}: {err}"));
+            use sidereon_core::astro::sgp4::TleFitError as E;
+            match err {
+                E::ArcTooShort { .. }
+                | E::InvalidInput { .. }
+                | E::EpochsNotIncreasing { .. }
+                | E::EpochOutsideArc
+                | E::MixedVelocityPresence
+                | E::OmmHeader(_) => SidereonStatus::InvalidArgument,
+                _ => SidereonStatus::Solve,
+            }
+        }
+    }
 }
 
 #[no_mangle]
@@ -529,6 +689,36 @@ mod tests {
     }
 
     #[test]
+    fn fitted_omm_keeps_supplied_header() {
+        unsafe {
+            let samples = existing_fit_samples();
+            let mut config = valid_config(None);
+            config.object_name = fixed_c_chars("ISS");
+            config.international_designator = fixed_c_chars("98067A");
+            let mut fit = ptr::null_mut();
+            assert_eq!(
+                sidereon_sgp4_fit_tle_with_omm_header(
+                    samples.as_ptr(),
+                    samples.len(),
+                    &config,
+                    b"2026-11-15T00:00:00".as_ptr(),
+                    19,
+                    b"TEST".as_ptr(),
+                    4,
+                    &mut fit
+                ),
+                SidereonStatus::Ok
+            );
+            assert_eq!(
+                (*fit).inner.omm.creation_date.as_deref(),
+                Some("2026-11-15T00:00:00")
+            );
+            assert_eq!((*fit).inner.omm.originator.as_deref(), Some("TEST"));
+            sidereon_sgp4_tle_fit_free(fit);
+        }
+    }
+
+    #[test]
     fn fit_tle_records_arc_and_best_effort_errors_with_lifecycle_boundaries() {
         unsafe {
             let samples = existing_fit_samples();
@@ -806,5 +996,44 @@ mod tests {
             assert!(snapshot_engine_error_for_test().is_none());
             sidereon_sgp4_tle_fit_free(fit);
         }
+    }
+}
+
+#[cfg(test)]
+mod fit_header_tests {
+    use super::*;
+
+    #[test]
+    fn invalid_header_preserves_nested_omm_error() {
+        let mut config = std::mem::MaybeUninit::<SidereonSgp4FitConfig>::uninit();
+        assert_eq!(
+            unsafe { sidereon_sgp4_fit_config_init(config.as_mut_ptr()) },
+            SidereonStatus::Ok
+        );
+        let config = unsafe { config.assume_init() };
+        let mut fit = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_sgp4_fit_tle_with_omm_header(
+                    ptr::null(),
+                    0,
+                    &config,
+                    b"bad".as_ptr(),
+                    3,
+                    b"TEST".as_ptr(),
+                    4,
+                    &mut fit,
+                )
+            },
+            SidereonStatus::InvalidArgument
+        );
+        let (_, payload) = crate::engine_error::snapshot_engine_error_for_test().unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(payload["error"]["kind"], "omm_header");
+        assert_eq!(payload["error"]["fields"]["cause"]["kind"], "invalid_field");
+        assert_eq!(
+            payload["error"]["fields"]["cause"]["fields"]["field"],
+            "CREATION_DATE"
+        );
     }
 }

@@ -2612,7 +2612,7 @@ fn unwrap_look_batch(
         .collect()
 }
 
-fn map_sgp4_error(fn_name: &str, err: Sgp4Error) -> SidereonStatus {
+pub(crate) fn map_sgp4_error(fn_name: &str, err: Sgp4Error) -> SidereonStatus {
     set_last_error(format!("{fn_name}: {err}"));
     record_sgp4_error(&err);
     match err {

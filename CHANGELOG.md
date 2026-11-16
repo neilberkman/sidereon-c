@@ -4,6 +4,8 @@
 
 ### Added
 
+- Add CelesTrak GP and NAVCEN source metadata and URL builders, GP response parsing, OMM conversion and source spans, fitted OMM headers, and lenient OMM KVN and XML writers.
+
 - Add the precise-positioning dual-frequency TEC estimation, arc-leveling,
   thin-shell mapping, and ionospheric pierce-point C API.
 - Add precise-positioning snapshot RAIM global testing, residual
@@ -24,6 +26,14 @@
   residual-ionosphere PPP solves, owned ambiguity-search and correction-lookup
   access, complete PPP value equality, and the core low-level range-rate and
   velocity least-squares API.
+
+### Changed
+
+- OMM KVN and XML writers require complete CCSDS mandatory fields.
+
+### Fixed
+
+- Report invalid fitted OMM headers as argument errors and preserve source lines in CelesTrak TLE handles.
 
 ## 3.0.6 - 2026-10-30
 
