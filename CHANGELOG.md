@@ -5,7 +5,11 @@
 ### Fixed
 
 - Forward GDOP validation in broadcast SPP and reject it for V2 operations whose core driver cannot apply it.
-- Document the core tight EKF joint-gate limitation.
+- Apply the joint innovation gate to tight EKF updates and expose per-row coast diagnostics.
+- Preserve tight cross-covariance when loose updates are rejected.
+- Coast when IGG III removes every loose-update row, with gate diagnostics where applicable.
+- Refuse invalid or conflicting gate settings and options for the inactive filter kind.
+- Report structured GDOP and ceiling values for FDE validation refusals.
 
 ### Added
 

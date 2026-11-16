@@ -687,6 +687,34 @@ static int exercise_quality(const SidereonSp3 *sp3) {
         return fail("spp solve for quality", 1);
     }
 
+    SidereonFdeOptions fde_options;
+    if (sidereon_fde_options_init(&fde_options) != SIDEREON_STATUS_OK) return fail("FDE options", 1);
+    fde_options.use_validation_options = true;
+    fde_options.validation.max_gdop_enabled = true;
+    fde_options.validation.max_gdop = 0.1;
+    for (int robust = 0; robust < 2; ++robust) {
+        SidereonFdeSolution *fde = NULL;
+        SidereonSppRobustConfig robust_options = {1.345, 0.1, 10, 1e-4};
+        SidereonStatus result = robust ? sidereon_robust_fde_solve_spp(sp3, &inputs.base, &robust_options, &fde_options, &fde)
+                                       : sidereon_fde_solve_spp(sp3, &inputs.base, &fde_options, &fde);
+        unsigned char detail[2048] = {0}; size_t n = 0, required = 0;
+        if (result != SIDEREON_STATUS_SOLVE || fde != NULL ||
+            sidereon_last_engine_error_payload(detail, sizeof(detail)-1, &n, &required) != SIDEREON_STATUS_OK ||
+            !strstr((char *)detail, "degenerate_geometry_gdop") || !strstr((char *)detail, "\"gdop\":{") ||
+            !strstr((char *)detail, "\"max_gdop\":{") || !strstr((char *)detail, "\"decimal\":\"0.1\"")) {
+            sidereon_spp_solution_free(sol);
+            return fail("FDE GDOP structured payload", 1);
+        }
+        const char *gdop_object = strstr((char *)detail, "\"gdop\":{");
+        const char *gdop_decimal = gdop_object ? strstr(gdop_object, "\"decimal\":\"") : NULL;
+        char *end = NULL;
+        double gdop = gdop_decimal ? strtod(gdop_decimal + strlen("\"decimal\":\""), &end) : 0.0;
+        if (!gdop_decimal || *end != '\"' || !isfinite(gdop) || gdop <= 0.1) {
+            sidereon_spp_solution_free(sol);
+            return fail("FDE GDOP value", 1);
+        }
+    }
+
     inputs.policy.use_validation_options = true;
     inputs.policy.validation.max_gdop_enabled = true;
     inputs.policy.validation.max_gdop = 0.1;

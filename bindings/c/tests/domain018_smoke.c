@@ -1071,10 +1071,13 @@ static void test_joint_gate(void) {
         config.has_loose_measurement_reweighting = true;
         config.loose_measurement_reweighting.k0_sigma = 2.0;
         config.loose_measurement_reweighting.k1_sigma = 5.0;
-        config.has_loose_joint_innovation_gate_probability = true;
-        config.loose_joint_innovation_gate_probability = 0.01;
-        config.has_ukf_joint_innovation_gate_probability = true;
-        config.ukf_joint_innovation_gate_probability = 0.01;
+        if (kind == SIDEREON_FUSION_FILTER_KIND_EKF) {
+            config.has_loose_joint_innovation_gate_probability = true;
+            config.loose_joint_innovation_gate_probability = 0.01;
+        } else {
+            config.has_ukf_joint_innovation_gate_probability = true;
+            config.ukf_joint_innovation_gate_probability = 0.01;
+        }
         SidereonFusionFilter *filter = create_field_filter(&config, &nav, "joint filter");
         if (filter == NULL) continue;
         SidereonFusionLooseMeasurement fix;
@@ -1086,6 +1089,53 @@ static void test_joint_gate(void) {
               fabs(update.joint_gate_statistic - 16.0) < 1e-10 &&
               fabs(update.joint_gate_threshold - 6.6348966010212145) < 1e-10,
               "joint gate core fixture");
+        sidereon_fusion_filter_free(filter);
+    }
+}
+
+static void test_gate_refusals_and_igg(void) {
+    SidereonFusionNavState nav; init_nav(&nav);
+    double diag[15]; for (size_t i = 0; i < 15; ++i) diag[i] = 1.0;
+    for (int case_id = 0; case_id < 12; ++case_id) {
+        SidereonFusionFilterConfig config; init_field_config(&config);
+        if (case_id == 0) { config.has_ukf_joint_innovation_gate_probability = true; config.ukf_joint_innovation_gate_probability = 0.01; }
+        if (case_id == 1) { config.filter_kind = SIDEREON_FUSION_FILTER_KIND_UKF; config.has_loose_joint_innovation_gate_probability = true; config.loose_joint_innovation_gate_probability = 0.01; }
+        if (case_id == 2) { config.filter_kind = SIDEREON_FUSION_FILTER_KIND_UKF; config.has_tight_joint_innovation_gate_probability = true; config.tight_joint_innovation_gate_probability = 0.01; }
+        if (case_id == 3) { config.has_loose_joint_innovation_gate_probability = true; config.loose_joint_innovation_gate_probability = NAN; }
+        if (case_id == 4) { config.has_tight_joint_innovation_gate_probability = true; config.tight_joint_innovation_gate_probability = 1.0; }
+        if (case_id == 5) { config.filter_kind = SIDEREON_FUSION_FILTER_KIND_UKF; config.has_ukf_joint_innovation_gate_probability = true; config.ukf_joint_innovation_gate_probability = 0.0; }
+        if (case_id == 6) { config.has_tight_innovation_gate = true; config.tight_innovation_gate.threshold_sigma = 3.0; config.has_tight_joint_innovation_gate_probability = true; config.tight_joint_innovation_gate_probability = 0.01; }
+        if (case_id == 7) { config.filter_kind = SIDEREON_FUSION_FILTER_KIND_UKF; config.has_ukf_innovation_gate = true; config.ukf_innovation_gate.threshold_sigma = 3.0; config.has_ukf_joint_innovation_gate_probability = true; config.ukf_joint_innovation_gate_probability = 0.01; }
+        if (case_id == 8) { config.has_ukf_innovation_gate = true; config.ukf_innovation_gate.threshold_sigma = 3.0; }
+        if (case_id == 9) { config.filter_kind = SIDEREON_FUSION_FILTER_KIND_UKF; config.has_loose_innovation_gate = true; config.loose_innovation_gate.threshold_sigma = 3.0; }
+        if (case_id == 10) { config.filter_kind = SIDEREON_FUSION_FILTER_KIND_UKF; config.has_tight_innovation_gate = true; config.tight_innovation_gate.threshold_sigma = 3.0; }
+        if (case_id == 11) { config.has_loose_innovation_gate = true; config.loose_innovation_gate.threshold_sigma = 3.0; config.has_loose_joint_innovation_gate_probability = true; config.loose_joint_innovation_gate_probability = 0.01; }
+        SidereonFusionFilter *filter = NULL;
+        check(sidereon_fusion_filter_create(&nav, diag, 15, &config, &filter) == SIDEREON_STATUS_INVALID_ARGUMENT && filter == NULL, "fusion invalid gate options");
+        unsigned char payload[1024] = {0}; size_t written = 0, required = 0;
+        check(sidereon_last_engine_error_payload(payload, sizeof(payload)-1, &written, &required) == SIDEREON_STATUS_OK && strstr((char *)payload, "invalid_input") != NULL, "fusion typed gate refusal");
+    }
+    double cov[9]; identity_matrix(cov, 3);
+    const double position[3] = {6378237.0, 100.0, 100.0};
+    for (int kind = 0; kind < 2; ++kind) for (int joint = 0; joint < 2; ++joint) {
+        SidereonFusionFilterConfig config; init_field_config(&config); config.filter_kind = (uint32_t)kind;
+        config.has_loose_measurement_reweighting = true; config.loose_measurement_reweighting.k0_sigma = 2.0; config.loose_measurement_reweighting.k1_sigma = 5.0;
+        if (kind == SIDEREON_FUSION_FILTER_KIND_EKF) {
+            if (joint) { config.has_loose_joint_innovation_gate_probability = true; config.loose_joint_innovation_gate_probability = 0.01; }
+            else { config.has_loose_innovation_gate = true; config.loose_innovation_gate.threshold_sigma = 3.0; }
+        } else {
+            if (joint) { config.has_ukf_joint_innovation_gate_probability = true; config.ukf_joint_innovation_gate_probability = 0.01; }
+            else { config.has_ukf_innovation_gate = true; config.ukf_innovation_gate.threshold_sigma = 3.0; }
+        }
+        SidereonFusionFilter *filter = create_field_filter(&config, &nav, "IGG coast filter"); if (!filter) continue;
+        SidereonFusionLooseMeasurement fix = {0}; fix.t_j2000_s = 0.0; memcpy(fix.position_ecef_m, position, sizeof(position)); fix.covariance = cov; fix.covariance_len = 9; fix.solution_valid = true; fix.satellites_used = 7; fix.fix_status = SIDEREON_FUSION_GNSS_FIX_STATUS_SINGLE;
+        SidereonFusionState before, after; double p_before[225], p_after[225]; size_t n, total;
+        check(sidereon_fusion_filter_state(filter, &before) == SIDEREON_STATUS_OK && sidereon_fusion_filter_covariance(filter, p_before, 225, &n, &total) == SIDEREON_STATUS_OK, "IGG prior");
+        SidereonFusionUpdate update;
+        check(sidereon_fusion_filter_update_loose(filter, &fix, &update) == SIDEREON_STATUS_OK && !update.applied && update.rows == 3 && update.accepted_rows == 0 && update.rejected_rows == 3 &&
+              (joint ? !update.has_joint_innovation_gate : (update.has_innovation_gate && update.innovation_gate_coasted && update.innovation_gate_input_rows == 3 && update.innovation_gate_accepted_rows == 0 && update.innovation_gate_rejected_rows == 3)), "IGG all rows coast");
+        check(sidereon_fusion_filter_state(filter, &after) == SIDEREON_STATUS_OK && sidereon_fusion_filter_covariance(filter, p_after, 225, &n, &total) == SIDEREON_STATUS_OK &&
+              memcmp(before.position_ecef_m, after.position_ecef_m, sizeof(before.position_ecef_m)) == 0 && memcmp(p_before, p_after, sizeof(p_before)) == 0 && before.tight_clock_bias_m == after.tight_clock_bias_m, "IGG coast preserves state and covariance");
         sidereon_fusion_filter_free(filter);
     }
 }
@@ -1116,31 +1166,82 @@ static void test_tight_joint_gate(void) {
     check(sidereon_sp3_epochs_j2000_seconds(sp3, epochs, 12, &written, &required) == SIDEREON_STATUS_OK && written == 12, "tight gate epoch");
     const double epoch = epochs[5];
     SidereonFusionNavState nav; init_nav(&nav); nav.t_j2000_s = epoch;
-    SidereonFusionFilterConfig config; init_field_config(&config);
-    config.tight_light_time = false; config.tight_sagnac = false;
-    config.tight_initial_clock_bias_variance_m2 = 4.0;
-    config.has_tight_joint_innovation_gate_probability = true;
-    config.tight_joint_innovation_gate_probability = 0.01;
-    SidereonFusionFilter *filter = create_field_filter(&config, &nav, "tight gate filter");
-    if (filter) {
-        SidereonFusionTightObservation observation = {0};
-        observation.sat_id = "G01"; observation.pseudorange_m = 20000008.0; observation.pseudorange_sigma_m = 1.0;
-        SidereonFusionTightEpoch measurement = {epoch, &observation, 1};
-        SidereonFusionUpdate update;
-        /* innovation=8, H=[-1,0,0,1], P=diag(1,1,1,4), R=1. */
-        const double innovation = 8.0, h[4] = {-1.0,0.0,0.0,1.0}, p[4] = {1.0,1.0,1.0,4.0}, r = 1.0;
-        double innovation_covariance = r;
-        for (size_t i = 0; i < 4; ++i) innovation_covariance += h[i] * p[i] * h[i];
-        const double nis = innovation * innovation / innovation_covariance;
-        /* fusion_gate_oracles.json: chi-square survival quantile, dof=1, p=0.01. */
-        const double threshold = 6.634896601021215;
-        /* SP3 interpolation rounds the 20,000 km range; the tight EKF currently leaves its joint gate unused. */
-        SidereonStatus status = sidereon_fusion_filter_update_tight_sp3(filter, sp3, &measurement, &update);
-        check(status == SIDEREON_STATUS_OK &&
-              fabs(update.nis - nis) < 2e-6 && nis > threshold &&
-              !update.has_joint_innovation_gate && update.applied,
-              "tight EKF NIS and core joint-gate behavior");
-        sidereon_fusion_filter_free(filter);
+    for (uint32_t kind = 0; kind < 2; ++kind) {
+        for (int reject = 0; reject < 2; ++reject) {
+            SidereonFusionFilterConfig config; init_field_config(&config);
+            config.filter_kind = kind; config.tight_light_time = false; config.tight_sagnac = false;
+            config.tight_initial_clock_bias_variance_m2 = 4.0;
+            if (kind == SIDEREON_FUSION_FILTER_KIND_EKF) {
+                config.has_tight_joint_innovation_gate_probability = true;
+                config.tight_joint_innovation_gate_probability = 0.01;
+            } else {
+                config.has_ukf_joint_innovation_gate_probability = true;
+                config.ukf_joint_innovation_gate_probability = 0.01;
+            }
+            SidereonFusionFilter *filter = create_field_filter(&config, &nav, "tight gate filter");
+            if (!filter) continue;
+            SidereonFusionTightObservation observation = {0};
+            observation.sat_id = "G01"; observation.pseudorange_m = 20000000.0 + (reject ? 8.0 : 2.0); observation.pseudorange_sigma_m = 1.0;
+            SidereonFusionTightEpoch measurement = {epoch, &observation, 1};
+            SidereonFusionState before, after; double p_before[225], p_after[225]; size_t n = 0, total = 0;
+            check(sidereon_fusion_filter_state(filter, &before) == SIDEREON_STATUS_OK &&
+                  sidereon_fusion_filter_covariance(filter, p_before, 225, &n, &total) == SIDEREON_STATUS_OK, "tight prior");
+            SidereonFusionUpdate update;
+            const double innovation = reject ? 8.0 : 2.0, h[4] = {-1.0,0.0,0.0,1.0}, p[4] = {1.0,1.0,1.0,4.0}, r = 1.0;
+            double innovation_covariance = r;
+            for (size_t i = 0; i < 4; ++i) innovation_covariance += h[i] * p[i] * h[i];
+            const double nis = innovation * innovation / innovation_covariance;
+            /* fusion_gate_oracles.json: chi-square survival quantile, dof=1, p=0.01. */
+            const double threshold = 6.634896601021215;
+            SidereonStatus status = sidereon_fusion_filter_update_tight_sp3(filter, sp3, &measurement, &update);
+            check(status == SIDEREON_STATUS_OK && update.has_joint_innovation_gate &&
+                  update.joint_gate_degrees_of_freedom == 1 && update.joint_gate_probability == 0.01 &&
+                  fabs(update.joint_gate_threshold - threshold) < 1e-14 &&
+                  fabs(update.joint_gate_statistic - nis) < 2e-6 &&
+                  update.joint_gate_accepted == !reject && update.applied == !reject, "tight joint gate");
+            check(sidereon_fusion_filter_state(filter, &after) == SIDEREON_STATUS_OK &&
+                  sidereon_fusion_filter_covariance(filter, p_after, 225, &n, &total) == SIDEREON_STATUS_OK &&
+                  (!reject || (memcmp(before.position_ecef_m, after.position_ecef_m, sizeof(before.position_ecef_m)) == 0 &&
+                               memcmp(p_before, p_after, sizeof(p_before)) == 0 &&
+                               before.tight_clock_bias_m == after.tight_clock_bias_m)), "tight rejected state and covariance");
+            sidereon_fusion_filter_free(filter);
+        }
+    }
+    {
+        SidereonFusionFilterConfig config; init_field_config(&config);
+        config.tight_light_time = false; config.tight_sagnac = false;
+        config.tight_initial_clock_bias_variance_m2 = 4.0;
+        config.has_loose_joint_innovation_gate_probability = true;
+        config.loose_joint_innovation_gate_probability = 0.01;
+        SidereonFusionFilter *a = create_field_filter(&config, &nav, "cross covariance A");
+        SidereonFusionFilter *b = create_field_filter(&config, &nav, "cross covariance B");
+        if (a && b) {
+            SidereonFusionTightObservation observation = {0}; observation.sat_id = "G01";
+            observation.pseudorange_m = 20000002.0; observation.pseudorange_sigma_m = 1.0;
+            SidereonFusionTightEpoch tight = {epoch, &observation, 1}; SidereonFusionUpdate ua, ub;
+            check(sidereon_fusion_filter_update_tight_sp3(a, sp3, &tight, &ua) == SIDEREON_STATUS_OK &&
+                  sidereon_fusion_filter_update_tight_sp3(b, sp3, &tight, &ub) == SIDEREON_STATUS_OK, "cross covariance initial tight");
+            SidereonFusionImuSample sample = {0};
+            sample.kind = SIDEREON_FUSION_IMU_SAMPLE_KIND_INCREMENT; sample.dt_s = 1.0;
+            sample.t_j2000_s = epoch + 1.0; sample.delta_velocity_mps[0] = 9.7803253359;
+            check(sidereon_fusion_filter_propagate(a, &sample) == SIDEREON_STATUS_OK && sidereon_fusion_filter_propagate(b, &sample) == SIDEREON_STATUS_OK, "cross covariance first propagation");
+            double cov[9]; identity_matrix(cov, 3);
+            SidereonFusionLooseMeasurement fix = {0}; fix.t_j2000_s = epoch + 1.0;
+            fix.position_ecef_m[0] = 6378237.0; fix.position_ecef_m[1] = 100.0; fix.position_ecef_m[2] = 100.0;
+            fix.covariance = cov; fix.covariance_len = 9; fix.satellites_used = 7; fix.solution_valid = true; fix.fix_status = SIDEREON_FUSION_GNSS_FIX_STATUS_SINGLE;
+            check(sidereon_fusion_filter_update_loose(a, &fix, &ua) == SIDEREON_STATUS_OK && ua.has_joint_innovation_gate && !ua.applied, "cross covariance rejected loose");
+            sample.t_j2000_s = epoch + 2.0;
+            check(sidereon_fusion_filter_propagate(a, &sample) == SIDEREON_STATUS_OK && sidereon_fusion_filter_propagate(b, &sample) == SIDEREON_STATUS_OK, "cross covariance second propagation");
+            tight.t_j2000_s = epoch + 2.0;
+            observation.pseudorange_m = 20000003.0;
+            check(sidereon_fusion_filter_update_tight_sp3(a, sp3, &tight, &ua) == SIDEREON_STATUS_OK &&
+                  sidereon_fusion_filter_update_tight_sp3(b, sp3, &tight, &ub) == SIDEREON_STATUS_OK && ua.nis == ub.nis, "cross covariance subsequent tight");
+            SidereonFusionState sa, sb; double ca[225], cb[225]; size_t n, total;
+            check(sidereon_fusion_filter_state(a, &sa) == SIDEREON_STATUS_OK && sidereon_fusion_filter_state(b, &sb) == SIDEREON_STATUS_OK &&
+                  sidereon_fusion_filter_covariance(a, ca, 225, &n, &total) == SIDEREON_STATUS_OK && sidereon_fusion_filter_covariance(b, cb, 225, &n, &total) == SIDEREON_STATUS_OK &&
+                  memcmp(sa.position_ecef_m, sb.position_ecef_m, sizeof(sa.position_ecef_m)) == 0 && sa.tight_clock_bias_m == sb.tight_clock_bias_m && memcmp(ca, cb, sizeof(ca)) == 0, "cross covariance preserved");
+        }
+        sidereon_fusion_filter_free(a); sidereon_fusion_filter_free(b);
     }
     SidereonSppInputsV2 input;
     check(sidereon_spp_inputs_v2_init(&input) == SIDEREON_STATUS_OK, "GDOP refusal inputs");
@@ -1172,6 +1273,7 @@ int main(void) {
     test_fusion();
     test_fusion_field_mode();
     test_joint_gate();
+    test_gate_refusals_and_igg();
     test_tight_joint_gate();
     test_fusion_recorded_rts();
     if (failures != 0) {

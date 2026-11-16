@@ -463,8 +463,7 @@ pub struct SidereonFusionFilterConfig {
     pub has_loose_joint_innovation_gate_probability: bool,
     /// Loose EKF joint gate false-alarm probability.
     pub loose_joint_innovation_gate_probability: f64,
-    /// Request the tight EKF joint gate. Core 4.0 currently does not apply this gate
-    /// in tight EKF updates; callers must not rely on it until the core supports it.
+    /// Enable the tight EKF joint gate.
     pub has_tight_joint_innovation_gate_probability: bool,
     /// Tight EKF joint gate false-alarm probability.
     pub tight_joint_innovation_gate_probability: f64,
@@ -610,6 +609,16 @@ pub struct SidereonFusionTightEpoch {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct SidereonFusionUpdate {
+    /// Whether per-row innovation gate diagnostics are present.
+    pub has_innovation_gate: bool,
+    /// Whether the per-row innovation gate coasted.
+    pub innovation_gate_coasted: bool,
+    /// Per-row gate input row count.
+    pub innovation_gate_input_rows: usize,
+    /// Per-row gate accepted row count.
+    pub innovation_gate_accepted_rows: usize,
+    /// Per-row gate rejected row count.
+    pub innovation_gate_rejected_rows: usize,
     /// Whether the joint innovation gate ran.
     pub has_joint_innovation_gate: bool,
     /// Joint normalized innovation squared.
@@ -3119,6 +3128,27 @@ unsafe fn tight_epoch_from_c(
 
 fn fusion_update_to_c(update: &sidereon_core::fusion::FusionUpdate) -> SidereonFusionUpdate {
     SidereonFusionUpdate {
+        has_innovation_gate: update.ekf.innovation_gate.is_some(),
+        innovation_gate_coasted: update
+            .ekf
+            .innovation_gate
+            .as_ref()
+            .is_some_and(|v| v.coasted),
+        innovation_gate_input_rows: update
+            .ekf
+            .innovation_gate
+            .as_ref()
+            .map_or(0, |v| v.input_rows),
+        innovation_gate_accepted_rows: update
+            .ekf
+            .innovation_gate
+            .as_ref()
+            .map_or(0, |v| v.accepted_rows),
+        innovation_gate_rejected_rows: update
+            .ekf
+            .innovation_gate
+            .as_ref()
+            .map_or(0, |v| v.rejected_rows),
         has_joint_innovation_gate: update.ekf.joint_innovation_gate.is_some(),
         joint_gate_statistic: update
             .ekf
@@ -3230,6 +3260,11 @@ fn preflight_fusion_update_outputs(
 
 fn zero_fusion_update() -> SidereonFusionUpdate {
     SidereonFusionUpdate {
+        has_innovation_gate: false,
+        innovation_gate_coasted: false,
+        innovation_gate_input_rows: 0,
+        innovation_gate_accepted_rows: 0,
+        innovation_gate_rejected_rows: 0,
         has_joint_innovation_gate: false,
         joint_gate_statistic: 0.0,
         joint_gate_degrees_of_freedom: 0,

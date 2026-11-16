@@ -13627,7 +13627,8 @@ typedef struct SidereonFdeOptions {
      */
     bool use_validation_options;
     /**
-     * Per-iteration solution validation gates.
+     * Per-iteration solution validation gates. A GDOP refusal is available via
+     * sidereon_last_engine_error_payload, including gdop and max_gdop.
      */
     struct SidereonSppValidationOptions validation;
 } SidereonFdeOptions;
@@ -14799,8 +14800,7 @@ typedef struct SidereonFusionFilterConfig {
      */
     double loose_joint_innovation_gate_probability;
     /**
-     * Request the tight EKF joint gate. Core 4.0 currently does not apply this gate
-     * in tight EKF updates; callers must not rely on it until the core supports it.
+     * Enable the tight EKF joint gate.
      */
     bool has_tight_joint_innovation_gate_probability;
     /**
@@ -15055,6 +15055,26 @@ typedef struct SidereonFusionLooseMeasurement {
  * Report returned by loose and tight fusion updates.
  */
 typedef struct SidereonFusionUpdate {
+    /**
+     * Whether per-row innovation gate diagnostics are present.
+     */
+    bool has_innovation_gate;
+    /**
+     * Whether the per-row innovation gate coasted.
+     */
+    bool innovation_gate_coasted;
+    /**
+     * Per-row gate input row count.
+     */
+    size_t innovation_gate_input_rows;
+    /**
+     * Per-row gate accepted row count.
+     */
+    size_t innovation_gate_accepted_rows;
+    /**
+     * Per-row gate rejected row count.
+     */
+    size_t innovation_gate_rejected_rows;
     /**
      * Whether the joint innovation gate ran.
      */

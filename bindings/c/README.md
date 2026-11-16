@@ -1416,8 +1416,6 @@ The checked coverage helpers reject non-finite thresholds; the legacy grid helpe
 are deprecated. `sidereon_chi2_isf` takes a false-alarm tail probability directly.
 PPP weighted protection levels use inverse-sigma weights; fault-free accuracy
 bounds are a separate quantity. Solution validation can opt into a GDOP ceiling.
-The core tight EKF currently does not apply its configured joint gate; do not
-rely on that gate until the core implements it.
 Fusion configuration can enable joint EKF or UKF gates, whose statistic, degrees
 of freedom, threshold, probability, and verdict appear in the update report.
 RTK arc epoch metadata and accessors report mask convergence, selected references,
