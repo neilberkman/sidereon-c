@@ -1202,6 +1202,14 @@ pub struct SidereonRtkArcConfig {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct SidereonRtkArcEpochMetadata {
+    /// Whether the rover elevation mask converged.
+    pub elevation_mask_converged: bool,
+    /// Number of released holds.
+    pub released_hold_count: usize,
+    /// Number of reference satellites.
+    pub reference_satellite_count: usize,
+    /// Number of rover-mask rejected satellites.
+    pub elevation_masked_satellite_count: usize,
     /// Ambiguity-conditioned reported baseline for this epoch (metres).
     pub reported_baseline_m: [f64; 3],
     /// Carried float (Kalman posterior) baseline after this epoch (metres).
@@ -3858,6 +3866,10 @@ pub unsafe extern "C" fn sidereon_rtk_arc_solution_epoch_metadata(
                 index
             ));
             *out = SidereonRtkArcEpochMetadata {
+                elevation_mask_converged: epoch.elevation_mask_converged,
+                released_hold_count: epoch.released_holds.len(),
+                reference_satellite_count: epoch.reference_satellite_ids.len(),
+                elevation_masked_satellite_count: epoch.elevation_masked_satellite_ids.len(),
                 reported_baseline_m: epoch.reported_baseline_m,
                 float_baseline_m: epoch.float_baseline_m,
                 integer_fixed: epoch.integer_fixed,
@@ -3920,6 +3932,200 @@ pub unsafe extern "C" fn sidereon_rtk_arc_solution_epoch_used_satellites(
             SidereonStatus::Ok
         },
     )
+}
+
+/// Copy satellite identifiers from the epoch solution.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtk_arc_solution_epoch_reference_satellites(
+    solution: *const SidereonRtkArcSolution,
+    index: usize,
+    out: *mut SidereonSatelliteToken,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtk_arc_solution_epoch_reference_satellites",
+        SidereonStatus::Panic,
+        || {
+            c_try!(reject_outputs_overlapping_handle(
+                "sidereon_rtk_arc_solution_epoch_reference_satellites",
+                &[
+                    (out.cast(), size_of::<SidereonSatelliteToken>(), len, "out"),
+                    (out_written.cast(), size_of::<usize>(), 1, "out_written"),
+                    (out_required.cast(), size_of::<usize>(), 1, "out_required")
+                ],
+                solution,
+                "solution"
+            ));
+            c_try!(init_copy_counts(
+                "sidereon_rtk_arc_solution_epoch_reference_satellites",
+                out_written,
+                out_required
+            ));
+            let epoch = c_try!(rtk_arc_epoch_at(
+                "sidereon_rtk_arc_solution_epoch_reference_satellites",
+                solution,
+                index
+            ));
+            let rows: Vec<SidereonSatelliteToken> = epoch
+                .reference_satellite_ids
+                .iter()
+                .map(|id| satellite_token_from_text(id))
+                .collect();
+            c_try!(copy_prefix_to_c(
+                "sidereon_rtk_arc_solution_epoch_reference_satellites",
+                "out",
+                &rows,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy satellite identifiers from the epoch solution.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtk_arc_solution_epoch_elevation_masked_satellites(
+    solution: *const SidereonRtkArcSolution,
+    index: usize,
+    out: *mut SidereonSatelliteToken,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_rtk_arc_solution_epoch_elevation_masked_satellites",
+        SidereonStatus::Panic,
+        || {
+            c_try!(reject_outputs_overlapping_handle(
+                "sidereon_rtk_arc_solution_epoch_elevation_masked_satellites",
+                &[
+                    (out.cast(), size_of::<SidereonSatelliteToken>(), len, "out"),
+                    (out_written.cast(), size_of::<usize>(), 1, "out_written"),
+                    (out_required.cast(), size_of::<usize>(), 1, "out_required")
+                ],
+                solution,
+                "solution"
+            ));
+            c_try!(init_copy_counts(
+                "sidereon_rtk_arc_solution_epoch_elevation_masked_satellites",
+                out_written,
+                out_required
+            ));
+            let epoch = c_try!(rtk_arc_epoch_at(
+                "sidereon_rtk_arc_solution_epoch_elevation_masked_satellites",
+                solution,
+                index
+            ));
+            let rows: Vec<SidereonSatelliteToken> = epoch
+                .elevation_masked_satellite_ids
+                .iter()
+                .map(|id| satellite_token_from_text(id))
+                .collect();
+            c_try!(copy_prefix_to_c(
+                "sidereon_rtk_arc_solution_epoch_elevation_masked_satellites",
+                "out",
+                &rows,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Reason an RTK ambiguity hold was released.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub enum SidereonRtkHoldReleaseReason {
+    /// The replacement reference is not held.
+    UnheldReference = 0,
+    /// Carrier wavelengths cannot share a common integer lattice.
+    IncompatibleWavelengths = 1,
+}
+/// An ambiguity hold released during a reference change.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonReleasedRtkHold {
+    /// Released ambiguity identifier.
+    pub ambiguity_id: SidereonRtkId,
+    /// Release reason.
+    pub reason: SidereonRtkHoldReleaseReason,
+}
+/// Copy the holds released at an epoch. All output arrays follow the variable-length contract.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtk_arc_solution_epoch_released_holds(
+    solution: *const SidereonRtkArcSolution,
+    index: usize,
+    out: *mut SidereonReleasedRtkHold,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_rtk_arc_solution_epoch_released_holds";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        c_try!(reject_outputs_overlapping_handle(
+            FN,
+            &[
+                (out.cast(), size_of::<SidereonReleasedRtkHold>(), len, "out"),
+                (out_written.cast(), size_of::<usize>(), 1, "out_written"),
+                (out_required.cast(), size_of::<usize>(), 1, "out_required")
+            ],
+            solution,
+            "solution"
+        ));
+        c_try!(init_copy_counts(FN, out_written, out_required));
+        let epoch = c_try!(rtk_arc_epoch_at(FN, solution, index));
+        let rows: Vec<_> = epoch
+            .released_holds
+            .iter()
+            .map(|h| SidereonReleasedRtkHold {
+                ambiguity_id: rtk_id_token(&h.ambiguity_id),
+                reason: match h.reason {
+                    sidereon_core::rtk_filter::RtkHoldReleaseReason::UnheldReference => {
+                        SidereonRtkHoldReleaseReason::UnheldReference
+                    }
+                    sidereon_core::rtk_filter::RtkHoldReleaseReason::IncompatibleWavelengths => {
+                        SidereonRtkHoldReleaseReason::IncompatibleWavelengths
+                    }
+                },
+            })
+            .collect();
+        c_try!(copy_prefix_to_c(
+            FN,
+            "out",
+            &rows,
+            out,
+            len,
+            out_written,
+            out_required
+        ));
+        SidereonStatus::Ok
+    })
+}
+/// Read whether the static rover elevation mask converged.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_rtk_static_arc_solution_elevation_mask_converged(
+    solution: *const SidereonRtkStaticArcSolution,
+    out: *mut bool,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_rtk_static_arc_solution_elevation_mask_converged";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        c_try!(reject_output_overlaps_handle(
+            FN, out, "out", solution, "solution"
+        ));
+        let out = c_try!(require_out(out, FN, "out"));
+        *out = c_try!(require_ref(solution, FN, "solution"))
+            .inner
+            .elevation_mask_converged;
+        SidereonStatus::Ok
+    })
 }
 
 /// Copy one epoch's reported single-difference ambiguities (id, metres) in column

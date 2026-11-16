@@ -303,6 +303,10 @@ pub unsafe extern "C" fn sidereon_dgnss_position_solve(
                 "sidereon_dgnss_position_solve",
                 "inputs"
             ));
+            c_try!(reject_unusable_max_gdop(
+                "sidereon_dgnss_position_solve",
+                &inputs.policy
+            ));
             let glonass_channels = c_try!(glonass_channels_from_c(
                 "sidereon_dgnss_position_solve",
                 inputs

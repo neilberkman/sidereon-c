@@ -393,3 +393,15 @@ cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -o "${target_dir}/catalog_refusal_smoke_ci"
 "${target_dir}/catalog_refusal_smoke_ci"
 python3 "${here}/check_catalog_refusal_coverage.py"
+
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
+    -I"${binding_root}/include" "${here}/parity_refusal_smoke.c" \
+    -L"${lib_dir}" -lsidereon -Wl,-rpath,"${lib_dir}" -lm \
+    -o "${target_dir}/parity_refusal_smoke_ci"
+"${target_dir}/parity_refusal_smoke_ci"
+
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
+    -I"${binding_root}/include" -I"${here}" "${here}/rtk_hold_transport_smoke.c" \
+    -L"${lib_dir}" -lsidereon -Wl,-rpath,"${lib_dir}" -lm \
+    -o "${target_dir}/rtk_hold_transport_smoke_ci"
+"${target_dir}/rtk_hold_transport_smoke_ci"

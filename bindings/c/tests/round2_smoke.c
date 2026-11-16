@@ -687,6 +687,21 @@ static int exercise_quality(const SidereonSp3 *sp3) {
         return fail("spp solve for quality", 1);
     }
 
+    inputs.policy.use_validation_options = true;
+    inputs.policy.validation.max_gdop_enabled = true;
+    inputs.policy.validation.max_gdop = 0.1;
+    SidereonSppSolution *rejected = NULL;
+    if (sidereon_solve_spp_v2(sp3, &inputs, &rejected) != SIDEREON_STATUS_SOLVE || rejected != NULL) {
+        sidereon_spp_solution_free(sol);
+        return fail("SPP policy GDOP gate", 1);
+    }
+    unsigned char policy_payload[2048] = {0}; size_t policy_written = 0, policy_required = 0;
+    if (sidereon_last_engine_error_payload(policy_payload, sizeof(policy_payload)-1, &policy_written, &policy_required) != SIDEREON_STATUS_OK ||
+        strstr((const char *)policy_payload, "degenerate_geometry_gdop") == NULL) {
+        sidereon_spp_solution_free(sol);
+        return fail("SPP policy GDOP payload", 1);
+    }
+
     SidereonRaimResult raim;
     if (sidereon_raim_for_solution(sol, 0.001, SIDEREON_RAIM_WEIGHTS_MODE_UNIT, NULL, 0, false, 0,
                                    &raim) !=
@@ -710,6 +725,30 @@ static int exercise_quality(const SidereonSp3 *sp3) {
         W4_R2_SOLUTION_VALID) {
         sidereon_spp_solution_free(sol);
         return fail("validate_receiver_solution", 1);
+    }
+    svo.has_max_gdop = true;
+    svo.max_gdop = 0.1; /* Four-state GDOP cannot be below this bound. */
+    if (sidereon_validate_receiver_solution(sol, &svo) != SIDEREON_STATUS_INVALID_ARGUMENT) {
+        sidereon_spp_solution_free(sol);
+        return fail("GDOP gate", 1);
+    }
+    unsigned char gdop_payload[1024] = {0};
+    size_t written = 0, required = 0;
+    if (sidereon_last_engine_error_payload(gdop_payload, sizeof(gdop_payload)-1, &written, &required) != SIDEREON_STATUS_OK ||
+        strstr((const char *)gdop_payload, "degenerate_geometry_gdop") == NULL) {
+        sidereon_spp_solution_free(sol);
+        return fail("GDOP gate error kind", 1);
+    }
+    const char *gdop_field = strstr((const char *)gdop_payload, "\"gdop\":{");
+    const char *decimal_field = gdop_field ? strstr(gdop_field, "\"decimal\":\"") : NULL;
+    const char *bits_field = gdop_field ? strstr(gdop_field, "\"bits_hex\":\"") : NULL;
+    char *gdop_end = NULL, *bits_end = NULL;
+    double gdop = decimal_field ? strtod(decimal_field + strlen("\"decimal\":\""), &gdop_end) : 0.0;
+    unsigned long long gdop_bits = bits_field ? strtoull(bits_field + strlen("\"bits_hex\":\""), &bits_end, 16) : 0;
+    if (!decimal_field || !bits_field || *gdop_end != '\"' || *bits_end != '\"' ||
+        !isfinite(gdop) || gdop <= 0.1 || (uint64_t)gdop_bits != f64_to_bits(gdop)) {
+        sidereon_spp_solution_free(sol);
+        return fail("GDOP structured payload", 1);
     }
     sidereon_spp_solution_free(sol);
     return 0;

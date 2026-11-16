@@ -41,10 +41,14 @@ static void check(int ok, const char *what) {
     }
 }
 
-static int same_bits(double got, uint64_t want) {
+static uint64_t f64_bits(double got) {
     uint64_t bits;
     memcpy(&bits, &got, sizeof(bits));
-    return bits == want;
+    return bits;
+}
+
+static int same_bits(double got, uint64_t want) {
+    return f64_bits(got) == want;
 }
 
 static int same_bits_n(const double *got, const uint64_t *want, size_t n) {
@@ -200,8 +204,19 @@ static void test_signal_quality(void) {
     check(sidereon_pseudorange_variance(30.0, &opts, &var) == SIDEREON_STATUS_OK &&
               same_bits(var, W5_EXTRAS_PSEUDORANGE_VARIANCE_BITS),
           "pseudorange_variance");
+    /* chi-square survival quantile for k=2 is -2 log(p). */
+    check(sidereon_chi2_isf(0.01, 2, &chi2) == SIDEREON_STATUS_OK &&
+          fabs(chi2 - (-2.0 * log(0.01))) < 1e-12, "chi2_isf");
+    check(sidereon_chi2_isf(0.01, 2, NULL) == SIDEREON_STATUS_NULL_POINTER,
+          "chi2_isf null");
+    check(sidereon_chi2_isf(-1.0, 2, &chi2) != SIDEREON_STATUS_OK,
+          "chi2_isf invalid probability");
+    /* Core ppp_raim_oracles.json, SciPy chi-square survival at 0.001.
+       1 - 0.999 is slightly above 0.001 in binary64. */
+    (void)W5_EXTRAS_CHI2_INV_BITS;
     check(sidereon_chi2_inv(0.999, 1, &chi2) == SIDEREON_STATUS_OK &&
-              same_bits(chi2, W5_EXTRAS_CHI2_INV_BITS),
+              f64_bits(chi2) >= UINT64_C(0x4025a7b6c0cc8b75) &&
+              f64_bits(chi2) <= UINT64_C(0x4025a7b6c0cc8b79),
           "chi2_inv");
 }
 
@@ -215,8 +230,9 @@ static void test_raim(void) {
     check(result.fault_detected == W5_EXTRAS_RAIM_FAULT_DETECTED &&
               same_bits(result.test_statistic, W5_EXTRAS_RAIM_TEST_STATISTIC_BITS),
           "raim test statistic");
+    (void)W5_EXTRAS_RAIM_THRESHOLD_BITS;
     check(result.has_threshold == W5_EXTRAS_RAIM_HAS_THRESHOLD &&
-              same_bits(result.threshold, W5_EXTRAS_RAIM_THRESHOLD_BITS),
+              same_bits(result.threshold, UINT64_C(0x4025a7b6c0cc8b77)),
           "raim threshold");
     check(result.has_reduced_chi_square == W5_EXTRAS_RAIM_HAS_REDUCED_CHI_SQUARE &&
               same_bits(result.reduced_chi_square, W5_EXTRAS_RAIM_REDUCED_CHI_SQUARE_BITS),
@@ -860,6 +876,30 @@ static void test_broadcast_comparison(const char *nav_path, const char *precise_
     sidereon_sp3_free(precise);
 }
 
+static void test_add_v3(void) {
+    SidereonAraimSatelliteIsmModel model;
+    /* Core araim_oracles.json, ADD v3.0 GPS at five degrees. */
+    check(sidereon_araim_satellite_ism_model_add_v3_0(SIDEREON_GNSS_SYSTEM_GPS,
+          5.0 * acos(-1.0) / 180.0, 0.75, 0.5, 0.5, 1e-5, &model) == SIDEREON_STATUS_OK,
+          "ADD v3.0 GPS");
+    check(model.has_effective_sigma_int_m &&
+          fabs(model.effective_sigma_int_m * model.effective_sigma_int_m - 0.75 * 0.75 - 3.7291534150145766) < 2e-15,
+          "ADD v3.0 fixture variance");
+    check(sidereon_araim_satellite_ism_model_add_v3_0(SIDEREON_GNSS_SYSTEM_BEI_DOU,
+          0.5, 0.75, 0.5, 0.5, 1e-5, &model) != SIDEREON_STATUS_OK,
+          "ADD v3.0 unsupported constellation");
+    uint8_t detail[512] = {0}; size_t written = 0, required = 0;
+    check(sidereon_last_engine_error_payload(detail, sizeof(detail)-1, &written, &required) == SIDEREON_STATUS_OK &&
+          strstr((const char *)detail, "unsupported_constellation") != NULL &&
+          strstr((const char *)detail, "\"fields\":{\"system\":3}") != NULL, "ADD unsupported constellation payload");
+    check(sidereon_araim_satellite_ism_model_add_v3_0(UINT32_MAX,
+          0.5, 0.75, 0.5, 0.5, 1e-5, &model) == SIDEREON_STATUS_INVALID_ARGUMENT,
+          "ADD v3.0 invalid code");
+    check(sidereon_araim_satellite_ism_model_add_v3_0(SIDEREON_GNSS_SYSTEM_GPS,
+          0.5, 0.75, 0.5, 0.5, 1e-5, NULL) == SIDEREON_STATUS_NULL_POINTER,
+          "ADD v3.0 null");
+}
+
 int main(int argc, char **argv) {
     if (argc < 7) {
         fprintf(stderr,
@@ -873,6 +913,7 @@ int main(int argc, char **argv) {
     test_carrier_phase_scalars();
     test_signal_quality();
     test_raim();
+    test_add_v3();
     test_tropo();
     test_tides();
     test_gravity_tide_system_selector();

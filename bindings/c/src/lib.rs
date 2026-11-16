@@ -65,8 +65,8 @@ use sidereon_core::astro::atmosphere::{
 use sidereon_core::astro::constants::units::MICROSECONDS_PER_SECOND;
 use sidereon_core::astro::constants::MU_EARTH;
 use sidereon_core::astro::coverage::{
-    access_counts as coverage_access_counts, look_angles_batch as coverage_look_angles_batch,
-    max_elevation as coverage_max_elevation, visible_mask as coverage_visible_mask, LookAngleGrid,
+    look_angles_batch as coverage_look_angles_batch, max_elevation as coverage_max_elevation,
+    LookAngleGrid,
 };
 use sidereon_core::astro::elements::{coe2rv, rv2coe, ClassicalElements, ElementsError, OrbitType};
 use sidereon_core::astro::error::PropagationError;
@@ -1840,6 +1840,8 @@ fn default_robust_config() -> SidereonSppRobustConfig {
 fn default_validation_options() -> SidereonSppValidationOptions {
     let validation = SolutionValidationOptions::default();
     SidereonSppValidationOptions {
+        max_gdop_enabled: validation.max_gdop.is_some(),
+        max_gdop: validation.max_gdop.unwrap_or(0.0),
         max_pdop_enabled: validation.max_pdop.is_some(),
         max_pdop: validation.max_pdop.unwrap_or(0.0),
         min_plausible_radius_m: validation.min_plausible_radius_m,
@@ -1994,12 +1996,26 @@ fn beidou_klobuchar_from_c(inputs: &SidereonSppInputsV2) -> Option<KlobucharCoef
 /// engine default gates are used, exactly as the V2 solve policy does; shared by
 /// the SPP solve policy and the FDE per-iteration solve so both honor the same
 /// gates.
+fn reject_unusable_max_gdop(
+    fn_name: &str,
+    policy: &SidereonSppSolvePolicy,
+) -> Result<(), SidereonStatus> {
+    if policy.use_validation_options && policy.validation.max_gdop_enabled {
+        set_last_error(format!(
+            "{fn_name}: policy.validation.max_gdop cannot be applied by this operation"
+        ));
+        return Err(SidereonStatus::InvalidArgument);
+    }
+    Ok(())
+}
+
 fn validation_options_from_c(
     use_validation_options: bool,
     validation: &SidereonSppValidationOptions,
 ) -> SolutionValidationOptions {
     if use_validation_options {
         let mut o = SolutionValidationOptions::default();
+        o.max_gdop = validation.max_gdop_enabled.then_some(validation.max_gdop);
         o.max_pdop = validation.max_pdop_enabled.then_some(validation.max_pdop);
         o.min_plausible_radius_m = validation.min_plausible_radius_m;
         o.max_plausible_radius_m = validation.max_plausible_radius_m;

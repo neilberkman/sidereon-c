@@ -607,8 +607,11 @@ static int test_baarda_constants(void) {
                    "w-test noncentrality") != 0) {
         return 1;
     }
-    if (!same_bits(constants.delta0, W5_CAP015_WTEST_DELTA0_BITS) ||
-        !same_bits(constants.lambda0, W5_CAP015_WTEST_LAMBDA0_BITS)) {
+    /* Core evaluates inverse-normal tails without forming 1 - p; araim_oracles.json pins lambda, whose square root is delta. */
+    (void)W5_CAP015_WTEST_DELTA0_BITS;
+    (void)W5_CAP015_WTEST_LAMBDA0_BITS;
+    if (!same_bits(constants.delta0, UINT64_C(0x40108751cbd0bec6)) ||
+        !same_bits(constants.lambda0, UINT64_C(0x4031131c0d9309e5))) {
         fprintf(stderr, "FAIL: delta0 %.17g lambda0 %.17g differ from the engine's\n",
                 constants.delta0, constants.lambda0);
         return 1;

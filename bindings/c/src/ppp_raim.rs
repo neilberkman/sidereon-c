@@ -140,6 +140,8 @@ pub enum SidereonPppRaimFdeStatus {
     CannotExclude = 2,
     /// No valid exclusion restored integrity.
     IntegrityNotRestored = 3,
+    /// The solve had no redundancy to test.
+    Untested = 4,
 }
 
 /// PPP RAIM refusal kind. Values correspond one-to-one with core variants.
@@ -156,6 +158,12 @@ pub enum SidereonPppRaimErrorKind {
     Dop = 3,
     /// Singular geometry.
     SingularGeometry = 4,
+    /// Protection level calculation failed numerically.
+    NumericalProtectionLevel = 5,
+    /// Noncentrality exceeds the supported domain.
+    UnsupportedNoncentrality = 6,
+    /// Residual degrees of freedom exceed the supported domain.
+    UnsupportedDof = 7,
 }
 
 /// PPP RAIM/FDE refusal kind.
@@ -214,6 +222,7 @@ fn status_to_c(value: core::RaimStatus) -> SidereonPppRaimStatus {
 
 fn fde_status_to_c(value: core::RaimFdeStatus) -> SidereonPppRaimFdeStatus {
     match value {
+        core::RaimFdeStatus::Untested => SidereonPppRaimFdeStatus::Untested,
         core::RaimFdeStatus::Clean => SidereonPppRaimFdeStatus::Clean,
         core::RaimFdeStatus::Restored => SidereonPppRaimFdeStatus::Restored,
         core::RaimFdeStatus::CannotExclude => SidereonPppRaimFdeStatus::CannotExclude,
@@ -295,6 +304,15 @@ fn raim_error_value(error: &core::RaimError) -> Value {
             "kind": "dop", "message": error.to_string(),
             "fields": {"cause": crate::engine_error::dop_error_value(cause)}
         }),
+        core::RaimError::NumericalProtectionLevel => {
+            json!({"kind": "numerical_protection_level", "message": error.to_string(), "fields": {}})
+        }
+        core::RaimError::UnsupportedNoncentrality => {
+            json!({"kind": "unsupported_noncentrality", "message": error.to_string(), "fields": {}})
+        }
+        core::RaimError::UnsupportedDof { dof, max } => {
+            json!({"kind": "unsupported_dof", "message": error.to_string(), "fields": {"dof": dof, "max": max}})
+        }
         core::RaimError::SingularGeometry => json!({
             "kind": "singular_geometry", "message": error.to_string(), "fields": {}
         }),
@@ -308,9 +326,19 @@ fn map_raim_error(fn_name: &str, error: core::RaimError) -> SidereonStatus {
         raim_error_value(&error),
     );
     set_last_error(format!("{fn_name}: {error}"));
+    raim_error_status(&error)
+}
+
+fn raim_error_status(error: &core::RaimError) -> SidereonStatus {
     match error {
-        core::RaimError::SingularGeometry | core::RaimError::Dop(_) => SidereonStatus::Solve,
-        _ => SidereonStatus::InvalidArgument,
+        core::RaimError::SingularGeometry
+        | core::RaimError::Dop(_)
+        | core::RaimError::NumericalProtectionLevel => SidereonStatus::Solve,
+        core::RaimError::InvalidConfig { .. }
+        | core::RaimError::InvalidResidual { .. }
+        | core::RaimError::InvalidGeometry { .. }
+        | core::RaimError::UnsupportedNoncentrality
+        | core::RaimError::UnsupportedDof { .. } => SidereonStatus::InvalidArgument,
     }
 }
 
@@ -318,12 +346,7 @@ fn map_fde_error(fn_name: &str, error: core::RaimFdeError) -> SidereonStatus {
     let (tree, status) = match &error {
         core::RaimFdeError::Raim(cause) => (
             json!({"kind": "raim", "message": error.to_string(), "fields": {"cause": raim_error_value(cause)}}),
-            match cause {
-                core::RaimError::SingularGeometry | core::RaimError::Dop(_) => {
-                    SidereonStatus::Solve
-                }
-                _ => SidereonStatus::InvalidArgument,
-            },
+            raim_error_status(cause),
         ),
         core::RaimFdeError::Solve(cause) => (
             json!({
@@ -400,6 +423,16 @@ pub unsafe extern "C" fn sidereon_ppp_raim_error_text(
                 core::RaimError::Dop(sidereon_core::geometry::DopError::Singular)
             }
             SidereonPppRaimErrorKind::SingularGeometry => core::RaimError::SingularGeometry,
+            SidereonPppRaimErrorKind::NumericalProtectionLevel => {
+                core::RaimError::NumericalProtectionLevel
+            }
+            SidereonPppRaimErrorKind::UnsupportedNoncentrality => {
+                core::RaimError::UnsupportedNoncentrality
+            }
+            SidereonPppRaimErrorKind::UnsupportedDof => core::RaimError::UnsupportedDof {
+                dof: 100001,
+                max: 100000,
+            },
         };
         copy_text(
             fn_name,
@@ -507,7 +540,8 @@ pub unsafe extern "C" fn sidereon_ppp_raim_per_satellite_statistics(
     })
 }
 
-/// Compute PPP RAIM horizontal and vertical protection levels.
+/// Compute Brown snapshot-RAIM horizontal and vertical fault protection levels.
+/// The geometry must have positive residual redundancy.
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_ppp_raim_protection_levels(
     geometry: *const SidereonPppRaimGeometryRow,
@@ -521,6 +555,134 @@ pub unsafe extern "C" fn sidereon_ppp_raim_protection_levels(
         let geometry = c_try!(geometry_from_c(fn_name, geometry, geometry_count));
         let receiver = c_try!(geodetic_to_wgs84(fn_name, "receiver", receiver));
         match core::raim::protection_levels(&geometry, receiver, config_to_core(config)) {
+            Ok(value) => {
+                *c_try!(require_out(out, fn_name, "out")) = SidereonPppRaimProtectionLevels {
+                    hpl_m: value.hpl_m,
+                    vpl_m: value.vpl_m,
+                };
+                SidereonStatus::Ok
+            }
+            Err(error) => map_raim_error(fn_name, error),
+        }
+    })
+}
+
+/// Compute Brown snapshot-RAIM fault protection levels using inverse-sigma weights.
+/// Safety: geometry and weights each point to count entries; out points to writable storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_raim_protection_levels_with_weights(
+    geometry: *const SidereonPppRaimGeometryRow,
+    weights: *const f64,
+    count: usize,
+    receiver: SidereonGeodetic,
+    config: SidereonPppRaimConfig,
+    out: *mut SidereonPppRaimProtectionLevels,
+) -> SidereonStatus {
+    let fn_name = "sidereon_ppp_raim_protection_levels_with_weights";
+    engine_error_operation_boundary(fn_name, SidereonStatus::Panic, || {
+        let _ = c_try!(require_out(out, fn_name, "out"));
+        if count != 0 && !geometry.is_null() && !weights.is_null() {
+            let output_range = c_try!(checked_output_range(fn_name, out, 1, "out"));
+            let geometry_range = c_try!(checked_output_range(
+                fn_name,
+                geometry.cast_mut(),
+                count,
+                "geometry"
+            ));
+            let weights_range = c_try!(checked_output_range(
+                fn_name,
+                weights.cast_mut(),
+                count,
+                "weights"
+            ));
+            c_try!(reject_overlapping_outputs(
+                fn_name,
+                output_range,
+                geometry_range,
+                "out",
+                "geometry"
+            ));
+            c_try!(reject_overlapping_outputs(
+                fn_name,
+                output_range,
+                weights_range,
+                "out",
+                "weights"
+            ));
+        }
+        let geometry = c_try!(geometry_from_c(fn_name, geometry, count));
+        let weights = c_try!(require_slice(weights, count, fn_name, "weights"));
+        let receiver = c_try!(geodetic_to_wgs84(fn_name, "receiver", receiver));
+        match core::raim::protection_levels_with_weights(
+            &geometry,
+            weights,
+            receiver,
+            config_to_core(config),
+        ) {
+            Ok(value) => {
+                *c_try!(require_out(out, fn_name, "out")) = SidereonPppRaimProtectionLevels {
+                    hpl_m: value.hpl_m,
+                    vpl_m: value.vpl_m,
+                };
+                SidereonStatus::Ok
+            }
+            Err(error) => map_raim_error(fn_name, error),
+        }
+    })
+}
+
+/// Compute fault-free accuracy bounds using inverse-sigma weights.
+/// Safety: geometry and weights each point to count entries; out points to writable storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_raim_fault_free_accuracy_bounds(
+    geometry: *const SidereonPppRaimGeometryRow,
+    weights: *const f64,
+    count: usize,
+    receiver: SidereonGeodetic,
+    config: SidereonPppRaimConfig,
+    out: *mut SidereonPppRaimProtectionLevels,
+) -> SidereonStatus {
+    let fn_name = "sidereon_ppp_raim_fault_free_accuracy_bounds";
+    engine_error_operation_boundary(fn_name, SidereonStatus::Panic, || {
+        let _ = c_try!(require_out(out, fn_name, "out"));
+        if count != 0 && !geometry.is_null() && !weights.is_null() {
+            let output_range = c_try!(checked_output_range(fn_name, out, 1, "out"));
+            let geometry_range = c_try!(checked_output_range(
+                fn_name,
+                geometry.cast_mut(),
+                count,
+                "geometry"
+            ));
+            let weights_range = c_try!(checked_output_range(
+                fn_name,
+                weights.cast_mut(),
+                count,
+                "weights"
+            ));
+            c_try!(reject_overlapping_outputs(
+                fn_name,
+                output_range,
+                geometry_range,
+                "out",
+                "geometry"
+            ));
+            c_try!(reject_overlapping_outputs(
+                fn_name,
+                output_range,
+                weights_range,
+                "out",
+                "weights"
+            ));
+        }
+        let geometry = c_try!(geometry_from_c(fn_name, geometry, count));
+        let weights = c_try!(require_slice(weights, count, fn_name, "weights"));
+        let receiver = c_try!(geodetic_to_wgs84(fn_name, "receiver", receiver));
+        match core::raim::fault_free_accuracy_bounds(
+            &geometry,
+            weights,
+            receiver,
+            config_to_core(config),
+        ) {
             Ok(value) => {
                 *c_try!(require_out(out, fn_name, "out")) = SidereonPppRaimProtectionLevels {
                     hpl_m: value.hpl_m,

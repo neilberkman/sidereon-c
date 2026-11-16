@@ -348,11 +348,14 @@ static int exercise_estimation_primitives(void) {
 
     double threshold = 0.0;
     SidereonNisGate gate;
+    /* Core estimation/primitives.rs checks this quantile to 1e-12. */
+    (void)W5_CAP013_NIS_THRESHOLD_BITS;
+    (void)W5_CAP013_GATE_THRESHOLD_BITS;
     if (require_ok(sidereon_nis_gate_threshold(1, 0.95, &threshold), "nis threshold") != 0 ||
-        !same_bits(threshold, W5_CAP013_NIS_THRESHOLD_BITS) ||
+        fabs(threshold - 3.841458820694124) >= 1e-12 ||
         require_ok(sidereon_nis_gate_test(2.0, 4.0, 1, 0.95, &gate), "nis gate") != 0 ||
         gate.in_gate != W5_CAP013_GATE_IN_GATE || !same_bits(gate.nis, W5_CAP013_GATE_NIS_BITS) ||
-        !same_bits(gate.threshold, W5_CAP013_GATE_THRESHOLD_BITS) ||
+        fabs(gate.threshold - 3.841458820694124) >= 1e-12 ||
         gate.dof != W5_CAP013_GATE_DOF) {
         return fail("estimation primitives: nis gate");
     }

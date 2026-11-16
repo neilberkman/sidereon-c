@@ -829,22 +829,31 @@ pub unsafe extern "C" fn sidereon_solve_broadcast_with_models(
             let broadcast = require_ref(broadcast, FN, "broadcast")?;
             let inputs = require_ref(inputs, FN, "inputs")?;
             let solve_inputs = crate::spp::build_spp_solve_inputs_with_models(FN, inputs, models)?;
-            Ok((broadcast, solve_inputs, inputs.base.with_geodetic))
+            let policy = solve_policy_from_c(FN, &inputs.policy)?;
+            Ok((broadcast, solve_inputs, inputs.base.with_geodetic, policy))
         })();
         *out_solution = ptr::null_mut();
-        let (broadcast, solve_inputs, with_geodetic) = c_try!(input_result);
-        let solution = match solve_broadcast(&broadcast.inner, &solve_inputs, with_geodetic) {
-            Ok(solution) => solution,
-            Err(error) => {
-                set_last_error(format!("{FN}: {error}"));
-                crate::engine_error::record_engine_error(
-                    crate::engine_error::SidereonEngineErrorFamily::Spp,
-                    FN,
-                    crate::engine_error::spp_error_value(&error),
-                );
-                return SidereonStatus::Solve;
-            }
-        };
+        let (broadcast, solve_inputs, with_geodetic, policy) = c_try!(input_result);
+        let solution =
+            match sidereon::solve_spp(&broadcast.inner, &solve_inputs, with_geodetic, policy) {
+                Ok(solution) => solution,
+                Err(sidereon::Error::Spp(sidereon_core::positioning::SolvePolicyError::Solve(
+                    error,
+                ))) => {
+                    set_last_error(format!("{FN}: {error}"));
+                    crate::engine_error::record_engine_error(
+                        crate::engine_error::SidereonEngineErrorFamily::Spp,
+                        FN,
+                        crate::engine_error::spp_error_value(&error),
+                    );
+                    return SidereonStatus::Solve;
+                }
+                Err(error) => {
+                    set_last_error(format!("{FN}: {error}"));
+                    crate::engine_error::RecordEngineError::record_engine_error(FN, &error);
+                    return SidereonStatus::Solve;
+                }
+            };
         write_boxed_handle(out_solution, SidereonSppSolution { inner: solution });
         SidereonStatus::Ok
     })
@@ -2341,6 +2350,7 @@ unsafe fn solve_spp_batch_impl(
         let rows = require_slice(inputs, input_count, fn_name, "inputs")?;
         let mut epochs = Vec::with_capacity(rows.len());
         for row in rows {
+            reject_unusable_max_gdop(fn_name, &row.policy)?;
             let glonass = glonass_channels_from_c(fn_name, row)?;
             let solve_inputs = build_spp_solve_inputs(
                 fn_name,

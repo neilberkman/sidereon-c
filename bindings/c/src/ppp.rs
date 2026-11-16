@@ -3485,6 +3485,54 @@ pub unsafe extern "C" fn sidereon_ppp_float_solution_posterior_variance_factor(
     })
 }
 
+/// Report whether the float solution's posterior variance factor was estimated.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_float_solution_posterior_variance_factor_estimated(
+    solution: *const SidereonPppFloatSolution,
+    out_value: *mut bool,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_float_solution_posterior_variance_factor_estimated";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        c_try!(reject_output_overlaps_handle(
+            FN,
+            out_value,
+            "out_value",
+            solution,
+            "solution"
+        ));
+        let out = c_try!(require_out(out_value, FN, "out_value"));
+        *out = false;
+        *out = c_try!(require_ref(solution, FN, "solution"))
+            .inner
+            .posterior_variance_factor_estimated;
+        SidereonStatus::Ok
+    })
+}
+
+/// Report whether the fixed solution's posterior variance factor was estimated.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_ppp_fixed_solution_posterior_variance_factor_estimated(
+    solution: *const SidereonPppFixedSolution,
+    out_value: *mut bool,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_ppp_fixed_solution_posterior_variance_factor_estimated";
+    ffi_boundary(FN, SidereonStatus::Panic, || {
+        c_try!(reject_output_overlaps_handle(
+            FN,
+            out_value,
+            "out_value",
+            solution,
+            "solution"
+        ));
+        let out = c_try!(require_out(out_value, FN, "out_value"));
+        *out = false;
+        *out = c_try!(require_ref(solution, FN, "solution"))
+            .inner
+            .posterior_variance_factor_estimated;
+        SidereonStatus::Ok
+    })
+}
+
 /// Compare two opaque PPP float solutions using the core's value equality.
 #[no_mangle]
 pub unsafe extern "C" fn sidereon_ppp_float_solution_equal(
@@ -5158,6 +5206,7 @@ mod tests {
             position_covariance: core_position_covariance(0.0),
             formal_position_covariance: core_position_covariance(10.0),
             posterior_variance_factor: 2.5,
+            posterior_variance_factor_estimated: true,
             position_covariance_scale_factor: 2.5,
             temporal_position_covariance: core_position_covariance(20.0),
             temporal_position_covariance_scale_factor: 4.75,

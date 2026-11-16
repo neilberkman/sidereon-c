@@ -290,6 +290,18 @@ static void test_coverage_grid(SidereonTle *tle) {
               written == 2 && required == 2 && counts[0] == W6_FCOV_COUNTS[0] &&
               counts[1] == W6_FCOV_COUNTS[1],
           "coverage access counts");
+    check(sidereon_coverage_grid_try_visible_mask(grid, -90.0, mask, 2, &written, &required) == SIDEREON_STATUS_OK &&
+          written == 2 && mask[0] == W6_FCOV_MASK[0] && mask[1] == W6_FCOV_MASK[1], "checked visible mask");
+    check(sidereon_coverage_grid_try_access_counts(grid, -90.0, counts, 2, &written, &required) == SIDEREON_STATUS_OK &&
+          written == 2 && counts[0] == W6_FCOV_COUNTS[0] && counts[1] == W6_FCOV_COUNTS[1], "checked access counts");
+    check(sidereon_coverage_grid_try_visible_mask(grid, NAN, mask, 2, &written, &required) == SIDEREON_STATUS_INVALID_ARGUMENT,
+          "checked visible mask nonfinite threshold");
+    check(sidereon_coverage_grid_try_access_counts(grid, NAN, counts, 2, &written, &required) == SIDEREON_STATUS_INVALID_ARGUMENT,
+          "checked access counts nonfinite threshold");
+    check(sidereon_coverage_grid_try_visible_mask(NULL, 0.0, mask, 2, &written, &required) == SIDEREON_STATUS_NULL_POINTER,
+          "checked visible mask null");
+    check(sidereon_coverage_grid_try_access_counts(NULL, 0.0, counts, 2, &written, &required) == SIDEREON_STATUS_NULL_POINTER,
+          "checked access counts null");
     double max_el[2] = {0.0, 0.0};
     check(sidereon_coverage_grid_max_elevation_deg(grid, max_el, 2, &written, &required) ==
               SIDEREON_STATUS_OK &&

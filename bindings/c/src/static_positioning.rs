@@ -1083,6 +1083,7 @@ unsafe fn static_epochs_from_c(
     let raw = require_slice(epochs, epoch_count, fn_name, "epochs")?;
     let mut out = Vec::with_capacity(raw.len());
     for (idx, epoch) in raw.iter().enumerate() {
+        reject_unusable_max_gdop(fn_name, &epoch.inputs.policy)?;
         let glonass_channels = glonass_channels_from_c(fn_name, &epoch.inputs)?;
         let solve_inputs = build_spp_solve_inputs(
             fn_name,
@@ -1327,6 +1328,12 @@ fn static_residual_to_c(residual: &CoreStaticResidual) -> SidereonStaticPosition
 
 fn spp_rejection_reason_to_c(reason: CoreSppRejectionReason) -> SidereonSppRejectionReason {
     match reason {
+        CoreSppRejectionReason::NonFinitePseudorange => {
+            SidereonSppRejectionReason::NonFinitePseudorange
+        }
+        CoreSppRejectionReason::NonPositivePseudorange => {
+            SidereonSppRejectionReason::NonPositivePseudorange
+        }
         CoreSppRejectionReason::NoEphemeris => SidereonSppRejectionReason::NoEphemeris,
         CoreSppRejectionReason::LowElevation => SidereonSppRejectionReason::LowElevation,
         CoreSppRejectionReason::SbasWithdrawn => SidereonSppRejectionReason::SbasWithdrawn,

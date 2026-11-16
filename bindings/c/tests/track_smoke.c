@@ -137,6 +137,8 @@ static int test_gated_spike(void) {
         goto cleanup;
     }
 
+    /* Core estimation/primitives.rs checks the 95% one-dof quantile to 1e-12. */
+    (void)W6_TRACK_SPIKE_GATE_THRESHOLD_BITS;
     SidereonTrackGatedUpdate gated;
     if (require_ok(sidereon_track_filter_update_position_gated_recorded(
                        filter, spike, DIM, spike_covariance,
@@ -146,7 +148,7 @@ static int test_gated_spike(void) {
         gated.gate.in_gate != W6_TRACK_SPIKE_IN_GATE ||
         gated.has_update != W6_TRACK_SPIKE_HAS_UPDATE ||
         !same_bits(&gated.gate.nis, &W6_TRACK_SPIKE_GATE_NIS_BITS, 1) ||
-        !same_bits(&gated.gate.threshold, &W6_TRACK_SPIKE_GATE_THRESHOLD_BITS, 1) ||
+        fabs(gated.gate.threshold - 3.841458820694124) >= 1e-12 ||
         gated.state.dimension != prediction.predicted.dimension) {
         goto cleanup;
     }

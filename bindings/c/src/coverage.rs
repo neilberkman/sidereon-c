@@ -252,7 +252,8 @@ pub unsafe extern "C" fn sidereon_coverage_grid_look_angle(
 }
 
 /// Copy the flattened visibility mask. Delegates to
-/// sidereon_core::astro::coverage::visible_mask.
+/// Deprecated: use sidereon_coverage_grid_try_visible_mask.
+/// Delegates to sidereon_core::astro::coverage::visible_mask.
 ///
 /// Safety: grid must be a live handle; out must point to len bool entries or be
 /// NULL when len is 0; out_written and out_required must point to size_t values.
@@ -279,7 +280,9 @@ pub unsafe extern "C" fn sidereon_coverage_grid_visible_mask(
                 "sidereon_coverage_grid_visible_mask",
                 "grid"
             ));
-            let mask = coverage_visible_mask(&grid.inner, min_elevation_deg);
+            // Preserve the deprecated core API's behavior for all legacy inputs.
+            #[allow(deprecated)]
+            let mask = sidereon_core::astro::coverage::visible_mask(&grid.inner, min_elevation_deg);
             let values: Vec<bool> = mask.into_iter().flatten().collect();
             c_try!(copy_prefix_to_c(
                 "sidereon_coverage_grid_visible_mask",
@@ -296,7 +299,8 @@ pub unsafe extern "C" fn sidereon_coverage_grid_visible_mask(
 }
 
 /// Copy the per-station access counts. Delegates to
-/// sidereon_core::astro::coverage::access_counts.
+/// Deprecated: use sidereon_coverage_grid_try_access_counts.
+/// Delegates to sidereon_core::astro::coverage::access_counts.
 ///
 /// Safety: grid must be a live handle; out must point to len size_t entries or
 /// be NULL when len is 0; out_written and out_required must point to size_t
@@ -324,7 +328,10 @@ pub unsafe extern "C" fn sidereon_coverage_grid_access_counts(
                 "sidereon_coverage_grid_access_counts",
                 "grid"
             ));
-            let counts = coverage_access_counts(&grid.inner, min_elevation_deg);
+            // Preserve the deprecated core API's behavior for all legacy inputs.
+            #[allow(deprecated)]
+            let counts =
+                sidereon_core::astro::coverage::access_counts(&grid.inner, min_elevation_deg);
             c_try!(copy_prefix_to_c(
                 "sidereon_coverage_grid_access_counts",
                 "out",
@@ -395,6 +402,127 @@ pub unsafe extern "C" fn sidereon_coverage_grid_free(grid: *mut SidereonCoverage
     ffi_boundary("sidereon_coverage_grid_free", (), || {
         free_boxed(grid);
     });
+}
+
+/// Checked coverage operation; rejects non-finite thresholds and invalid grids.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_coverage_grid_try_visible_mask(
+    grid: *const SidereonCoverageGrid,
+    min_elevation_deg: f64,
+    out: *mut bool,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    crate::engine_error::engine_error_operation_boundary(
+        "sidereon_coverage_grid_try_visible_mask",
+        SidereonStatus::Panic,
+        || {
+            c_try!(reject_outputs_overlapping_handle(
+                "checked coverage",
+                &[
+                    (out.cast(), size_of::<bool>(), len, "out"),
+                    (out_written.cast(), size_of::<usize>(), 1, "out_written"),
+                    (out_required.cast(), size_of::<usize>(), 1, "out_required")
+                ],
+                grid,
+                "grid"
+            ));
+            c_try!(init_copy_counts(
+                "sidereon_coverage_grid_try_visible_mask",
+                out_written,
+                out_required
+            ));
+            let grid = c_try!(require_ref(
+                grid,
+                "sidereon_coverage_grid_try_visible_mask",
+                "grid"
+            ));
+            let mask = match sidereon_core::astro::coverage::try_visible_mask(
+                &grid.inner,
+                min_elevation_deg,
+            ) {
+                Ok(value) => value,
+                Err(error) => {
+                    return crate::tle::map_look_angle_error(
+                        "sidereon_coverage_grid_try_visible_mask",
+                        error,
+                    );
+                }
+            };
+            let values: Vec<bool> = mask.into_iter().flatten().collect();
+            c_try!(copy_prefix_to_c(
+                "sidereon_coverage_grid_try_visible_mask",
+                "out",
+                &values,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Checked coverage operation; rejects non-finite thresholds and invalid grids.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_coverage_grid_try_access_counts(
+    grid: *const SidereonCoverageGrid,
+    min_elevation_deg: f64,
+    out: *mut usize,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    crate::engine_error::engine_error_operation_boundary(
+        "sidereon_coverage_grid_try_access_counts",
+        SidereonStatus::Panic,
+        || {
+            c_try!(reject_outputs_overlapping_handle(
+                "checked coverage",
+                &[
+                    (out.cast(), size_of::<usize>(), len, "out"),
+                    (out_written.cast(), size_of::<usize>(), 1, "out_written"),
+                    (out_required.cast(), size_of::<usize>(), 1, "out_required")
+                ],
+                grid,
+                "grid"
+            ));
+            c_try!(init_copy_counts(
+                "sidereon_coverage_grid_try_access_counts",
+                out_written,
+                out_required
+            ));
+            let grid = c_try!(require_ref(
+                grid,
+                "sidereon_coverage_grid_try_access_counts",
+                "grid"
+            ));
+            let counts = match sidereon_core::astro::coverage::try_access_counts(
+                &grid.inner,
+                min_elevation_deg,
+            ) {
+                Ok(value) => value,
+                Err(error) => {
+                    return crate::tle::map_look_angle_error(
+                        "sidereon_coverage_grid_try_access_counts",
+                        error,
+                    );
+                }
+            };
+            c_try!(copy_prefix_to_c(
+                "sidereon_coverage_grid_try_access_counts",
+                "out",
+                &counts,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
 }
 
 #[cfg(test)]

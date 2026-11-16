@@ -252,6 +252,11 @@ int main(int argc, char **argv) {
     assert(
         sidereon_ppp_float_solution_equal(float_solution, float_solution, (bool *)float_solution) ==
         SIDEREON_STATUS_INVALID_ARGUMENT);
+    bool variance_estimated = false;
+    assert(sidereon_ppp_float_solution_posterior_variance_factor_estimated(float_solution, &variance_estimated) == SIDEREON_STATUS_OK);
+    assert(variance_estimated);
+    assert(sidereon_ppp_float_solution_posterior_variance_factor_estimated(NULL, &variance_estimated) == SIDEREON_STATUS_NULL_POINTER);
+    assert(sidereon_ppp_float_solution_posterior_variance_factor_estimated(float_solution, (bool *)float_solution) == SIDEREON_STATUS_INVALID_ARGUMENT);
     double float_posterior = 0.0;
     double decorrelation = 0.0;
     assert(sidereon_ppp_float_solution_posterior_variance_factor(
@@ -382,6 +387,11 @@ int main(int argc, char **argv) {
            SIDEREON_STATUS_OK);
     assert(!equal);
     wavelengths[0].value = first_wavelength;
+    variance_estimated = false;
+    assert(sidereon_ppp_fixed_solution_posterior_variance_factor_estimated(fixed_solution, &variance_estimated) == SIDEREON_STATUS_OK);
+    assert(variance_estimated);
+    assert(sidereon_ppp_fixed_solution_posterior_variance_factor_estimated(NULL, &variance_estimated) == SIDEREON_STATUS_NULL_POINTER);
+    assert(sidereon_ppp_fixed_solution_posterior_variance_factor_estimated(fixed_solution, (bool *)fixed_solution) == SIDEREON_STATUS_INVALID_ARGUMENT);
     double fixed_posterior = 0.0;
     assert(sidereon_ppp_fixed_solution_posterior_variance_factor(
                fixed_solution, &fixed_posterior) == SIDEREON_STATUS_OK);

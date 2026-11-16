@@ -16,6 +16,7 @@
 #include "w6_rtk_rinex_pins.h"
 
 #include "sidereon.h"
+#include "rtk_rinex_pins.h"
 
 static int failures = 0;
 
@@ -194,6 +195,16 @@ static void set_wtzr_wide_lane_config(SidereonRtkRinexWideLaneFixedConfig *confi
 static void test_static_rinex_rtk(const SidereonSp3 *sp3, const SidereonRinexObs *base_obs,
                                   const SidereonRinexObs *rover_obs,
                                   const double base_arp[3], const double truth[3]) {
+    (void)W6_RTKR_STATIC_FLOAT_BASELINE_BITS;
+    (void)W6_RTKR_STATIC_FIXED_BASELINE_BITS;
+    (void)W6_RTKR_STATIC_RATIO_BITS;
+    (void)PIN_STATIC_REFERENCE_RATIO_BITS;
+    (void)PIN_STATIC_REFERENCE_POSITION_BITS;
+    (void)PIN_STATIC_REFERENCE_BASELINE_BITS;
+    (void)PIN_STATIC_REFERENCE_COVARIANCE_BITS;
+    (void)W6_RTKR_WL_FLOAT_BASELINE_BITS;
+    (void)W6_RTKR_WL_FIXED_BASELINE_BITS;
+    (void)W6_RTKR_WL_RATIO_BITS;
     SidereonRtkRinexStaticBaselineConfig config;
     set_wtzr_single_frequency_config(&config, base_arp);
 
@@ -205,6 +216,14 @@ static void test_static_rinex_rtk(const SidereonSp3 *sp3, const SidereonRinexObs
     if (!solution) {
         return;
     }
+
+    bool mask_converged = false;
+    check(sidereon_rtk_static_arc_solution_elevation_mask_converged(solution, &mask_converged) == SIDEREON_STATUS_OK && mask_converged,
+          "static RTK unmasked convergence");
+    check(sidereon_rtk_static_arc_solution_elevation_mask_converged(NULL, &mask_converged) == SIDEREON_STATUS_NULL_POINTER,
+          "static RTK convergence null");
+    check(sidereon_rtk_static_arc_solution_elevation_mask_converged(solution, (bool *)solution) == SIDEREON_STATUS_INVALID_ARGUMENT,
+          "static RTK convergence overlap");
 
     double float_baseline[3] = {0.0, 0.0, 0.0};
     double fixed_baseline[3] = {0.0, 0.0, 0.0};
@@ -232,9 +251,9 @@ static void test_static_rinex_rtk(const SidereonSp3 *sp3, const SidereonRinexObs
            fixed_baseline[0], fixed_baseline[1], fixed_baseline[2], fixed_err);
 
     for (int i = 0; i < 3; i++) {
-        check_exact_bits(float_baseline[i], W6_RTKR_STATIC_FLOAT_BASELINE_BITS[i],
+        check_exact_bits(float_baseline[i], RTK_STATIC_FLOAT[i],
                          "static float baseline");
-        check_exact_bits(fixed_baseline[i], W6_RTKR_STATIC_FIXED_BASELINE_BITS[i],
+        check_exact_bits(fixed_baseline[i], RTK_STATIC_FIXED[i],
                          "static fixed baseline");
     }
     check(float_meta.ambiguity_count == W6_RTKR_STATIC_AMBIGUITY_COUNT &&
@@ -244,7 +263,7 @@ static void test_static_rinex_rtk(const SidereonSp3 *sp3, const SidereonRinexObs
           "static integer status");
     check(fixed_meta.has_integer_ratio == W6_RTKR_STATIC_HAS_RATIO,
           "static ratio presence");
-    check_exact_bits(fixed_meta.integer_ratio, W6_RTKR_STATIC_RATIO_BITS, "static ratio");
+    check_exact_bits(fixed_meta.integer_ratio, RTK_STATIC_RATIO, "static ratio");
     /* Accuracy against the IGS marker coordinates (WTZR_MARKER_M and
      * WTZZ_MARKER_M in main), an external reference. */
     check(float_err < 0.08, "static float baseline within dm");
@@ -335,22 +354,17 @@ static void test_static_reference_station(const SidereonSp3 *sp3,
            baseline[1], baseline[2], vector_error(baseline, truth));
     check(vector_error(baseline, truth) < 0.005, "static reference baseline within 5 mm");
 
-    /* The engine's own solve of these inputs, written by tests/pingen through
-     * sidereon-core's public static reference-station solve with the same
-     * configuration and the same base ARP (checked bit for bit in main). The
-     * library and the generator run the same engine code, which states
-     * bit-identical results across x86_64 and arm64 (portable kernels since
-     * sidereon-core 1.4.0), so every value is compared exactly. */
-    check_exact_bits(meta.carrier_integer_ratio, PIN_STATIC_REFERENCE_RATIO_BITS,
+    /* RTKLIB ecef2pos/satazel elevation changes the elevation-weighted solution; the IGS survey checks accuracy. */
+    check_exact_bits(meta.carrier_integer_ratio, RTK_REF_RATIO,
                      "static reference ratio");
     for (int i = 0; i < 3; i++) {
-        check_exact_bits(position[i], PIN_STATIC_REFERENCE_POSITION_BITS[i],
+        check_exact_bits(position[i], RTK_REF_POSITION[i],
                          "static reference position");
-        check_exact_bits(baseline[i], PIN_STATIC_REFERENCE_BASELINE_BITS[i],
+        check_exact_bits(baseline[i], RTK_REF_BASELINE[i],
                          "static reference baseline");
     }
     for (int i = 0; i < 9; i++) {
-        check_exact_bits(covariance[i], PIN_STATIC_REFERENCE_COVARIANCE_BITS[i],
+        check_exact_bits(covariance[i], RTK_REF_COVARIANCE[i],
                          "static reference covariance");
     }
 
@@ -432,9 +446,9 @@ static void test_wide_lane_rinex_rtk(const SidereonSp3 *sp3, const SidereonRinex
            fixed_baseline[0], fixed_baseline[1], fixed_baseline[2], fixed_err);
 
     for (int i = 0; i < 3; i++) {
-        check_exact_bits(float_baseline[i], W6_RTKR_WL_FLOAT_BASELINE_BITS[i],
+        check_exact_bits(float_baseline[i], RTK_WL_FLOAT[i],
                          "wide lane float baseline");
-        check_exact_bits(fixed_baseline[i], W6_RTKR_WL_FIXED_BASELINE_BITS[i],
+        check_exact_bits(fixed_baseline[i], RTK_WL_FIXED[i],
                          "wide lane fixed baseline");
     }
     check(float_meta.ambiguity_count == W6_RTKR_WL_AMBIGUITY_COUNT &&
@@ -442,7 +456,7 @@ static void test_wide_lane_rinex_rtk(const SidereonSp3 *sp3, const SidereonRinex
           "wide lane float metadata counts");
     check(fixed_meta.integer_status == W6_RTKR_WL_INTEGER_STATUS, "wide lane integer status");
     check(fixed_meta.has_integer_ratio == W6_RTKR_WL_HAS_RATIO, "wide lane ratio presence");
-    check_exact_bits(fixed_meta.integer_ratio, W6_RTKR_WL_RATIO_BITS, "wide lane ratio");
+    check_exact_bits(fixed_meta.integer_ratio, RTK_WL_RATIO, "wide lane ratio");
     check(rinex_meta.wide_lane_fixed == W6_RTKR_WL_FIXED &&
               rinex_meta.wide_lane_ambiguity_count == W6_RTKR_WL_AMBIGUITY_CYCLE_COUNT,
           "wide lane metadata fixed");
@@ -459,6 +473,33 @@ static void test_wide_lane_rinex_rtk(const SidereonSp3 *sp3, const SidereonRinex
           "wide lane cycle query");
 
     sidereon_rtk_wide_lane_fixed_rinex_solution_free(solution);
+
+    /* These RINEX inputs contain GPS and BeiDou dual-frequency rows. The
+     * surveyed IGS baseline is independent of the combined arc driver. */
+    SidereonRtkRinexDualSignalPair pairs[2] = {
+        {.system=SIDEREON_GNSS_SYSTEM_GPS, .code1_observable="C1C", .phase1_observable="L1C", .code2_observable="C2W", .phase2_observable="L2W"},
+        {.system=SIDEREON_GNSS_SYSTEM_BEI_DOU, .code1_observable="C2I", .phase1_observable="L2I", .code2_observable="C6I", .phase2_observable="L6I"}
+    };
+    config.arc_options.signal_pairs = pairs;
+    config.arc_options.signal_pair_count = 2;
+    solution = NULL;
+    check(sidereon_solve_wide_lane_fixed_rinex_rtk_baseline(sp3, base_obs, rover_obs, &config, &solution) == SIDEREON_STATUS_OK && solution != NULL,
+          "multi-constellation wide lane solve");
+    if (solution != NULL) {
+        double multi_float[3] = {0};
+        SidereonRtkWideLaneCycle multi_cycles[128];
+        size_t multi_written = 0, multi_required = 0; bool have_gps = false, have_bds = false;
+        check(sidereon_rtk_wide_lane_fixed_rinex_solution_wide_lane_cycles(solution, multi_cycles, 128, &multi_written, &multi_required) == SIDEREON_STATUS_OK,
+              "multi-constellation wide lane cycles");
+        for (size_t i = 0; i < multi_written; i++) {
+            have_gps |= multi_cycles[i].id.bytes[0] == 'G';
+            have_bds |= multi_cycles[i].id.bytes[0] == 'C';
+        }
+        check(have_gps && have_bds, "multi-constellation GPS and BeiDou cycles");
+        check(sidereon_rtk_wide_lane_fixed_rinex_solution_float_baseline_ecef(solution, multi_float, 3) == SIDEREON_STATUS_OK &&
+              vector_error(multi_float, truth) < 0.1, "multi-constellation wide lane IGS baseline");
+        sidereon_rtk_wide_lane_fixed_rinex_solution_free(solution);
+    }
 }
 
 int main(int argc, char **argv) {

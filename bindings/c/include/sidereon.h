@@ -2047,6 +2047,18 @@ typedef enum SidereonPppRaimErrorKind {
      * Singular geometry.
      */
     SIDEREON_PPP_RAIM_ERROR_KIND_SINGULAR_GEOMETRY = 4,
+    /**
+     * Protection level calculation failed numerically.
+     */
+    SIDEREON_PPP_RAIM_ERROR_KIND_NUMERICAL_PROTECTION_LEVEL = 5,
+    /**
+     * Noncentrality exceeds the supported domain.
+     */
+    SIDEREON_PPP_RAIM_ERROR_KIND_UNSUPPORTED_NONCENTRALITY = 6,
+    /**
+     * Residual degrees of freedom exceed the supported domain.
+     */
+    SIDEREON_PPP_RAIM_ERROR_KIND_UNSUPPORTED_DOF = 7,
 } SidereonPppRaimErrorKind;
 
 /**
@@ -2083,6 +2095,10 @@ typedef enum SidereonPppRaimFdeStatus {
      * No valid exclusion restored integrity.
      */
     SIDEREON_PPP_RAIM_FDE_STATUS_INTEGRITY_NOT_RESTORED = 3,
+    /**
+     * The solve had no redundancy to test.
+     */
+    SIDEREON_PPP_RAIM_FDE_STATUS_UNTESTED = 4,
 } SidereonPppRaimFdeStatus;
 
 /**
@@ -2484,6 +2500,20 @@ typedef enum SidereonRtcmFrameSkipReason {
      */
     SIDEREON_RTCM_FRAME_SKIP_REASON_DEPARTURE = 2,
 } SidereonRtcmFrameSkipReason;
+
+/**
+ * Reason an RTK ambiguity hold was released.
+ */
+typedef enum SidereonRtkHoldReleaseReason {
+    /**
+     * The replacement reference is not held.
+     */
+    SIDEREON_RTK_HOLD_RELEASE_REASON_UNHELD_REFERENCE = 0,
+    /**
+     * Carrier wavelengths cannot share a common integer lattice.
+     */
+    SIDEREON_RTK_HOLD_RELEASE_REASON_INCOMPATIBLE_WAVELENGTHS = 1,
+} SidereonRtkHoldReleaseReason;
 
 /**
  * The receiver whose observation file a RINEX RTK arc report comes from.
@@ -3422,8 +3452,9 @@ typedef enum SidereonUt1Degradation {
 /**
  * Why an SPP observation was excluded from the final solve.
  *
- * Selection reports the first reason in the core policy order: strict SSR
- * correction-size refusal, NoEphemeris, LowElevation, SbasIonoUncovered, then
+ * Invalid pseudoranges are rejected before satellite selection. Remaining rows
+ * report the first reason in the core policy order: strict SSR correction-size
+ * refusal, NoEphemeris, LowElevation, SbasIonoUncovered, then
  * IonosphereCarrierUnresolved. A satellite both below the mask and without a
  * carrier is reported as LowElevation. SbasWithdrawn is not reported by SPP.
  */
@@ -3459,6 +3490,14 @@ typedef enum SidereonSppRejectionReason {
      * magnitudes from the V2 rejected-satellite record.
      */
     SIDEREON_SPP_REJECTION_REASON_SSR_CORRECTION_EXCEEDS_LIMIT = 5,
+    /**
+     * Pseudorange is NaN or infinite.
+     */
+    SIDEREON_SPP_REJECTION_REASON_NON_FINITE_PSEUDORANGE = 6,
+    /**
+     * Pseudorange is zero or negative.
+     */
+    SIDEREON_SPP_REJECTION_REASON_NON_POSITIVE_PSEUDORANGE = 7,
 } SidereonSppRejectionReason;
 
 typedef enum SidereonSsrVtecQueryKind {
@@ -12731,6 +12770,14 @@ typedef struct SidereonSppRobustConfig {
  */
 typedef struct SidereonSppValidationOptions {
     /**
+     * Enable the GDOP ceiling.
+     */
+    bool max_gdop_enabled;
+    /**
+     * GDOP ceiling when enabled.
+     */
+    double max_gdop;
+    /**
      * Whether max_pdop is enforced.
      */
     bool max_pdop_enabled;
@@ -12824,7 +12871,8 @@ typedef struct SidereonSppInputsV2 {
      */
     struct SidereonSppRobustConfig robust;
     /**
-     * Solve policy controls.
+     * Solve policy controls. Operations without a core validation policy reject an enabled max_gdop.
+     * Batch serial/parallel use their separate policy and reject max_gdop in individual rows.
      */
     struct SidereonSppSolvePolicy policy;
     /**
@@ -14743,6 +14791,31 @@ typedef struct SidereonFusionFilterConfig {
      */
     struct SidereonFusionInnovationGate ukf_innovation_gate;
     /**
+     * Enable the loose EKF joint gate at this false-alarm probability.
+     */
+    bool has_loose_joint_innovation_gate_probability;
+    /**
+     * Loose EKF joint gate false-alarm probability.
+     */
+    double loose_joint_innovation_gate_probability;
+    /**
+     * Request the tight EKF joint gate. Core 4.0 currently does not apply this gate
+     * in tight EKF updates; callers must not rely on it until the core supports it.
+     */
+    bool has_tight_joint_innovation_gate_probability;
+    /**
+     * Tight EKF joint gate false-alarm probability.
+     */
+    double tight_joint_innovation_gate_probability;
+    /**
+     * Enable the UKF joint gate.
+     */
+    bool has_ukf_joint_innovation_gate_probability;
+    /**
+     * UKF joint gate false-alarm probability.
+     */
+    double ukf_joint_innovation_gate_probability;
+    /**
      * Retained IMU sample capacity for time-synchronization replay.
      */
     size_t time_sync_imu_capacity;
@@ -14982,6 +15055,30 @@ typedef struct SidereonFusionLooseMeasurement {
  * Report returned by loose and tight fusion updates.
  */
 typedef struct SidereonFusionUpdate {
+    /**
+     * Whether the joint innovation gate ran.
+     */
+    bool has_joint_innovation_gate;
+    /**
+     * Joint normalized innovation squared.
+     */
+    double joint_gate_statistic;
+    /**
+     * Degrees of freedom of the joint test.
+     */
+    size_t joint_gate_degrees_of_freedom;
+    /**
+     * Joint chi-square threshold.
+     */
+    double joint_gate_threshold;
+    /**
+     * Configured false-alarm probability.
+     */
+    double joint_gate_probability;
+    /**
+     * Whether the joint gate accepted the measurement block.
+     */
+    bool joint_gate_accepted;
     /**
      * Whether the update modified state and covariance.
      */
@@ -19860,20 +19957,6 @@ typedef struct SidereonPppRaimConfig {
 } SidereonPppRaimConfig;
 
 /**
- * Fixed metadata for an owned FDE result.
- */
-typedef struct SidereonPppRaimFdeInfo {
-    /**
-     * Terminal FDE status.
-     */
-    enum SidereonPppRaimFdeStatus status;
-    /**
-     * Number of excluded satellite identifiers.
-     */
-    size_t excluded_satellite_count;
-} SidereonPppRaimFdeInfo;
-
-/**
  * One lossless PPP snapshot geometry row.
  */
 typedef struct SidereonPppRaimGeometryRow {
@@ -19886,6 +19969,34 @@ typedef struct SidereonPppRaimGeometryRow {
      */
     struct SidereonLineOfSight line_of_sight;
 } SidereonPppRaimGeometryRow;
+
+/**
+ * Horizontal and vertical protection levels. This plain value has field equality.
+ */
+typedef struct SidereonPppRaimProtectionLevels {
+    /**
+     * Horizontal protection level, in metres.
+     */
+    double hpl_m;
+    /**
+     * Vertical protection level, in metres.
+     */
+    double vpl_m;
+} SidereonPppRaimProtectionLevels;
+
+/**
+ * Fixed metadata for an owned FDE result.
+ */
+typedef struct SidereonPppRaimFdeInfo {
+    /**
+     * Terminal FDE status.
+     */
+    enum SidereonPppRaimFdeStatus status;
+    /**
+     * Number of excluded satellite identifiers.
+     */
+    size_t excluded_satellite_count;
+} SidereonPppRaimFdeInfo;
 
 /**
  * One lossless PPP float residual input row.
@@ -19946,20 +20057,6 @@ typedef struct SidereonPppRaimSatelliteStatistic {
      */
     bool phase_testable;
 } SidereonPppRaimSatelliteStatistic;
-
-/**
- * Horizontal and vertical protection levels. This plain value has field equality.
- */
-typedef struct SidereonPppRaimProtectionLevels {
-    /**
-     * Horizontal protection level, in metres.
-     */
-    double hpl_m;
-    /**
-     * Vertical protection level, in metres.
-     */
-    double vpl_m;
-} SidereonPppRaimProtectionLevels;
 
 /**
  * Fixed fields of a PPP RAIM result.
@@ -23335,6 +23432,22 @@ typedef struct SidereonRtcmFrameSkip {
  */
 typedef struct SidereonRtkArcEpochMetadata {
     /**
+     * Whether the rover elevation mask converged.
+     */
+    bool elevation_mask_converged;
+    /**
+     * Number of released holds.
+     */
+    size_t released_hold_count;
+    /**
+     * Number of reference satellites.
+     */
+    size_t reference_satellite_count;
+    /**
+     * Number of rover-mask rejected satellites.
+     */
+    size_t elevation_masked_satellite_count;
+    /**
      * Ambiguity-conditioned reported baseline for this epoch (metres).
      */
     double reported_baseline_m[3];
@@ -23379,6 +23492,20 @@ typedef struct SidereonRtkArcEpochMetadata {
      */
     bool has_search;
 } SidereonRtkArcEpochMetadata;
+
+/**
+ * An ambiguity hold released during a reference change.
+ */
+typedef struct SidereonReleasedRtkHold {
+    /**
+     * Released ambiguity identifier.
+     */
+    struct SidereonRtkId ambiguity_id;
+    /**
+     * Release reason.
+     */
+    enum SidereonRtkHoldReleaseReason reason;
+} SidereonReleasedRtkHold;
 
 /**
  * One float ambiguity estimate in meters.
@@ -25606,6 +25733,14 @@ typedef struct SidereonSmoothedTrackEpoch {
  * sidereon_core::quality::SolutionValidationOptions.
  */
 typedef struct SidereonSolutionValidationOptions {
+    /**
+     * Enable the GDOP ceiling.
+     */
+    bool has_max_gdop;
+    /**
+     * GDOP ceiling when enabled.
+     */
+    double max_gdop;
     /**
      * Whether max_pdop is enforced.
      */
@@ -30453,6 +30588,18 @@ enum SidereonStatus sidereon_araim_result_summary(const struct SidereonAraimResu
                                                   struct SidereonAraimSummary *out_summary);
 
 /**
+ * Construct the ADD v3.0 dual-frequency satellite model at the given elevation.
+ * The system must be supported by Appendix A. Safety: out must be writable.
+ */
+enum SidereonStatus sidereon_araim_satellite_ism_model_add_v3_0(uint32_t system,
+                                                                double elevation_rad,
+                                                                double sigma_ura_m,
+                                                                double sigma_ure_m,
+                                                                double b_nom_m,
+                                                                double p_sat,
+                                                                struct SidereonAraimSatelliteIsmModel *out);
+
+/**
  * An NRLMSISE-00 input prefilled with the engine's reference quiet-Sun
  * geomagnetic defaults (f107, f107a, ap from
  * sidereon_core::astro::atmosphere::{DEFAULT_F107, DEFAULT_F107A, DEFAULT_AP}),
@@ -31905,6 +32052,12 @@ enum SidereonStatus sidereon_chan_ho_initial_guess(const struct SidereonSourceSe
 enum SidereonStatus sidereon_chi2_inv(double p, size_t k, double *out);
 
 /**
+ * Chi-square inverse survival quantile for tail probability p and k degrees of freedom.
+ * Safety: out must point to a writable double.
+ */
+enum SidereonStatus sidereon_chi2_isf(double p, size_t k, double *out);
+
+/**
  * Convert a civil epoch in a time scale into the scale-tagged instant a RINEX
  * clock record at that epoch holds. The second is read as the shortest
  * decimal of the double given, every digit kept. A UTC second of 60.x is
@@ -33088,7 +33241,8 @@ enum SidereonStatus sidereon_covariance_transport(const struct SidereonCovarianc
 
 /**
  * Copy the per-station access counts. Delegates to
- * sidereon_core::astro::coverage::access_counts.
+ * Deprecated: use sidereon_coverage_grid_try_access_counts.
+ * Delegates to sidereon_core::astro::coverage::access_counts.
  *
  * Safety: grid must be a live handle; out must point to len size_t entries or
  * be NULL when len is 0; out_written and out_required must point to size_t
@@ -33163,8 +33317,29 @@ enum SidereonStatus sidereon_coverage_grid_max_elevation_deg(const struct Sidere
                                                              size_t *out_required);
 
 /**
+ * Checked coverage operation; rejects non-finite thresholds and invalid grids.
+ */
+enum SidereonStatus sidereon_coverage_grid_try_access_counts(const struct SidereonCoverageGrid *grid,
+                                                             double min_elevation_deg,
+                                                             size_t *out,
+                                                             size_t len,
+                                                             size_t *out_written,
+                                                             size_t *out_required);
+
+/**
+ * Checked coverage operation; rejects non-finite thresholds and invalid grids.
+ */
+enum SidereonStatus sidereon_coverage_grid_try_visible_mask(const struct SidereonCoverageGrid *grid,
+                                                            double min_elevation_deg,
+                                                            bool *out,
+                                                            size_t len,
+                                                            size_t *out_written,
+                                                            size_t *out_required);
+
+/**
  * Copy the flattened visibility mask. Delegates to
- * sidereon_core::astro::coverage::visible_mask.
+ * Deprecated: use sidereon_coverage_grid_try_visible_mask.
+ * Delegates to sidereon_core::astro::coverage::visible_mask.
  *
  * Safety: grid must be a live handle; out must point to len bool entries or be
  * NULL when len is 0; out_written and out_required must point to size_t values.
@@ -41859,6 +42034,12 @@ enum SidereonStatus sidereon_ppp_fixed_solution_posterior_variance_factor(const 
                                                                           double *out_value);
 
 /**
+ * Report whether the fixed solution's posterior variance factor was estimated.
+ */
+enum SidereonStatus sidereon_ppp_fixed_solution_posterior_variance_factor_estimated(const struct SidereonPppFixedSolution *solution,
+                                                                                    bool *out_value);
+
+/**
  * Copy residual-ionosphere estimates from a fixed solution.
  */
 enum SidereonStatus sidereon_ppp_fixed_solution_residual_ionosphere(const struct SidereonPppFixedSolution *solution,
@@ -42160,6 +42341,12 @@ enum SidereonStatus sidereon_ppp_float_solution_position_covariances(const struc
  */
 enum SidereonStatus sidereon_ppp_float_solution_posterior_variance_factor(const struct SidereonPppFloatSolution *solution,
                                                                           double *out_value);
+
+/**
+ * Report whether the float solution's posterior variance factor was estimated.
+ */
+enum SidereonStatus sidereon_ppp_float_solution_posterior_variance_factor_estimated(const struct SidereonPppFloatSolution *solution,
+                                                                                    bool *out_value);
 
 /**
  * Copy residual-ionosphere estimates from a float solution.
@@ -42627,6 +42814,17 @@ enum SidereonStatus sidereon_ppp_raim_error_text(enum SidereonPppRaimErrorKind k
                                                  size_t *out_required);
 
 /**
+ * Compute fault-free accuracy bounds using inverse-sigma weights.
+ * Safety: geometry and weights each point to count entries; out points to writable storage.
+ */
+enum SidereonStatus sidereon_ppp_raim_fault_free_accuracy_bounds(const struct SidereonPppRaimGeometryRow *geometry,
+                                                                 const double *weights,
+                                                                 size_t count,
+                                                                 struct SidereonGeodetic receiver,
+                                                                 struct SidereonPppRaimConfig config,
+                                                                 struct SidereonPppRaimProtectionLevels *out);
+
+/**
  * Copy representative core Display text for a PPP RAIM/FDE error kind.
  */
 enum SidereonStatus sidereon_ppp_raim_fde_error_text(enum SidereonPppRaimFdeErrorKind kind,
@@ -42765,13 +42963,25 @@ enum SidereonStatus sidereon_ppp_raim_per_satellite_statistics(const struct Side
                                                                struct SidereonPppRaimIdentification **out);
 
 /**
- * Compute PPP RAIM horizontal and vertical protection levels.
+ * Compute Brown snapshot-RAIM horizontal and vertical fault protection levels.
+ * The geometry must have positive residual redundancy.
  */
 enum SidereonStatus sidereon_ppp_raim_protection_levels(const struct SidereonPppRaimGeometryRow *geometry,
                                                         size_t geometry_count,
                                                         struct SidereonGeodetic receiver,
                                                         struct SidereonPppRaimConfig config,
                                                         struct SidereonPppRaimProtectionLevels *out);
+
+/**
+ * Compute Brown snapshot-RAIM fault protection levels using inverse-sigma weights.
+ * Safety: geometry and weights each point to count entries; out points to writable storage.
+ */
+enum SidereonStatus sidereon_ppp_raim_protection_levels_with_weights(const struct SidereonPppRaimGeometryRow *geometry,
+                                                                     const double *weights,
+                                                                     size_t count,
+                                                                     struct SidereonGeodetic receiver,
+                                                                     struct SidereonPppRaimConfig config,
+                                                                     struct SidereonPppRaimProtectionLevels *out);
 
 /**
  * Compare two RAIM results by core value equality.
@@ -47153,6 +47363,16 @@ enum SidereonStatus sidereon_rtk_arc_solution_epoch_count(const struct SidereonR
                                                           size_t *out_count);
 
 /**
+ * Copy satellite identifiers from the epoch solution.
+ */
+enum SidereonStatus sidereon_rtk_arc_solution_epoch_elevation_masked_satellites(const struct SidereonRtkArcSolution *solution,
+                                                                                size_t index,
+                                                                                struct SidereonSatelliteToken *out,
+                                                                                size_t len,
+                                                                                size_t *out_written,
+                                                                                size_t *out_required);
+
+/**
  * Copy one epoch's reported solution metadata into *out.
  *
  * Safety: solution is a live handle; out points to a SidereonRtkArcEpochMetadata.
@@ -47160,6 +47380,26 @@ enum SidereonStatus sidereon_rtk_arc_solution_epoch_count(const struct SidereonR
 enum SidereonStatus sidereon_rtk_arc_solution_epoch_metadata(const struct SidereonRtkArcSolution *solution,
                                                              size_t index,
                                                              struct SidereonRtkArcEpochMetadata *out);
+
+/**
+ * Copy satellite identifiers from the epoch solution.
+ */
+enum SidereonStatus sidereon_rtk_arc_solution_epoch_reference_satellites(const struct SidereonRtkArcSolution *solution,
+                                                                         size_t index,
+                                                                         struct SidereonSatelliteToken *out,
+                                                                         size_t len,
+                                                                         size_t *out_written,
+                                                                         size_t *out_required);
+
+/**
+ * Copy the holds released at an epoch. All output arrays follow the variable-length contract.
+ */
+enum SidereonStatus sidereon_rtk_arc_solution_epoch_released_holds(const struct SidereonRtkArcSolution *solution,
+                                                                   size_t index,
+                                                                   struct SidereonReleasedRtkHold *out,
+                                                                   size_t len,
+                                                                   size_t *out_written,
+                                                                   size_t *out_required);
 
 /**
  * Copy one epoch's reported single-difference ambiguities (id, metres) in column
@@ -47930,6 +48170,12 @@ enum SidereonStatus sidereon_rtk_static_arc_solution_dropped_sats(const struct S
                                                                   size_t len,
                                                                   size_t *out_written,
                                                                   size_t *out_required);
+
+/**
+ * Read whether the static rover elevation mask converged.
+ */
+enum SidereonStatus sidereon_rtk_static_arc_solution_elevation_mask_converged(const struct SidereonRtkStaticArcSolution *solution,
+                                                                              bool *out);
 
 /**
  * Copy static-arc satellites masked by elevation preprocessing. Variable-length
@@ -53034,6 +53280,12 @@ enum SidereonStatus sidereon_spp_solution_residuals(const struct SidereonSppSolu
                                                     size_t len,
                                                     size_t *out_written,
                                                     size_t *out_required);
+
+/**
+ * Copy the RTKLIB shared-clock DOP, when geometry permits.
+ */
+enum SidereonStatus sidereon_spp_solution_rtklib_single_clock_dop(const struct SidereonSppSolution *sol,
+                                                                  struct SidereonDop *out_dop);
 
 /**
  * Write the optional receiver clock drift in seconds per second and set
