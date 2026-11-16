@@ -48,7 +48,8 @@ pub struct SidereonFdeOptions {
     /// When false, the engine default validation gates apply to each
     /// per-iteration solve; when true, the validation field is applied.
     pub use_validation_options: bool,
-    /// Per-iteration solution validation gates.
+    /// Per-iteration solution validation gates. A GDOP refusal is available via
+    /// sidereon_last_engine_error_payload, including gdop and max_gdop.
     pub validation: SidereonSppValidationOptions,
 }
 
@@ -102,7 +103,7 @@ thread_local! {
 fn fde_operation_boundary<T>(fn_name: &str, panic_value: T, body: impl FnOnce() -> T) -> T {
     LAST_FDE_UNRESOLVED.with(|slot| *slot.borrow_mut() = None);
     LAST_QUALITY_ERROR_KIND.with(|slot| slot.set(SidereonQualityErrorKind::None));
-    ffi_boundary(fn_name, panic_value, body)
+    crate::engine_error::engine_error_operation_boundary(fn_name, panic_value, body)
 }
 
 /// Fill *out_options with the default FDE options: sidereon-core's
@@ -702,6 +703,7 @@ unsafe fn fde_outcome_to_c(
     fn_name: &str,
     outcome: Result<FdeResult<ReceiverSolution>, FdeError<ReceiverSolution, FdeSppError>>,
     out_solution: *mut *mut SidereonFdeSolution,
+    options: &SidereonFdeOptions,
 ) -> SidereonStatus {
     match outcome {
         Ok(found) => {
@@ -733,6 +735,24 @@ unsafe fn fde_outcome_to_c(
             }
         }
         Err(FdeError::Solve(FdeSppError::Validation(error))) => {
+            let mut detail = crate::engine_error::solution_validation_error_value(&error);
+            if let (
+                sidereon_core::quality::SolutionValidationError::DegenerateGeometryGdop(_),
+                true,
+                true,
+            ) = (
+                &error,
+                options.use_validation_options,
+                options.validation.max_gdop_enabled,
+            ) {
+                detail["fields"]["max_gdop"] =
+                    crate::engine_error::engine_f64(options.validation.max_gdop);
+            }
+            crate::engine_error::record_engine_error(
+                crate::engine_error::SidereonEngineErrorFamily::SolutionValidation,
+                fn_name,
+                detail,
+            );
             set_last_error(format!("{fn_name}: solution validation failed: {error:?}"));
             SidereonStatus::Solve
         }
@@ -769,6 +789,7 @@ unsafe fn run_fde(
         fn_name,
         fde_spp(eph, &inputs, with_geodetic, &fde_options),
         out_solution,
+        options,
     )
 }
 
@@ -794,6 +815,7 @@ unsafe fn run_robust_fde(
         fn_name,
         spp_robust_fde_driver(eph, &inputs, with_geodetic, robust, &fde_options),
         out_solution,
+        options,
     )
 }
 
