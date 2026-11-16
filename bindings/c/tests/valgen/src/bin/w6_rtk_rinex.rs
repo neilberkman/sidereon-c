@@ -148,6 +148,7 @@ fn main() {
         default_validated(),
     );
     let solution = solve_static_rtk_arc(&arc.epochs, &config).expect("static RINEX RTK");
+    comment("Core 4.0.0 uses RTKLIB ecef2pos/satazel arithmetic for elevation-weighted RTK.");
     comment("Single-frequency static RINEX RTK baseline.");
     def_vec3(
         "W6_RTKR_STATIC_FLOAT_BASELINE_BITS",

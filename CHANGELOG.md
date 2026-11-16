@@ -2,14 +2,17 @@
 
 ## Unreleased
 
+## 4.0.0 - 2026-11-16
+
 ### Fixed
 
 - Forward GDOP validation in broadcast SPP and reject it for V2 operations whose core driver cannot apply it.
 - Apply the joint innovation gate to tight EKF updates and expose per-row coast diagnostics.
 - Preserve tight cross-covariance when loose updates are rejected.
 - Coast when IGG III removes every loose-update row, with gate diagnostics where applicable.
-- Refuse invalid or conflicting gate settings and options for the inactive filter kind.
+- **Breaking.** Refuse invalid or conflicting gate settings and options for the inactive filter kind.
 - Report structured GDOP and ceiling values for FDE validation refusals.
+- Report invalid fitted OMM headers as argument errors and preserve source lines in CelesTrak TLE handles.
 
 ### Added
 
@@ -45,11 +48,16 @@
 
 ### Changed
 
+- **Breaking.** Extend `SidereonFusionUpdate`, `SidereonFusionFilterConfig`,
+  `SidereonSppValidationOptions`, `SidereonSolutionValidationOptions`, and
+  `SidereonRtkArcEpochMetadata`; C applications must recompile.
+- **Breaking.** PPP RAIM protection levels now describe Brown snapshot-RAIM fault
+  protection and require positive redundancy. Fault-free accuracy bounds have
+  separate entry points.
+- **Breaking.** Add distinct RAIM status and error values, pseudorange rejection
+  codes, and RTK hold-release reasons.
+
 - OMM KVN and XML writers require complete CCSDS mandatory fields.
-
-### Fixed
-
-- Report invalid fitted OMM headers as argument errors and preserve source lines in CelesTrak TLE handles.
 
 ## 3.0.6 - 2026-10-30
 

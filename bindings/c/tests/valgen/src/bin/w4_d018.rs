@@ -156,6 +156,7 @@ fn scenario() {
     // sidereon_scenario_simulate_json serializes the output with serde_json.
     let bytes = serde_json::to_vec(&set).expect("scenario output JSON");
     println!("/* test_scenario: sidereon_core::scenario::simulate_scenario of the test's JSON. */");
+    println!("/* The scenario fingerprint and JSON include the core engine version, 4.0.0. */");
     int("SCENARIO_OBSERVATION_COUNT", set.observation_count());
     int(
         "SCENARIO_EPOCH_OFFSET_COUNT",
@@ -564,6 +565,7 @@ fn fusion() {
 }
 
 fn recorded_rts() {
+    println!("/* Core 4.0.0 evaluates Yang adaptation per observation group using raw covariance before IGG III inflation. */");
     println!("/* test_fusion_recorded_rts: recorded history and RTS smoothing. */");
     let mut config = CConfig::init();
     config.innovation_gate = Some(fu::InnovationGate {

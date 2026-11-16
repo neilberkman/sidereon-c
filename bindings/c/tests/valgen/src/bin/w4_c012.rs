@@ -173,6 +173,7 @@ fn summary(prefix: &str, result: &sidereon_core::araim::AraimResult) {
 }
 
 fn araim_section() {
+    println!("/* Core 4.0.0 uses the ADD v3.0 Eq. (2) partition and Eq. (16) consolidation for protection levels. */");
     println!("/* test_araim: sidereon_core::araim::araim on the test's geometry and ISM. */");
     let half_pi = std::f64::consts::PI / 2.0;
     let rows_in: [(&str, [f64; 3], GnssSystem); 10] = [

@@ -1,6 +1,6 @@
-# C/Python TDM parity
+# TDM interface mapping
 
-This table compares the release-3.0.6 Python surface with the C binding. C uses
+This table maps the Python value model and core TDM capabilities to the C ABI. C uses
 plain caller-owned value structs for Python value objects, an opaque `SidereonTdm`
 for the message, indexed access/mutation, and the normal two-call buffer contract
 for variable-length text and arrays.

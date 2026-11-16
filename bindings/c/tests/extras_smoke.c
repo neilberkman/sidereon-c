@@ -211,12 +211,10 @@ static void test_signal_quality(void) {
           "chi2_isf null");
     check(sidereon_chi2_isf(-1.0, 2, &chi2) != SIDEREON_STATUS_OK,
           "chi2_isf invalid probability");
-    /* Core ppp_raim_oracles.json, SciPy chi-square survival at 0.001.
-       1 - 0.999 is slightly above 0.001 in binary64. */
-    (void)W5_EXTRAS_CHI2_INV_BITS;
+    /* Core 4.0.0 corrects chi-square tails; chi2_extended_mpmath.json
+       references chi2_inv(0.999, 1), whose survival input differs from 0.001 in binary64. */
     check(sidereon_chi2_inv(0.999, 1, &chi2) == SIDEREON_STATUS_OK &&
-              f64_bits(chi2) >= UINT64_C(0x4025a7b6c0cc8b75) &&
-              f64_bits(chi2) <= UINT64_C(0x4025a7b6c0cc8b79),
+              same_bits(chi2, W5_EXTRAS_CHI2_INV_BITS),
           "chi2_inv");
 }
 
@@ -230,9 +228,8 @@ static void test_raim(void) {
     check(result.fault_detected == W5_EXTRAS_RAIM_FAULT_DETECTED &&
               same_bits(result.test_statistic, W5_EXTRAS_RAIM_TEST_STATISTIC_BITS),
           "raim test statistic");
-    (void)W5_EXTRAS_RAIM_THRESHOLD_BITS;
     check(result.has_threshold == W5_EXTRAS_RAIM_HAS_THRESHOLD &&
-              same_bits(result.threshold, UINT64_C(0x4025a7b6c0cc8b77)),
+              same_bits(result.threshold, W5_EXTRAS_RAIM_THRESHOLD_BITS),
           "raim threshold");
     check(result.has_reduced_chi_square == W5_EXTRAS_RAIM_HAS_REDUCED_CHI_SQUARE &&
               same_bits(result.reduced_chi_square, W5_EXTRAS_RAIM_REDUCED_CHI_SQUARE_BITS),

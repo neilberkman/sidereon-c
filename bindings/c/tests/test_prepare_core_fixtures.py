@@ -353,6 +353,22 @@ class PrepareCoreFixturesRegressionTests(unittest.TestCase):
                 with self.assertRaisesRegex(SystemExit, "does not match verified engine commit"):
                     PREPARE.checked_source(report, self.revision)
 
+    def test_registry_fixture_identity_requires_the_published_commit(self) -> None:
+        source = self._create_source_tree("registry_fixture_source")
+        report = {"mode": "registry", "revision": self.revision, "graphs": []}
+        for revision in (self.revision, "0" * 40):
+            runner = self.create_git_metadata_runner(
+                default_origin="fixture-archive.bundle",
+                revision_map={str(source): revision},
+            )
+            with patch.dict(os.environ, {"SIDEREON_CORE_SOURCE": str(source)}):
+                with patch("subprocess.run", side_effect=runner):
+                    if revision == self.revision:
+                        self.assertEqual(PREPARE.checked_source(report, self.revision)[2], revision)
+                    else:
+                        with self.assertRaisesRegex(SystemExit, "does not match verified engine commit"):
+                            PREPARE.checked_source(report, self.revision)
+
     def test_checked_source_rejects_noncanonical_origin(self) -> None:
         configured_source = self._create_source_tree("noncanonical_origin_source")
         report = {
