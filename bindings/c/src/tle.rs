@@ -2420,7 +2420,7 @@ pub unsafe extern "C" fn sidereon_visible_from_satellites(
     )
 }
 
-fn map_look_angle_error(fn_name: &str, err: LookAngleError) -> SidereonStatus {
+pub(crate) fn map_look_angle_error(fn_name: &str, err: LookAngleError) -> SidereonStatus {
     record_engine_error(
         SidereonEngineErrorFamily::LookAngle,
         fn_name,

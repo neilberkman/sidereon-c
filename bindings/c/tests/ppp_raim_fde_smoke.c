@@ -107,7 +107,8 @@ int main(int argc, char **argv) {
     SidereonPppRaimConfig raim;
     assert(sidereon_ppp_raim_config_default(&raim) == SIDEREON_STATUS_OK);
     raim.has_chi_square_threshold = true;
-    raim.chi_square_threshold = 1e30;
+    /* Large enough to pass this fixture while remaining within the Brown PL noncentrality domain. */
+    raim.chi_square_threshold = 1e6;
     SidereonPppRaimFdeResult *result = NULL;
     assert(sidereon_ppp_solve_float_epoch_with_raim(sp3, &config_v2, raim, &result) ==
            SIDEREON_STATUS_OK);
@@ -133,6 +134,24 @@ int main(int argc, char **argv) {
     double position[3];
     assert(sidereon_ppp_float_solution_position(solution, position, 3) == SIDEREON_STATUS_OK);
     assert(position[0] != 0.0 && position[1] != 0.0 && position[2] != 0.0);
+    sidereon_ppp_float_solution_free(solution);
+    sidereon_ppp_raim_fde_result_free(result);
+
+    /* Four satellites with position and one clock leave zero snapshot redundancy. */
+    epoch.observation_count = 4;
+    config_v2.legacy.tropo.enabled = false;
+    config_v2.legacy.tropo.estimate_ztd = false;
+    config_v2.legacy.initial_state.ambiguity_count = 4;
+    assert(sidereon_ppp_raim_config_default(&raim) == SIDEREON_STATUS_OK);
+    result = NULL;
+    assert(sidereon_ppp_solve_float_epoch_with_raim(sp3, &config_v2, raim, &result) == SIDEREON_STATUS_OK);
+    assert(sidereon_ppp_raim_fde_result_info(result, &info) == SIDEREON_STATUS_OK &&
+           info.status == SIDEREON_PPP_RAIM_FDE_STATUS_UNTESTED && info.excluded_satellite_count == 0);
+    solution = NULL;
+    assert(sidereon_ppp_raim_fde_result_solution(result, &solution) == SIDEREON_STATUS_OK);
+    bool estimated = true; double factor = 0.0;
+    assert(sidereon_ppp_float_solution_posterior_variance_factor_estimated(solution, &estimated) == SIDEREON_STATUS_OK && !estimated);
+    assert(sidereon_ppp_float_solution_posterior_variance_factor(solution, &factor) == SIDEREON_STATUS_OK && factor == 1.0);
     sidereon_ppp_float_solution_free(solution);
     sidereon_ppp_raim_fde_result_free(result);
 

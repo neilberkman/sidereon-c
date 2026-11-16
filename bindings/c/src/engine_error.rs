@@ -3254,6 +3254,10 @@ pub(crate) fn solution_validation_error_value(
         E::DegenerateGeometryRankDeficient => {
             rtk_node("degenerate_geometry_rank_deficient", json!({}))
         }
+        E::DegenerateGeometryGdop(gdop) => rtk_node(
+            "degenerate_geometry_gdop",
+            json!({"gdop": engine_f64(*gdop)}),
+        ),
         E::DegenerateGeometryPdop(pdop) => rtk_node(
             "degenerate_geometry_pdop",
             json!({"pdop": engine_f64(*pdop)}),
@@ -4078,6 +4082,32 @@ mod tests {
     use crate::SidereonStatus;
     use serde_json::{json, Value};
     use std::ptr;
+
+    #[test]
+    fn missing_ambiguity_column_payload_is_structured_at_c_accessor() {
+        let error = sidereon_core::rtk_filter::UpdateError::MissingAmbiguityColumn("G04".into());
+        record_engine_error(
+            SidereonEngineErrorFamily::Rtk,
+            "rtk",
+            super::update_error_value(&error),
+        );
+        let mut buffer = [0u8; 512];
+        let (mut written, mut required) = (0, 0);
+        assert_eq!(
+            unsafe {
+                sidereon_last_engine_error_payload(
+                    buffer.as_mut_ptr(),
+                    buffer.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        let payload: Value = serde_json::from_slice(&buffer[..written]).unwrap();
+        assert_eq!(payload["error"]["kind"], "missing_ambiguity_column");
+        assert_eq!(payload["error"]["fields"]["ambiguity_id"], "G04");
+    }
 
     #[test]
     fn nmea_error_mapper_preserves_each_core_variant_and_payload() {

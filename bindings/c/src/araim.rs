@@ -59,6 +59,48 @@ pub struct SidereonAraimSatelliteIsmModel {
     pub p_sat: f64,
 }
 
+/// Construct the ADD v3.0 dual-frequency satellite model at the given elevation.
+/// The system must be supported by Appendix A. Safety: out must be writable.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_araim_satellite_ism_model_add_v3_0(
+    system: u32,
+    elevation_rad: f64,
+    sigma_ura_m: f64,
+    sigma_ure_m: f64,
+    b_nom_m: f64,
+    p_sat: f64,
+    out: *mut SidereonAraimSatelliteIsmModel,
+) -> SidereonStatus {
+    const FN: &str = "sidereon_araim_satellite_ism_model_add_v3_0";
+    engine_error_operation_boundary(FN, SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out, FN, "out"));
+        let system = c_try!(gnss_system_from_c_code(FN, "system", system));
+        match SatelliteIsmModel::add_v3_0(
+            system,
+            elevation_rad,
+            sigma_ura_m,
+            sigma_ure_m,
+            b_nom_m,
+            p_sat,
+        ) {
+            Ok(model) => {
+                *out = SidereonAraimSatelliteIsmModel {
+                    sigma_ura_m: model.sigma_ura_m,
+                    sigma_ure_m: model.sigma_ure_m,
+                    has_effective_sigma_int_m: model.effective_sigma_int_m.is_some(),
+                    effective_sigma_int_m: model.effective_sigma_int_m.unwrap_or(0.0),
+                    has_effective_sigma_acc_m: model.effective_sigma_acc_m.is_some(),
+                    effective_sigma_acc_m: model.effective_sigma_acc_m.unwrap_or(0.0),
+                    b_nom_m: model.b_nom_m,
+                    p_sat: model.p_sat,
+                };
+                SidereonStatus::Ok
+            }
+            Err(error) => map_araim_error(FN, error),
+        }
+    })
+}
+
 /// Per-constellation ARAIM ISM default.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -524,6 +566,10 @@ fn araim_node(kind: &str, fields: Value) -> Value {
 pub(crate) fn araim_error_value(error: &AraimError) -> Value {
     use AraimError as E;
     match error {
+        E::UnsupportedConstellation(system) => araim_node(
+            "unsupported_constellation",
+            json!({"system": gnss_system_to_c(*system) as u32}),
+        ),
         E::InsufficientGeometry => araim_node("insufficient_geometry", json!({})),
         E::UnmonitorableFaultMass => araim_node("unmonitorable_fault_mass", json!({})),
         E::NumericalFailure => araim_node("numerical_failure", json!({})),
@@ -541,7 +587,9 @@ pub(crate) fn araim_error_value(error: &AraimError) -> Value {
 pub(crate) fn map_araim_error_retaining(fn_name: &str, err: &AraimError) -> SidereonStatus {
     set_last_error(format!("{fn_name}: {err}"));
     match err {
-        AraimError::InvalidIsm | AraimError::InvalidAllocation => SidereonStatus::InvalidArgument,
+        AraimError::UnsupportedConstellation(_)
+        | AraimError::InvalidIsm
+        | AraimError::InvalidAllocation => SidereonStatus::InvalidArgument,
         AraimError::InsufficientGeometry
         | AraimError::UnmonitorableFaultMass
         | AraimError::NumericalFailure => SidereonStatus::Solve,

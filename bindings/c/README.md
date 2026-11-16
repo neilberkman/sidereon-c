@@ -1274,7 +1274,7 @@ detail record.
 
 The snapshot PPP integrity API exposes core RAIM configuration defaults, global
 tests with and without geometry, per-satellite standardized residuals,
-protection levels, and the one-epoch solve/FDE drivers. Results and
+Brown snapshot-RAIM fault protection levels (which require positive redundancy), and the one-epoch solve/FDE drivers. Results and
 identification records use owned handles with core-backed equality and matching
 free functions. Satellite and ambiguity identifiers use lossless UTF-8 input
 and size-query output contracts. RAIM, nested DOP, float-solve, and FDE
@@ -1411,3 +1411,28 @@ reproduce fails the build. The propagation and SP3 goldens are read from the
 files sidereon-core's `SIDEREON_DUMP_FIXTURES` emitters write in the core
 checkout the generators resolve; the former `PY_FIXTURES` variable, which
 pointed the transcribers at another binding's fixture copies, is removed.
+
+The checked coverage helpers reject non-finite thresholds; the legacy grid helpers
+are deprecated. `sidereon_chi2_isf` takes a false-alarm tail probability directly.
+PPP weighted protection levels use inverse-sigma weights; fault-free accuracy
+bounds are a separate quantity. Solution validation can opt into a GDOP ceiling.
+The core tight EKF currently does not apply its configured joint gate; do not
+rely on that gate until the core implements it.
+Fusion configuration can enable joint EKF or UKF gates, whose statistic, degrees
+of freedom, threshold, probability, and verdict appear in the update report.
+RTK arc epoch metadata and accessors report mask convergence, selected references,
+masked satellites, and released holds.
+
+This update changes the layouts of `SidereonSppValidationOptions`,
+`SidereonSolutionValidationOptions`, `SidereonFusionFilterConfig`,
+`SidereonFusionUpdate`, and `SidereonRtkArcEpochMetadata`; applications must
+recompile against the matching generated header and library.
+
+PPP RAIM FDE reports `SIDEREON_PPP_RAIM_FDE_STATUS_UNTESTED` when there is no
+redundancy. Structured PPP RAIM errors distinguish `unsupported_noncentrality`,
+`unsupported_dof` (with `dof` and `max`), and `numerical_protection_level`.
+ARAIM reports `unsupported_constellation` with its numeric `system`; solution
+validation reports `degenerate_geometry_gdop` with `gdop`. SPP and static
+positioning report non-finite and non-positive pseudoranges using distinct
+rejection codes. RTK update errors retain `missing_ambiguity_column` and the
+`state.fixed_cycles` missing-input details in their structured error payloads.

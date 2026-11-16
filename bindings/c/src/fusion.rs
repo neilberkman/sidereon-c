@@ -459,6 +459,19 @@ pub struct SidereonFusionFilterConfig {
     pub has_ukf_innovation_gate: bool,
     /// UKF innovation screen used by loose and tight UKF updates.
     pub ukf_innovation_gate: SidereonFusionInnovationGate,
+    /// Enable the loose EKF joint gate at this false-alarm probability.
+    pub has_loose_joint_innovation_gate_probability: bool,
+    /// Loose EKF joint gate false-alarm probability.
+    pub loose_joint_innovation_gate_probability: f64,
+    /// Request the tight EKF joint gate. Core 4.0 currently does not apply this gate
+    /// in tight EKF updates; callers must not rely on it until the core supports it.
+    pub has_tight_joint_innovation_gate_probability: bool,
+    /// Tight EKF joint gate false-alarm probability.
+    pub tight_joint_innovation_gate_probability: f64,
+    /// Enable the UKF joint gate.
+    pub has_ukf_joint_innovation_gate_probability: bool,
+    /// UKF joint gate false-alarm probability.
+    pub ukf_joint_innovation_gate_probability: f64,
     /// Retained IMU sample capacity for time-synchronization replay.
     pub time_sync_imu_capacity: usize,
     /// Retained checkpoint capacity for time-synchronization replay.
@@ -597,6 +610,18 @@ pub struct SidereonFusionTightEpoch {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct SidereonFusionUpdate {
+    /// Whether the joint innovation gate ran.
+    pub has_joint_innovation_gate: bool,
+    /// Joint normalized innovation squared.
+    pub joint_gate_statistic: f64,
+    /// Degrees of freedom of the joint test.
+    pub joint_gate_degrees_of_freedom: usize,
+    /// Joint chi-square threshold.
+    pub joint_gate_threshold: f64,
+    /// Configured false-alarm probability.
+    pub joint_gate_probability: f64,
+    /// Whether the joint gate accepted the measurement block.
+    pub joint_gate_accepted: bool,
     /// Whether the update modified state and covariance.
     pub applied: bool,
     /// Normalized innovation squared.
@@ -803,6 +828,28 @@ pub unsafe extern "C" fn sidereon_fusion_filter_config_init(
                 ukf_kappa: ukf.transform.kappa,
                 has_ukf_innovation_gate: false,
                 ukf_innovation_gate: zero_fusion_innovation_gate(),
+                has_loose_joint_innovation_gate_probability: loose
+                    .update_options
+                    .joint_innovation_gate_probability
+                    .is_some(),
+                loose_joint_innovation_gate_probability: loose
+                    .update_options
+                    .joint_innovation_gate_probability
+                    .unwrap_or(0.0),
+                has_tight_joint_innovation_gate_probability: tight
+                    .update_options
+                    .joint_innovation_gate_probability
+                    .is_some(),
+                tight_joint_innovation_gate_probability: tight
+                    .update_options
+                    .joint_innovation_gate_probability
+                    .unwrap_or(0.0),
+                has_ukf_joint_innovation_gate_probability: ukf
+                    .joint_innovation_gate_probability
+                    .is_some(),
+                ukf_joint_innovation_gate_probability: ukf
+                    .joint_innovation_gate_probability
+                    .unwrap_or(0.0),
                 time_sync_imu_capacity: sidereon_core::fusion::DEFAULT_TIME_SYNC_IMU_CAPACITY,
                 time_sync_checkpoint_capacity:
                     sidereon_core::fusion::DEFAULT_TIME_SYNC_CHECKPOINT_CAPACITY,
@@ -2849,6 +2896,12 @@ fn fusion_filter_config_from_c(
     };
     config.loose.update_options.innovation_gate =
         fusion_innovation_gate_from_c(raw.has_loose_innovation_gate, raw.loose_innovation_gate);
+    config
+        .loose
+        .update_options
+        .joint_innovation_gate_probability = raw
+        .has_loose_joint_innovation_gate_probability
+        .then_some(raw.loose_joint_innovation_gate_probability);
     config.loose.measurement_reweighting = raw.has_loose_measurement_reweighting.then_some(
         sidereon_core::fusion::IggIiiMeasurementReweighting {
             k0_sigma: raw.loose_measurement_reweighting.k0_sigma,
@@ -2894,6 +2947,15 @@ fn fusion_filter_config_from_c(
     config.tight.clock_drift_random_walk_m2_s3 = raw.tight_clock_drift_random_walk_m2_s3;
     config.tight.update_options.innovation_gate =
         fusion_innovation_gate_from_c(raw.has_tight_innovation_gate, raw.tight_innovation_gate);
+    config
+        .tight
+        .update_options
+        .joint_innovation_gate_probability = raw
+        .has_tight_joint_innovation_gate_probability
+        .then_some(raw.tight_joint_innovation_gate_probability);
+    config.ukf_update_options.joint_innovation_gate_probability = raw
+        .has_ukf_joint_innovation_gate_probability
+        .then_some(raw.ukf_joint_innovation_gate_probability);
     let mut transform = sidereon_core::fusion::UnscentedTransformOptions::default();
     transform.alpha = raw.ukf_alpha;
     transform.beta = raw.ukf_beta;
@@ -3057,6 +3119,24 @@ unsafe fn tight_epoch_from_c(
 
 fn fusion_update_to_c(update: &sidereon_core::fusion::FusionUpdate) -> SidereonFusionUpdate {
     SidereonFusionUpdate {
+        has_joint_innovation_gate: update.ekf.joint_innovation_gate.is_some(),
+        joint_gate_statistic: update
+            .ekf
+            .joint_innovation_gate
+            .map_or(0.0, |v| v.statistic),
+        joint_gate_degrees_of_freedom: update
+            .ekf
+            .joint_innovation_gate
+            .map_or(0, |v| v.degrees_of_freedom),
+        joint_gate_threshold: update
+            .ekf
+            .joint_innovation_gate
+            .map_or(0.0, |v| v.threshold),
+        joint_gate_probability: update
+            .ekf
+            .joint_innovation_gate
+            .map_or(0.0, |v| v.false_alarm_probability),
+        joint_gate_accepted: update.ekf.joint_innovation_gate.is_some_and(|v| v.accepted),
         applied: update.applied,
         nis: update.nis,
         rows: update.rows,
@@ -3150,6 +3230,12 @@ fn preflight_fusion_update_outputs(
 
 fn zero_fusion_update() -> SidereonFusionUpdate {
     SidereonFusionUpdate {
+        has_joint_innovation_gate: false,
+        joint_gate_statistic: 0.0,
+        joint_gate_degrees_of_freedom: 0,
+        joint_gate_threshold: 0.0,
+        joint_gate_probability: 0.0,
+        joint_gate_accepted: false,
         applied: false,
         nis: 0.0,
         rows: 0,
@@ -3638,6 +3724,12 @@ mod tests {
             ukf_kappa: 0.0,
             has_ukf_innovation_gate: false,
             ukf_innovation_gate: zero_fusion_innovation_gate(),
+            has_loose_joint_innovation_gate_probability: false,
+            loose_joint_innovation_gate_probability: 0.0,
+            has_tight_joint_innovation_gate_probability: false,
+            tight_joint_innovation_gate_probability: 0.0,
+            has_ukf_joint_innovation_gate_probability: false,
+            ukf_joint_innovation_gate_probability: 0.0,
             time_sync_imu_capacity: 0,
             time_sync_checkpoint_capacity: 0,
         };
@@ -3904,6 +3996,12 @@ mod tests {
             ukf_kappa: 0.0,
             has_ukf_innovation_gate: false,
             ukf_innovation_gate: zero_fusion_innovation_gate(),
+            has_loose_joint_innovation_gate_probability: false,
+            loose_joint_innovation_gate_probability: 0.0,
+            has_tight_joint_innovation_gate_probability: false,
+            tight_joint_innovation_gate_probability: 0.0,
+            has_ukf_joint_innovation_gate_probability: false,
+            ukf_joint_innovation_gate_probability: 0.0,
             time_sync_imu_capacity: 0,
             time_sync_checkpoint_capacity: 0,
         };

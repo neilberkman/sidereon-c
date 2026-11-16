@@ -2883,6 +2883,10 @@ static const char *sa_spp_rejection_reason_name(SidereonSppRejectionReason reaso
         return "IonosphereCarrierUnresolved";
     case SIDEREON_SPP_REJECTION_REASON_SSR_CORRECTION_EXCEEDS_LIMIT:
         return "SsrCorrectionExceedsLimit";
+    case SIDEREON_SPP_REJECTION_REASON_NON_FINITE_PSEUDORANGE:
+        return "NonFinitePseudorange";
+    case SIDEREON_SPP_REJECTION_REASON_NON_POSITIVE_PSEUDORANGE:
+        return "NonPositivePseudorange";
     }
     return "";
 }
@@ -8863,6 +8867,20 @@ int main(int argc, char **argv) {
     }
 #endif
 
+    SidereonDop rtklib_dop;
+    /* This fixture uses GPS only, so the shared-clock design is the pinned single-clock design. */
+    if (sidereon_spp_solution_rtklib_single_clock_dop(sol, &rtklib_dop) != SIDEREON_STATUS_OK ||
+        f64_to_bits(rtklib_dop.gdop) != SMOKE_B_POSITIONING_SPP_DOP_BITS[0] ||
+        f64_to_bits(rtklib_dop.pdop) != SMOKE_B_POSITIONING_SPP_DOP_BITS[1] ||
+        f64_to_bits(rtklib_dop.hdop) != SMOKE_B_POSITIONING_SPP_DOP_BITS[2] ||
+        f64_to_bits(rtklib_dop.vdop) != SMOKE_B_POSITIONING_SPP_DOP_BITS[3] ||
+        f64_to_bits(rtklib_dop.tdop) != SMOKE_B_POSITIONING_SPP_DOP_BITS[4] ||
+        sidereon_spp_solution_rtklib_single_clock_dop(NULL, &rtklib_dop) != SIDEREON_STATUS_NULL_POINTER ||
+        sidereon_spp_solution_rtklib_single_clock_dop(sol, (SidereonDop *)sol) != SIDEREON_STATUS_INVALID_ARGUMENT) {
+        sidereon_spp_solution_free(sol); sidereon_sp3_free(sp3);
+        return fail("RTKLIB single-clock DOP", 1);
+    }
+
     SidereonObservation observations_with_reject[SPP_OBS_COUNT + 1];
     for (size_t i = 0; i < SPP_OBS_COUNT; i++) {
         observations_with_reject[i] = observations[i];
@@ -8899,6 +8917,27 @@ int main(int argc, char **argv) {
         return fail("sidereon_spp_solution_rejected_sats full copy", 1);
     }
     sidereon_spp_solution_free(reject_sol);
+
+    /* Core pre-rejects invalid pseudoranges even for a duplicate valid satellite. */
+    const double invalid_ranges[2] = {NAN, 0.0};
+    const SidereonSppRejectionReason invalid_reasons[2] = {
+        SIDEREON_SPP_REJECTION_REASON_NON_FINITE_PSEUDORANGE,
+        SIDEREON_SPP_REJECTION_REASON_NON_POSITIVE_PSEUDORANGE};
+    for (size_t invalid_index = 0; invalid_index < 2; invalid_index++) {
+        observations_with_reject[SPP_OBS_COUNT] = observations[0];
+        observations_with_reject[SPP_OBS_COUNT].pseudorange_m = invalid_ranges[invalid_index];
+        reject_sol = NULL;
+        if (sidereon_solve_spp(sp3, &reject_inputs, &reject_sol) != SIDEREON_STATUS_OK) {
+            sidereon_spp_solution_free(sol); sidereon_sp3_free(sp3);
+            return fail("SPP invalid pseudorange solve", 1);
+        }
+        SidereonSppRejectedSat reasons[SPP_OBS_COUNT + 1];
+        size_t nw = 0, nr = 0; bool found = false;
+        if (sidereon_spp_solution_rejected_sats(reject_sol, reasons, SPP_OBS_COUNT + 1, &nw, &nr) == SIDEREON_STATUS_OK)
+            for (size_t j = 0; j < nw; j++) if (reasons[j].reason == invalid_reasons[invalid_index]) found = true;
+        sidereon_spp_solution_free(reject_sol);
+        if (!found) { sidereon_spp_solution_free(sol); sidereon_sp3_free(sp3); return fail("SPP invalid pseudorange reason", 1); }
+    }
 
     if (sidereon_spp_inputs_v2_init(NULL) != SIDEREON_STATUS_NULL_POINTER) {
         sidereon_spp_solution_free(sol);
@@ -8962,7 +9001,7 @@ int main(int argc, char **argv) {
 
     /* A real public static-positioning refusal with a nested, payload-bearing
      * core SPP cause. Starting from this valid SPP request and setting one
-     * pseudorange to zero reaches core input validation for epoch zero. */
+     * day_of_year to zero reaches core input validation for epoch zero. */
     SidereonStaticPositionEpoch static_epoch;
     memset(&static_epoch, 0, sizeof static_epoch);
     if (sidereon_spp_inputs_v2_init(&static_epoch.inputs) != SIDEREON_STATUS_OK) {
@@ -8973,7 +9012,23 @@ int main(int argc, char **argv) {
     static_epoch.inputs.base = inputs;
     SidereonObservation static_bad_observations[SPP_OBS_COUNT];
     memcpy(static_bad_observations, observations, sizeof static_bad_observations);
-    static_bad_observations[0].pseudorange_m = 0.0;
+    static_epoch.inputs.base.observations = static_bad_observations;
+    static_epoch.inputs.base.observation_count = SPP_OBS_COUNT;
+    for (size_t invalid_index = 0; invalid_index < 2; invalid_index++) {
+        static_bad_observations[0].pseudorange_m = invalid_ranges[invalid_index];
+        SidereonStaticPositionSolution *valid_static = NULL;
+        SidereonStaticPositionErrorKind valid_error = SIDEREON_STATIC_POSITION_ERROR_KIND_NONE;
+        if (sidereon_solve_static_position_sp3(sp3, &static_epoch, 1, NULL, &valid_error, &valid_static) != SIDEREON_STATUS_OK || !valid_static) {
+            sidereon_spp_solution_free(sol); sidereon_sp3_free(sp3); return fail("static invalid pseudorange solve", 1);
+        }
+        SidereonSppRejectedSat invalid_static[SPP_OBS_COUNT]; size_t nw=0, nr=0; bool found=false;
+        if (sidereon_static_position_solution_rejected_sats(valid_static, 0, invalid_static, SPP_OBS_COUNT, &nw, &nr) == SIDEREON_STATUS_OK)
+            for (size_t j=0; j<nw; j++) if (invalid_static[j].reason == invalid_reasons[invalid_index]) found=true;
+        sidereon_static_position_solution_free(valid_static);
+        if (!found) { sidereon_spp_solution_free(sol); sidereon_sp3_free(sp3); return fail("static invalid pseudorange reason", 1); }
+    }
+    static_bad_observations[0] = observations[0];
+    static_epoch.inputs.base.day_of_year = 0.0;
     static_epoch.inputs.base.observations = static_bad_observations;
     static_epoch.inputs.base.observation_count = SPP_OBS_COUNT;
     SidereonStaticPositionErrorKind static_error = SIDEREON_STATIC_POSITION_ERROR_KIND_NONE;
@@ -9024,8 +9079,8 @@ int main(int argc, char **argv) {
         strstr((const char *)static_payload, "\"kind\":\"epoch_input\"") == NULL ||
         strstr((const char *)static_payload, "\"epoch_index\":0") == NULL ||
         strstr((const char *)static_payload, "\"kind\":\"invalid_input\"") == NULL ||
-        strstr((const char *)static_payload, "\"field\":\"observation.pseudorange_m\"") == NULL ||
-        strstr((const char *)static_payload, "\"kind\":\"not_positive\"") == NULL) {
+        strstr((const char *)static_payload, "\"field\":\"day_of_year\"") == NULL ||
+        strstr((const char *)static_payload, "\"kind\":\"out_of_range\"") == NULL) {
         free(static_payload);
         sidereon_spp_solution_free(sol);
         sidereon_sp3_free(sp3);
@@ -9036,7 +9091,7 @@ int main(int argc, char **argv) {
     (void)sidereon_last_error_message(static_message, sizeof static_message);
     if (strcmp(static_message,
                "sidereon_solve_static_position_sp3: invalid static epoch 0: "
-               "invalid SPP input observation.pseudorange_m: not positive") != 0) {
+               "invalid SPP input day_of_year: out of range") != 0) {
         sidereon_spp_solution_free(sol);
         sidereon_sp3_free(sp3);
         return fail("static-positioning exact legacy error message", 1);

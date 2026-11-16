@@ -1,5 +1,5 @@
 /*
- * Smoke coverage for the newly merged core features bound into the C binding:
+ * Smoke coverage for the newly core 4.0 features bound into the C binding:
  *
  *   1. NeQuick-G full slant integration (sidereon_nequick_g_stec_tecu /
  *      sidereon_nequick_g_delay_m over a SidereonNequickGRay).
@@ -207,12 +207,13 @@ static void test_raim_fde(void) {
               bits_equal(cov, W3M_RAIM_COVARIANCE, W3M_RAIM_COVARIANCE_LEN),
           "range_fde_result_covariance");
 
+    /* Core chi2_extended_mpmath.json pins the quantile at binary64 1 - 0.001. */
     SidereonRangeChiSquareTest test;
     check(sidereon_range_fde_result_global_test(result, &test) == SIDEREON_STATUS_OK &&
               test.testable == W3M_RAIM_TEST_TESTABLE &&
               test.fault_detected == W3M_RAIM_TEST_FAULT_DETECTED &&
               test.has_threshold == W3M_RAIM_TEST_HAS_THRESHOLD &&
-              f64_bits(test.threshold) == W3M_RAIM_TEST_THRESHOLD &&
+              f64_bits(test.threshold) == UINT64_C(0x4025a7b6c0cc8b76) &&
               f64_bits(test.weighted_sum_squares) == W3M_RAIM_TEST_WEIGHTED_SUM_SQUARES &&
               test.dof == W3M_RAIM_TEST_DOF,
           "range_fde global test passes on the protected set");
@@ -365,6 +366,19 @@ static void test_rtk_arc(void) {
               meta.residual_count == W3M_ARC_E1_RESIDUAL_COUNT &&
               bits_equal(meta.reported_baseline_m, W3M_ARC_E1_REPORTED_BASELINE, 3),
           "rtk_arc epoch metadata");
+
+    check(meta.elevation_mask_converged && meta.elevation_masked_satellite_count == 0 &&
+          meta.reference_satellite_count == 1 && meta.released_hold_count == 0,
+          "rtk arc unmasked metadata");
+    SidereonSatelliteToken references[8], masked[8];
+    size_t extra_written = 0, extra_required = 0;
+    check(sidereon_rtk_arc_solution_epoch_reference_satellites(sol, 1, references, 8, &extra_written, &extra_required) == SIDEREON_STATUS_OK &&
+          extra_written == 1 && extra_required == 1, "rtk arc reference satellites");
+    check(sidereon_rtk_arc_solution_epoch_elevation_masked_satellites(sol, 1, masked, 8, &extra_written, &extra_required) == SIDEREON_STATUS_OK &&
+          extra_written == 0 && extra_required == 0, "rtk arc masked satellites");
+    SidereonReleasedRtkHold released[8];
+    check(sidereon_rtk_arc_solution_epoch_released_holds(sol, 1, released, 8, &extra_written, &extra_required) == SIDEREON_STATUS_OK &&
+          extra_written == 0 && extra_required == 0, "rtk arc released holds");
 
     double err = 0.0;
     for (int k = 0; k < 3; k++) {
@@ -740,21 +754,32 @@ static void test_rtk_dual_arc_drivers(void) {
         SidereonRtkMapValue wavelengths[8];
         written = 0;
         required = 0;
+        /* Core 4.0 includes the reference wavelength c/(f1+f2) and zero offset. */
         check(sidereon_rtk_ionosphere_free_arc_solution_wavelengths_m(if_sol, wavelengths, 8,
-                                                                      &written, &required) ==
-                      SIDEREON_STATUS_OK &&
-                  written == required && required == W3M_IF_WAVELENGTH_COUNT &&
-                  f64_bits(wavelengths[0].value) == W3M_IF_WAVELENGTHS[0],
-              "ionosphere_free_rtk_arc wavelengths");
-
+              &written, &required) == SIDEREON_STATUS_OK && written == required &&
+              required == W3M_IF_WAVELENGTH_COUNT + 1, "ionosphere_free_rtk_arc wavelengths");
+        size_t target = 0;
+        for (size_t i = 0; i < written; i++) {
+            if (strcmp((const char *)wavelengths[i].id.bytes, (const char *)refs[0].reference_id.bytes) == 0)
+                check(fabs(wavelengths[i].value - 299792458.0 / (1575420000.0 + 1227600000.0)) < 1e-15, "reference narrow-lane wavelength");
+            else {
+                check(target < W3M_IF_WAVELENGTH_COUNT && f64_bits(wavelengths[i].value) == W3M_IF_WAVELENGTHS[target], "target wavelength");
+                target++;
+            }
+        }
         SidereonRtkMapValue offsets[8];
-        written = 0;
-        required = 0;
+        written = 0; required = 0; target = 0;
         check(sidereon_rtk_ionosphere_free_arc_solution_offsets_m(if_sol, offsets, 8, &written,
-                                                                  &required) == SIDEREON_STATUS_OK &&
-                  written == required && required == W3M_IF_OFFSET_COUNT &&
-                  f64_bits(offsets[0].value) == W3M_IF_OFFSETS[0],
+              &required) == SIDEREON_STATUS_OK && written == required && required == W3M_IF_OFFSET_COUNT + 1,
               "ionosphere_free_rtk_arc offsets");
+        for (size_t i = 0; i < written; i++) {
+            if (strcmp((const char *)offsets[i].id.bytes, (const char *)refs[0].reference_id.bytes) == 0)
+                check(offsets[i].value == 0.0, "reference offset");
+            else {
+                check(target < W3M_IF_OFFSET_COUNT && f64_bits(offsets[i].value) == W3M_IF_OFFSETS[target], "target offset");
+                target++;
+            }
+        }
 
         SidereonRtkArcEpochOutMetadata meta;
         check(sidereon_rtk_ionosphere_free_arc_solution_epoch_metadata(if_sol, 0, &meta) ==

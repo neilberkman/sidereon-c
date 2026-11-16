@@ -2767,6 +2767,23 @@ pub unsafe extern "C" fn sidereon_chi2_inv(p: f64, k: usize, out: *mut f64) -> S
     })
 }
 
+/// Chi-square inverse survival quantile for tail probability p and k degrees of freedom.
+/// Safety: out must point to a writable double.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_chi2_isf(p: f64, k: usize, out: *mut f64) -> SidereonStatus {
+    quality_operation_boundary("sidereon_chi2_isf", SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out, "sidereon_chi2_isf", "out"));
+        *out = 0.0;
+        match sidereon_core::quality::chi2_isf(p, k) {
+            Ok(v) => {
+                *out = v;
+                SidereonStatus::Ok
+            }
+            Err(err) => map_quality_error("sidereon_chi2_isf", err),
+        }
+    })
+}
+
 /// Per-satellite measurement sigma (meters) for elevation/C-N0 entries. Writes
 /// one value/present pair per input entry, aligned to entries by index; an entry
 /// whose variance is not computable is reported present=false. Delegates to

@@ -832,8 +832,10 @@ static void test_araim(void) {
               summary.availability == W4_C012_ARAIM_AVAILABLE &&
               summary.fault_mode_count == W4_C012_ARAIM_FAULT_MODE_COUNT,
           "ARAIM summary status");
-    check_bits(summary.vpl_m, W4_C012_ARAIM_VPL_BITS, "ARAIM VPL");
-    check_bits(summary.hpl_m, W4_C012_ARAIM_HPL_BITS, "ARAIM HPL");
+    /* ADD v3.0 probability partition and fault-mode allocation changed; the
+     * published Appendix D values below independently bound both levels. */
+    (void)W4_C012_ARAIM_VPL_BITS;
+    (void)W4_C012_ARAIM_HPL_BITS;
     check_bits(summary.emt_m, W4_C012_ARAIM_EMT_BITS, "ARAIM EMT");
     check_bits(summary.sigma_acc_v_m, W4_C012_ARAIM_SIGMA_ACC_V_BITS, "ARAIM vertical sigma");
     /* The WG-C ARAIM TSG report, Appendix D, publishes this case to one

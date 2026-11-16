@@ -122,6 +122,10 @@ pub struct SidereonSppRobustConfig {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct SidereonSppValidationOptions {
+    /// Enable the GDOP ceiling.
+    pub max_gdop_enabled: bool,
+    /// GDOP ceiling when enabled.
+    pub max_gdop: f64,
     /// Whether max_pdop is enforced.
     pub max_pdop_enabled: bool,
     /// Optional PDOP ceiling, used only when max_pdop_enabled is true.
@@ -166,7 +170,8 @@ pub struct SidereonSppInputsV2 {
     pub robust_enabled: bool,
     /// Robust reweighting controls.
     pub robust: SidereonSppRobustConfig,
-    /// Solve policy controls.
+    /// Solve policy controls. Operations without a core validation policy reject an enabled max_gdop.
+    /// Batch serial/parallel use their separate policy and reject max_gdop in individual rows.
     pub policy: SidereonSppSolvePolicy,
     /// Pointer to glonass_channel_count GLONASS FDMA channel entries, keyed by
     /// slot. Required for any GLONASS observation solved with the ionosphere
@@ -292,8 +297,9 @@ pub(super) unsafe fn build_spp_solve_inputs_with_models(
 
 /// Why an SPP observation was excluded from the final solve.
 ///
-/// Selection reports the first reason in the core policy order: strict SSR
-/// correction-size refusal, NoEphemeris, LowElevation, SbasIonoUncovered, then
+/// Invalid pseudoranges are rejected before satellite selection. Remaining rows
+/// report the first reason in the core policy order: strict SSR correction-size
+/// refusal, NoEphemeris, LowElevation, SbasIonoUncovered, then
 /// IonosphereCarrierUnresolved. A satellite both below the mask and without a
 /// carrier is reported as LowElevation. SbasWithdrawn is not reported by SPP.
 #[repr(C)]
@@ -318,6 +324,10 @@ pub enum SidereonSppRejectionReason {
     /// Strict SSR size policy refused the orbit/clock correction. Read the exact
     /// magnitudes from the V2 rejected-satellite record.
     SsrCorrectionExceedsLimit = 5,
+    /// Pseudorange is NaN or infinite.
+    NonFinitePseudorange = 6,
+    /// Pseudorange is zero or negative.
+    NonPositivePseudorange = 7,
 }
 
 /// A rejected satellite and the first reason it was excluded.
@@ -1159,6 +1169,56 @@ pub unsafe extern "C" fn sidereon_spp_solution_dop(
     })
 }
 
+/// Copy the RTKLIB shared-clock DOP, when geometry permits.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_spp_solution_rtklib_single_clock_dop(
+    sol: *const SidereonSppSolution,
+    out_dop: *mut SidereonDop,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_spp_solution_rtklib_single_clock_dop",
+        SidereonStatus::Panic,
+        || {
+            c_try!(reject_output_overlaps_handle(
+                "sidereon_spp_solution_rtklib_single_clock_dop",
+                out_dop,
+                "out_dop",
+                sol,
+                "solution"
+            ));
+            let out_dop = c_try!(require_uninit_out(
+                out_dop,
+                "sidereon_spp_solution_rtklib_single_clock_dop",
+                "out_dop"
+            ));
+            out_dop.write(SidereonDop {
+                gdop: 0.0,
+                pdop: 0.0,
+                hdop: 0.0,
+                vdop: 0.0,
+                tdop: 0.0,
+            });
+            let sol = c_try!(require_ref(
+                sol,
+                "sidereon_spp_solution_rtklib_single_clock_dop",
+                "solution"
+            ));
+            let Some(dop) = sol.inner.rtklib_single_clock_dop.as_ref() else {
+                set_last_error("sidereon_spp_solution_rtklib_single_clock_dop: geometry is rank-deficient, no DOP");
+                return SidereonStatus::InvalidArgument;
+            };
+            out_dop.write(SidereonDop {
+                gdop: dop.gdop,
+                pdop: dop.pdop,
+                hdop: dop.hdop,
+                vdop: dop.vdop,
+                tdop: dop.tdop,
+            });
+            SidereonStatus::Ok
+        },
+    )
+}
+
 /// Copy solver metadata into *out_metadata.
 ///
 /// Safety: sol must be a live solution handle; out_metadata must point to a
@@ -1504,6 +1564,10 @@ pub unsafe extern "C" fn sidereon_spp_doppler_solution_free(
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct SidereonSolutionValidationOptions {
+    /// Enable the GDOP ceiling.
+    pub has_max_gdop: bool,
+    /// GDOP ceiling when enabled.
+    pub max_gdop: f64,
     /// Whether max_pdop is enforced.
     pub has_max_pdop: bool,
     /// PDOP ceiling when has_max_pdop is true.
@@ -1534,6 +1598,8 @@ pub unsafe extern "C" fn sidereon_solution_validation_options_init(
             ));
             let d = SolutionValidationOptions::default();
             *out_options = SidereonSolutionValidationOptions {
+                has_max_gdop: d.max_gdop.is_some(),
+                max_gdop: d.max_gdop.unwrap_or(0.0),
                 has_max_pdop: d.max_pdop.is_some(),
                 max_pdop: d.max_pdop.unwrap_or(0.0),
                 min_plausible_radius_m: d.min_plausible_radius_m,
@@ -1572,6 +1638,7 @@ pub unsafe extern "C" fn sidereon_validate_receiver_solution(
                 "options"
             ));
             let mut opts = SolutionValidationOptions::default();
+            opts.max_gdop = options.has_max_gdop.then_some(options.max_gdop);
             opts.max_pdop = options.has_max_pdop.then_some(options.max_pdop);
             opts.min_plausible_radius_m = options.min_plausible_radius_m;
             opts.max_plausible_radius_m = options.max_plausible_radius_m;
@@ -2863,6 +2930,12 @@ fn rejection_reason_to_c(
     reason: sidereon_core::positioning::RejectionReason,
 ) -> SidereonSppRejectionReason {
     match reason {
+        sidereon_core::positioning::RejectionReason::NonFinitePseudorange => {
+            SidereonSppRejectionReason::NonFinitePseudorange
+        }
+        sidereon_core::positioning::RejectionReason::NonPositivePseudorange => {
+            SidereonSppRejectionReason::NonPositivePseudorange
+        }
         sidereon_core::positioning::RejectionReason::NoEphemeris => {
             SidereonSppRejectionReason::NoEphemeris
         }
@@ -2923,6 +2996,7 @@ where
     let out_solution = c_try!(require_out(out_solution, fn_name, "out_solution"));
     *out_solution = ptr::null_mut();
     let inputs = c_try!(require_ref(inputs, fn_name, "inputs"));
+    c_try!(reject_unusable_max_gdop(fn_name, &inputs.policy));
     let glonass_channels = c_try!(glonass_channels_from_c(fn_name, inputs));
     let solve_inputs = c_try!(build_spp_solve_inputs(
         fn_name,
@@ -4648,6 +4722,8 @@ mod tests {
         let test_policy = SidereonSppSolvePolicy {
             use_validation_options: false,
             validation: SidereonSppValidationOptions {
+                max_gdop_enabled: false,
+                max_gdop: 0.0,
                 max_pdop_enabled: false,
                 max_pdop: 0.0,
                 min_plausible_radius_m: 0.0,

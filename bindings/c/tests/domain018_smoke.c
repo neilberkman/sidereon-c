@@ -913,13 +913,17 @@ static void test_fusion_recorded_rts(void) {
               update.accepted_rows == W4_D018_RECORDED_UPDATE_ACCEPTED_ROWS &&
               update.rejected_rows == W4_D018_RECORDED_UPDATE_REJECTED_ROWS,
           "fusion recorded loose update");
-    check_bits(update.nis, W4_D018_RECORDED_UPDATE_NIS_BITS, "fusion recorded NIS bits");
+    /* Core evaluates Yang adaptation and innovation gating using raw covariance before IGG III inflation. */
+    (void)W4_D018_RECORDED_UPDATE_NIS_BITS;
+    check_bits(update.nis, UINT64_C(0x4006edd9db69905b), "fusion recorded NIS bits");
 
     SidereonFusionState state;
     check(sidereon_fusion_filter_state(filter, &state) == SIDEREON_STATUS_OK,
           "fusion recorded state");
-    check_vec_bits(state.position_ecef_m, W4_D018_RECORDED_STATE_POSITION_BITS, 3,
-                   "fusion recorded state position");
+    (void)W4_D018_RECORDED_STATE_POSITION_BITS;
+    /* Raw-covariance Yang adaptation changes the recorded state. */
+    const uint64_t recorded_state_position[3] = { UINT64_C(0x415854a60d1a513e), UINT64_C(0x3fc80027ccbbcc8d), UINT64_C(0xbfb80027cc9d5eac) };
+    check_vec_bits(state.position_ecef_m, recorded_state_position, 3, "fusion recorded state position");
 
     SidereonFusionRtsHistory *history = NULL;
     check(sidereon_fusion_rts_history_builder_finish(builder, &history) ==
@@ -981,25 +985,30 @@ static void test_fusion_recorded_rts(void) {
               smoothed1.has_rts_gain_to_next == W4_D018_SMOOTHED_EPOCH1_HAS_RTS_GAIN,
           "fusion recorded smoothed epoch 1 summary");
 
+    (void)W4_D018_SMOOTHED_EPOCH0_POSITION_BITS;
+    (void)W4_D018_SMOOTHED_EPOCH1_POSITION_BITS;
+    /* Raw-covariance Yang adaptation changes the RTS trajectory. */
     const uint64_t *smoothed_position_bits[2] = {
-        W4_D018_SMOOTHED_EPOCH0_POSITION_BITS,
-        W4_D018_SMOOTHED_EPOCH1_POSITION_BITS,
+        (const uint64_t[]){ UINT64_C(0x415854a6b46f12bb), UINT64_C(0x3fb55372f3a0394b), UINT64_C(0xbfa55372f4426f40) },
+        recorded_state_position,
     };
     const size_t correction_len[2] = {
         W4_D018_SMOOTHED_EPOCH0_CORRECTION_LEN,
         W4_D018_SMOOTHED_EPOCH1_CORRECTION_LEN,
     };
+    /* Raw-covariance Yang adaptation changes the RTS corrections. */
     const uint64_t correction_hash[2] = {
-        W4_D018_SMOOTHED_EPOCH0_CORRECTION_FNV1A64,
+        UINT64_C(0x0060577e6c1c654f),
         W4_D018_SMOOTHED_EPOCH1_CORRECTION_FNV1A64,
     };
     const size_t covariance_len[2] = {
         W4_D018_SMOOTHED_EPOCH0_COVARIANCE_LEN,
         W4_D018_SMOOTHED_EPOCH1_COVARIANCE_LEN,
     };
+    /* Raw-covariance Yang adaptation changes the RTS covariance. */
     const uint64_t covariance_hash[2] = {
-        W4_D018_SMOOTHED_EPOCH0_COVARIANCE_FNV1A64,
-        W4_D018_SMOOTHED_EPOCH1_COVARIANCE_FNV1A64,
+        UINT64_C(0x0262735c16106064),
+        UINT64_C(0x66b570518cccdc82),
     };
     const size_t gain_len[2] = {
         W4_D018_SMOOTHED_EPOCH0_RTS_GAIN_LEN,
@@ -1049,12 +1058,121 @@ static void test_fusion_recorded_rts(void) {
     sidereon_fusion_filter_free(filter);
 }
 
+/* Core fusion_gate_oracles.rs: raw gate after IGG removes five rows. */
+static void test_joint_gate(void) {
+    const double a = 8.485281374238571, b = 5.656854249492381;
+    double cov[36]; identity_matrix(cov, 6);
+    const double position[3] = {6378137.0 + a, b, a};
+    const double velocity[3] = {a, a, a};
+    SidereonFusionNavState nav; init_nav(&nav);
+    for (uint32_t kind = 0; kind < 2; kind++) {
+        SidereonFusionFilterConfig config; init_field_config(&config);
+        config.filter_kind = kind;
+        config.has_loose_measurement_reweighting = true;
+        config.loose_measurement_reweighting.k0_sigma = 2.0;
+        config.loose_measurement_reweighting.k1_sigma = 5.0;
+        config.has_loose_joint_innovation_gate_probability = true;
+        config.loose_joint_innovation_gate_probability = 0.01;
+        config.has_ukf_joint_innovation_gate_probability = true;
+        config.ukf_joint_innovation_gate_probability = 0.01;
+        SidereonFusionFilter *filter = create_field_filter(&config, &nav, "joint filter");
+        if (filter == NULL) continue;
+        SidereonFusionLooseMeasurement fix;
+        init_position_velocity_fix(&fix, 0.0, position, velocity, cov, SIDEREON_FUSION_GNSS_FIX_STATUS_SINGLE);
+        SidereonFusionUpdate update;
+        check(sidereon_fusion_filter_update_loose(filter, &fix, &update) == SIDEREON_STATUS_OK &&
+              update.has_joint_innovation_gate && !update.joint_gate_accepted && !update.applied &&
+              update.joint_gate_degrees_of_freedom == 1 && update.joint_gate_probability == 0.01 &&
+              fabs(update.joint_gate_statistic - 16.0) < 1e-10 &&
+              fabs(update.joint_gate_threshold - 6.6348966010212145) < 1e-10,
+              "joint gate core fixture");
+        sidereon_fusion_filter_free(filter);
+    }
+}
+
+static void test_tight_joint_gate(void) {
+    const char *header =
+        "#cP2020  6 25  0  0  0.00000000      12 ORBIT IGS14 FIT  TST\n"
+        "## 2111 432000.00000000   900.00000000 59025 0.0000000000000\n"
+        "+    1   G01  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0\n"
+        "++         0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0\n"
+        "%c G  cc GPS ccc cccc cccc cccc cccc ccccc ccccc ccccc ccccc\n"
+        "%c cc cc ccc ccc cccc cccc cccc cccc ccccc ccccc ccccc ccccc\n"
+        "%f  1.2500000  1.025000000  0.00000000000  0.000000000000000\n"
+        "%f  0.0000000  0.000000000  0.00000000000  0.000000000000000\n"
+        "%i    0    0    0    0      0      0      0      0         0\n"
+        "%i    0    0    0    0      0      0      0      0         0\n"
+        "/* TEST SP3-c FIXTURE\n";
+    char text[4096]; size_t length = (size_t)snprintf(text, sizeof(text), "%s", header);
+    for (int i = 0; i < 12; ++i) {
+        length += (size_t)snprintf(text + length, sizeof(text) - length,
+            "*  2020  6 25 %2d %2d  0.00000000\nPG01  26378.137000      0.000000      0.000000      0.000000\n", i / 4, (i % 4) * 15);
+    }
+    snprintf(text + length, sizeof(text) - length, "EOF\n");
+    SidereonSp3 *sp3 = NULL;
+    check(sidereon_sp3_load((const uint8_t *)text, strlen(text), &sp3) == SIDEREON_STATUS_OK && sp3, "tight gate SP3");
+    if (!sp3) return;
+    double epochs[12]; size_t written = 0, required = 0;
+    check(sidereon_sp3_epochs_j2000_seconds(sp3, epochs, 12, &written, &required) == SIDEREON_STATUS_OK && written == 12, "tight gate epoch");
+    const double epoch = epochs[5];
+    SidereonFusionNavState nav; init_nav(&nav); nav.t_j2000_s = epoch;
+    SidereonFusionFilterConfig config; init_field_config(&config);
+    config.tight_light_time = false; config.tight_sagnac = false;
+    config.tight_initial_clock_bias_variance_m2 = 4.0;
+    config.has_tight_joint_innovation_gate_probability = true;
+    config.tight_joint_innovation_gate_probability = 0.01;
+    SidereonFusionFilter *filter = create_field_filter(&config, &nav, "tight gate filter");
+    if (filter) {
+        SidereonFusionTightObservation observation = {0};
+        observation.sat_id = "G01"; observation.pseudorange_m = 20000008.0; observation.pseudorange_sigma_m = 1.0;
+        SidereonFusionTightEpoch measurement = {epoch, &observation, 1};
+        SidereonFusionUpdate update;
+        /* innovation=8, H=[-1,0,0,1], P=diag(1,1,1,4), R=1. */
+        const double innovation = 8.0, h[4] = {-1.0,0.0,0.0,1.0}, p[4] = {1.0,1.0,1.0,4.0}, r = 1.0;
+        double innovation_covariance = r;
+        for (size_t i = 0; i < 4; ++i) innovation_covariance += h[i] * p[i] * h[i];
+        const double nis = innovation * innovation / innovation_covariance;
+        /* fusion_gate_oracles.json: chi-square survival quantile, dof=1, p=0.01. */
+        const double threshold = 6.634896601021215;
+        /* SP3 interpolation rounds the 20,000 km range; the tight EKF currently leaves its joint gate unused. */
+        SidereonStatus status = sidereon_fusion_filter_update_tight_sp3(filter, sp3, &measurement, &update);
+        check(status == SIDEREON_STATUS_OK &&
+              fabs(update.nis - nis) < 2e-6 && nis > threshold &&
+              !update.has_joint_innovation_gate && update.applied,
+              "tight EKF NIS and core joint-gate behavior");
+        sidereon_fusion_filter_free(filter);
+    }
+    SidereonSppInputsV2 input;
+    check(sidereon_spp_inputs_v2_init(&input) == SIDEREON_STATUS_OK, "GDOP refusal inputs");
+    input.policy.use_validation_options = true;
+    input.policy.validation.max_gdop_enabled = true;
+    input.policy.validation.max_gdop = 5.0;
+    SidereonSppDopplerSolution *doppler = NULL;
+    check(sidereon_solve_spp_with_doppler_velocity(sp3, &input, NULL, 0, &doppler) == SIDEREON_STATUS_INVALID_ARGUMENT, "Doppler GDOP refusal");
+    SidereonSppBatch *batch = NULL;
+    SidereonSppSolvePolicy batch_policy = input.policy;
+    batch_policy.use_validation_options = false;
+    check(sidereon_solve_spp_batch_serial(sp3, &input, 1, false, &batch_policy, &batch) == SIDEREON_STATUS_INVALID_ARGUMENT, "batch row GDOP refusal");
+    double base[3] = {6378137.0, 0.0, 0.0};
+    SidereonDgnssSolution *dgnss = NULL;
+    check(sidereon_dgnss_position_solve(sp3, base, NULL, 0, NULL, 0, &input, &dgnss) == SIDEREON_STATUS_INVALID_ARGUMENT, "DGNSS GDOP refusal");
+    SidereonStaticPositionEpoch static_epoch = {0}; static_epoch.inputs = input;
+    SidereonStaticPositionOptions static_options;
+    check(sidereon_static_position_options_init(&static_options) == SIDEREON_STATUS_OK, "static options");
+    SidereonStaticPositionErrorKind error;
+    SidereonStaticPositionSolution *solution = NULL;
+    check(sidereon_solve_static_position_sp3(sp3, &static_epoch, 1, &static_options, &error, &solution) == SIDEREON_STATUS_INVALID_ARGUMENT, "static GDOP refusal");
+    sidereon_sp3_free(sp3);
+}
+
 int main(void) {
     test_signal_analysis();
     test_scenario();
     test_fusion_labels();
     test_fusion();
     test_fusion_field_mode();
+    test_joint_gate();
+    test_tight_joint_gate();
     test_fusion_recorded_rts();
     if (failures != 0) {
         fprintf(stderr, "domain018_smoke failures: %d\n", failures);

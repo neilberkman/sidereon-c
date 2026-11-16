@@ -2,7 +2,19 @@
 
 ## Unreleased
 
+### Fixed
+
+- Forward GDOP validation in broadcast SPP and reject it for V2 operations whose core driver cannot apply it.
+- Document the core tight EKF joint-gate limitation.
+
 ### Added
+
+- Expose chi-square inverse survival, checked coverage helpers, ADD v3.0 satellite models,
+  weighted Brown RAIM protection and fault-free accuracy bounds, PPP variance-factor
+  estimation flags, joint EKF/UKF gates and reports, GDOP validation, RTKLIB shared-clock
+  DOP, and RTK arc mask, reference and released-hold diagnostics.
+- Map core 4.0’s new PPP RAIM status and errors, SPP pseudorange rejection
+  reasons, ARAIM unsupported-constellation error, and GDOP validation error.
 
 - Add CelesTrak GP and NAVCEN source metadata and URL builders, GP response parsing, OMM conversion and source spans, fitted OMM headers, and lenient OMM KVN and XML writers.
 
