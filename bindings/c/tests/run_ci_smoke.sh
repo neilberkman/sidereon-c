@@ -378,3 +378,11 @@ cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -o "${target_dir}/ppp_kinematic_smoke_ci"
 "${target_dir}/ppp_kinematic_smoke_ci" \
     "${here}/fixtures/sp3/GBM0MGXRAP_20201770000_01D_05M_ORB_120epoch.sp3"
+
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
+    -I"${binding_root}/include" "${here}/celestrak_gp_smoke.c" \
+    -L"${lib_dir}" -lsidereon -Wl,-rpath,"${lib_dir}" -lm \
+    -o "${target_dir}/celestrak_gp_smoke_ci"
+"${target_dir}/celestrak_gp_smoke_ci" \
+    "${here}/fixtures/omm/24876.xml" "${here}/fixtures/omm/24876.kvn" \
+    "${here}/fixtures/omm/25544.json" "${here}/fixtures/omm/25544_pretty.json"

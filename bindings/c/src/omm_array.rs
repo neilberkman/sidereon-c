@@ -348,6 +348,7 @@ pub unsafe extern "C" fn sidereon_omm_array_new(out: *mut *mut SidereonOmmArray)
                 inner: sidereon_core::astro::omm::OmmArray {
                     omms: Vec::new(),
                     skipped: Vec::new(),
+                    spans: Vec::new(),
                 },
             },
         );
@@ -739,6 +740,115 @@ pub unsafe extern "C" fn sidereon_omm_array_free(array: *mut SidereonOmmArray) {
     free_boxed(array);
 }
 
+/// Source position of one parsed OMM record. Values compare field by field.
+#[repr(C)]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub struct SidereonOmmRecordSpan {
+    /// Zero-based source record index.
+    pub index: usize,
+    /// Inclusive byte offset.
+    pub byte_start: usize,
+    /// Exclusive byte offset.
+    pub byte_end: usize,
+    /// One-based source line.
+    pub line: usize,
+}
+
+/// Return the number of parser-provided record spans.
+///
+/// Safety: array is live and out points to writable storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_omm_array_span_count(
+    array: *const SidereonOmmArray,
+    out: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_omm_array_span_count",
+        SidereonStatus::Panic,
+        || {
+            let out = c_try!(require_out(out, "sidereon_omm_array_span_count", "out"));
+            c_try!(reject_output_overlaps_handle(
+                "sidereon_omm_array_span_count",
+                out,
+                "out",
+                array,
+                "array"
+            ));
+            let array = c_try!(require_ref(array, "sidereon_omm_array_span_count", "array"));
+            *out = array.inner.spans.len();
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy a parser-provided source span by position.
+///
+/// Safety: array is live and out points to writable storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_omm_array_span(
+    array: *const SidereonOmmArray,
+    index: usize,
+    out: *mut SidereonOmmRecordSpan,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_omm_array_span", SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out, "sidereon_omm_array_span", "out"));
+        c_try!(reject_output_overlaps_handle(
+            "sidereon_omm_array_span",
+            out,
+            "out",
+            array,
+            "array"
+        ));
+        let array = c_try!(require_ref(array, "sidereon_omm_array_span", "array"));
+        let Some(span) = array.inner.spans.get(index) else {
+            set_last_error(format!(
+                "sidereon_omm_array_span: index {index} out of range (count {})",
+                array.inner.spans.len()
+            ));
+            return SidereonStatus::InvalidArgument;
+        };
+        *out = SidereonOmmRecordSpan {
+            index: span.index,
+            byte_start: span.byte_start,
+            byte_end: span.byte_end,
+            line: span.line,
+        };
+        SidereonStatus::Ok
+    })
+}
+
+/// Compare OMM collections by core value, including skipped records and spans.
+///
+/// Safety: left and right are live and out points to writable bool storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_omm_array_equal(
+    left: *const SidereonOmmArray,
+    right: *const SidereonOmmArray,
+    out: *mut bool,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_omm_array_equal", SidereonStatus::Panic, || {
+        c_try!(reject_output_overlaps_handle(
+            "sidereon_omm_array_equal",
+            out,
+            "out",
+            left,
+            "left"
+        ));
+        c_try!(reject_output_overlaps_handle(
+            "sidereon_omm_array_equal",
+            out,
+            "out",
+            right,
+            "right"
+        ));
+        let out = c_try!(require_out(out, "sidereon_omm_array_equal", "out"));
+        let left = c_try!(require_ref(left, "sidereon_omm_array_equal", "left"));
+        let right = c_try!(require_ref(right, "sidereon_omm_array_equal", "right"));
+        *out = left.inner == right.inner;
+        SidereonStatus::Ok
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -861,5 +971,111 @@ mod tests {
             crate::omm::sidereon_omm_free(source);
             crate::tle::sidereon_sgp4_satellite_free(satellite);
         }
+    }
+}
+
+#[cfg(test)]
+mod span_tests {
+    use super::*;
+
+    #[test]
+    fn xml_and_csv_spans_preserve_offsets() {
+        let xml = b"<ndm>\n<omm></omm>\n</ndm>";
+        let csv = b"EPOCH\nbad\n";
+        for (input, parse, expected) in [
+            (
+                xml.as_slice(),
+                sidereon_omm_parse_xml_all
+                    as unsafe extern "C" fn(
+                        *const u8,
+                        usize,
+                        *mut *mut SidereonOmmArray,
+                    ) -> SidereonStatus,
+                SidereonOmmRecordSpan {
+                    index: 0,
+                    byte_start: 6,
+                    byte_end: 17,
+                    line: 2,
+                },
+            ),
+            (
+                csv.as_slice(),
+                sidereon_omm_parse_csv_array
+                    as unsafe extern "C" fn(
+                        *const u8,
+                        usize,
+                        *mut *mut SidereonOmmArray,
+                    ) -> SidereonStatus,
+                SidereonOmmRecordSpan {
+                    index: 0,
+                    byte_start: 6,
+                    byte_end: 9,
+                    line: 2,
+                },
+            ),
+        ] {
+            let mut array = ptr::null_mut();
+            assert_eq!(
+                unsafe { parse(input.as_ptr(), input.len(), &mut array) },
+                SidereonStatus::Ok
+            );
+            let mut span = SidereonOmmRecordSpan::default();
+            assert_eq!(
+                unsafe { sidereon_omm_array_span(array, 0, &mut span) },
+                SidereonStatus::Ok
+            );
+            assert!(span == expected);
+            unsafe { sidereon_omm_array_free(array) };
+        }
+    }
+
+    #[test]
+    fn json_spans_preserve_offsets_and_value_equality() {
+        let input = b"[\n null,\n null]";
+        let mut array = ptr::null_mut();
+        assert_eq!(
+            unsafe { sidereon_omm_parse_json_array(input.as_ptr(), input.len(), &mut array) },
+            SidereonStatus::Ok
+        );
+        let mut count = 0;
+        assert_eq!(
+            unsafe { sidereon_omm_array_span_count(array, &mut count) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(count, 2);
+        let mut span = SidereonOmmRecordSpan::default();
+        assert_eq!(
+            unsafe { sidereon_omm_array_span(array, 0, &mut span) },
+            SidereonStatus::Ok
+        );
+        let expected = SidereonOmmRecordSpan {
+            index: 0,
+            byte_start: 3,
+            byte_end: 7,
+            line: 2,
+        };
+        assert!(span == expected);
+        let mut equal = false;
+        assert_eq!(
+            unsafe { sidereon_omm_array_equal(array, array, &mut equal) },
+            SidereonStatus::Ok
+        );
+        assert!(equal);
+        let mut empty = ptr::null_mut();
+        assert_eq!(
+            unsafe { sidereon_omm_array_new(&mut empty) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(
+            unsafe { sidereon_omm_array_equal(array, empty, &mut equal) },
+            SidereonStatus::Ok
+        );
+        assert!(!equal);
+        unsafe { sidereon_omm_array_free(empty) };
+        assert_eq!(
+            unsafe { sidereon_omm_array_span(array, 2, &mut span) },
+            SidereonStatus::InvalidArgument
+        );
+        unsafe { sidereon_omm_array_free(array) };
     }
 }

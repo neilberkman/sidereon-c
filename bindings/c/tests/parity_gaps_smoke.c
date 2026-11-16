@@ -285,12 +285,16 @@ static void test_omm(const char *kvn_path) {
 
     /* Each serializer: size query then fill, then round-trip the KVN back. */
     size_t written = 0, required = 0;
-    check(sidereon_omm_to_kvn(omm, NULL, 0, &written, &required) == SIDEREON_STATUS_OK &&
+    check(sidereon_omm_to_kvn(omm, NULL, 0, &written, &required) == SIDEREON_STATUS_INVALID_ARGUMENT,
+          "strict KVN requires a CCSDS header");
+    check(sidereon_omm_to_xml(omm, NULL, 0, &written, &required) == SIDEREON_STATUS_INVALID_ARGUMENT,
+          "strict XML requires a CCSDS header");
+    check(sidereon_omm_to_kvn_lenient(omm, NULL, 0, &written, &required) == SIDEREON_STATUS_OK &&
               required > 0,
           "omm_to_kvn size query");
     uint8_t *kvn_out = (uint8_t *)malloc(required);
     check(kvn_out != NULL &&
-              sidereon_omm_to_kvn(omm, kvn_out, required, &written, &required) ==
+              sidereon_omm_to_kvn_lenient(omm, kvn_out, required, &written, &required) ==
                   SIDEREON_STATUS_OK &&
               written == required,
           "omm_to_kvn fill");
@@ -302,12 +306,12 @@ static void test_omm(const char *kvn_path) {
     sidereon_omm_free(reparsed);
     free(kvn_out);
 
-    check(sidereon_omm_to_xml(omm, NULL, 0, &written, &required) == SIDEREON_STATUS_OK &&
+    check(sidereon_omm_to_xml_lenient(omm, NULL, 0, &written, &required) == SIDEREON_STATUS_OK &&
               required > 0,
           "omm_to_xml size query");
     uint8_t *xml_out = (uint8_t *)malloc(required);
     check(xml_out != NULL &&
-              sidereon_omm_to_xml(omm, xml_out, required, &written, &required) ==
+              sidereon_omm_to_xml_lenient(omm, xml_out, required, &written, &required) ==
                   SIDEREON_STATUS_OK,
           "omm_to_xml fill");
     SidereonOmm *from_xml = NULL;

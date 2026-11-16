@@ -2770,7 +2770,7 @@ pub(crate) fn tle_fit_result_value(value: &sidereon_core::astro::sgp4::TleFit) -
     })
 }
 
-fn tle_error_value(error: &sidereon_core::astro::tle::TleError) -> Value {
+pub(crate) fn tle_error_value(error: &sidereon_core::astro::tle::TleError) -> Value {
     use sidereon_core::astro::tle::TleError as E;
     match error {
         E::NonAscii => rtk_node("non_ascii", json!({})),
@@ -2810,6 +2810,10 @@ fn tle_error_value(error: &sidereon_core::astro::tle::TleError) -> Value {
 pub(crate) fn tle_fit_error_value(error: &sidereon_core::astro::sgp4::TleFitError) -> Value {
     use sidereon_core::astro::sgp4::TleFitError as E;
     match error {
+        E::OmmHeader(source) => rtk_node(
+            "omm_header",
+            json!({"message": source.to_string(), "cause": omm_error_value(source)}),
+        ),
         E::ArcTooShort { samples, needed } => rtk_node(
             "arc_too_short",
             json!({"samples": tle_fit_integer_value(*samples), "needed": tle_fit_integer_value(*needed)}),
@@ -3890,6 +3894,15 @@ pub(crate) fn opm_error_value(error: &sidereon_core::astro::opm::OpmError) -> Va
 pub(crate) fn omm_error_value(error: &sidereon_core::astro::omm::OmmError) -> Value {
     use sidereon_core::astro::omm::OmmError as E;
     match error {
+        E::MalformedDocument {
+            format,
+            message,
+            byte_offset,
+        } => rtk_node(
+            "malformed_document",
+            json!({"format": format, "message": message, "byte_offset": byte_offset}),
+        ),
+        E::MissingOneOf(fields) => rtk_node("missing_one_of", json!({"fields": fields})),
         E::MissingField(field) => rtk_node("missing_field", json!({"field": field})),
         E::InvalidField { field, kind } => rtk_node(
             "invalid_field",
@@ -3944,6 +3957,44 @@ pub(crate) fn omm_error_value(error: &sidereon_core::astro::omm::OmmError) -> Va
             json!({"field": field, "value": value, "issue": ndm_text_issue_name(*issue)}),
         ),
     }
+}
+
+#[cfg(test)]
+pub(crate) fn snapshot_engine_error_for_test() -> Option<(SidereonEngineErrorInfo, String)> {
+    let mut info = std::mem::MaybeUninit::<SidereonEngineErrorInfo>::uninit();
+    let status = unsafe { sidereon_last_engine_error_info(info.as_mut_ptr()) };
+    assert_eq!(status, SidereonStatus::Ok);
+    let info = unsafe { info.assume_init() };
+    if info.family == SidereonEngineErrorFamily::None && info.payload_len == 0 {
+        return None;
+    }
+    let mut written = usize::MAX;
+    let mut required = 0usize;
+    let status = unsafe {
+        sidereon_last_engine_error_payload(std::ptr::null_mut(), 0, &mut written, &mut required)
+    };
+    assert_eq!(status, SidereonStatus::Ok);
+    assert_eq!(written, 0);
+    assert_eq!(required, info.payload_len);
+    if required == 0 {
+        return Some((info, String::new()));
+    }
+    let mut buf = vec![0u8; required];
+    let mut written2 = 0usize;
+    let mut required2 = 0usize;
+    let status = unsafe {
+        sidereon_last_engine_error_payload(
+            buf.as_mut_ptr(),
+            buf.len(),
+            &mut written2,
+            &mut required2,
+        )
+    };
+    assert_eq!(status, SidereonStatus::Ok);
+    assert_eq!(written2, required);
+    assert_eq!(required2, required);
+    let payload = String::from_utf8(buf).expect("valid utf-8 payload");
+    Some((info, payload))
 }
 
 #[cfg(test)]
@@ -4009,44 +4060,6 @@ mod ndm_error_mapper_tests {
             })
         );
     }
-}
-
-#[cfg(test)]
-pub(crate) fn snapshot_engine_error_for_test() -> Option<(SidereonEngineErrorInfo, String)> {
-    let mut info = std::mem::MaybeUninit::<SidereonEngineErrorInfo>::uninit();
-    let status = unsafe { sidereon_last_engine_error_info(info.as_mut_ptr()) };
-    assert_eq!(status, SidereonStatus::Ok);
-    let info = unsafe { info.assume_init() };
-    if info.family == SidereonEngineErrorFamily::None && info.payload_len == 0 {
-        return None;
-    }
-    let mut written = usize::MAX;
-    let mut required = 0usize;
-    let status = unsafe {
-        sidereon_last_engine_error_payload(std::ptr::null_mut(), 0, &mut written, &mut required)
-    };
-    assert_eq!(status, SidereonStatus::Ok);
-    assert_eq!(written, 0);
-    assert_eq!(required, info.payload_len);
-    if required == 0 {
-        return Some((info, String::new()));
-    }
-    let mut buf = vec![0u8; required];
-    let mut written2 = 0usize;
-    let mut required2 = 0usize;
-    let status = unsafe {
-        sidereon_last_engine_error_payload(
-            buf.as_mut_ptr(),
-            buf.len(),
-            &mut written2,
-            &mut required2,
-        )
-    };
-    assert_eq!(status, SidereonStatus::Ok);
-    assert_eq!(written2, required);
-    assert_eq!(required2, required);
-    let payload = String::from_utf8(buf).expect("valid utf-8 payload");
-    Some((info, payload))
 }
 
 #[cfg(test)]
@@ -7322,6 +7335,30 @@ mod error_metrics_family_tests {
         assert_eq!(
             error_metrics_error_value(&E::Rotation(D::Singular)),
             rtk_node("rotation", json!({"cause":rtk_node("singular", json!({}))}))
+        );
+    }
+}
+
+#[cfg(test)]
+mod gp_omm_error_tests {
+    use super::*;
+
+    #[test]
+    fn new_omm_errors_preserve_all_fields() {
+        use sidereon_core::astro::omm::OmmError;
+        let malformed = OmmError::MalformedDocument {
+            format: "XML",
+            message: "bad document".into(),
+            byte_offset: Some(17),
+        };
+        assert_eq!(
+            omm_error_value(&malformed),
+            json!({"kind":"malformed_document", "fields":{"format":"XML", "message":"bad document", "byte_offset":17}})
+        );
+        let missing = OmmError::MissingOneOf(&["SEMI_MAJOR_AXIS", "MEAN_MOTION"]);
+        assert_eq!(
+            omm_error_value(&missing),
+            json!({"kind":"missing_one_of", "fields":{"fields":["SEMI_MAJOR_AXIS", "MEAN_MOTION"]}})
         );
     }
 }

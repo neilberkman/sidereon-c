@@ -3898,6 +3898,81 @@ typedef enum SidereonPppKinematicPositionProcessNoiseKind {
 } SidereonPppKinematicPositionProcessNoiseKind;
 
 /**
+ * CelesTrak GP output format selector.
+ */
+typedef enum SidereonCelestrakGpFormat {
+    /**
+     * Three-line TLE with an unprefixed name.
+     */
+    SIDEREON_CELESTRAK_GP_FORMAT_TLE = 0,
+    /**
+     * Three-line TLE with a prefixed name.
+     */
+    SIDEREON_CELESTRAK_GP_FORMAT_THREE_LINE = 1,
+    /**
+     * Two-line TLE.
+     */
+    SIDEREON_CELESTRAK_GP_FORMAT_TWO_LINE = 2,
+    /**
+     * CCSDS XML.
+     */
+    SIDEREON_CELESTRAK_GP_FORMAT_XML = 3,
+    /**
+     * CCSDS KVN.
+     */
+    SIDEREON_CELESTRAK_GP_FORMAT_KVN = 4,
+    /**
+     * Compact JSON.
+     */
+    SIDEREON_CELESTRAK_GP_FORMAT_JSON = 5,
+    /**
+     * Pretty JSON.
+     */
+    SIDEREON_CELESTRAK_GP_FORMAT_JSON_PRETTY = 6,
+    /**
+     * CSV.
+     */
+    SIDEREON_CELESTRAK_GP_FORMAT_CSV = 7,
+} SidereonCelestrakGpFormat;
+
+/**
+ * Text selector for sidereon_celestrak_gp_url. Catalog numbers and special
+ * data sets use their dedicated URL functions.
+ */
+typedef enum SidereonCelestrakGpQueryKind {
+    /**
+     * Group name.
+     */
+    SIDEREON_CELESTRAK_GP_QUERY_KIND_GROUP = 0,
+    /**
+     * International launch designator.
+     */
+    SIDEREON_CELESTRAK_GP_QUERY_KIND_INTERNATIONAL_DESIGNATOR = 2,
+    /**
+     * Partial object name.
+     */
+    SIDEREON_CELESTRAK_GP_QUERY_KIND_NAME = 3,
+} SidereonCelestrakGpQueryKind;
+
+/**
+ * CelesTrak GP special data set.
+ */
+typedef enum SidereonCelestrakGpSpecial {
+    /**
+     * GEO protected zone.
+     */
+    SIDEREON_CELESTRAK_GP_SPECIAL_GPZ = 0,
+    /**
+     * Extended GEO protected zone.
+     */
+    SIDEREON_CELESTRAK_GP_SPECIAL_GPZ_PLUS = 1,
+    /**
+     * Potential decays.
+     */
+    SIDEREON_CELESTRAK_GP_SPECIAL_DECAYING = 2,
+} SidereonCelestrakGpSpecial;
+
+/**
  * Standard GNSS product family.
  */
 typedef enum SidereonProductFamily {
@@ -7342,6 +7417,11 @@ typedef struct SidereonBroadcastEphemeris SidereonBroadcastEphemeris;
  * sidereon_cdm_free.
  */
 typedef struct SidereonCdm SidereonCdm;
+
+/**
+ * Parsed CelesTrak GP response, released with sidereon_celestrak_gp_response_free.
+ */
+typedef struct SidereonCelestrakGpResponse SidereonCelestrakGpResponse;
 
 /**
  * An owned snapshot of a RINEX clock product's header records. Create with
@@ -11150,6 +11230,80 @@ typedef struct SidereonRtkRinexArcOptions {
      */
     bool include_prediction_time;
 } SidereonRtkRinexArcOptions;
+
+/**
+ * Detached numeric result of bridging an OMM into SGP4 elements.
+ */
+typedef struct SidereonOmmElementSet {
+    /**
+     * Split Julian-date whole component.
+     */
+    double epoch_whole;
+    /**
+     * Split Julian-date fractional component.
+     */
+    double epoch_fraction;
+    /**
+     * SGP4 B-star drag term after OMM bridge policy.
+     */
+    double bstar;
+    /**
+     * Whether mean_motion_dot is present.
+     */
+    bool mean_motion_dot_present;
+    /**
+     * First mean-motion derivative when present, otherwise zero.
+     */
+    double mean_motion_dot;
+    /**
+     * Whether mean_motion_double_dot is present.
+     */
+    bool mean_motion_double_dot_present;
+    /**
+     * Second mean-motion derivative when present, otherwise zero.
+     */
+    double mean_motion_double_dot;
+    /**
+     * Dimensionless eccentricity.
+     */
+    double eccentricity;
+    /**
+     * Argument of perigee in degrees.
+     */
+    double argument_of_perigee_deg;
+    /**
+     * Inclination in degrees.
+     */
+    double inclination_deg;
+    /**
+     * Mean anomaly in degrees.
+     */
+    double mean_anomaly_deg;
+    /**
+     * Mean motion in revolutions per day.
+     */
+    double mean_motion_rev_per_day;
+    /**
+     * Right ascension of ascending node in degrees.
+     */
+    double right_ascension_deg;
+    /**
+     * Whether catalog_number is present.
+     */
+    bool catalog_number_present;
+    /**
+     * NORAD catalog number when present, otherwise zero.
+     */
+    uint32_t catalog_number;
+    /**
+     * Whether omm_epoch_days is present.
+     */
+    bool omm_epoch_days_present;
+    /**
+     * python-sgp4 OMM initialization epoch when present, otherwise zero.
+     */
+    double omm_epoch_days;
+} SidereonOmmElementSet;
 
 /**
  * A source-localization sensor position. position_m stores 2D or 3D Cartesian
@@ -17700,6 +17854,28 @@ typedef struct SidereonBodyObservation {
 } SidereonBodyObservation;
 
 /**
+ * Source position of one parsed OMM record. Values compare field by field.
+ */
+typedef struct SidereonOmmRecordSpan {
+    /**
+     * Zero-based source record index.
+     */
+    size_t index;
+    /**
+     * Inclusive byte offset.
+     */
+    size_t byte_start;
+    /**
+     * Exclusive byte offset.
+     */
+    size_t byte_end;
+    /**
+     * One-based source line.
+     */
+    size_t line;
+} SidereonOmmRecordSpan;
+
+/**
  * One OMM entry that the lenient build could not resolve to a record for the
  * requested system, read back as a value struct. The object name (when present)
  * is copied separately with sidereon_omm_catalog_skipped_object_name because it
@@ -17745,80 +17921,6 @@ typedef struct SidereonOmmEpoch {
     uint32_t microsecond;
     uint32_t femtosecond;
 } SidereonOmmEpoch;
-
-/**
- * Detached numeric result of bridging an OMM into SGP4 elements.
- */
-typedef struct SidereonOmmElementSet {
-    /**
-     * Split Julian-date whole component.
-     */
-    double epoch_whole;
-    /**
-     * Split Julian-date fractional component.
-     */
-    double epoch_fraction;
-    /**
-     * SGP4 B-star drag term after OMM bridge policy.
-     */
-    double bstar;
-    /**
-     * Whether mean_motion_dot is present.
-     */
-    bool mean_motion_dot_present;
-    /**
-     * First mean-motion derivative when present, otherwise zero.
-     */
-    double mean_motion_dot;
-    /**
-     * Whether mean_motion_double_dot is present.
-     */
-    bool mean_motion_double_dot_present;
-    /**
-     * Second mean-motion derivative when present, otherwise zero.
-     */
-    double mean_motion_double_dot;
-    /**
-     * Dimensionless eccentricity.
-     */
-    double eccentricity;
-    /**
-     * Argument of perigee in degrees.
-     */
-    double argument_of_perigee_deg;
-    /**
-     * Inclination in degrees.
-     */
-    double inclination_deg;
-    /**
-     * Mean anomaly in degrees.
-     */
-    double mean_anomaly_deg;
-    /**
-     * Mean motion in revolutions per day.
-     */
-    double mean_motion_rev_per_day;
-    /**
-     * Right ascension of ascending node in degrees.
-     */
-    double right_ascension_deg;
-    /**
-     * Whether catalog_number is present.
-     */
-    bool catalog_number_present;
-    /**
-     * NORAD catalog number when present, otherwise zero.
-     */
-    uint32_t catalog_number;
-    /**
-     * Whether omm_epoch_days is present.
-     */
-    bool omm_epoch_days_present;
-    /**
-     * python-sgp4 OMM initialization epoch when present, otherwise zero.
-     */
-    double omm_epoch_days;
-} SidereonOmmElementSet;
 
 /**
  * Arc span covered by a residual ledger.
@@ -31496,6 +31598,249 @@ enum SidereonStatus sidereon_cdm_to_xml(const struct SidereonCdm *cdm,
                                         size_t *out_required);
 
 /**
+ * Build the CelesTrak GP URL for a GNSS constellation and format.
+ *
+ * Safety: out points to out_len writable bytes or is NULL for zero; count
+ * pointers point to writable size_t values.
+ */
+enum SidereonStatus sidereon_celestrak_constellation_url(uint32_t system,
+                                                         uint32_t format,
+                                                         uint8_t *out,
+                                                         size_t out_len,
+                                                         size_t *out_written,
+                                                         size_t *out_required);
+
+/**
+ * Build a CelesTrak GP URL for a catalog number.
+ *
+ * Safety: out points to out_len writable bytes or is NULL for zero; count pointers are writable.
+ */
+enum SidereonStatus sidereon_celestrak_gp_catalog_number_url(uint64_t number,
+                                                             uint32_t format,
+                                                             uint8_t *out,
+                                                             size_t out_len,
+                                                             size_t *out_written,
+                                                             size_t *out_required);
+
+/**
+ * Copy the exact wire value of a CelesTrak GP format selector.
+ *
+ * Safety: out points to out_len writable bytes or is NULL for zero; count
+ * pointers point to writable size_t values.
+ */
+enum SidereonStatus sidereon_celestrak_gp_format_as_str(uint32_t format,
+                                                        uint8_t *out,
+                                                        size_t out_len,
+                                                        size_t *out_written,
+                                                        size_t *out_required);
+
+/**
+ * Compare native GP payloads using core value equality.
+ *
+ * Safety: both responses are live and out points to writable bool storage.
+ */
+enum SidereonStatus sidereon_celestrak_gp_payload_equal(const struct SidereonCelestrakGpResponse *left,
+                                                        const struct SidereonCelestrakGpResponse *right,
+                                                        size_t left_index,
+                                                        size_t right_index,
+                                                        bool *out);
+
+/**
+ * Compare accepted or rejected GP records by core value.
+ *
+ * Safety: both responses are live and out points to writable bool storage.
+ */
+enum SidereonStatus sidereon_celestrak_gp_record_equal(const struct SidereonCelestrakGpResponse *left,
+                                                       const struct SidereonCelestrakGpResponse *right,
+                                                       bool rejected,
+                                                       size_t left_index,
+                                                       size_t right_index,
+                                                       bool *out);
+
+/**
+ * Copy the native TLE payload into a newly owned TLE handle. OMM records are
+ * refused; use sidereon_celestrak_gp_record_to_omm for either payload kind.
+ * opsmode and policy use SidereonTleOpsMode and SidereonTlePolicy values.
+ *
+ * Safety: response is live and out points to writable handle storage.
+ */
+enum SidereonStatus sidereon_celestrak_gp_record_tle(const struct SidereonCelestrakGpResponse *response,
+                                                     size_t index,
+                                                     uint32_t opsmode,
+                                                     uint32_t policy,
+                                                     struct SidereonTle **out);
+
+/**
+ * Convert an accepted GP record directly to SGP4 elements.
+ *
+ * Safety: response is live and out points to writable element-set storage.
+ */
+enum SidereonStatus sidereon_celestrak_gp_record_to_element_set(const struct SidereonCelestrakGpResponse *response,
+                                                                size_t index,
+                                                                struct SidereonOmmElementSet *out);
+
+/**
+ * Convert an accepted GP record to a newly owned OMM.
+ *
+ * Safety: response is live and out points to writable handle storage.
+ */
+enum SidereonStatus sidereon_celestrak_gp_record_to_omm(const struct SidereonCelestrakGpResponse *response,
+                                                        size_t index,
+                                                        struct SidereonOmm **out);
+
+/**
+ * Compare rejection reasons using core value equality.
+ *
+ * Safety: both responses are live and out points to writable bool storage.
+ */
+enum SidereonStatus sidereon_celestrak_gp_rejection_reason_equal(const struct SidereonCelestrakGpResponse *left,
+                                                                 const struct SidereonCelestrakGpResponse *right,
+                                                                 size_t left_index,
+                                                                 size_t right_index,
+                                                                 bool *out);
+
+/**
+ * Return accepted and rejected record counts.
+ *
+ * Safety: response is live and both outputs point to distinct writable size_t values.
+ */
+enum SidereonStatus sidereon_celestrak_gp_response_counts(const struct SidereonCelestrakGpResponse *response,
+                                                          size_t *records,
+                                                          size_t *rejected);
+
+/**
+ * Compare parsed GP responses by core value.
+ *
+ * Safety: both responses are live and out points to writable bool storage.
+ */
+enum SidereonStatus sidereon_celestrak_gp_response_equal(const struct SidereonCelestrakGpResponse *left,
+                                                         const struct SidereonCelestrakGpResponse *right,
+                                                         bool *out);
+
+/**
+ * Free a parsed CelesTrak GP response. NULL is accepted.
+ *
+ * Safety: response is NULL or a handle returned by the GP parser, freed once.
+ */
+void sidereon_celestrak_gp_response_free(struct SidereonCelestrakGpResponse *response);
+
+/**
+ * Copy the exact source bytes of an accepted or rejected GP record. Set
+ * rejected to select the rejected-record list. Output is not null-terminated.
+ *
+ * Safety: response is live; output points to out_len writable bytes or NULL for
+ * zero; count pointers point to writable size_t values.
+ */
+enum SidereonStatus sidereon_celestrak_gp_response_raw(const struct SidereonCelestrakGpResponse *response,
+                                                       bool rejected,
+                                                       size_t index,
+                                                       uint8_t *out,
+                                                       size_t out_len,
+                                                       size_t *out_written,
+                                                       size_t *out_required);
+
+/**
+ * Copy GP record metadata as JSON. Rejections include a typed reason and its
+ * complete fields; accepted records include their native payload kind.
+ *
+ * Safety: response is live; out points to out_len writable bytes or NULL for
+ * zero; count pointers point to writable size_t values.
+ */
+enum SidereonStatus sidereon_celestrak_gp_response_record_json(const struct SidereonCelestrakGpResponse *response,
+                                                               bool rejected,
+                                                               size_t index,
+                                                               uint8_t *out,
+                                                               size_t out_len,
+                                                               size_t *out_written,
+                                                               size_t *out_required);
+
+/**
+ * Copy the CelesTrak GP source entry as JSON, including protocol, host and URL.
+ * Output uses the variable-length byte buffer contract.
+ *
+ * Safety: out points to out_len writable bytes or is NULL for zero; both count
+ * pointers point to writable size_t values.
+ */
+enum SidereonStatus sidereon_celestrak_gp_source_entry(uint8_t *out,
+                                                       size_t out_len,
+                                                       size_t *out_written,
+                                                       size_t *out_required);
+
+/**
+ * Copy the exact wire value of a CelesTrak GP special selector.
+ *
+ * Safety: out points to out_len writable bytes or is NULL for zero; count
+ * pointers point to writable size_t values.
+ */
+enum SidereonStatus sidereon_celestrak_gp_special_as_str(uint32_t special,
+                                                         uint8_t *out,
+                                                         size_t out_len,
+                                                         size_t *out_written,
+                                                         size_t *out_required);
+
+/**
+ * Build a CelesTrak GP URL for a special data set.
+ *
+ * Safety: out points to out_len writable bytes or is NULL for zero; count pointers are writable.
+ */
+enum SidereonStatus sidereon_celestrak_gp_special_url(uint32_t special,
+                                                      uint32_t format,
+                                                      uint8_t *out,
+                                                      size_t out_len,
+                                                      size_t *out_written,
+                                                      size_t *out_required);
+
+/**
+ * Compare structural rejection errors using core value equality. Both reasons
+ * must be structural rejections.
+ *
+ * Safety: both responses are live and out points to writable bool storage.
+ */
+enum SidereonStatus sidereon_celestrak_gp_structural_error_equal(const struct SidereonCelestrakGpResponse *left,
+                                                                 const struct SidereonCelestrakGpResponse *right,
+                                                                 size_t left_index,
+                                                                 size_t right_index,
+                                                                 bool *out);
+
+/**
+ * Build a CelesTrak GP URL for a group, international designator, or name.
+ *
+ * Safety: value points to value_len readable bytes; out points to out_len
+ * writable bytes or is NULL for zero; count pointers are writable.
+ */
+enum SidereonStatus sidereon_celestrak_gp_url(uint32_t kind,
+                                              const uint8_t *value,
+                                              size_t value_len,
+                                              uint32_t format,
+                                              uint8_t *out,
+                                              size_t out_len,
+                                              size_t *out_written,
+                                              size_t *out_required);
+
+/**
+ * Copy the CelesTrak group for a GNSS constellation as bytes.
+ *
+ * Safety: out points to out_len writable bytes or is NULL for zero; count
+ * pointers point to writable size_t values.
+ */
+enum SidereonStatus sidereon_celestrak_group(uint32_t system,
+                                             uint8_t *out,
+                                             size_t out_len,
+                                             size_t *out_written,
+                                             size_t *out_required);
+
+/**
+ * Compare native TLE records using core value equality. Both payloads must be TLE.
+ *
+ * Safety: both responses are live and out points to writable bool storage.
+ */
+enum SidereonStatus sidereon_celestrak_tle_record_equal(const struct SidereonCelestrakGpResponse *left,
+                                                        const struct SidereonCelestrakGpResponse *right,
+                                                        size_t left_index,
+                                                        size_t right_index,
+                                                        bool *out);
+
+/**
  * CA-CFAR false-alarm probability from an absolute threshold and mean noise
  * level.
  *
@@ -32898,6 +33243,17 @@ enum SidereonStatus sidereon_cw_stm(double mean_motion_rad_s,
  * Safety: out_options must point to writable storage.
  */
 enum SidereonStatus sidereon_cycle_slip_options_init(struct SidereonCycleSlipOptions *out_options);
+
+/**
+ * Copy the catalog's allow-listed hosts as a JSON array of strings.
+ *
+ * Safety: out points to out_len writable bytes or is NULL for zero; count
+ * pointers point to writable size_t values.
+ */
+enum SidereonStatus sidereon_data_allowed_hosts(uint8_t *out,
+                                                size_t out_len,
+                                                size_t *out_written,
+                                                size_t *out_required);
 
 /**
  * Write the integer day-of-year for a validated product date. January 1 is
@@ -39365,6 +39721,17 @@ enum SidereonStatus sidereon_navcen_assessment_outage_start(const struct Sidereo
 void sidereon_navcen_assessments_free(struct SidereonNavcenAssessments *assessments);
 
 /**
+ * Copy NAVCEN's constellation URL as bytes using the variable-length contract.
+ *
+ * Safety: out points to out_len writable bytes or is NULL for zero; both count
+ * pointers point to writable size_t values.
+ */
+enum SidereonStatus sidereon_navcen_constellation_url(uint8_t *out,
+                                                      size_t out_len,
+                                                      size_t *out_written,
+                                                      size_t *out_required);
+
+/**
  * Parse NAVCEN status HTML and evaluate every row at explicit UTC Unix
  * microseconds. On success writes an owned assessment handle to out_assessments;
  * release it with sidereon_navcen_assessments_free.
@@ -39376,6 +39743,18 @@ enum SidereonStatus sidereon_navcen_parse_at(const uint8_t *navcen_html,
                                              size_t navcen_len,
                                              int64_t evaluated_at_unix_us,
                                              struct SidereonNavcenAssessments **out_assessments);
+
+/**
+ * Copy the NAVCEN source entry as JSON, including protocol, host and URL.
+ * Output uses the variable-length byte buffer contract.
+ *
+ * Safety: out points to out_len writable bytes or is NULL for zero; both count
+ * pointers point to writable size_t values.
+ */
+enum SidereonStatus sidereon_navcen_source_entry(uint8_t *out,
+                                                 size_t out_len,
+                                                 size_t *out_written,
+                                                 size_t *out_required);
 
 /**
  * Full NeQuick-G slant ionospheric group delay (meters) on frequency_hz.
@@ -40099,6 +40478,15 @@ enum SidereonStatus sidereon_oem_to_xml(const struct SidereonOem *oem,
 enum SidereonStatus sidereon_omm_array_count(const struct SidereonOmmArray *array, size_t *out);
 
 /**
+ * Compare OMM collections by core value, including skipped records and spans.
+ *
+ * Safety: left and right are live and out points to writable bool storage.
+ */
+enum SidereonStatus sidereon_omm_array_equal(const struct SidereonOmmArray *left,
+                                             const struct SidereonOmmArray *right,
+                                             bool *out);
+
+/**
  * Release an owned OMM collection.
  */
 void sidereon_omm_array_free(struct SidereonOmmArray *array);
@@ -40148,6 +40536,23 @@ enum SidereonStatus sidereon_omm_array_skipped(const struct SidereonOmmArray *ar
  */
 enum SidereonStatus sidereon_omm_array_skipped_count(const struct SidereonOmmArray *array,
                                                      size_t *out);
+
+/**
+ * Copy a parser-provided source span by position.
+ *
+ * Safety: array is live and out points to writable storage.
+ */
+enum SidereonStatus sidereon_omm_array_span(const struct SidereonOmmArray *array,
+                                            size_t index,
+                                            struct SidereonOmmRecordSpan *out);
+
+/**
+ * Return the number of parser-provided record spans.
+ *
+ * Safety: array is live and out points to writable storage.
+ */
+enum SidereonStatus sidereon_omm_array_span_count(const struct SidereonOmmArray *array,
+                                                  size_t *out);
 
 /**
  * Write every record as GP CSV; refuse comments that CSV cannot preserve.
@@ -40323,6 +40728,15 @@ enum SidereonStatus sidereon_omm_catalog_skipped_object_name(const struct Sidere
                                                              size_t *out_required);
 
 /**
+ * Compare two OMM handles using core value equality.
+ *
+ * Safety: left and right are live and out points to writable bool storage.
+ */
+enum SidereonStatus sidereon_omm_equal(const struct SidereonOmm *left,
+                                       const struct SidereonOmm *right,
+                                       bool *out);
+
+/**
  * Release an OMM handle. Passing NULL is a no-op.
  *
  * Safety: omm must be a handle from a sidereon_omm_parse_* call or NULL.
@@ -40339,6 +40753,18 @@ void sidereon_omm_free(struct SidereonOmm *omm);
 enum SidereonStatus sidereon_omm_from_snapshot_json(const uint8_t *data,
                                                     size_t len,
                                                     struct SidereonOmm **out_omm);
+
+/**
+ * Convert the parsed TLE into an independently owned OMM. A null name with
+ * zero length selects no object name.
+ *
+ * Safety: tle is live; name points to name_len bytes, or is NULL for zero;
+ * out points to writable handle storage.
+ */
+enum SidereonStatus sidereon_omm_from_tle(const struct SidereonTle *tle,
+                                          const uint8_t *name,
+                                          size_t name_len,
+                                          struct SidereonOmm **out);
 
 /**
  * Parse one OMM using the core format autodetector.
@@ -40482,6 +40908,19 @@ enum SidereonStatus sidereon_omm_to_kvn(const struct SidereonOmm *omm,
                                         size_t *out_required);
 
 /**
+ * Serialize an OMM to KVN without requiring a complete CCSDS message.
+ * Output uses the variable-length byte buffer contract.
+ *
+ * Safety: omm is a live handle; out points to len writable bytes or NULL when
+ * len is 0; out_written and out_required point to writable size_t values.
+ */
+enum SidereonStatus sidereon_omm_to_kvn_lenient(const struct SidereonOmm *omm,
+                                                uint8_t *out,
+                                                size_t len,
+                                                size_t *out_written,
+                                                size_t *out_required);
+
+/**
  * Serialize an OMM to XML text (not null-terminated). Round-trips with
  * sidereon_omm_parse_xml. Variable-length output contract. Delegates to
  * sidereon_core::astro::omm::encode_xml.
@@ -40496,6 +40935,34 @@ enum SidereonStatus sidereon_omm_to_xml(const struct SidereonOmm *omm,
                                         size_t len,
                                         size_t *out_written,
                                         size_t *out_required);
+
+/**
+ * Serialize an OMM to XML without requiring a complete CCSDS message.
+ * Output uses the variable-length byte buffer contract.
+ *
+ * Safety: omm is a live handle; out points to len writable bytes or NULL when
+ * len is 0; out_written and out_required point to writable size_t values.
+ */
+enum SidereonStatus sidereon_omm_to_xml_lenient(const struct SidereonOmm *omm,
+                                                uint8_t *out,
+                                                size_t len,
+                                                size_t *out_written,
+                                                size_t *out_required);
+
+/**
+ * Return a copy with validated CCSDS header fields.
+ *
+ * Safety: omm is live; each string points to its given byte count; out points
+ * to writable handle storage.
+ */
+enum SidereonStatus sidereon_omm_with_ccsds_header(const struct SidereonOmm *omm,
+                                                   const uint8_t *version,
+                                                   size_t version_len,
+                                                   const uint8_t *creation_date,
+                                                   size_t creation_date_len,
+                                                   const uint8_t *originator,
+                                                   size_t originator_len,
+                                                   struct SidereonOmm **out);
 
 /**
  * Release an OPM handle from a sidereon_opm_parse_* call. Passing NULL is a
@@ -40643,6 +41110,16 @@ enum SidereonStatus sidereon_parallactic_angle_deg(double observer_latitude_deg,
                                                    double hour_angle_deg,
                                                    double declination_deg,
                                                    double *out_angle_deg);
+
+/**
+ * Parse a CelesTrak GP response in the selected format.
+ *
+ * Safety: data points to len readable bytes and out points to writable handle storage.
+ */
+enum SidereonStatus sidereon_parse_celestrak_gp_response(const uint8_t *data,
+                                                         size_t len,
+                                                         uint32_t format,
+                                                         struct SidereonCelestrakGpResponse **out);
 
 /**
  * Parse RINEX GLONASS state-vector records into an owned list. Representable
@@ -48887,6 +49364,21 @@ enum SidereonStatus sidereon_sgp4_fit_tle(const struct SidereonSgp4FitSample *sa
                                           size_t sample_count,
                                           const struct SidereonSgp4FitConfig *config,
                                           struct SidereonSgp4TleFit **out_fit);
+
+/**
+ * Fit a TLE while supplying the fitted OMM's CCSDS creation date and originator.
+ *
+ * Safety: samples and strings point to their given lengths; config is readable
+ * and out_fit points to writable handle storage.
+ */
+enum SidereonStatus sidereon_sgp4_fit_tle_with_omm_header(const struct SidereonSgp4FitSample *samples,
+                                                          size_t sample_count,
+                                                          const struct SidereonSgp4FitConfig *config,
+                                                          const uint8_t *creation_date,
+                                                          size_t creation_date_len,
+                                                          const uint8_t *originator,
+                                                          size_t originator_len,
+                                                          struct SidereonSgp4TleFit **out_fit);
 
 enum SidereonStatus sidereon_sgp4_last_error_info(struct SidereonSgp4ErrorInfo *out_info);
 

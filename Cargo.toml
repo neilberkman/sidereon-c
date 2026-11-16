@@ -12,3 +12,8 @@ members = ["bindings/c"]
 # this workspace must not pull it in. It carries its own lockfile and consumes
 # the same canonical engine over git.
 exclude = ["bindings/python"]
+
+# The release version bump replaces these path patches.
+[patch.crates-io]
+sidereon-core = { path = "/Volumes/ExternalSSD/sidereon-oracle-20261114/sidereon-fetch/crates/sidereon-core" }
+trust-region-least-squares = { path = "/Volumes/ExternalSSD/sidereon-oracle-20261114/sidereon-fetch/crates/trust-region-least-squares" }

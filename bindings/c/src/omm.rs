@@ -1113,25 +1113,7 @@ pub unsafe extern "C" fn sidereon_omm_to_element_set(
                     return SidereonStatus::InvalidArgument;
                 }
             };
-            *out = SidereonOmmElementSet {
-                epoch_whole: elements.epoch.0,
-                epoch_fraction: elements.epoch.1,
-                bstar: elements.bstar,
-                mean_motion_dot_present: elements.mean_motion_dot.is_some(),
-                mean_motion_dot: elements.mean_motion_dot.unwrap_or_default(),
-                mean_motion_double_dot_present: elements.mean_motion_double_dot.is_some(),
-                mean_motion_double_dot: elements.mean_motion_double_dot.unwrap_or_default(),
-                eccentricity: elements.eccentricity,
-                argument_of_perigee_deg: elements.argument_of_perigee_deg,
-                inclination_deg: elements.inclination_deg,
-                mean_anomaly_deg: elements.mean_anomaly_deg,
-                mean_motion_rev_per_day: elements.mean_motion_rev_per_day,
-                right_ascension_deg: elements.right_ascension_deg,
-                catalog_number_present: elements.catalog_number.is_some(),
-                catalog_number: elements.catalog_number.unwrap_or_default(),
-                omm_epoch_days_present: elements.omm_epoch_days.is_some(),
-                omm_epoch_days: elements.omm_epoch_days.unwrap_or_default(),
-            };
+            *out = omm_element_set_to_c(&elements);
             SidereonStatus::Ok
         },
     )
@@ -1273,6 +1255,66 @@ pub unsafe extern "C" fn sidereon_omm_to_xml(
                 out_written,
                 out_required,
                 sidereon_core::astro::omm::encode_xml,
+            )
+        },
+    )
+}
+
+/// Serialize an OMM to KVN without requiring a complete CCSDS message.
+/// Output uses the variable-length byte buffer contract.
+///
+/// Safety: omm is a live handle; out points to len writable bytes or NULL when
+/// len is 0; out_written and out_required point to writable size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_omm_to_kvn_lenient(
+    omm: *const SidereonOmm,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    crate::engine_error::engine_error_operation_boundary(
+        "sidereon_omm_to_kvn_lenient",
+        SidereonStatus::Panic,
+        || {
+            omm_encode(
+                "sidereon_omm_to_kvn_lenient",
+                omm,
+                out,
+                len,
+                out_written,
+                out_required,
+                sidereon_core::astro::omm::encode_kvn_lenient,
+            )
+        },
+    )
+}
+
+/// Serialize an OMM to XML without requiring a complete CCSDS message.
+/// Output uses the variable-length byte buffer contract.
+///
+/// Safety: omm is a live handle; out points to len writable bytes or NULL when
+/// len is 0; out_written and out_required point to writable size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_omm_to_xml_lenient(
+    omm: *const SidereonOmm,
+    out: *mut u8,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    crate::engine_error::engine_error_operation_boundary(
+        "sidereon_omm_to_xml_lenient",
+        SidereonStatus::Panic,
+        || {
+            omm_encode(
+                "sidereon_omm_to_xml_lenient",
+                omm,
+                out,
+                len,
+                out_written,
+                out_required,
+                sidereon_core::astro::omm::encode_xml_lenient,
             )
         },
     )
@@ -1434,6 +1476,244 @@ unsafe fn omm_encode(
         out_required,
     ));
     SidereonStatus::Ok
+}
+
+/// Convert the parsed TLE into an independently owned OMM. A null name with
+/// zero length selects no object name.
+///
+/// Safety: tle is live; name points to name_len bytes, or is NULL for zero;
+/// out points to writable handle storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_omm_from_tle(
+    tle: *const crate::tle::SidereonTle,
+    name: *const u8,
+    name_len: usize,
+    out: *mut *mut SidereonOmm,
+) -> SidereonStatus {
+    crate::engine_error::engine_error_operation_boundary(
+        "sidereon_omm_from_tle",
+        SidereonStatus::Panic,
+        || {
+            let output_range = c_try!(checked_output_range("sidereon_omm_from_tle", out, 1, "out"));
+            if !name.is_null() && name_len != 0 {
+                let input_range = c_try!(checked_output_range(
+                    "sidereon_omm_from_tle",
+                    name.cast_mut(),
+                    name_len,
+                    "name"
+                ));
+                c_try!(reject_overlapping_outputs(
+                    "sidereon_omm_from_tle",
+                    output_range,
+                    input_range,
+                    "out",
+                    "name"
+                ));
+            }
+            c_try!(reject_output_overlaps_handle(
+                "sidereon_omm_from_tle",
+                out,
+                "out",
+                tle,
+                "tle"
+            ));
+            let out = c_try!(require_out(out, "sidereon_omm_from_tle", "out"));
+            *out = ptr::null_mut();
+            let tle = c_try!(require_ref(tle, "sidereon_omm_from_tle", "tle"));
+            let name = c_try!(require_slice(
+                name,
+                name_len,
+                "sidereon_omm_from_tle",
+                "name"
+            ));
+            let name = match str::from_utf8(name) {
+                Ok(value) => value,
+                Err(_) => {
+                    set_last_error("sidereon_omm_from_tle: name is not valid UTF-8".to_string());
+                    return SidereonStatus::InvalidToken;
+                }
+            };
+            match sidereon_core::astro::omm::Omm::from_tle(
+                &tle.elements,
+                (!name.is_empty()).then(|| name.to_owned()),
+            ) {
+                Ok(inner) => {
+                    write_boxed_handle(out, SidereonOmm { inner });
+                    SidereonStatus::Ok
+                }
+                Err(error) => {
+                    crate::engine_error::record_engine_error(
+                        crate::engine_error::SidereonEngineErrorFamily::Omm,
+                        "sidereon_omm_from_tle",
+                        serde_json::json!({"kind":"tle", "fields":{"cause":crate::engine_error::tle_error_value(&error)}}),
+                    );
+                    set_last_error(format!("sidereon_omm_from_tle: {error}"));
+                    SidereonStatus::InvalidArgument
+                }
+            }
+        },
+    )
+}
+
+/// Return a copy with validated CCSDS header fields.
+///
+/// Safety: omm is live; each string points to its given byte count; out points
+/// to writable handle storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_omm_with_ccsds_header(
+    omm: *const SidereonOmm,
+    version: *const u8,
+    version_len: usize,
+    creation_date: *const u8,
+    creation_date_len: usize,
+    originator: *const u8,
+    originator_len: usize,
+    out: *mut *mut SidereonOmm,
+) -> SidereonStatus {
+    crate::engine_error::engine_error_operation_boundary(
+        "sidereon_omm_with_ccsds_header",
+        SidereonStatus::Panic,
+        || {
+            let output_range = c_try!(checked_output_range(
+                "sidereon_omm_with_ccsds_header",
+                out,
+                1,
+                "out"
+            ));
+            for (input, len, label) in [
+                (version, version_len, "version"),
+                (creation_date, creation_date_len, "creation_date"),
+                (originator, originator_len, "originator"),
+            ] {
+                if !input.is_null() && len != 0 {
+                    let input_range = c_try!(checked_output_range(
+                        "sidereon_omm_with_ccsds_header",
+                        input.cast_mut(),
+                        len,
+                        label
+                    ));
+                    c_try!(reject_overlapping_outputs(
+                        "sidereon_omm_with_ccsds_header",
+                        output_range,
+                        input_range,
+                        "out",
+                        label
+                    ));
+                }
+            }
+            c_try!(reject_output_overlaps_handle(
+                "sidereon_omm_with_ccsds_header",
+                out,
+                "out",
+                omm,
+                "omm"
+            ));
+            let out = c_try!(require_out(out, "sidereon_omm_with_ccsds_header", "out"));
+            *out = ptr::null_mut();
+            let omm = c_try!(require_ref(omm, "sidereon_omm_with_ccsds_header", "omm"));
+            let version = c_try!(require_slice(
+                version,
+                version_len,
+                "sidereon_omm_with_ccsds_header",
+                "version"
+            ));
+            let creation_date = c_try!(require_slice(
+                creation_date,
+                creation_date_len,
+                "sidereon_omm_with_ccsds_header",
+                "creation_date"
+            ));
+            let originator = c_try!(require_slice(
+                originator,
+                originator_len,
+                "sidereon_omm_with_ccsds_header",
+                "originator"
+            ));
+            let (Ok(version), Ok(creation_date), Ok(originator)) = (
+                str::from_utf8(version),
+                str::from_utf8(creation_date),
+                str::from_utf8(originator),
+            ) else {
+                set_last_error("sidereon_omm_with_ccsds_header: invalid UTF-8".to_string());
+                return SidereonStatus::InvalidToken;
+            };
+            match omm
+                .inner
+                .clone()
+                .with_ccsds_header(version, creation_date, originator)
+            {
+                Ok(inner) => {
+                    write_boxed_handle(out, SidereonOmm { inner });
+                    SidereonStatus::Ok
+                }
+                Err(error) => {
+                    crate::engine_error::record_engine_error(
+                        crate::engine_error::SidereonEngineErrorFamily::Omm,
+                        "sidereon_omm_with_ccsds_header",
+                        crate::engine_error::omm_error_value(&error),
+                    );
+                    set_last_error(format!("sidereon_omm_with_ccsds_header: {error}"));
+                    SidereonStatus::InvalidArgument
+                }
+            }
+        },
+    )
+}
+
+pub(crate) fn omm_element_set_to_c(
+    elements: &sidereon_core::astro::sgp4::ElementSet,
+) -> SidereonOmmElementSet {
+    SidereonOmmElementSet {
+        epoch_whole: elements.epoch.0,
+        epoch_fraction: elements.epoch.1,
+        bstar: elements.bstar,
+        mean_motion_dot_present: elements.mean_motion_dot.is_some(),
+        mean_motion_dot: elements.mean_motion_dot.unwrap_or_default(),
+        mean_motion_double_dot_present: elements.mean_motion_double_dot.is_some(),
+        mean_motion_double_dot: elements.mean_motion_double_dot.unwrap_or_default(),
+        eccentricity: elements.eccentricity,
+        argument_of_perigee_deg: elements.argument_of_perigee_deg,
+        inclination_deg: elements.inclination_deg,
+        mean_anomaly_deg: elements.mean_anomaly_deg,
+        mean_motion_rev_per_day: elements.mean_motion_rev_per_day,
+        right_ascension_deg: elements.right_ascension_deg,
+        catalog_number_present: elements.catalog_number.is_some(),
+        catalog_number: elements.catalog_number.unwrap_or_default(),
+        omm_epoch_days_present: elements.omm_epoch_days.is_some(),
+        omm_epoch_days: elements.omm_epoch_days.unwrap_or_default(),
+    }
+}
+
+/// Compare two OMM handles using core value equality.
+///
+/// Safety: left and right are live and out points to writable bool storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_omm_equal(
+    left: *const SidereonOmm,
+    right: *const SidereonOmm,
+    out: *mut bool,
+) -> SidereonStatus {
+    ffi_boundary("sidereon_omm_equal", SidereonStatus::Panic, || {
+        c_try!(reject_output_overlaps_handle(
+            "sidereon_omm_equal",
+            out,
+            "out",
+            left,
+            "left"
+        ));
+        c_try!(reject_output_overlaps_handle(
+            "sidereon_omm_equal",
+            out,
+            "out",
+            right,
+            "right"
+        ));
+        let out = c_try!(require_out(out, "sidereon_omm_equal", "out"));
+        let left = c_try!(require_ref(left, "sidereon_omm_equal", "left"));
+        let right = c_try!(require_ref(right, "sidereon_omm_equal", "right"));
+        *out = left.inner == right.inner;
+        SidereonStatus::Ok
+    })
 }
 
 #[cfg(test)]
@@ -1851,7 +2131,7 @@ mod codec_error_tests {
         let (mut written, mut required) = (usize::MAX, usize::MAX);
         assert_eq!(
             unsafe {
-                sidereon_omm_to_kvn(
+                sidereon_omm_to_kvn_lenient(
                     parsed,
                     output.as_mut_ptr(),
                     output.len(),
@@ -1869,7 +2149,7 @@ mod codec_error_tests {
             serde_json::json!({
                 "schema_version": 1,
                 "family": "omm",
-                "operation": "sidereon_omm_to_kvn",
+                "operation": "sidereon_omm_to_kvn_lenient",
                 "error": {
                     "kind": "unwritable_text",
                     "fields": {
@@ -1882,9 +2162,231 @@ mod codec_error_tests {
         );
         assert_eq!(
             last_error(),
-            "sidereon_omm_to_kvn: OMM OBJECT_NAME value \"ISS\\n(ZARYA)\" contains a line break"
+            "sidereon_omm_to_kvn_lenient: OMM OBJECT_NAME value \"ISS\\n(ZARYA)\" contains a line break"
         );
         unsafe { sidereon_omm_free(parsed) };
         assert_snapshot_eq(&(info, payload));
+    }
+}
+
+#[cfg(test)]
+mod tle_omm_tests {
+    use super::*;
+
+    #[test]
+    fn strict_writers_match_literals() {
+        let json = br#"{"OBJECT_NAME":"TEST","OBJECT_ID":"2026-001A","CENTER_NAME":"EARTH","REF_FRAME":"TEME","TIME_SYSTEM":"UTC","MEAN_ELEMENT_THEORY":"OTHER","EPOCH":"2026-01-01T00:00:00","MEAN_MOTION":1,"ECCENTRICITY":0.1,"INCLINATION":2,"RA_OF_ASC_NODE":3,"ARG_OF_PERICENTER":4,"MEAN_ANOMALY":5}"#;
+        let mut source = ptr::null_mut();
+        assert_eq!(
+            unsafe { sidereon_omm_parse_json(json.as_ptr(), json.len(), &mut source) },
+            SidereonStatus::Ok
+        );
+        let mut headed = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_omm_with_ccsds_header(
+                    source,
+                    b"3.0".as_ptr(),
+                    3,
+                    b"2026-01-01T00:00:00".as_ptr(),
+                    19,
+                    b"TEST".as_ptr(),
+                    4,
+                    &mut headed,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        let mut bytes = [0; 2048];
+        let (mut written, mut required) = (0, 0);
+        assert_eq!(
+            unsafe {
+                sidereon_omm_to_kvn(
+                    headed,
+                    bytes.as_mut_ptr(),
+                    bytes.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(
+            &bytes[..written],
+            include_bytes!("../tests/fixtures/omm/strict_expected.kvn")
+        );
+        assert_eq!(
+            unsafe {
+                sidereon_omm_to_xml(
+                    headed,
+                    bytes.as_mut_ptr(),
+                    bytes.len(),
+                    &mut written,
+                    &mut required,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(
+            &bytes[..written],
+            include_bytes!("../tests/fixtures/omm/strict_expected.xml")
+        );
+        unsafe {
+            sidereon_omm_free(headed);
+            sidereon_omm_free(source);
+        }
+    }
+
+    #[test]
+    fn tle_conversion_header_and_strict_writer() {
+        let line1 = b"1 25544U 98067A   26095.55331950  .00008543  00000+0  16420-3 0  9998\0";
+        let line2 = b"2 25544  51.6328 299.5432 0006351 274.8255  85.2008 15.48786980560492\0";
+        let mut tle = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                crate::tle::sidereon_tle_load(
+                    line1.as_ptr().cast(),
+                    line2.as_ptr().cast(),
+                    0,
+                    &mut tle,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        let mut omm = ptr::null_mut();
+        assert_eq!(
+            unsafe { sidereon_omm_from_tle(tle, b"ISS".as_ptr(), 3, &mut omm) },
+            SidereonStatus::Ok
+        );
+        assert_eq!(unsafe { &*omm }.inner.object_name.as_deref(), Some("ISS"));
+        let value = &unsafe { &*omm }.inner;
+        assert_eq!(value.ccsds_omm_vers, None);
+        assert_eq!(value.classification, None);
+        assert_eq!(value.creation_date, None);
+        assert_eq!(value.originator, None);
+        assert_eq!(value.message_id, None);
+        assert_eq!(value.object_id.as_deref(), Some("1998-067A"));
+        assert_eq!(value.center_name.as_deref(), Some("EARTH"));
+        assert_eq!(value.ref_frame.as_deref(), Some("TEME"));
+        assert_eq!(value.ref_frame_epoch, None);
+        assert_eq!(value.time_system.as_deref(), Some("UTC"));
+        assert_eq!(value.mean_element_theory.as_deref(), Some("SGP4"));
+        assert_eq!(
+            (
+                value.epoch.year,
+                value.epoch.month,
+                value.epoch.day,
+                value.epoch.hour,
+                value.epoch.minute,
+                value.epoch.second,
+                value.epoch.microsecond,
+                value.epoch.femtosecond
+            ),
+            (2026, 4, 5, 13, 16, 46, 804800, 0)
+        );
+        assert_eq!(value.mean_motion, Some(15.48786980));
+        assert_eq!(value.semi_major_axis_km, None);
+        assert_eq!(value.eccentricity, 0.0006351);
+        assert_eq!(value.inclination_deg, 51.6328);
+        assert_eq!(value.ra_of_asc_node_deg, 299.5432);
+        assert_eq!(value.arg_of_pericenter_deg, 274.8255);
+        assert_eq!(value.mean_anomaly_deg, 85.2008);
+        assert_eq!(value.gm_km3_s2, None);
+        assert_eq!(value.spacecraft, None);
+        assert_eq!(value.ephemeris_type, Some(0));
+        assert_eq!(value.classification_type.as_deref(), Some("U"));
+        assert_eq!(value.norad_cat_id, Some(25544));
+        assert_eq!(value.element_set_no, Some(999));
+        assert_eq!(value.rev_at_epoch, Some(56049));
+        assert_eq!(value.bstar, Some(0.00016420));
+        assert_eq!(value.bterm_m2_kg, None);
+        assert_eq!(value.mean_motion_dot, Some(0.00008543));
+        assert_eq!(value.mean_motion_ddot, Some(0.0));
+        assert_eq!(value.agom_m2_kg, None);
+        assert_eq!(value.covariance, None);
+        assert!(value.user_defined.is_empty());
+        assert_eq!(
+            value.comments,
+            sidereon_core::astro::omm::OmmComments::default()
+        );
+        assert_eq!(value.exact_sgp4_epoch, None);
+        assert!(value.quantize_tle_derived_fields);
+        let (mut written, mut required) = (0, 0);
+        assert_eq!(
+            unsafe { sidereon_omm_to_kvn(omm, ptr::null_mut(), 0, &mut written, &mut required) },
+            SidereonStatus::InvalidArgument
+        );
+        let (info, payload) = crate::engine_error::snapshot_engine_error_for_test().unwrap();
+        assert_eq!(
+            info.family,
+            crate::engine_error::SidereonEngineErrorFamily::Omm
+        );
+        let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(payload["error"]["kind"], "missing_field");
+        assert_eq!(payload["error"]["fields"]["field"], "CCSDS_OMM_VERS");
+        let mut headed = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_omm_with_ccsds_header(
+                    omm,
+                    b"3.0".as_ptr(),
+                    3,
+                    b"2026-11-15T00:00:00".as_ptr(),
+                    19,
+                    b"TEST".as_ptr(),
+                    4,
+                    &mut headed,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        let mut equal = true;
+        assert_eq!(
+            unsafe { sidereon_omm_equal(omm, headed, &mut equal) },
+            SidereonStatus::Ok
+        );
+        assert!(!equal);
+        assert_eq!(
+            unsafe { sidereon_omm_equal(omm, omm, &mut equal) },
+            SidereonStatus::Ok
+        );
+        assert!(equal);
+        unsafe {
+            sidereon_omm_free(headed);
+            sidereon_omm_free(omm);
+            crate::tle::sidereon_tle_free(tle);
+        }
+    }
+}
+
+#[cfg(test)]
+mod output_reset_tests {
+    use super::*;
+
+    #[test]
+    fn failed_conversions_clear_outputs() {
+        let mut out = std::ptr::dangling_mut();
+        assert_eq!(
+            unsafe { sidereon_omm_from_tle(ptr::null(), ptr::null(), 0, &mut out) },
+            SidereonStatus::NullPointer
+        );
+        assert!(out.is_null());
+        out = std::ptr::dangling_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_omm_with_ccsds_header(
+                    ptr::null(),
+                    ptr::null(),
+                    0,
+                    ptr::null(),
+                    0,
+                    ptr::null(),
+                    0,
+                    &mut out,
+                )
+            },
+            SidereonStatus::NullPointer
+        );
+        assert!(out.is_null());
     }
 }
