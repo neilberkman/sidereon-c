@@ -473,6 +473,14 @@ pub struct SidereonTleBatchLookAngles {
     pub(crate) inner: Vec<Vec<LookAngle>>,
 }
 
+/// Batched sub-satellite (ground-track) geodetic result. Opaque to C. Create with
+/// sidereon_tle_batch_ground_tracks and release with
+/// sidereon_tle_batch_ground_tracks_free.
+pub struct SidereonTleBatchGroundTracks {
+    pub(crate) epoch_count: usize,
+    pub(crate) inner: Vec<Vec<Wgs84Geodetic>>,
+}
+
 /// SGP4 operation mode selector. Pass these values as uint32_t opsmode
 /// arguments.
 #[repr(C)]
@@ -2075,6 +2083,147 @@ pub unsafe extern "C" fn sidereon_tle_batch_look_angles_values(
     )
 }
 
+/// Compute sub-satellite (ground-track) geodetic points for a fleet of TLEs
+/// over a shared UTC unix-microsecond epoch grid. opsmode is one of
+/// SidereonTleOpsMode_* encoded as uint32_t. When parallel is true the
+/// engine's rayon batch path is used. On success writes a newly owned batch
+/// handle to *out_batch. Release it with
+/// sidereon_tle_batch_ground_tracks_free.
+///
+/// Safety: tles must point to tle_count line pairs; epochs_unix_us must point
+/// to epoch_count int64_t values; out_batch must point to handle storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_tle_batch_ground_tracks(
+    tles: *const SidereonTlePair,
+    tle_count: usize,
+    epochs_unix_us: *const i64,
+    epoch_count: usize,
+    opsmode: u32,
+    parallel: bool,
+    out_batch: *mut *mut SidereonTleBatchGroundTracks,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_tle_batch_ground_tracks",
+        SidereonStatus::Panic,
+        || {
+            let out_batch = c_try!(require_out(
+                out_batch,
+                "sidereon_tle_batch_ground_tracks",
+                "out_batch"
+            ));
+            *out_batch = ptr::null_mut();
+            let satellites = c_try!(tle_pair_satellites_from_c(
+                "sidereon_tle_batch_ground_tracks",
+                tles,
+                tle_count,
+                opsmode,
+            ));
+            let instants = c_try!(unix_instants_from_c(
+                "sidereon_tle_batch_ground_tracks",
+                epochs_unix_us,
+                epoch_count,
+            ));
+            let epoch_count = instants.len();
+            let results = if parallel {
+                ground_track_batch_parallel(&satellites, &instants)
+            } else {
+                ground_track_batch_serial(&satellites, &instants)
+            };
+            let inner = c_try!(unwrap_look_batch(
+                "sidereon_tle_batch_ground_tracks",
+                results
+            ));
+            write_boxed_handle(
+                out_batch,
+                SidereonTleBatchGroundTracks { epoch_count, inner },
+            );
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy the shape of a batched ground-track result as satellite_count and
+/// epoch_count.
+///
+/// Safety: batch must be a live handle; out_satellite_count and out_epoch_count
+/// must point to size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_tle_batch_ground_tracks_shape(
+    batch: *const SidereonTleBatchGroundTracks,
+    out_satellite_count: *mut usize,
+    out_epoch_count: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_tle_batch_ground_tracks_shape",
+        SidereonStatus::Panic,
+        || {
+            let out_satellite_count = c_try!(require_out(
+                out_satellite_count,
+                "sidereon_tle_batch_ground_tracks_shape",
+                "out_satellite_count"
+            ));
+            *out_satellite_count = 0;
+            let out_epoch_count = c_try!(require_out(
+                out_epoch_count,
+                "sidereon_tle_batch_ground_tracks_shape",
+                "out_epoch_count"
+            ));
+            *out_epoch_count = 0;
+            let batch = c_try!(require_ref(
+                batch,
+                "sidereon_tle_batch_ground_tracks_shape",
+                "batch"
+            ));
+            *out_satellite_count = batch.inner.len();
+            *out_epoch_count = batch.epoch_count;
+            SidereonStatus::Ok
+        },
+    )
+}
+
+/// Copy flattened satellite-major ground-track geodetic rows from a batched
+/// result. Uses the variable-length output contract documented at the top of
+/// the header.
+///
+/// Safety: batch must be a live handle; out must point to at least len writable
+/// entries or be NULL when len is 0; out_written and out_required must point to
+/// size_t values.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_tle_batch_ground_tracks_values(
+    batch: *const SidereonTleBatchGroundTracks,
+    out: *mut SidereonGeodetic,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    ffi_boundary(
+        "sidereon_tle_batch_ground_tracks_values",
+        SidereonStatus::Panic,
+        || {
+            c_try!(init_copy_counts(
+                "sidereon_tle_batch_ground_tracks_values",
+                out_written,
+                out_required
+            ));
+            let batch = c_try!(require_ref(
+                batch,
+                "sidereon_tle_batch_ground_tracks_values",
+                "batch"
+            ));
+            c_try!(copy_flattened_rows_to_c(
+                "sidereon_tle_batch_ground_tracks_values",
+                &batch.inner,
+                geodetic_to_c,
+                out,
+                len,
+                out_written,
+                out_required,
+            ));
+            SidereonStatus::Ok
+        },
+    )
+}
+
 /// Release a TLE handle. Null is a no-op. A non-null handle must come from
 /// sidereon_tle_load and must be freed exactly once with this function.
 ///
@@ -2298,6 +2447,22 @@ pub unsafe extern "C" fn sidereon_tle_batch_look_angles_free(
     batch: *mut SidereonTleBatchLookAngles,
 ) {
     ffi_boundary("sidereon_tle_batch_look_angles_free", (), || {
+        free_boxed(batch);
+    });
+}
+
+/// Release a batched ground-track handle. Null is a no-op. A non-null handle
+/// must come from sidereon_tle_batch_ground_tracks and must be freed exactly
+/// once with this function.
+///
+/// Safety: batch must be NULL or a live handle from
+/// sidereon_tle_batch_ground_tracks. Passing a handle after it has already been
+/// freed is invalid.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_tle_batch_ground_tracks_free(
+    batch: *mut SidereonTleBatchGroundTracks,
+) {
+    ffi_boundary("sidereon_tle_batch_ground_tracks_free", (), || {
         free_boxed(batch);
     });
 }
@@ -2596,10 +2761,10 @@ unsafe fn tle_pair_satellites_from_c(
     Ok(satellites)
 }
 
-fn unwrap_look_batch(
+fn unwrap_look_batch<T>(
     fn_name: &str,
-    results: Vec<Result<Vec<LookAngle>, LookAngleError>>,
-) -> Result<Vec<Vec<LookAngle>>, SidereonStatus> {
+    results: Vec<Result<Vec<T>, LookAngleError>>,
+) -> Result<Vec<Vec<T>>, SidereonStatus> {
     results
         .into_iter()
         .enumerate()
@@ -3022,5 +3187,190 @@ mod tests {
 
         unsafe { sidereon_pass_list_free(live_passes2) };
         unsafe { sidereon_tle_free(tle) };
+    }
+
+    #[test]
+    fn test_tle_find_passes_rejects_out_of_range_endpoints() {
+        clear_engine_error();
+        let l1 = b"1 25544U 98067A   18184.80969102  .00001614  00000-0  31745-4 0  9993\0";
+        let l2 = b"2 25544  51.6414 295.8524 0003435 262.6267 204.2868 15.54005638121106\0";
+        let mut tle: *mut SidereonTle = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_tle_load(
+                    l1.as_ptr() as *const c_char,
+                    l2.as_ptr() as *const c_char,
+                    0,
+                    &mut tle,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        let station = SidereonGroundStation {
+            latitude_deg: 51.5074,
+            longitude_deg: -0.1278,
+            altitude_m: 80.0,
+        };
+        let valid_unix_us = 1_530_619_200_000_000i64;
+
+        for (start, end) in [(i64::MIN, valid_unix_us), (valid_unix_us, i64::MAX)] {
+            clear_engine_error();
+            let mut passes: *mut SidereonPassList = ptr::null_mut();
+            let status = unsafe {
+                sidereon_tle_find_passes(tle, &station, start, end, ptr::null(), &mut passes)
+            };
+            assert_eq!(status, SidereonStatus::InvalidArgument);
+            assert!(passes.is_null());
+            let (info, payload) = snapshot_engine_error_for_test().expect("engine error recorded");
+            assert_eq!(info.family, SidereonEngineErrorFamily::Pass);
+            let v: serde_json::Value = serde_json::from_str(&payload).expect("valid json");
+            assert_eq!(v["error"]["kind"], "invalid_input");
+            assert_eq!(v["error"]["fields"]["field"], "datetime");
+            assert_eq!(v["error"]["fields"]["reason"], "invalid UTC instant");
+        }
+        unsafe { sidereon_tle_free(tle) };
+    }
+
+    #[test]
+    fn test_tle_batch_ground_tracks_matches_single_satellite() {
+        let l1 = b"1 25544U 98067A   18184.80969102  .00001614  00000-0  31745-4 0  9993\0";
+        let l2 = b"2 25544  51.6414 295.8524 0003435 262.6267 204.2868 15.54005638121106\0";
+        let pair = SidereonTlePair {
+            line1: l1.as_ptr() as *const c_char,
+            line2: l2.as_ptr() as *const c_char,
+        };
+        let pairs = [pair, pair];
+        let epochs = [1_530_619_200_000_000i64, 1_530_619_260_000_000i64];
+
+        let mut tle: *mut SidereonTle = ptr::null_mut();
+        assert_eq!(
+            unsafe { sidereon_tle_load(pair.line1, pair.line2, 0, &mut tle) },
+            SidereonStatus::Ok
+        );
+        let mut single_track: *mut SidereonGroundTrack = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_tle_ground_track(tle, epochs.as_ptr(), epochs.len(), &mut single_track)
+            },
+            SidereonStatus::Ok
+        );
+        let mut single_vals = vec![
+            SidereonGeodetic {
+                lat_rad: 0.0,
+                lon_rad: 0.0,
+                height_m: 0.0
+            };
+            epochs.len()
+        ];
+        let (mut sw, mut sr) = (0, 0);
+        assert_eq!(
+            unsafe {
+                sidereon_ground_track_values(
+                    single_track,
+                    single_vals.as_mut_ptr(),
+                    single_vals.len(),
+                    &mut sw,
+                    &mut sr,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        assert_eq!(sw, epochs.len());
+
+        for parallel in [false, true] {
+            let mut batch: *mut SidereonTleBatchGroundTracks = ptr::null_mut();
+            assert_eq!(
+                unsafe {
+                    sidereon_tle_batch_ground_tracks(
+                        pairs.as_ptr(),
+                        pairs.len(),
+                        epochs.as_ptr(),
+                        epochs.len(),
+                        0,
+                        parallel,
+                        &mut batch,
+                    )
+                },
+                SidereonStatus::Ok
+            );
+            let (mut sats, mut eps) = (0, 0);
+            assert_eq!(
+                unsafe { sidereon_tle_batch_ground_tracks_shape(batch, &mut sats, &mut eps) },
+                SidereonStatus::Ok
+            );
+            assert_eq!((sats, eps), (pairs.len(), epochs.len()));
+
+            let (mut written, mut required) = (0, 0);
+            assert_eq!(
+                unsafe {
+                    sidereon_tle_batch_ground_tracks_values(
+                        batch,
+                        ptr::null_mut(),
+                        0,
+                        &mut written,
+                        &mut required,
+                    )
+                },
+                SidereonStatus::Ok
+            );
+            assert_eq!((written, required), (0, pairs.len() * epochs.len()));
+
+            let mut vals = vec![
+                SidereonGeodetic {
+                    lat_rad: 0.0,
+                    lon_rad: 0.0,
+                    height_m: 0.0
+                };
+                required
+            ];
+            assert_eq!(
+                unsafe {
+                    sidereon_tle_batch_ground_tracks_values(
+                        batch,
+                        vals.as_mut_ptr(),
+                        vals.len(),
+                        &mut written,
+                        &mut required,
+                    )
+                },
+                SidereonStatus::Ok
+            );
+            assert_eq!(written, vals.len());
+            for sat_idx in 0..pairs.len() {
+                for ep_idx in 0..epochs.len() {
+                    let row = vals[sat_idx * epochs.len() + ep_idx];
+                    let expected = single_vals[ep_idx];
+                    assert_eq!(row.lat_rad.to_bits(), expected.lat_rad.to_bits());
+                    assert_eq!(row.lon_rad.to_bits(), expected.lon_rad.to_bits());
+                    assert_eq!(row.height_m.to_bits(), expected.height_m.to_bits());
+                }
+            }
+            unsafe { sidereon_tle_batch_ground_tracks_free(batch) };
+        }
+
+        // Out-of-range epoch returns Solve (matching unwrap_look_batch) without panicking.
+        let bad_epochs = [i64::MAX];
+        let mut bad_batch: *mut SidereonTleBatchGroundTracks = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_tle_batch_ground_tracks(
+                    pairs.as_ptr(),
+                    pairs.len(),
+                    bad_epochs.as_ptr(),
+                    bad_epochs.len(),
+                    0,
+                    false,
+                    &mut bad_batch,
+                )
+            },
+            SidereonStatus::Solve
+        );
+        assert!(bad_batch.is_null());
+
+        unsafe {
+            sidereon_tle_batch_ground_tracks_free(ptr::null_mut());
+            sidereon_ground_track_free(single_track);
+            sidereon_tle_free(tle);
+        }
     }
 }

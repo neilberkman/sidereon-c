@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 4.1.0 - 2026-11-19
+
+### Added
+
+- Add batched TLE ground-track entry points (`sidereon_tle_batch_ground_tracks`, `sidereon_tle_batch_ground_tracks_shape`, `sidereon_tle_batch_ground_tracks_values`, and `sidereon_tle_batch_ground_tracks_free`) delegating to `ground_track_batch_serial` and `ground_track_batch_parallel`.
+
+### Changed
+
+- Pin `sidereon` and `sidereon-core` to `4.1.0`.
+- Route `sidereon_satellite_constellation_ground_tracks` through `ground_track_batch_parallel`, sharing per-epoch frame matrix construction across satellites alongside the batch look-angle, visibility, and coverage-grid paths with bit-identical results.
+
+### Fixed
+
+- Return typed invalid-datetime errors (`field: "datetime"`, `reason: "invalid UTC instant"`) instead of panicking, returning empty results, or reporting window errors when instants outside UTC years 0 through 9999 reach coverage grids, pass searches, `sidereon_sun_moon_ecef`, `sidereon_sun_moon_ecef_batch`, `sidereon_sun_moon_eci_batch`, almanac, transit, eclipse, rise/set, and body-observation entry points.
+
 ## 4.0.0 - 2026-11-16
 
 ### Fixed

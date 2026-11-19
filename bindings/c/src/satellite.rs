@@ -594,13 +594,14 @@ pub unsafe extern "C" fn sidereon_satellite_constellation_ground_tracks(
                 epochs_unix_us,
                 epoch_count,
             ));
-            // Per-satellite loop over the core ground_track kernel; a failure
+            // Parallel core batch ground-track kernel; a per-satellite failure
             // becomes an empty track, keeping the result index-aligned with the
-            // fleet (the WASM/Elixir contract).
-            let mut inner = Vec::with_capacity(constellation.satellites.len());
-            let mut errors = Vec::with_capacity(constellation.satellites.len());
-            for satellite in &constellation.satellites {
-                match ground_track(satellite, &instants) {
+            // fleet while matching ground_track(sat, &instants) per satellite.
+            let results = ground_track_batch_parallel(&constellation.satellites, &instants);
+            let mut inner = Vec::with_capacity(results.len());
+            let mut errors = Vec::with_capacity(results.len());
+            for track in results {
+                match track {
                     Ok(track) => {
                         inner.push(track);
                         errors.push(None);
@@ -1165,6 +1166,193 @@ impl SidereonSatelliteState {
         Self {
             orbit: SidereonOrbitState::from_core(&s.orbit),
             clock: SidereonClockOffset::from_core(&s.clock),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_constellation_out_of_range_instants_report_invalid_datetime() {
+        let l1 = b"1 25544U 98067A   18184.80969102  .00001614  00000-0  31745-4 0  9993\0";
+        let l2 = b"2 25544  51.6414 295.8524 0003435 262.6267 204.2868 15.54005638121106\0";
+        let mut tle: *mut SidereonTle = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sidereon_tle_load(
+                    l1.as_ptr() as *const c_char,
+                    l2.as_ptr() as *const c_char,
+                    0,
+                    &mut tle,
+                )
+            },
+            SidereonStatus::Ok
+        );
+        let tles = [tle as *const SidereonTle];
+        let mut constellation: *mut SidereonSatelliteConstellation = ptr::null_mut();
+        assert_eq!(
+            unsafe { sidereon_satellite_constellation_build(tles.as_ptr(), 1, &mut constellation) },
+            SidereonStatus::Ok
+        );
+        let station = SidereonGroundStation {
+            latitude_deg: 51.5074,
+            longitude_deg: -0.1278,
+            altitude_m: 80.0,
+        };
+        let valid_unix_us = 1_530_619_200_000_000i64;
+
+        for &bad_epoch in &[i64::MIN, i64::MAX] {
+            let epochs = [bad_epoch];
+
+            let mut arcs: *mut SidereonSatelliteConstellationLookAngles = ptr::null_mut();
+            assert_eq!(
+                unsafe {
+                    sidereon_satellite_constellation_look_angle_arcs(
+                        constellation,
+                        &station,
+                        epochs.as_ptr(),
+                        1,
+                        true,
+                        &mut arcs,
+                    )
+                },
+                SidereonStatus::Ok
+            );
+            let (mut written, mut required) = (0, 0);
+            assert_eq!(
+                unsafe {
+                    sidereon_satellite_constellation_look_angles_error_payload(
+                        arcs,
+                        0,
+                        ptr::null_mut(),
+                        0,
+                        &mut written,
+                        &mut required,
+                    )
+                },
+                SidereonStatus::Ok
+            );
+            let mut buf = vec![0u8; required];
+            assert_eq!(
+                unsafe {
+                    sidereon_satellite_constellation_look_angles_error_payload(
+                        arcs,
+                        0,
+                        buf.as_mut_ptr(),
+                        buf.len(),
+                        &mut written,
+                        &mut required,
+                    )
+                },
+                SidereonStatus::Ok
+            );
+            let v: serde_json::Value = serde_json::from_slice(&buf).expect("valid json");
+            assert_eq!(v["kind"], "invalid_input");
+            assert_eq!(v["fields"]["field"], "datetime");
+            assert_eq!(v["fields"]["reason"], "invalid UTC instant");
+            unsafe { sidereon_satellite_constellation_look_angles_free(arcs) };
+
+            let mut tracks: *mut SidereonSatelliteConstellationGroundTracks = ptr::null_mut();
+            assert_eq!(
+                unsafe {
+                    sidereon_satellite_constellation_ground_tracks(
+                        constellation,
+                        epochs.as_ptr(),
+                        1,
+                        &mut tracks,
+                    )
+                },
+                SidereonStatus::Ok
+            );
+            assert_eq!(
+                unsafe {
+                    sidereon_satellite_constellation_ground_tracks_error_payload(
+                        tracks,
+                        0,
+                        ptr::null_mut(),
+                        0,
+                        &mut written,
+                        &mut required,
+                    )
+                },
+                SidereonStatus::Ok
+            );
+            let mut track_buf = vec![0u8; required];
+            assert_eq!(
+                unsafe {
+                    sidereon_satellite_constellation_ground_tracks_error_payload(
+                        tracks,
+                        0,
+                        track_buf.as_mut_ptr(),
+                        track_buf.len(),
+                        &mut written,
+                        &mut required,
+                    )
+                },
+                SidereonStatus::Ok
+            );
+            let tv: serde_json::Value = serde_json::from_slice(&track_buf).expect("valid json");
+            assert_eq!(tv["kind"], "invalid_input");
+            assert_eq!(tv["fields"]["field"], "datetime");
+            assert_eq!(tv["fields"]["reason"], "invalid UTC instant");
+            unsafe { sidereon_satellite_constellation_ground_tracks_free(tracks) };
+        }
+
+        for (start, end) in [(i64::MIN, valid_unix_us), (valid_unix_us, i64::MAX)] {
+            let mut passes: *mut SidereonSatelliteConstellationPasses = ptr::null_mut();
+            assert_eq!(
+                unsafe {
+                    sidereon_satellite_constellation_passes(
+                        constellation,
+                        &station,
+                        start,
+                        end,
+                        ptr::null(),
+                        &mut passes,
+                    )
+                },
+                SidereonStatus::Ok
+            );
+            let (mut written, mut required) = (0, 0);
+            assert_eq!(
+                unsafe {
+                    sidereon_satellite_constellation_passes_error_payload(
+                        passes,
+                        0,
+                        ptr::null_mut(),
+                        0,
+                        &mut written,
+                        &mut required,
+                    )
+                },
+                SidereonStatus::Ok
+            );
+            let mut buf = vec![0u8; required];
+            assert_eq!(
+                unsafe {
+                    sidereon_satellite_constellation_passes_error_payload(
+                        passes,
+                        0,
+                        buf.as_mut_ptr(),
+                        buf.len(),
+                        &mut written,
+                        &mut required,
+                    )
+                },
+                SidereonStatus::Ok
+            );
+            let v: serde_json::Value = serde_json::from_slice(&buf).expect("valid json");
+            assert_eq!(v["kind"], "invalid_input");
+            assert_eq!(v["fields"]["field"], "datetime");
+            assert_eq!(v["fields"]["reason"], "invalid UTC instant");
+            unsafe { sidereon_satellite_constellation_passes_free(passes) };
+        }
+
+        unsafe {
+            sidereon_satellite_constellation_free(constellation);
+            sidereon_tle_free(tle);
         }
     }
 }

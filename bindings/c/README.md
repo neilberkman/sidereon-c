@@ -1,6 +1,6 @@
 # sidereon (C)
 
-Version 4.0.0 uses the published `sidereon` and `sidereon-core` 4.0.0 APIs.
+Version 4.1.0 uses the published `sidereon` and `sidereon-core` 4.1.0 APIs.
 
 A C-ABI binding over the Sidereon GNSS positioning engine. It is a thin interface
 in the C idiom: opaque handles, integer status codes, and caller-allocated output
@@ -1396,9 +1396,17 @@ reference point, for one) rounds each operation separately, as Rust does.
 
 ## Reference data
 
-Generated reference values use the published `sidereon-core =4.0.0` crate.
+Generated reference values use the published `sidereon-core =4.1.0` crate.
 Their source revision is recorded in `tests/CORE_REVISION` and agrees with the
 crate's source identity. CSPICE reference states are independent reference data.
+
+## 4.1.0 API
+
+| Area | Entry points and behavior |
+| --- | --- |
+| Batched TLE ground tracks | `sidereon_tle_batch_ground_tracks`, `sidereon_tle_batch_ground_tracks_shape`, `sidereon_tle_batch_ground_tracks_values`, and `sidereon_tle_batch_ground_tracks_free` compute satellite-major WGS84 sub-satellite points across a shared epoch grid via `ground_track_batch_serial` / `ground_track_batch_parallel`. |
+| Constellation ground tracks | `sidereon_satellite_constellation_ground_tracks` delegates to `ground_track_batch_parallel` instead of looping per satellite, preserving fleet ordering and per-satellite errors. |
+| Out-of-range UTC instants | Instants outside UTC years 0 through 9999 return typed invalid-datetime errors (`field: "datetime"`, `reason: "invalid UTC instant"`) across pass search, coverage grids, batch look angles/ground tracks, `sidereon_sun_moon_ecef*`, almanac, transit, rise/set, and body observation. |
 
 ## 4.0.0 API
 

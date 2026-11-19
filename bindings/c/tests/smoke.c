@@ -2179,6 +2179,9 @@ static int exercise_propagation_surface(void) {
     SidereonTleBatchLookAngles *batch_look_angles = NULL;
     SidereonTleBatchLookAngles *empty_batch_look_angles = NULL;
     SidereonTleBatchLookAngles *empty_epoch_batch_look_angles = NULL;
+    SidereonTleBatchGroundTracks *batch_ground_tracks = NULL;
+    SidereonTleBatchGroundTracks *empty_batch_ground_tracks = NULL;
+    SidereonTleBatchGroundTracks *empty_epoch_batch_ground_tracks = NULL;
     SidereonEphemeris *ephemeris = NULL;
     SidereonEphemeris *empty_ephemeris = NULL;
 
@@ -2188,6 +2191,8 @@ static int exercise_propagation_surface(void) {
     sidereon_pass_list_free(NULL);
     sidereon_tle_batch_propagation_free(NULL);
     sidereon_tle_batch_look_angles_free(NULL);
+    sidereon_tle_batch_ground_tracks_free(NULL);
+    sidereon_tle_batch_ground_tracks_free(NULL);
     sidereon_ephemeris_free(NULL);
 
     SidereonTle *bad_tle = (SidereonTle *)(uintptr_t)1;
@@ -2664,6 +2669,108 @@ static int exercise_propagation_surface(void) {
         goto cleanup;
     }
 
+    if (sidereon_tle_batch_ground_tracks(
+            NULL, 0, PROP_EPOCHS_UNIX_US, PROP_EPOCH_COUNT, PROP_TLE_OPSMODE, true,
+            &empty_batch_ground_tracks) != SIDEREON_STATUS_OK ||
+        empty_batch_ground_tracks == NULL) {
+        rc = fail("sidereon_tle_batch_ground_tracks empty fleet returns empty batch", 1);
+        goto cleanup;
+    }
+    sat_count = 123;
+    batch_epoch_count = 123;
+    if (sidereon_tle_batch_ground_tracks_shape(
+            empty_batch_ground_tracks, &sat_count, &batch_epoch_count) != SIDEREON_STATUS_OK ||
+        sat_count != 0 || batch_epoch_count != PROP_EPOCH_COUNT) {
+        rc = fail("sidereon_tle_batch_ground_tracks_shape empty fleet", 1);
+        goto cleanup;
+    }
+    if (sidereon_tle_batch_ground_tracks_values(
+            empty_batch_ground_tracks, NULL, 0, &written, &required) != SIDEREON_STATUS_OK ||
+        written != 0 || required != 0) {
+        rc = fail("sidereon_tle_batch_ground_tracks_values empty fleet size query", 1);
+        goto cleanup;
+    }
+    if (sidereon_tle_batch_ground_tracks(
+            &tle_pair, 1, NULL, 0, PROP_TLE_OPSMODE, false,
+            &empty_epoch_batch_ground_tracks) != SIDEREON_STATUS_OK ||
+        empty_epoch_batch_ground_tracks == NULL) {
+        rc = fail("sidereon_tle_batch_ground_tracks empty epochs returns empty batch", 1);
+        goto cleanup;
+    }
+    sat_count = 123;
+    batch_epoch_count = 123;
+    if (sidereon_tle_batch_ground_tracks_shape(
+            empty_epoch_batch_ground_tracks, &sat_count, &batch_epoch_count) != SIDEREON_STATUS_OK ||
+        sat_count != 1 || batch_epoch_count != 0) {
+        rc = fail("sidereon_tle_batch_ground_tracks_shape empty epochs", 1);
+        goto cleanup;
+    }
+    if (sidereon_tle_batch_ground_tracks_values(
+            empty_epoch_batch_ground_tracks, NULL, 0, &written, &required) != SIDEREON_STATUS_OK ||
+        written != 0 || required != 0) {
+        rc = fail("sidereon_tle_batch_ground_tracks_values empty epochs size query", 1);
+        goto cleanup;
+    }
+    if (sidereon_tle_batch_ground_tracks(
+            &tle_pair, 1, PROP_EPOCHS_UNIX_US, PROP_EPOCH_COUNT, PROP_TLE_OPSMODE,
+            false, &batch_ground_tracks) != SIDEREON_STATUS_OK) {
+        rc = fail("sidereon_tle_batch_ground_tracks", 1);
+        goto cleanup;
+    }
+    if (sidereon_tle_batch_ground_tracks_shape(
+            batch_ground_tracks, &sat_count, &batch_epoch_count) != SIDEREON_STATUS_OK ||
+        sat_count != 1 || batch_epoch_count != PROP_EPOCH_COUNT) {
+        rc = fail("sidereon_tle_batch_ground_tracks_shape", 1);
+        goto cleanup;
+    }
+    if (sidereon_tle_batch_ground_tracks_values(batch_ground_tracks, NULL, 0, &written,
+                                                &required) != SIDEREON_STATUS_OK ||
+        written != 0 || required != PROP_EPOCH_COUNT) {
+        rc = fail("sidereon_tle_batch_ground_tracks_values size query", 1);
+        goto cleanup;
+    }
+    SidereonGeodetic short_batch_tracks[1];
+    short_batch_tracks[0].lat_rad = 42.0;
+    if (sidereon_tle_batch_ground_tracks_values(
+            batch_ground_tracks, short_batch_tracks, 1, &written, &required) !=
+            SIDEREON_STATUS_INVALID_ARGUMENT ||
+        written != 0 || required != PROP_EPOCH_COUNT || short_batch_tracks[0].lat_rad != 42.0) {
+        rc = fail("sidereon_tle_batch_ground_tracks_values short buffer", 1);
+        goto cleanup;
+    }
+    SidereonGeodetic batch_tracks[PROP_EPOCH_COUNT];
+    if (sidereon_tle_batch_ground_tracks_values(
+            batch_ground_tracks, batch_tracks, PROP_EPOCH_COUNT, &written, &required) !=
+            SIDEREON_STATUS_OK ||
+        written != PROP_EPOCH_COUNT || required != PROP_EPOCH_COUNT) {
+        rc = fail("sidereon_tle_batch_ground_tracks_values full copy", 1);
+        goto cleanup;
+    }
+    SidereonGroundTrack *single_ground_track = NULL;
+    if (sidereon_tle_ground_track(tle, PROP_EPOCHS_UNIX_US, PROP_EPOCH_COUNT,
+                                  &single_ground_track) != SIDEREON_STATUS_OK) {
+        rc = fail("sidereon_tle_ground_track cross-check", 1);
+        goto cleanup;
+    }
+    SidereonGeodetic single_tracks[PROP_EPOCH_COUNT];
+    size_t gt_written = 0, gt_required = 0;
+    if (sidereon_ground_track_values(single_ground_track, single_tracks, PROP_EPOCH_COUNT,
+                                     &gt_written, &gt_required) != SIDEREON_STATUS_OK ||
+        gt_written != PROP_EPOCH_COUNT) {
+        sidereon_ground_track_free(single_ground_track);
+        rc = fail("sidereon_ground_track_values cross-check", 1);
+        goto cleanup;
+    }
+    sidereon_ground_track_free(single_ground_track);
+    for (size_t i = 0; i < PROP_EPOCH_COUNT; i++) {
+        if (f64_to_bits(batch_tracks[i].lat_rad) != f64_to_bits(single_tracks[i].lat_rad) ||
+            f64_to_bits(batch_tracks[i].lon_rad) != f64_to_bits(single_tracks[i].lon_rad) ||
+            f64_to_bits(batch_tracks[i].height_m) != f64_to_bits(single_tracks[i].height_m)) {
+            rc = fail("sidereon_tle_batch_ground_tracks matches single-satellite track", 1);
+            goto cleanup;
+        }
+    }
+
     SidereonStatePropagationConfig config;
     if (sidereon_state_propagation_config_init(NULL) != SIDEREON_STATUS_NULL_POINTER ||
         sidereon_state_propagation_config_init(&config) != SIDEREON_STATUS_OK) {
@@ -2775,6 +2882,9 @@ static int exercise_propagation_surface(void) {
 cleanup:
     sidereon_ephemeris_free(empty_ephemeris);
     sidereon_ephemeris_free(ephemeris);
+    sidereon_tle_batch_ground_tracks_free(empty_epoch_batch_ground_tracks);
+    sidereon_tle_batch_ground_tracks_free(empty_batch_ground_tracks);
+    sidereon_tle_batch_ground_tracks_free(batch_ground_tracks);
     sidereon_tle_batch_look_angles_free(empty_epoch_batch_look_angles);
     sidereon_tle_batch_look_angles_free(empty_batch_look_angles);
     sidereon_tle_batch_look_angles_free(batch_look_angles);
@@ -8289,6 +8399,7 @@ int main(int argc, char **argv) {
     sidereon_pass_list_free(NULL);
     sidereon_tle_batch_propagation_free(NULL);
     sidereon_tle_batch_look_angles_free(NULL);
+    sidereon_tle_batch_ground_tracks_free(NULL);
     sidereon_ephemeris_free(NULL);
     sidereon_broadcast_ephemeris_free(NULL);
     sidereon_rinex_spp_inputs_free(NULL);

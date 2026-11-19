@@ -75,9 +75,9 @@
 #include <stdlib.h>
 
 #define SIDEREON_VERSION_MAJOR 4
-#define SIDEREON_VERSION_MINOR 0
+#define SIDEREON_VERSION_MINOR 1
 #define SIDEREON_VERSION_PATCH 0
-#define SIDEREON_VERSION_STRING "4.0.0"
+#define SIDEREON_VERSION_STRING "4.1.0"
 
 #define ANALYSIS_CENTER_C_BYTES 32
 
@@ -8412,6 +8412,13 @@ typedef struct SidereonTecSamplesResult SidereonTecSamplesResult;
  * sidereon_tle_load and release with sidereon_tle_free.
  */
 typedef struct SidereonTle SidereonTle;
+
+/**
+ * Batched sub-satellite (ground-track) geodetic result. Opaque to C. Create with
+ * sidereon_tle_batch_ground_tracks and release with
+ * sidereon_tle_batch_ground_tracks_free.
+ */
+typedef struct SidereonTleBatchGroundTracks SidereonTleBatchGroundTracks;
 
 /**
  * Batched topocentric look-angle result. Opaque to C. Create with
@@ -55549,6 +55556,62 @@ enum SidereonStatus sidereon_timescales_from_utc(int32_t year,
                                                  int32_t minute,
                                                  double second,
                                                  struct SidereonTimeScales *out);
+
+/**
+ * Compute sub-satellite (ground-track) geodetic points for a fleet of TLEs
+ * over a shared UTC unix-microsecond epoch grid. opsmode is one of
+ * SidereonTleOpsMode_* encoded as uint32_t. When parallel is true the
+ * engine's rayon batch path is used. On success writes a newly owned batch
+ * handle to *out_batch. Release it with
+ * sidereon_tle_batch_ground_tracks_free.
+ *
+ * Safety: tles must point to tle_count line pairs; epochs_unix_us must point
+ * to epoch_count int64_t values; out_batch must point to handle storage.
+ */
+enum SidereonStatus sidereon_tle_batch_ground_tracks(const struct SidereonTlePair *tles,
+                                                     size_t tle_count,
+                                                     const int64_t *epochs_unix_us,
+                                                     size_t epoch_count,
+                                                     uint32_t opsmode,
+                                                     bool parallel,
+                                                     struct SidereonTleBatchGroundTracks **out_batch);
+
+/**
+ * Release a batched ground-track handle. Null is a no-op. A non-null handle
+ * must come from sidereon_tle_batch_ground_tracks and must be freed exactly
+ * once with this function.
+ *
+ * Safety: batch must be NULL or a live handle from
+ * sidereon_tle_batch_ground_tracks. Passing a handle after it has already been
+ * freed is invalid.
+ */
+void sidereon_tle_batch_ground_tracks_free(struct SidereonTleBatchGroundTracks *batch);
+
+/**
+ * Copy the shape of a batched ground-track result as satellite_count and
+ * epoch_count.
+ *
+ * Safety: batch must be a live handle; out_satellite_count and out_epoch_count
+ * must point to size_t values.
+ */
+enum SidereonStatus sidereon_tle_batch_ground_tracks_shape(const struct SidereonTleBatchGroundTracks *batch,
+                                                           size_t *out_satellite_count,
+                                                           size_t *out_epoch_count);
+
+/**
+ * Copy flattened satellite-major ground-track geodetic rows from a batched
+ * result. Uses the variable-length output contract documented at the top of
+ * the header.
+ *
+ * Safety: batch must be a live handle; out must point to at least len writable
+ * entries or be NULL when len is 0; out_written and out_required must point to
+ * size_t values.
+ */
+enum SidereonStatus sidereon_tle_batch_ground_tracks_values(const struct SidereonTleBatchGroundTracks *batch,
+                                                            struct SidereonGeodetic *out,
+                                                            size_t len,
+                                                            size_t *out_written,
+                                                            size_t *out_required);
 
 /**
  * Compute topocentric look angles for a fleet of TLEs over a shared epoch

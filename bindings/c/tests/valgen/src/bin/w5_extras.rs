@@ -320,7 +320,9 @@ fn main() {
     let mut ecef_sun = Vec::new();
     let mut ecef_moon = Vec::new();
     for e in epochs {
-        let ts = sidereon_core::astro::passes::UtcInstant::from_unix_microseconds(e).time_scales();
+        let ts = sidereon_core::astro::passes::UtcInstant::from_unix_microseconds(e)
+            .try_time_scales()
+            .expect("valid UTC instant");
         let a = bodies::sun_moon_eci_at(&ts).expect("sun/moon ECI at");
         eci_sun.extend_from_slice(&a.sun);
         eci_moon.extend_from_slice(&a.moon);

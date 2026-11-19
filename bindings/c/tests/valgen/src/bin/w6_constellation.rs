@@ -7,8 +7,9 @@ mod shared;
 
 use shared::*;
 use sidereon_core::astro::passes::{
-    find_passes_for_satellite, ground_track, look_angle_batch_serial, propagate_teme_batch_serial,
-    visible_from_satellites, GroundStation, PassFinderOptions, UtcInstant,
+    find_passes_for_satellite, ground_track_batch_serial, look_angle_batch_serial,
+    propagate_teme_batch_serial, visible_from_satellites, GroundStation, PassFinderOptions,
+    UtcInstant,
 };
 use sidereon_core::astro::sgp4::{OpsMode, Satellite};
 use sidereon_core::astro::tle::{parse_with_policy, TlePolicy};
@@ -92,12 +93,13 @@ fn main() {
     def_bits_array("W6_CONST_LOOK_ELEVATION_DEG_BITS", &elevation);
     def_bits_array("W6_CONST_LOOK_RANGE_KM_BITS", &range);
 
+    let tracks = ground_track_batch_serial(&satellites, &epochs);
     let mut lat = Vec::new();
     let mut lon = Vec::new();
     let mut height = Vec::new();
     let mut track_lens = Vec::new();
-    for satellite in &satellites {
-        let track = ground_track(satellite, &epochs).unwrap_or_default();
+    for track in &tracks {
+        let track = track.clone().unwrap_or_default();
         track_lens.push(track.len());
         for point in &track {
             lat.push(point.lat_rad);

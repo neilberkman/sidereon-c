@@ -578,6 +578,22 @@ pub unsafe extern "C" fn sidereon_sun_moon_eci(
     })
 }
 
+fn try_time_scales_for_sun_moon(
+    epoch_unix_us: i64,
+) -> Result<
+    sidereon_core::astro::time::scales::TimeScales,
+    sidereon_core::astro::bodies::SunMoonError,
+> {
+    UtcInstant::from_unix_microseconds(epoch_unix_us)
+        .try_time_scales()
+        .ok_or(sidereon_core::astro::bodies::SunMoonError::FrameTransform(
+            FrameTransformError::InvalidInput {
+                field: "datetime",
+                reason: "invalid UTC instant",
+            },
+        ))
+}
+
 /// Analytic Sun and Moon positions in Earth-fixed ECEF, metres, for one
 /// unix-microsecond UTC epoch. Delegates to
 /// sidereon_core::astro::bodies::sun_moon_ecef.
@@ -604,7 +620,10 @@ pub unsafe extern "C" fn sidereon_sun_moon_ecef(
             3,
             &[0.0, 0.0, 0.0]
         ));
-        let ts = UtcInstant::from_unix_microseconds(epoch_unix_us).time_scales();
+        let ts = match try_time_scales_for_sun_moon(epoch_unix_us) {
+            Ok(ts) => ts,
+            Err(err) => return map_sun_moon_error("sidereon_sun_moon_ecef", err),
+        };
         match sidereon_core::astro::bodies::sun_moon_ecef(&ts) {
             Ok(sm) => {
                 c_try!(copy_exact_f64s(
@@ -2406,7 +2425,10 @@ unsafe fn sun_moon_epoch_batch(
     let mut sun = Vec::with_capacity(flat_len);
     let mut moon = Vec::with_capacity(flat_len);
     for &epoch_unix_us in epochs {
-        let ts = UtcInstant::from_unix_microseconds(epoch_unix_us).time_scales();
+        let ts = match try_time_scales_for_sun_moon(epoch_unix_us) {
+            Ok(ts) => ts,
+            Err(err) => return map_sun_moon_error(fn_name, err),
+        };
         let sm = match compute(&ts) {
             Ok(sm) => sm,
             Err(err) => return map_sun_moon_error(fn_name, err),
@@ -3264,5 +3286,59 @@ mod tests {
         let status = unsafe { sidereon_sun_moon_eci(0.0, sun.as_mut_ptr(), moon.as_mut_ptr()) };
         assert_eq!(status, SidereonStatus::Ok);
         assert!(snapshot_engine_error_for_test().is_none());
+
+        // 11. Extreme out-of-range instants return typed invalid-datetime errors instead of panicking
+        for &extreme_us in &[i64::MIN, i64::MAX] {
+            let status =
+                unsafe { sidereon_sun_moon_ecef(extreme_us, sun.as_mut_ptr(), moon.as_mut_ptr()) };
+            assert_eq!(status, SidereonStatus::InvalidArgument);
+            let (info, payload) = snapshot_engine_error_for_test().expect("SunMoon error recorded");
+            assert_eq!(info.family, SidereonEngineErrorFamily::SunMoon);
+            let v: serde_json::Value = serde_json::from_str(&payload).expect("valid json");
+            assert_eq!(v["error"]["kind"], "frame_transform");
+            assert_eq!(v["error"]["fields"]["cause"]["kind"], "invalid_input");
+            assert_eq!(v["error"]["fields"]["cause"]["fields"]["field"], "datetime");
+            assert_eq!(
+                v["error"]["fields"]["cause"]["fields"]["reason"],
+                "invalid UTC instant"
+            );
+
+            let extreme_epochs = [extreme_us];
+            let status = unsafe {
+                sidereon_sun_moon_ecef_batch(
+                    extreme_epochs.as_ptr(),
+                    1,
+                    sun.as_mut_ptr(),
+                    3,
+                    moon.as_mut_ptr(),
+                    3,
+                )
+            };
+            assert_eq!(status, SidereonStatus::InvalidArgument);
+            let (_, payload) = snapshot_engine_error_for_test().expect("SunMoon batch error");
+            let v: serde_json::Value = serde_json::from_str(&payload).expect("valid json");
+            assert_eq!(
+                v["error"]["fields"]["cause"]["fields"]["reason"],
+                "invalid UTC instant"
+            );
+
+            let status = unsafe {
+                sidereon_sun_moon_eci_batch(
+                    extreme_epochs.as_ptr(),
+                    1,
+                    sun.as_mut_ptr(),
+                    3,
+                    moon.as_mut_ptr(),
+                    3,
+                )
+            };
+            assert_eq!(status, SidereonStatus::InvalidArgument);
+            let (_, payload) = snapshot_engine_error_for_test().expect("SunMoon ECI batch error");
+            let v: serde_json::Value = serde_json::from_str(&payload).expect("valid json");
+            assert_eq!(
+                v["error"]["fields"]["cause"]["fields"]["reason"],
+                "invalid UTC instant"
+            );
+        }
     }
 }
