@@ -1298,6 +1298,16 @@ mod tests {
             SidereonStatus::InvalidArgument
         );
     }
+
+    #[test]
+    fn timescales_from_utc_rejects_extreme_years() {
+        let mut ts = std::mem::MaybeUninit::<SidereonTimeScales>::uninit();
+        for year in [i32::MIN, -1, 10_000, i32::MAX] {
+            let status =
+                unsafe { sidereon_timescales_from_utc(year, 1, 1, 0, 0, 0.0, ts.as_mut_ptr()) };
+            assert_eq!(status, SidereonStatus::InvalidArgument);
+        }
+    }
 }
 
 impl SidereonTimeScales {

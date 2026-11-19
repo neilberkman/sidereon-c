@@ -739,4 +739,79 @@ mod tests {
             "before_coverage"
         );
     }
+
+    #[test]
+    fn coverage_look_angles_rejects_out_of_range_instants() {
+        let l1 = b"1 25544U 98067A   18184.80969102  .00001614  00000-0  31745-4 0  9993\0";
+        let l2 = b"2 25544  51.6414 295.8524 0003435 262.6267 204.2868 15.54005638121106\0";
+        let mut tle = ptr::null_mut();
+        assert_eq!(
+            unsafe { sidereon_tle_load(l1.as_ptr().cast(), l2.as_ptr().cast(), 0, &mut tle) },
+            SidereonStatus::Ok
+        );
+        let tles = [tle as *const SidereonTle];
+        let stations = [SidereonGroundStation {
+            latitude_deg: 0.0,
+            longitude_deg: 0.0,
+            altitude_m: 0.0,
+        }];
+        for &epoch_unix_us in &[i64::MIN, i64::MAX] {
+            let mut grid = ptr::null_mut();
+            assert_eq!(
+                unsafe {
+                    sidereon_coverage_look_angles(
+                        tles.as_ptr(),
+                        1,
+                        stations.as_ptr(),
+                        1,
+                        epoch_unix_us,
+                        &mut grid,
+                    )
+                },
+                SidereonStatus::Ok
+            );
+            let mut cell = std::mem::MaybeUninit::uninit();
+            assert_eq!(
+                unsafe { sidereon_coverage_grid_look_angle(grid, 0, 0, cell.as_mut_ptr()) },
+                SidereonStatus::Ok
+            );
+            assert!(!unsafe { cell.assume_init() }.ok);
+            let (mut written, mut required) = (0, 0);
+            assert_eq!(
+                unsafe {
+                    sidereon_coverage_grid_look_angle_error_payload(
+                        grid,
+                        0,
+                        0,
+                        ptr::null_mut(),
+                        0,
+                        &mut written,
+                        &mut required,
+                    )
+                },
+                SidereonStatus::Ok
+            );
+            let mut bytes = vec![0; required];
+            assert_eq!(
+                unsafe {
+                    sidereon_coverage_grid_look_angle_error_payload(
+                        grid,
+                        0,
+                        0,
+                        bytes.as_mut_ptr(),
+                        bytes.len(),
+                        &mut written,
+                        &mut required,
+                    )
+                },
+                SidereonStatus::Ok
+            );
+            unsafe { sidereon_coverage_grid_free(grid) };
+            let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(payload["kind"], "invalid_input");
+            assert_eq!(payload["fields"]["field"], "datetime");
+            assert_eq!(payload["fields"]["reason"], "invalid UTC instant");
+        }
+        unsafe { sidereon_tle_free(tle) };
+    }
 }

@@ -405,3 +405,9 @@ cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -L"${lib_dir}" -lsidereon -Wl,-rpath,"${lib_dir}" -lm \
     -o "${target_dir}/rtk_hold_transport_smoke_ci"
 "${target_dir}/rtk_hold_transport_smoke_ci"
+
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
+    -I"${binding_root}/include" -I"${here}" "${here}/tle_batch_ground_tracks_smoke.c" \
+    -L"${lib_dir}" -lsidereon -Wl,-rpath,"${lib_dir}" -lm \
+    -o "${target_dir}/tle_batch_ground_tracks_smoke_ci"
+"${target_dir}/tle_batch_ground_tracks_smoke_ci"

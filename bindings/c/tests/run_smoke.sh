@@ -689,6 +689,15 @@ cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
 echo "== running ppp_prep_smoke program =="
 "${ppp_prep_out}"
 
+echo "== running tle_batch_ground_tracks_smoke program =="
+tle_batch_gt_out="${target_dir}/tle_batch_ground_tracks_smoke"
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
+    -I"${binding_root}/include" -I"${here}" \
+    "${here}/tle_batch_ground_tracks_smoke.c" \
+    -L"${lib_dir}" -lsidereon -Wl,-rpath,"${lib_dir}" -lm \
+    -o "${tle_batch_gt_out}"
+"${tle_batch_gt_out}"
+
 echo "== compiling ppp_kinematic_smoke program =="
 ppp_kinematic_out="${target_dir}/ppp_kinematic_smoke"
 cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \

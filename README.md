@@ -1,6 +1,6 @@
 # sidereon (C)
 
-Version 4.0.0 uses the published `sidereon` and `sidereon-core` 4.0.0 APIs.
+Version 4.1.0 uses the published `sidereon` and `sidereon-core` 4.1.0 APIs.
 
 GNSS and astrodynamics for C. Propagate satellites, predict passes, solve
 precise positions (SPP / RTK / PPP), and work with coordinate frames, time, and
@@ -529,8 +529,10 @@ selects arithmetic from the host platform.
   element conversions, anomaly conversions, Lambert transfer solutions, initial
   orbit determination (Gauss, Gibbs, Herrick-Gibbs), and relative motion in
   RSW / RTN / RIC / LVLH frames with Clohessy-Wiltshire propagation.
-- **Geometry and events.** Coordinate-frame transforms, look angles, eclipse,
-  conjunction screening with collision probability, and angular measures:
+- **Geometry and events.** Coordinate-frame transforms, look angles, ground
+  tracks (including `sidereon_tle_batch_ground_tracks`,
+  `sidereon_tle_batch_look_angles`, and `sidereon_satellite_constellation_*`),
+  eclipse, conjunction screening with collision probability, and angular measures:
   separation, position angle, phase angle, beta angle, parallactic angle.
 - **Observation and almanac.** Astrometric and apparent places (RA/Dec,
   azimuth/elevation with optional refraction, aberration, and light deflection)
