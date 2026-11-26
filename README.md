@@ -467,6 +467,96 @@ Coordinate failures return `SIDEREON_STATUS_INVALID_ARGUMENT` plus a
 offending coordinate. The function never panics, silently extrapolates, or
 selects arithmetic from the host platform.
 
+## Numerical force models and propagation
+
+Build immutable force handles for central and J2 gravity, Sun and Moon gravity,
+drag, solar and Earth radiation pressure, spherical harmonics, ECOM1, ECOM2,
+and empirical RTN terms. A composite retains its components in evaluation
+order. The same handles supply ordered parameter names and values, acceleration,
+position and velocity derivatives, and parameter derivatives. Force evaluations
+return finite values or typed errors. Non-finite inputs are refused when the
+force reads them. The J2 acceleration and its position derivatives follow
+Orekit's GCRF evaluation order.
+
+Use `sidereon_propagate_state_with_force_model` to sample a numerical ephemeris
+or `sidereon_propagate_state_with_dense_output` to propagate to one epoch and
+request continuous DP5(4) output. Both take a built-in force configuration,
+optional drag with fixed values or a space-weather table, and an ordered array
+of additional force handles. The engine applies those forces after the
+configured force and drag, as it does in force-parameter estimation. Pass
+NULL and a zero count for an empty array. Use `sidereon_propagate_variational`
+for state transitions and selected parameter sensitivities. Matrices are
+returned in row-major order.
+
+The released state and covariance ephemeris functions reject nonpositive
+initial steps and simultaneous zonal and spherical-harmonic gravity with
+`SIDEREON_STATUS_INVALID_ARGUMENT`, even for an empty epoch list.
+
+Numerical integration advances in elapsed TT, and public numerical epochs are
+absolute TDB seconds past J2000. Drag uses UT1 for Earth orientation and UTC
+for space weather. Solar radiation pressure defaults to apparent-disc
+occultation with WGS84 oblate Earth and lunar occultation. The conical selector
+uses Earth-only shadow geometry. Sun and Moon force inputs use GCRS axes.
+Assign a JPL DE ephemeris or a daily IERS 2010 orientation provider through
+`SidereonPropagationContext`. The covariance and built-in ephemeris entry
+points with context also accept explicit radiation settings.
+
+## Analytic orbits, gravity fields, and attitude
+
+The Eckstein–Hechler and Brouwer–Lyddane propagators convert mean and osculating
+elements and evaluate inertial states or ephemerides at TDB epochs. ICGEM fields
+provide complete header names, static coefficients and uncertainties,
+time-variable terms, tide-system conversion and spherical harmonic models.
+The geopotential uses the Holmes–Featherstone recursion. Body-fixed gravity
+evaluations use TT for time-dependent coefficients.
+
+The GNSS attitude routines expose spacecraft blocks, published yaw laws,
+single-state nominal yaw, and the DYB axes. Use `sidereon_gnss_attitude` to
+evaluate a law along a trajectory at TDB seconds past J2000. Samples contain
+GCRF satellite position and geocentric Sun position in metres, and satellite
+velocity in metres per second. The body and DYB axes are also in GCRF.
+
+Create a trajectory from SP3, broadcast navigation, an orbit scoring source,
+a GCRF Eckstein–Hechler or Brouwer–Lyddane propagator, or the continuous
+DP5(4) output from `sidereon_propagate_state_with_dense_output`. Query its
+inclusive TDB coverage with `sidereon_dense_output_coverage_tdb_seconds`.
+Earth-fixed sources use the default TDB Earth orientation provider or an IERS 2010
+provider supplied to the constructor. Their terrestrial coordinates must
+align with the provider's ITRF. The velocity difference half step
+is configurable in seconds of the source time scale. The Sun comes from the
+analytic ephemeris by default or from a supplied JPL DE ephemeris. Samples
+outside coverage return the typed `trajectory_unavailable` error. Some laws
+also require samples around the requested epoch.
+
+Each attitude trajectory retains its inputs, including the orbit source,
+orientation provider, and Sun ephemeris. Their original handles may be freed
+after the call that supplies them.
+
+Eclipse routines provide Earth and Moon shadow fractions, status, and
+position gradients. Compare value records field by field and use the
+equality functions for opaque values that support equality.
+
+## Orbit scoring and force-parameter estimation
+
+`sidereon_score_orbit` compares a predicted SP3, a broadcast orbit, or a
+sampled trajectory against a reference SP3. Reports include RTN, orbit-only
+SISRE, clock and combined SISRE statistics in horizon bins, with coverage per
+satellite and constellation. Predicted SP3 and broadcast sources retain their
+products independently. Broadcast sources and attitude trajectories retain the
+navigation message preference selected when they are created. Use the equality
+functions to compare scoring options, frame reconciliation options, epoch
+selections, and trajectory samples by value.
+
+Fit an initial state and selected force parameters to inertial positions or
+terrestrial SP3 observations with the orbit-parameter fitting functions.
+The options select the gravity tide system and use the same ordered array of
+additional forces as state propagation. Results provide the fitted state,
+ordered parameter names, covariance and correlation matrices, and RTN residuals.
+`sidereon_orbit_parameter_fit_force_parameter_at` returns each force estimate
+in list order with its name, initial and fitted values, and optional formal
+standard deviation. Variable-length arrays and UTF-8 text report the full
+required count when the caller supplies a short buffer.
+
 ## Capabilities
 
 - **Orbit propagation.** SGP4 from TLE/OMM, numerical state propagation with a

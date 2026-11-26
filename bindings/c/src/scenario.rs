@@ -384,7 +384,7 @@ pub unsafe extern "C" fn sidereon_scenario_simulate_json_with_broadcast(
                 "sidereon_scenario_simulate_json_with_broadcast",
                 &scenario,
                 sidereon_core::scenario::ScenarioExternalProductKind::Broadcast,
-                &broadcast.inner,
+                broadcast.inner.as_ref(),
                 None,
             ));
             c_try!(write_scenario_simulation(
@@ -447,7 +447,7 @@ pub unsafe extern "C" fn sidereon_scenario_simulate_json_with_broadcast_and_ione
                 "sidereon_scenario_simulate_json_with_broadcast_and_ionex",
                 &scenario,
                 sidereon_core::scenario::ScenarioExternalProductKind::Broadcast,
-                &broadcast.inner,
+                broadcast.inner.as_ref(),
                 Some(&media),
             ));
             c_try!(write_scenario_simulation(

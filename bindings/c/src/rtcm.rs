@@ -7412,7 +7412,7 @@ mod rtcm_encode_refusal_tests {
         );
         assert_eq!((written, required), (0, 0));
         let needed = unsafe { sidereon_last_error_message(ptr::null_mut(), 0) };
-        let mut message = vec![0_i8; needed + 1];
+        let mut message: Vec<c_char> = vec![0; needed + 1];
         unsafe { sidereon_last_error_message(message.as_mut_ptr(), message.len()) };
         let message = unsafe { CStr::from_ptr(message.as_ptr()) }.to_string_lossy();
         assert!(message.contains("index 1 out of range"), "{message}");
@@ -8245,7 +8245,7 @@ mod rtcm_encode_error_public_contract_tests {
         assert_eq!(actual["error"], expected_payload);
 
         let needed = unsafe { sidereon_last_error_message(std::ptr::null_mut(), 0) };
-        let mut message = vec![0_i8; needed + 1];
+        let mut message: Vec<c_char> = vec![0; needed + 1];
         unsafe { sidereon_last_error_message(message.as_mut_ptr(), message.len()) };
         let message = unsafe { CStr::from_ptr(message.as_ptr()) }.to_string_lossy();
         assert_eq!(

@@ -593,7 +593,7 @@ pub unsafe extern "C" fn sidereon_solve_velocity_broadcast(
 
         let inner = c_try!(guard(FN_NAME, SidereonStatus::Solve, || {
             sidereon::solve_velocity(
-                &broadcast.inner,
+                broadcast.inner.as_ref(),
                 &parsed,
                 receiver_ecef_m,
                 t_rx_j2000_s,

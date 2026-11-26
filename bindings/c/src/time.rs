@@ -2055,6 +2055,24 @@ pub unsafe extern "C" fn sidereon_exact_epoch_query_free(query: *mut SidereonExa
     free_boxed(query);
 }
 
+/// Return TDB minus TT in seconds at the supplied TT epoch.
+#[no_mangle]
+pub extern "C" fn sidereon_tdb_minus_tt_seconds(tt_j2000_s: f64) -> f64 {
+    sidereon_core::astro::time::scales::tdb_minus_tt_seconds(tt_j2000_s)
+}
+
+/// Convert TT seconds past J2000 to TDB seconds past J2000.
+#[no_mangle]
+pub extern "C" fn sidereon_tdb_from_tt_j2000_seconds(tt_j2000_s: f64) -> f64 {
+    sidereon_core::astro::time::scales::tdb_from_tt_j2000_seconds(tt_j2000_s)
+}
+
+/// Convert TDB seconds past J2000 to TT seconds past J2000.
+#[no_mangle]
+pub extern "C" fn sidereon_tt_from_tdb_j2000_seconds(tdb_j2000_s: f64) -> f64 {
+    sidereon_core::astro::time::scales::tt_from_tdb_j2000_seconds(tdb_j2000_s)
+}
+
 #[cfg(test)]
 mod exact_epoch_semantics_tests {
     use super::*;

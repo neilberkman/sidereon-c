@@ -19,7 +19,8 @@ pub enum SidereonBroadcastReasonKind {
 /// sidereon_broadcast_ephemeris_parse_nav and release with
 /// sidereon_broadcast_ephemeris_free.
 pub struct SidereonBroadcastEphemeris {
-    pub(crate) inner: BroadcastEphemeris,
+    pub(crate) inner: Arc<BroadcastEphemeris>,
+    nav_text: Box<str>,
     // BroadcastStore intentionally keeps this header value private. Keep the
     // parsed header value beside the public store handle so the C surface does
     // not replace an optional value with a sentinel.
@@ -46,7 +47,7 @@ pub unsafe extern "C" fn sidereon_broadcast_state_at_epoch_queries(
         let state = c_try!(guard_core(
             || {
                 sidereon_core::positioning::EphemerisSource::try_position_clock_group_delay_selected_at_epoch_query(
-                &broadcast.inner, satellite, &state_epoch.inner, &selection_epoch.inner,
+                broadcast.inner.as_ref(), satellite, &state_epoch.inner, &selection_epoch.inner,
             )
             },
             |error| crate::precise::precise_source_error_to_status(FN_NAME, error),
@@ -118,7 +119,7 @@ pub unsafe extern "C" fn sidereon_broadcast_transmit_epoch_clock_at_epoch_querie
         let selection_epoch = c_try!(require_ref(selection_epoch, FN_NAME, "selection_epoch"));
         let clock = c_try!(guard_core(
             || sidereon_core::positioning::EphemerisSource::try_transmit_epoch_clock_at_epoch_query(
-                &broadcast.inner,
+                broadcast.inner.as_ref(),
                 satellite,
                 &transmit_epoch.inner,
                 &selection_epoch.inner,
@@ -173,7 +174,7 @@ pub unsafe extern "C" fn sidereon_broadcast_clock_relativity_at_epoch_query(
             "position_ecef_m"
         ));
         match sidereon_core::positioning::EphemerisSource::clock_relativity_for_state_at_epoch_query(
-            &broadcast.inner,
+            broadcast.inner.as_ref(),
             satellite,
             &epoch.inner,
             [position[0], position[1], position[2]],
@@ -208,7 +209,7 @@ pub unsafe extern "C" fn sidereon_broadcast_ephemeris_variance_at_epoch_queries(
         let state_epoch = c_try!(require_ref(state_epoch, FN_NAME, "state_epoch"));
         let selection_epoch = c_try!(require_ref(selection_epoch, FN_NAME, "selection_epoch"));
         *out = sidereon_core::positioning::EphemerisSource::ephemeris_variance_at_epoch_query(
-            &broadcast.inner,
+            broadcast.inner.as_ref(),
             satellite,
             &state_epoch.inner,
             &selection_epoch.inner,
@@ -273,7 +274,8 @@ pub unsafe extern "C" fn sidereon_broadcast_ephemeris_parse_nav(
             write_boxed_handle(
                 out_broadcast,
                 SidereonBroadcastEphemeris {
-                    inner,
+                    inner: Arc::new(inner),
+                    nav_text: text.into(),
                     leap_seconds,
                 },
             );
@@ -345,7 +347,8 @@ pub unsafe extern "C" fn sidereon_broadcast_ephemeris_load_nav(
             write_boxed_handle(
                 out_broadcast,
                 SidereonBroadcastEphemeris {
-                    inner,
+                    inner: Arc::new(inner),
+                    nav_text: source.into(),
                     leap_seconds,
                 },
             );
@@ -412,7 +415,7 @@ pub unsafe extern "C" fn sidereon_broadcast_observables(
                 options
             ));
             let obs = match observables_predict(
-                &broadcast.inner,
+                broadcast.inner.as_ref(),
                 satellite,
                 receiver_ecef_m,
                 t_rx_j2000_s,
@@ -528,7 +531,7 @@ pub unsafe extern "C" fn sidereon_broadcast_observable_state(
             ));
             observable_state_common(
                 "sidereon_broadcast_observable_state",
-                &eph.inner,
+                eph.inner.as_ref(),
                 satellite_id,
                 t_j2000_s,
                 out_position_ecef_m,
@@ -677,7 +680,7 @@ pub unsafe extern "C" fn sidereon_broadcast_comparison_compare(
                 });
             }
             match sidereon_core::broadcast_comparison::compare(
-                &broadcast.inner,
+                broadcast.inner.as_ref(),
                 &precise.inner,
                 &sats,
                 &epochs_vec,
@@ -1490,7 +1493,7 @@ pub unsafe extern "C" fn sidereon_broadcast_comparison_compare_window(
                 velocity_half_s: window.velocity_half_s,
             };
             match sidereon_core::broadcast_comparison::compare_window(
-                &broadcast.inner,
+                broadcast.inner.as_ref(),
                 &precise.inner,
                 &sats,
                 &core_window,
@@ -1563,7 +1566,7 @@ pub unsafe extern "C" fn sidereon_broadcast_observables_batch(
                 "sidereon_broadcast_observables_batch",
                 raw
             ));
-            let results = core_predict_batch(&broadcast.inner, &parsed, opts);
+            let results = core_predict_batch(broadcast.inner.as_ref(), &parsed, opts);
             write_predict_batch_results(&results, out, out_ok);
             SidereonStatus::Ok
         },
@@ -1599,7 +1602,7 @@ pub unsafe extern "C" fn sidereon_broadcast_ephemeris_sample(
             ));
             ephemeris_sample_common(
                 "sidereon_broadcast_ephemeris_sample",
-                &broadcast.inner,
+                broadcast.inner.as_ref(),
                 satellites,
                 satellite_count,
                 start_j2000_s,
@@ -1643,7 +1646,7 @@ pub unsafe extern "C" fn sidereon_broadcast_observable_states_at_j2000_s(
             ));
             observable_states_at_j2000_s_common(
                 "sidereon_broadcast_observable_states_at_j2000_s",
-                &broadcast.inner,
+                broadcast.inner.as_ref(),
                 satellites,
                 epochs_j2000_s,
                 count,
@@ -1684,7 +1687,7 @@ pub unsafe extern "C" fn sidereon_broadcast_observable_states_at_shared_j2000_s(
             ));
             observable_states_at_shared_j2000_s_common(
                 "sidereon_broadcast_observable_states_at_shared_j2000_s",
-                &broadcast.inner,
+                broadcast.inner.as_ref(),
                 satellites,
                 satellite_count,
                 epoch_j2000_s,
@@ -2476,7 +2479,23 @@ pub unsafe extern "C" fn sidereon_broadcast_ephemeris_set_nav_message_preference
                     return SidereonStatus::InvalidArgument;
                 }
             };
-            broadcast.inner.set_message_preference(preference);
+            if let Some(inner) = Arc::get_mut(&mut broadcast.inner) {
+                inner.set_message_preference(preference);
+            } else {
+                // Existing orbit sources keep the navigation data and
+                // preference they were constructed with.
+                let mut inner = match BroadcastEphemeris::from_nav(&broadcast.nav_text) {
+                    Ok(inner) => inner,
+                    Err(err) => {
+                        set_last_error(format!(
+                            "sidereon_broadcast_ephemeris_set_nav_message_preference: {err}"
+                        ));
+                        return SidereonStatus::InvalidArgument;
+                    }
+                };
+                inner.set_message_preference(preference);
+                broadcast.inner = Arc::new(inner);
+            }
             SidereonStatus::Ok
         },
     )

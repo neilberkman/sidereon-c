@@ -1623,7 +1623,7 @@ pub unsafe extern "C" fn sidereon_ssr_corrected_state(
                 allow_regional_provider,
                 regional_provider_id,
             ));
-            let corrected = SsrCorrectedEphemeris::new(&broadcast.inner, &store.inner)
+            let corrected = SsrCorrectedEphemeris::new(broadcast.inner.as_ref(), &store.inner)
                 .with_staleness(StalenessPolicy::seconds(staleness_s))
                 .with_fallback(fallback);
             if let Some((position, clock)) = corrected.corrected_state(sat, t_j2000_s) {
@@ -1704,7 +1704,7 @@ pub unsafe extern "C" fn sidereon_ssr_corrected_state_at_epoch_queries(
                 return SidereonStatus::InvalidArgument;
             }
         };
-        let corrected = SsrCorrectedEphemeris::new(&broadcast.inner, &store.inner)
+        let corrected = SsrCorrectedEphemeris::new(broadcast.inner.as_ref(), &store.inner)
             .with_staleness(StalenessPolicy::seconds(staleness_s))
             .with_fallback(fallback)
             .with_correction_size_policy(size_policy);
@@ -1855,7 +1855,7 @@ pub unsafe extern "C" fn sidereon_ssr_transmit_epoch_clock_at_epoch_queries(
             regional_provider_id,
         ));
         let size_policy = c_try!(ssr_size_policy_from_c(FN_NAME, size_policy));
-        let corrected = SsrCorrectedEphemeris::new(&broadcast.inner, &store.inner)
+        let corrected = SsrCorrectedEphemeris::new(broadcast.inner.as_ref(), &store.inner)
             .with_staleness(StalenessPolicy::seconds(staleness_s))
             .with_fallback(fallback)
             .with_correction_size_policy(size_policy);
@@ -1959,7 +1959,7 @@ pub unsafe extern "C" fn sidereon_ssr_clock_relativity_at_epoch_query(
             regional_provider_id,
         ));
         let size_policy = c_try!(ssr_size_policy_from_c(FN_NAME, size_policy));
-        let corrected = SsrCorrectedEphemeris::new(&broadcast.inner, &store.inner)
+        let corrected = SsrCorrectedEphemeris::new(broadcast.inner.as_ref(), &store.inner)
             .with_staleness(StalenessPolicy::seconds(staleness_s))
             .with_fallback(fallback)
             .with_correction_size_policy(size_policy);
@@ -2023,7 +2023,7 @@ pub unsafe extern "C" fn sidereon_ssr_ephemeris_variance_at_epoch_queries(
             regional_provider_id,
         ));
         let size_policy = c_try!(ssr_size_policy_from_c(FN_NAME, size_policy));
-        let corrected = SsrCorrectedEphemeris::new(&broadcast.inner, &store.inner)
+        let corrected = SsrCorrectedEphemeris::new(broadcast.inner.as_ref(), &store.inner)
             .with_staleness(StalenessPolicy::seconds(staleness_s))
             .with_fallback(fallback)
             .with_correction_size_policy(size_policy);
@@ -2083,7 +2083,7 @@ pub unsafe extern "C" fn sidereon_ssr_solve_broadcast(
                 allow_regional_provider,
                 regional_provider_id,
             ));
-            let corrected = SsrCorrectedEphemeris::new(&broadcast.inner, &store.inner)
+            let corrected = SsrCorrectedEphemeris::new(broadcast.inner.as_ref(), &store.inner)
                 .with_staleness(StalenessPolicy::seconds(staleness_s))
                 .with_fallback(fallback);
             let solve_inputs = c_try!(build_spp_solve_inputs(
@@ -2150,7 +2150,7 @@ pub unsafe extern "C" fn sidereon_ssr_solve_broadcast_at_exact_epoch(
             allow_regional_provider,
             regional_provider_id,
         ));
-        let corrected = SsrCorrectedEphemeris::new(&broadcast.inner, &store.inner)
+        let corrected = SsrCorrectedEphemeris::new(broadcast.inner.as_ref(), &store.inner)
             .with_staleness(StalenessPolicy::seconds(staleness_s))
             .with_fallback(fallback)
             .with_correction_size_policy(size_policy);
@@ -2207,7 +2207,7 @@ pub unsafe extern "C" fn sidereon_ssr_solve_broadcast_v2_with_models_at_exact_ep
             allow_regional_provider,
             regional_provider_id,
         ));
-        let corrected = SsrCorrectedEphemeris::new(&broadcast.inner, &store.inner)
+        let corrected = SsrCorrectedEphemeris::new(broadcast.inner.as_ref(), &store.inner)
             .with_staleness(StalenessPolicy::seconds(staleness_s))
             .with_fallback(fallback)
             .with_correction_size_policy(size_policy);
@@ -2267,7 +2267,7 @@ pub unsafe extern "C" fn sidereon_ssr_ephemeris_sample(
                 allow_regional_provider,
                 regional_provider_id,
             ));
-            let corrected = SsrCorrectedEphemeris::new(&broadcast.inner, &store.inner)
+            let corrected = SsrCorrectedEphemeris::new(broadcast.inner.as_ref(), &store.inner)
                 .with_staleness(StalenessPolicy::seconds(staleness_s))
                 .with_fallback(fallback);
             ephemeris_sample_common(

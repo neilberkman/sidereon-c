@@ -1639,7 +1639,8 @@ pub unsafe extern "C" fn sidereon_sbas_corrected_state(
                 sat_id
             ));
             let corrected =
-                SbasCorrectedEphemeris::new(&broadcast.inner, &store.inner, geo).with_mode(mode);
+                SbasCorrectedEphemeris::new(broadcast.inner.as_ref(), &store.inner, geo)
+                    .with_mode(mode);
             if let Some((position, clock)) = corrected.position_clock_at_j2000_s(sat, t_j2000_s) {
                 c_try!(copy_exact_f64s(
                     "sidereon_sbas_corrected_state",
@@ -1679,8 +1680,8 @@ pub unsafe extern "C" fn sidereon_sbas_corrected_state_at_epoch_queries(
         let satellite = c_try!(parse_satellite_token(FN_NAME, sat_id));
         let state_epoch = c_try!(require_ref(state_epoch, FN_NAME, "state_epoch"));
         let selection_epoch = c_try!(require_ref(selection_epoch, FN_NAME, "selection_epoch"));
-        let corrected =
-            SbasCorrectedEphemeris::new(&broadcast.inner, &store.inner, geo).with_mode(mode);
+        let corrected = SbasCorrectedEphemeris::new(broadcast.inner.as_ref(), &store.inner, geo)
+            .with_mode(mode);
         let state = c_try!(guard_core(
             || {
                 sidereon_core::positioning::EphemerisSource::try_position_clock_group_delay_selected_at_epoch_query(
@@ -1733,8 +1734,8 @@ pub unsafe extern "C" fn sidereon_sbas_transmit_epoch_clock_at_epoch_queries(
         let satellite = c_try!(parse_satellite_token(FN_NAME, sat_id));
         let transmit_epoch = c_try!(require_ref(transmit_epoch, FN_NAME, "transmit_epoch"));
         let selection_epoch = c_try!(require_ref(selection_epoch, FN_NAME, "selection_epoch"));
-        let corrected =
-            SbasCorrectedEphemeris::new(&broadcast.inner, &store.inner, geo).with_mode(mode);
+        let corrected = SbasCorrectedEphemeris::new(broadcast.inner.as_ref(), &store.inner, geo)
+            .with_mode(mode);
         let clock = c_try!(guard_core(
             || sidereon_core::positioning::EphemerisSource::try_transmit_epoch_clock_at_epoch_query(
                 &corrected,
@@ -1785,8 +1786,8 @@ pub unsafe extern "C" fn sidereon_sbas_clock_relativity_at_epoch_query(
             "position_ecef_m"
         ));
         let position = [position[0], position[1], position[2]];
-        let corrected =
-            SbasCorrectedEphemeris::new(&broadcast.inner, &store.inner, geo).with_mode(mode);
+        let corrected = SbasCorrectedEphemeris::new(broadcast.inner.as_ref(), &store.inner, geo)
+            .with_mode(mode);
         match sidereon_core::positioning::EphemerisSource::clock_relativity_for_state_at_epoch_query(
             &corrected,
             satellite,
@@ -1828,8 +1829,8 @@ pub unsafe extern "C" fn sidereon_sbas_ephemeris_variance_at_epoch_queries(
         let satellite = c_try!(parse_satellite_token(FN_NAME, sat_id));
         let state_epoch = c_try!(require_ref(state_epoch, FN_NAME, "state_epoch"));
         let selection_epoch = c_try!(require_ref(selection_epoch, FN_NAME, "selection_epoch"));
-        let corrected =
-            SbasCorrectedEphemeris::new(&broadcast.inner, &store.inner, geo).with_mode(mode);
+        let corrected = SbasCorrectedEphemeris::new(broadcast.inner.as_ref(), &store.inner, geo)
+            .with_mode(mode);
         *out_variance_m2 =
             sidereon_core::positioning::EphemerisSource::ephemeris_variance_at_epoch_query(
                 &corrected,
@@ -1859,8 +1860,8 @@ pub unsafe extern "C" fn sidereon_sbas_solve_broadcast(
         let geo = c_try!(parse_satellite_token(FN_NAME, geo_sat_id));
         let mode = c_try!(sbas_solve_mode_from_c(FN_NAME, mode));
         let inputs = c_try!(require_ref(inputs, FN_NAME, "inputs"));
-        let corrected =
-            SbasCorrectedEphemeris::new(&broadcast.inner, &store.inner, geo).with_mode(mode);
+        let corrected = SbasCorrectedEphemeris::new(broadcast.inner.as_ref(), &store.inner, geo)
+            .with_mode(mode);
         let mut solve_inputs = c_try!(build_spp_solve_inputs(
             FN_NAME,
             inputs,
@@ -1902,8 +1903,8 @@ pub unsafe extern "C" fn sidereon_sbas_solve_broadcast_at_exact_epoch(
         let mode = c_try!(sbas_solve_mode_from_c(FN_NAME, mode));
         let inputs = c_try!(require_ref(inputs, FN_NAME, "inputs"));
         let receive_epoch = c_try!(require_ref(receive_epoch, FN_NAME, "receive_epoch"));
-        let corrected =
-            SbasCorrectedEphemeris::new(&broadcast.inner, &store.inner, geo).with_mode(mode);
+        let corrected = SbasCorrectedEphemeris::new(broadcast.inner.as_ref(), &store.inner, geo)
+            .with_mode(mode);
         let mut solve_inputs = c_try!(build_spp_solve_inputs(
             FN_NAME,
             inputs,
@@ -1950,8 +1951,8 @@ pub unsafe extern "C" fn sidereon_sbas_solve_broadcast_v2_with_models_at_exact_e
         let mode = c_try!(sbas_solve_mode_from_c(FN_NAME, mode));
         let inputs = c_try!(require_ref(inputs, FN_NAME, "inputs"));
         let receive_epoch = c_try!(require_ref(receive_epoch, FN_NAME, "receive_epoch"));
-        let corrected =
-            SbasCorrectedEphemeris::new(&broadcast.inner, &store.inner, geo).with_mode(mode);
+        let corrected = SbasCorrectedEphemeris::new(broadcast.inner.as_ref(), &store.inner, geo)
+            .with_mode(mode);
         let mut solve_inputs = c_try!(crate::spp::build_spp_solve_inputs_with_models(
             FN_NAME, inputs, models
         ));

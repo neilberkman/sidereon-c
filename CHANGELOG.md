@@ -2,6 +2,47 @@
 
 ## Unreleased
 
+### Added
+
+- Add Eckstein–Hechler and Brouwer–Lyddane propagation, element conversions,
+  ICGEM gravity fields, JPL DE ephemerides, and IERS 2010 Earth orientation.
+- Add GNSS satellite blocks and yaw laws, nominal yaw, DYB axes, lunar
+  occultation, and shadow gradients.
+- Evaluate GNSS attitude and GCRF samples along SP3, broadcast, scoring,
+  analytic, and numerical trajectories at TDB seconds past J2000. Add
+  continuous DP5(4) propagation output, and support optional IERS 2010
+  Earth orientation and JPL DE Sun data for attitude trajectories.
+- Expose the inclusive TDB coverage of continuous DP5(4) propagation output.
+- Add composable force handles, ECOM1 and ECOM2 radiation pressure, empirical
+  RTN terms, force parameter derivatives, and variational propagation.
+- Add orbit prediction scoring with value equality for scoring options,
+  frame reconciliation options, explicit epochs, and trajectory samples.
+- Add orbit fits that estimate force parameters with the initial state, select
+  the gravity tide system, and expose each force estimate with its name and
+  optional formal standard deviation.
+- Add ordered force handles to state ephemerides and single-epoch propagation
+  with dense output, alongside the built-in gravity and drag configuration.
+
+### Changed
+
+- Integrate numerical trajectories in elapsed TT and use UT1 orientation for
+  drag. Solar radiation pressure uses apparent-disc occultation with WGS84
+  oblate Earth and the Moon by default.
+- Evaluate analytic Sun and Moon force inputs on GCRS axes and use the
+  Holmes–Featherstone geopotential recursion.
+- Follow Orekit's J2 operation order for acceleration and position derivatives.
+- Return finite force evaluations or typed errors, recovering finite results
+  when intermediate values exceed the exponent range and validating the
+  inputs each model reads.
+
+### Fixed
+
+- Preserve the 4.1.0 argument errors for nonpositive initial steps and
+  conflicting gravity selections in released propagation and orbit-fit APIs.
+- Retain the orbit and supporting data in scoring sources and GNSS attitude
+  trajectories so input handles may be released independently.
+- Reject output slots that overlap input handles before writing to them.
+
 ## 4.1.0 - 2026-11-19
 
 ### Added

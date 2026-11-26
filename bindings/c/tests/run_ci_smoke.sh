@@ -411,3 +411,24 @@ cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -L"${lib_dir}" -lsidereon -Wl,-rpath,"${lib_dir}" -lm \
     -o "${target_dir}/tle_batch_ground_tracks_smoke_ci"
 "${target_dir}/tle_batch_ground_tracks_smoke_ci"
+
+for family in orbit_models orbit_estimates orbit_contracts; do
+    cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
+        -I"${binding_root}/include" "${here}/${family}_smoke.c" \
+        -L"${lib_dir}" -lsidereon -Wl,-rpath,"${lib_dir}" -lm \
+        -o "${target_dir}/${family}_smoke_ci"
+    if [ "${family}" = orbit_estimates ]; then
+        "${target_dir}/${family}_smoke_ci" \
+            "${here}/fixtures/sp3/GBM0MGXRAP_20201770000_01D_05M_ORB_120epoch.sp3"
+    else
+        "${target_dir}/${family}_smoke_ci"
+    fi
+done
+
+cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
+    -I"${binding_root}/include" "${here}/gnss_attitude_smoke.c" \
+    -L"${lib_dir}" -lsidereon -Wl,-rpath,"${lib_dir}" -lm \
+    -o "${target_dir}/gnss_attitude_smoke_ci"
+"${target_dir}/gnss_attitude_smoke_ci" \
+    "${here}/fixtures/sp3/GBM0MGXRAP_20201770000_01D_05M_ORB_120epoch.sp3" \
+    "${here}/fixtures/nav/ESBC00DNK_R_20201770000_01D_MN.rnx"

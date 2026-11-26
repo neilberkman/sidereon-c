@@ -738,6 +738,7 @@ macro_rules! fb_try {
 }
 
 mod almanac;
+mod analytic;
 mod antenna;
 mod antex;
 mod araim;
@@ -752,6 +753,7 @@ mod constellation;
 mod covariance;
 mod coverage;
 mod data_distribution;
+mod de;
 mod decay;
 mod dgnss;
 mod dop;
@@ -764,6 +766,7 @@ mod error_metrics;
 mod estimation;
 mod fde;
 mod force;
+mod force_models;
 mod frame;
 mod frame_catalog;
 mod fusion;
@@ -773,6 +776,9 @@ mod geofence;
 mod geoid;
 mod geometry;
 mod glonass;
+mod gnss_attitude;
+mod gravity_field;
+mod iers2010;
 mod ils;
 mod inertial;
 mod iod;
@@ -789,6 +795,8 @@ mod omm_array;
 mod opm;
 mod orbit;
 mod orbit_fit;
+mod orbit_parameters;
+mod orbit_scoring;
 mod ppp;
 mod ppp_cycle_slip;
 #[cfg(test)]
@@ -834,8 +842,10 @@ mod time;
 mod tle;
 mod trls;
 mod tropo;
+mod variational;
 mod velocity;
 pub use almanac::*;
+pub use analytic::*;
 pub use antenna::*;
 pub use antex::*;
 pub use araim::*;
@@ -850,6 +860,7 @@ pub use constellation::*;
 pub use covariance::*;
 pub use coverage::*;
 pub use data_distribution::*;
+pub use de::*;
 pub use decay::*;
 pub use dgnss::*;
 pub use dop::*;
@@ -862,6 +873,7 @@ pub use error_metrics::*;
 pub use estimation::*;
 pub use fde::*;
 pub use force::*;
+pub use force_models::*;
 pub use frame::*;
 pub use frame_catalog::*;
 pub use fusion::*;
@@ -871,6 +883,9 @@ pub use geofence::*;
 pub use geoid::*;
 pub use geometry::*;
 pub use glonass::*;
+pub use gnss_attitude::*;
+pub use gravity_field::*;
+pub use iers2010::*;
 pub use ils::*;
 pub use inertial::*;
 pub use iod::*;
@@ -886,6 +901,8 @@ pub use omm::*;
 pub use opm::*;
 pub use orbit::*;
 pub use orbit_fit::*;
+pub use orbit_parameters::*;
+pub use orbit_scoring::*;
 pub use ppp::*;
 pub use ppp_raim::*;
 pub use ppp_tec::*;
@@ -926,6 +943,7 @@ pub use time::*;
 pub use tle::*;
 pub use trls::*;
 pub use tropo::*;
+pub use variational::*;
 pub use velocity::*;
 
 /// Run a fallible body, mapping any `sidereon` error to a status code while
@@ -1284,6 +1302,26 @@ unsafe fn copy_exact_f64s(
     Ok(())
 }
 
+unsafe fn check_named_value_outputs(
+    operation: &str,
+    out_name: *mut u8,
+    name_count: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+    out_value: *mut f64,
+) -> Result<(), SidereonStatus> {
+    let value = checked_output_range(operation, out_value, 1, "out_value")?;
+    let written = checked_output_range(operation, out_written, 1, "out_written")?;
+    let required = checked_output_range(operation, out_required, 1, "out_required")?;
+    reject_overlapping_outputs(operation, value, written, "out_value", "out_written")?;
+    reject_overlapping_outputs(operation, value, required, "out_value", "out_required")?;
+    if !out_name.is_null() && name_count != 0 {
+        let name = checked_output_range(operation, out_name, name_count, "out_name")?;
+        reject_overlapping_outputs(operation, value, name, "out_value", "out_name")?;
+    }
+    Ok(())
+}
+
 unsafe fn copy_prefix_to_c<T: Copy>(
     fn_name: &str,
     out_name: &str,
@@ -1483,6 +1521,29 @@ unsafe fn reject_output_overlaps_handle<O, H>(
         output_name,
         handle_name,
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn init_handle_copy_counts<T, H>(
+    operation: &str,
+    out: *mut T,
+    capacity: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+    handle: *const H,
+    handle_name: &str,
+) -> Result<(), SidereonStatus> {
+    reject_outputs_overlapping_handle(
+        operation,
+        &[
+            (out.cast(), size_of::<T>(), capacity, "out"),
+            (out_written.cast(), size_of::<usize>(), 1, "out_written"),
+            (out_required.cast(), size_of::<usize>(), 1, "out_required"),
+        ],
+        handle,
+        handle_name,
+    )?;
+    init_copy_counts(operation, out_written, out_required)
 }
 
 unsafe fn reject_outputs_overlapping_handle<H>(
@@ -2562,6 +2623,7 @@ fn propagation_force_model_kind_from_c(
     fn_name: &str,
     config: &SidereonStatePropagationConfig,
     tide_system: CoreTideSystem,
+    legacy_gravity_check: bool,
 ) -> Result<ForceModelKind, SidereonStatus> {
     match config.force_model {
         value if value == SidereonPropagationForceModel::TwoBody as u32 => {
@@ -2585,7 +2647,7 @@ fn propagation_force_model_kind_from_c(
             })
         }
         value if value == SidereonPropagationForceModel::Composite as u32 => {
-            composite_force_model_from_c(fn_name, config, tide_system)
+            composite_force_model_from_c(fn_name, config, tide_system, legacy_gravity_check)
         }
         value if value == SidereonPropagationForceModel::EarthPhaseA as u32 => {
             let srp = if config.force_components.has_solar_radiation_pressure {
@@ -2707,7 +2769,17 @@ fn state_propagator_from_c_with_tide_system(
         set_last_error(format!("{fn_name}: initial_step_s must be positive"));
         return Err(SidereonStatus::InvalidArgument);
     }
-    let force_model = propagation_force_model_kind_from_c(fn_name, config, tide_system)?;
+    build_state_propagator_from_c(fn_name, config, tide_system, true)
+}
+
+fn build_state_propagator_from_c(
+    fn_name: &str,
+    config: &SidereonStatePropagationConfig,
+    tide_system: CoreTideSystem,
+    legacy_gravity_check: bool,
+) -> Result<StatePropagator, SidereonStatus> {
+    let force_model =
+        propagation_force_model_kind_from_c(fn_name, config, tide_system, legacy_gravity_check)?;
     let integrator = propagation_integrator_from_c(fn_name, config.integrator)?;
     let mut options = IntegratorOptions::default();
     options.abs_tol = config.abs_tol;
@@ -2753,6 +2825,7 @@ fn composite_force_model_from_c(
     fn_name: &str,
     config: &SidereonStatePropagationConfig,
     tide_system: CoreTideSystem,
+    legacy_gravity_check: bool,
 ) -> Result<ForceModelKind, SidereonStatus> {
     let components = config.force_components;
     let effective_mu = if config.mu_km3_s2_enabled {
@@ -2807,7 +2880,7 @@ fn composite_force_model_from_c(
         ));
     }
     if components.has_spherical_harmonic {
-        if components.has_zonal {
+        if legacy_gravity_check && components.has_zonal {
             set_last_error(format!(
                 "{fn_name}: zonal and spherical_harmonic gravity cannot both be enabled"
             ));
@@ -3221,6 +3294,35 @@ pub unsafe extern "C" fn sidereon_last_error_message(buf: *mut c_char, len: usiz
             needed
         })
     })
+}
+
+#[cfg(test)]
+fn assert_argument_refusal(status: SidereonStatus, expected: &str) {
+    use crate::engine_error::{
+        sidereon_last_engine_error_info, SidereonEngineErrorFamily, SidereonEngineErrorInfo,
+    };
+
+    assert_eq!(status, SidereonStatus::InvalidArgument, "{expected}");
+    let mut message = vec![0u8; expected.len() + 1];
+    assert_eq!(
+        unsafe { sidereon_last_error_message(message.as_mut_ptr().cast(), message.len()) },
+        expected.len()
+    );
+    assert_eq!(
+        CStr::from_bytes_with_nul(&message).unwrap().to_bytes(),
+        expected.as_bytes()
+    );
+
+    let mut info = SidereonEngineErrorInfo {
+        family: SidereonEngineErrorFamily::Propagation,
+        payload_len: usize::MAX,
+    };
+    assert_eq!(
+        unsafe { sidereon_last_engine_error_info(&mut info) },
+        SidereonStatus::Ok
+    );
+    assert_eq!(info.family, SidereonEngineErrorFamily::None);
+    assert_eq!(info.payload_len, 0);
 }
 
 /// Return a static, null-terminated, human-readable name for a status code.

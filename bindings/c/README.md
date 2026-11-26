@@ -1400,6 +1400,12 @@ Generated reference values use the published `sidereon-core =4.1.0` crate.
 Their source revision is recorded in `tests/CORE_REVISION` and agrees with the
 crate's source identity. CSPICE reference states are independent reference data.
 
+## 4.2.0 API
+
+| Area | Entry points and behavior |
+| --- | --- |
+| Continuous numerical propagation | `sidereon_propagate_state_with_dense_output` returns an owned DP5(4) interpolant. `sidereon_dense_output_coverage_tdb_seconds` reports its inclusive endpoints in chronological order in TDB seconds past J2000, with `has_coverage` false for an empty interpolant. |
+
 ## 4.1.0 API
 
 | Area | Entry points and behavior |

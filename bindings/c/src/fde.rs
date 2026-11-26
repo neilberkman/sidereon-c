@@ -226,7 +226,7 @@ pub unsafe extern "C" fn sidereon_fde_solve_broadcast(
             ));
             run_fde(
                 "sidereon_fde_solve_broadcast",
-                &broadcast.inner,
+                broadcast.inner.as_ref(),
                 solve_inputs,
                 inputs.with_geodetic,
                 options,
@@ -337,7 +337,7 @@ pub unsafe extern "C" fn sidereon_robust_fde_solve_broadcast(
             ));
             run_robust_fde(
                 "sidereon_robust_fde_solve_broadcast",
-                &broadcast.inner,
+                broadcast.inner.as_ref(),
                 solve_inputs,
                 inputs.with_geodetic,
                 robust_config_value_from_c(robust),

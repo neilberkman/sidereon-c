@@ -690,6 +690,7 @@ pub unsafe extern "C" fn sidereon_propagate_covariance(
             epochs_s,
             epoch_count,
             options,
+            ptr::null(),
             out_ephemeris,
         )
     })
@@ -718,6 +719,7 @@ pub unsafe extern "C" fn sidereon_propagate_covariance_with_tide_system(
             epochs_s,
             epoch_count,
             options,
+            ptr::null(),
             out_ephemeris,
         )
     })
@@ -732,31 +734,45 @@ unsafe fn propagate_covariance_with_tide_system_impl(
     epochs_s: *const f64,
     epoch_count: usize,
     options: SidereonCovariancePropagationOptions,
+    environment: *const SidereonStatePropagationEnvironment,
     out_ephemeris: *mut *mut SidereonCovarianceEphemeris,
 ) -> SidereonStatus {
     let config = c_try!(require_ref(config, fn_name, "config"));
     let covariance0 = c_try!(require_ref(covariance0, fn_name, "covariance0"));
     let covariance0 = c_try!(covariance_matrix_from_c(fn_name, covariance0));
     let epochs = c_try!(times_from_c(fn_name, epochs_s, epoch_count));
-    let propagator = c_try!(state_propagator_from_c_with_tide_system(
-        fn_name,
-        config,
-        tide_system
-    ));
+    let (propagator, context) = if environment.is_null() {
+        (
+            c_try!(state_propagator_from_c_with_tide_system(
+                fn_name,
+                config,
+                tide_system
+            )),
+            None,
+        )
+    } else {
+        let (propagator, context) = c_try!(crate::force_models::state_propagator_with_environment(
+            fn_name,
+            config,
+            environment
+        ));
+        (propagator, Some(context))
+    };
     let input_frame = c_try!(covariance_frame_from_c(fn_name, options.input_frame));
     let output_frame = c_try!(covariance_frame_from_c(fn_name, options.output_frame));
     let process_noise = c_try!(process_noise_from_c(fn_name, options.process_noise));
     let mut prop_opts = sidereon_core::astro::propagator::CovariancePropagationOptions::default();
     prop_opts.process_noise = process_noise;
     prop_opts.output_frame = output_frame;
-    let result = match propagator.propagate_covariance(
-        sidereon_core::astro::propagator::LabeledCovariance6 {
-            covariance: covariance0,
-            frame: input_frame,
-        },
-        epochs,
-        &prop_opts,
-    ) {
+    let initial = sidereon_core::astro::propagator::LabeledCovariance6 {
+        covariance: covariance0,
+        frame: input_frame,
+    };
+    let result = match if let Some(context) = context {
+        propagator.propagate_covariance_with_context(initial, epochs, &prop_opts, &context)
+    } else {
+        propagator.propagate_covariance(initial, epochs, &prop_opts)
+    } {
         Ok(result) => result,
         Err(err) => return map_propagation_error(fn_name, err),
     };
@@ -906,6 +922,120 @@ fn covariance_matrix_to_c(value: &Covariance6) -> SidereonCovarianceMatrix6 {
     }
 }
 
+/// Propagate an orbit covariance with an explicit force environment.
+///
+/// Safety: config and covariance0 are readable, epochs_s has epoch_count entries,
+/// and environment is NULL or readable with live handles. out is writable.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_propagate_covariance_with_context(
+    config: *const SidereonStatePropagationConfig,
+    covariance0: *const SidereonCovarianceMatrix6,
+    epochs_s: *const f64,
+    epoch_count: usize,
+    options: SidereonCovariancePropagationOptions,
+    environment: *const SidereonStatePropagationEnvironment,
+    out: *mut *mut SidereonCovarianceEphemeris,
+) -> SidereonStatus {
+    const OP: &str = "sidereon_propagate_covariance_with_context";
+    engine_error_operation_boundary(OP, SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out, OP, "out"));
+        out.write(ptr::null_mut());
+        let default = SidereonStatePropagationEnvironment {
+            gravity_tide_system: 0,
+            solar_shadow: ptr::null(),
+            earth_radiation_pressure: ptr::null(),
+            context: ptr::null(),
+            space_weather: ptr::null(),
+        };
+        let environment = environment.as_ref().unwrap_or(&default);
+        propagate_covariance_with_tide_system_impl(
+            OP,
+            config,
+            CoreTideSystem::TideFree,
+            covariance0,
+            epochs_s,
+            epoch_count,
+            options,
+            environment,
+            out,
+        )
+    })
+}
+
+/// Propagated Cartesian state and inertial covariance.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonStateWithCovariance {
+    /// Propagated state.
+    pub state: SidereonCartesianState,
+    /// Propagated inertial covariance.
+    pub covariance: SidereonCovarianceMatrix6,
+}
+
+/// Propagate a state and inertial covariance by a span in TDB seconds.
+///
+/// Safety: config and covariance0 are readable. environment is NULL or
+/// readable with live handles. out is disjoint writable result storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_propagate_state_with_covariance_with_context(
+    config: *const SidereonStatePropagationConfig,
+    covariance0: *const SidereonCovarianceMatrix6,
+    span_seconds: f64,
+    environment: *const SidereonStatePropagationEnvironment,
+    out: *mut SidereonStateWithCovariance,
+) -> SidereonStatus {
+    const OP: &str = "sidereon_propagate_state_with_covariance_with_context";
+    engine_error_operation_boundary(OP, SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out, OP, "out"));
+        let config = c_try!(require_ref(config, OP, "config"));
+        let covariance = c_try!(covariance_matrix_from_c(
+            OP,
+            c_try!(require_ref(covariance0, OP, "covariance0"))
+        ));
+        let (propagator, context) = c_try!(crate::force_models::state_propagator_with_environment(
+            OP,
+            config,
+            environment
+        ));
+        let (state, covariance) = c_try!(propagator
+            .propagate_state_with_covariance_with_context(covariance, span_seconds, &context)
+            .map_err(|err| map_propagation_error(OP, err)));
+        out.write(SidereonStateWithCovariance {
+            state: cartesian_state_to_c(&state),
+            covariance: covariance_matrix_to_c(&covariance),
+        });
+        SidereonStatus::Ok
+    })
+}
+
+/// Evaluate the numerical state transition matrix at an absolute TDB epoch.
+///
+/// Safety: config is readable, environment is NULL or readable with live
+/// handles, and out is disjoint writable matrix storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_state_transition_matrix_to_with_context(
+    config: *const SidereonStatePropagationConfig,
+    epoch_tdb_seconds: f64,
+    environment: *const SidereonStatePropagationEnvironment,
+    out: *mut f64,
+) -> SidereonStatus {
+    const OP: &str = "sidereon_state_transition_matrix_to_with_context";
+    engine_error_operation_boundary(OP, SidereonStatus::Panic, || {
+        let out = c_try!(require_out_f64_array::<36>(out, OP, "out"));
+        let config = c_try!(require_ref(config, OP, "config"));
+        let (propagator, context) = c_try!(crate::force_models::state_propagator_with_environment(
+            OP,
+            config,
+            environment
+        ));
+        let stm = c_try!(propagator
+            .state_transition_matrix_to_with_context(epoch_tdb_seconds, &context)
+            .map_err(|err| map_propagation_error(OP, err)));
+        out.write(std::array::from_fn(|i| stm[i / 6][i % 6]));
+        SidereonStatus::Ok
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -935,6 +1065,68 @@ mod tests {
                     "[{row}][{column}]"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn released_covariance_propagation_refuses_invalid_configuration() {
+        let mut zero_step = crate::ephemeris::default_state_propagation_config();
+        zero_step.initial_step_s = 0.0;
+        let mut conflicting_gravity = zero_step;
+        conflicting_gravity.initial_step_s = 60.0;
+        conflicting_gravity.force_model = SidereonPropagationForceModel::Composite as u32;
+        conflicting_gravity.force_components.has_zonal = true;
+        conflicting_gravity.force_components.has_spherical_harmonic = true;
+
+        let covariance = diagonal([1.0; 6]);
+        let options = SidereonCovariancePropagationOptions {
+            input_frame: SidereonCovarianceFrame::Inertial as u32,
+            output_frame: SidereonCovarianceFrame::Inertial as u32,
+            process_noise: SidereonProcessNoise {
+                kind: SidereonProcessNoiseKind::None as u32,
+                q_radial_km2_s3: 0.0,
+                q_transverse_km2_s3: 0.0,
+                q_normal_km2_s3: 0.0,
+            },
+        };
+        for (config, reason) in [
+            (zero_step, "initial_step_s must be positive"),
+            (
+                conflicting_gravity,
+                "zonal and spherical_harmonic gravity cannot both be enabled",
+            ),
+        ] {
+            let mut out = ptr::dangling_mut();
+            let status = unsafe {
+                sidereon_propagate_covariance(
+                    &config,
+                    &covariance,
+                    ptr::null(),
+                    0,
+                    options,
+                    &mut out,
+                )
+            };
+            assert_argument_refusal(status, &format!("sidereon_propagate_covariance: {reason}"));
+            assert!(out.is_null());
+
+            out = ptr::dangling_mut();
+            let status = unsafe {
+                sidereon_propagate_covariance_with_tide_system(
+                    &config,
+                    SidereonGravityTideSystem::TideFree as u32,
+                    &covariance,
+                    ptr::null(),
+                    0,
+                    options,
+                    &mut out,
+                )
+            };
+            assert_argument_refusal(
+                status,
+                &format!("sidereon_propagate_covariance_with_tide_system: {reason}"),
+            );
+            assert!(out.is_null());
         }
     }
 

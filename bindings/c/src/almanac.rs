@@ -495,7 +495,7 @@ pub unsafe extern "C" fn sidereon_eclipse_status_with_model(
     )
 }
 
-fn earth_shadow_model_from_c(
+pub(crate) fn earth_shadow_model_from_c(
     fn_name: &str,
     value: u32,
 ) -> Result<sidereon_core::astro::events::eclipse::EarthShadowModel, SidereonStatus> {
@@ -2762,6 +2762,430 @@ fn ecliptic_to_c(value: sidereon_core::astro::bodies::Ecliptic) -> SidereonEclip
         longitude_deg: value.longitude_deg,
         latitude_deg: value.latitude_deg,
         distance_km: value.distance_km,
+    }
+}
+
+/// Analytic geocentric positions of the Sun and Moon on GCRS axes.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SidereonSunMoon {
+    /// Sun position in metres.
+    pub sun_m: [f64; 3],
+    /// Moon position in metres.
+    pub moon_m: [f64; 3],
+}
+
+unsafe fn write_gcrs_sun_moon(
+    operation: &str,
+    out: *mut SidereonSunMoon,
+    evaluate: impl FnOnce() -> Result<
+        sidereon_core::astro::bodies::SunMoon,
+        sidereon_core::astro::bodies::SunMoonError,
+    >,
+) -> SidereonStatus {
+    engine_error_operation_boundary(operation, SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out, operation, "out"));
+        out.write(SidereonSunMoon::default());
+        let value = c_try!(evaluate().map_err(|err| map_sun_moon_error(operation, err)));
+        out.write(SidereonSunMoon {
+            sun_m: value.sun,
+            moon_m: value.moon,
+        });
+        SidereonStatus::Ok
+    })
+}
+
+/// Evaluate geocentric Sun and Moon positions in GCRS at TT Julian centuries past J2000.
+///
+/// Safety: out must point to writable storage for one position record.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sun_moon_gcrs(
+    tt_julian_centuries: f64,
+    out: *mut SidereonSunMoon,
+) -> SidereonStatus {
+    write_gcrs_sun_moon("sidereon_sun_moon_gcrs", out, || {
+        sidereon_core::astro::bodies::sun_moon_gcrs(tt_julian_centuries)
+    })
+}
+
+/// Evaluate geocentric Sun and Moon positions in GCRS at a UTC epoch in Unix microseconds.
+///
+/// Safety: out must point to writable storage for one position record.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sun_moon_gcrs_at(
+    epoch_unix_us: i64,
+    out: *mut SidereonSunMoon,
+) -> SidereonStatus {
+    write_gcrs_sun_moon("sidereon_sun_moon_gcrs_at", out, || {
+        sidereon_core::astro::bodies::sun_moon_gcrs_at(&try_time_scales_for_sun_moon(
+            epoch_unix_us,
+        )?)
+    })
+}
+
+/// Evaluate geocentric Sun and Moon positions in GCRS at TDB seconds past J2000.
+///
+/// Safety: out must point to writable storage for one position record.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_sun_moon_gcrs_at_tdb_seconds(
+    epoch_tdb_seconds: f64,
+    out: *mut SidereonSunMoon,
+) -> SidereonStatus {
+    write_gcrs_sun_moon("sidereon_sun_moon_gcrs_at_tdb_seconds", out, || {
+        sidereon_core::astro::bodies::sun_moon_gcrs_at_tdb_seconds(epoch_tdb_seconds)
+    })
+}
+
+/// Solar lighting function for radiation pressure.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SidereonShadowFunction {
+    /// Apparent-disc occultation.
+    #[default]
+    ApparentDisc = 0,
+    /// Linear conical Earth shadow.
+    Conical = 1,
+}
+
+/// Fraction in shadow and its derivative with respect to satellite position.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SidereonShadowGradient {
+    /// Fraction of the solar disc in shadow.
+    pub fraction: f64,
+    /// Partial derivatives with respect to satellite coordinates, per km.
+    pub gradient_per_km: [f64; 3],
+}
+
+fn eclipse_error_value(
+    error: sidereon_core::astro::events::eclipse::EclipseError,
+) -> serde_json::Value {
+    let sidereon_core::astro::events::eclipse::EclipseError::InvalidInput { field, reason } = error;
+    error_node(
+        "invalid_input",
+        serde_json::json!({"field":field, "reason":reason}),
+    )
+}
+
+fn map_eclipse_error(
+    operation: &str,
+    error: sidereon_core::astro::events::eclipse::EclipseError,
+) -> SidereonStatus {
+    record_engine_error(
+        SidereonEngineErrorFamily::Eclipse,
+        operation,
+        eclipse_error_value(error),
+    );
+    extra_invalid_arg(operation, error)
+}
+
+fn map_shadow_gradient_error(
+    operation: &str,
+    error: sidereon_core::astro::events::eclipse::ShadowGradientError,
+) -> SidereonStatus {
+    use sidereon_core::astro::events::eclipse::ShadowGradientError;
+    let detail = match error {
+        ShadowGradientError::Eclipse(cause) => error_node(
+            "eclipse",
+            serde_json::json!({"cause":eclipse_error_value(cause)}),
+        ),
+        ShadowGradientError::NumericalFailure => {
+            error_node("numerical_failure", serde_json::json!({}))
+        }
+        _ => error_node("unknown", serde_json::json!({})),
+    };
+    record_engine_error(SidereonEngineErrorFamily::ShadowGradient, operation, detail);
+    extra_invalid_arg(operation, error)
+}
+
+/// Evaluate the fraction in lunar shadow.
+///
+/// Safety: each position points to three doubles in km and out points to
+/// writable storage for one result. The output and inputs must be disjoint.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_eclipse_moon_shadow_fraction(
+    sat_pos_km: *const f64,
+    sun_pos_km: *const f64,
+    moon_pos_km: *const f64,
+    out: *mut f64,
+) -> SidereonStatus {
+    const OP: &str = "sidereon_eclipse_moon_shadow_fraction";
+    engine_error_operation_boundary(OP, SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out, OP, "out"));
+        out.write(0.0);
+        let sat = c_try!(read_vec3(OP, "sat_pos_km", sat_pos_km));
+        let sun = c_try!(read_vec3(OP, "sun_pos_km", sun_pos_km));
+        let moon = c_try!(read_vec3(OP, "moon_pos_km", moon_pos_km));
+        let value = c_try!(sidereon_core::astro::events::eclipse::moon_shadow_fraction(
+            sat, sun, moon
+        )
+        .map_err(|err| map_eclipse_error(OP, err)));
+        out.write(value);
+        SidereonStatus::Ok
+    })
+}
+
+/// Evaluate combined Earth and Moon occultation with spherical Earth.
+///
+/// Safety: each position points to three doubles in km and out points to
+/// writable storage for one result. The output and inputs must be disjoint.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_eclipse_shadow_fraction_with_moon(
+    sat_pos_km: *const f64,
+    sun_pos_km: *const f64,
+    moon_pos_km: *const f64,
+    out: *mut f64,
+) -> SidereonStatus {
+    const OP: &str = "sidereon_eclipse_shadow_fraction_with_moon";
+    engine_error_operation_boundary(OP, SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out, OP, "out"));
+        out.write(0.0);
+        let sat = c_try!(read_vec3(OP, "sat_pos_km", sat_pos_km));
+        let sun = c_try!(read_vec3(OP, "sun_pos_km", sun_pos_km));
+        let moon = c_try!(read_vec3(OP, "moon_pos_km", moon_pos_km));
+        let value = c_try!(
+            sidereon_core::astro::events::eclipse::shadow_fraction_with_moon(sat, sun, moon)
+                .map_err(|err| map_eclipse_error(OP, err))
+        );
+        out.write(value);
+        SidereonStatus::Ok
+    })
+}
+
+/// Evaluate combined Earth and Moon occultation with the selected Earth figure.
+///
+/// Safety: each position points to three doubles in km and out points to
+/// writable storage for one result. The output and inputs must be disjoint.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_eclipse_shadow_fraction_with_model_and_moon(
+    sat_pos_km: *const f64,
+    sun_pos_km: *const f64,
+    moon_pos_km: *const f64,
+    model: u32,
+    out: *mut f64,
+) -> SidereonStatus {
+    const OP: &str = "sidereon_eclipse_shadow_fraction_with_model_and_moon";
+    engine_error_operation_boundary(OP, SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out, OP, "out"));
+        out.write(0.0);
+        let sat = c_try!(read_vec3(OP, "sat_pos_km", sat_pos_km));
+        let sun = c_try!(read_vec3(OP, "sun_pos_km", sun_pos_km));
+        let moon = c_try!(read_vec3(OP, "moon_pos_km", moon_pos_km));
+        let model = c_try!(earth_shadow_model_from_c(OP, model));
+        let value = c_try!(
+            sidereon_core::astro::events::eclipse::shadow_fraction_with_model_and_moon(
+                sat, sun, moon, model
+            )
+            .map_err(|err| map_eclipse_error(OP, err))
+        );
+        out.write(value);
+        SidereonStatus::Ok
+    })
+}
+
+/// Classify combined Earth and Moon occultation with spherical Earth.
+///
+/// Safety: each position points to three doubles in km and out points to
+/// writable storage for one result. The output and inputs must be disjoint.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_eclipse_status_with_moon(
+    sat_pos_km: *const f64,
+    sun_pos_km: *const f64,
+    moon_pos_km: *const f64,
+    out: *mut SidereonEclipseStatus,
+) -> SidereonStatus {
+    const OP: &str = "sidereon_eclipse_status_with_moon";
+    engine_error_operation_boundary(OP, SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out, OP, "out"));
+        out.write(SidereonEclipseStatus::Sunlit);
+        let sat = c_try!(read_vec3(OP, "sat_pos_km", sat_pos_km));
+        let sun = c_try!(read_vec3(OP, "sun_pos_km", sun_pos_km));
+        let moon = c_try!(read_vec3(OP, "moon_pos_km", moon_pos_km));
+        let value = c_try!(
+            sidereon_core::astro::events::eclipse::status_with_moon(sat, sun, moon)
+                .map_err(|err| map_eclipse_error(OP, err))
+        );
+        out.write(match value {
+            sidereon_core::astro::events::eclipse::EclipseStatus::Sunlit => {
+                SidereonEclipseStatus::Sunlit
+            }
+            sidereon_core::astro::events::eclipse::EclipseStatus::Penumbra => {
+                SidereonEclipseStatus::Penumbra
+            }
+            sidereon_core::astro::events::eclipse::EclipseStatus::Umbra => {
+                SidereonEclipseStatus::Umbra
+            }
+        });
+        SidereonStatus::Ok
+    })
+}
+
+/// Classify combined Earth and Moon occultation with the selected Earth figure.
+///
+/// Safety: each position points to three doubles in km and out points to
+/// writable storage for one result. The output and inputs must be disjoint.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_eclipse_status_with_model_and_moon(
+    sat_pos_km: *const f64,
+    sun_pos_km: *const f64,
+    moon_pos_km: *const f64,
+    model: u32,
+    out: *mut SidereonEclipseStatus,
+) -> SidereonStatus {
+    const OP: &str = "sidereon_eclipse_status_with_model_and_moon";
+    engine_error_operation_boundary(OP, SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out, OP, "out"));
+        out.write(SidereonEclipseStatus::Sunlit);
+        let sat = c_try!(read_vec3(OP, "sat_pos_km", sat_pos_km));
+        let sun = c_try!(read_vec3(OP, "sun_pos_km", sun_pos_km));
+        let moon = c_try!(read_vec3(OP, "moon_pos_km", moon_pos_km));
+        let model = c_try!(earth_shadow_model_from_c(OP, model));
+        let value = c_try!(
+            sidereon_core::astro::events::eclipse::status_with_model_and_moon(
+                sat, sun, moon, model
+            )
+            .map_err(|err| map_eclipse_error(OP, err))
+        );
+        out.write(match value {
+            sidereon_core::astro::events::eclipse::EclipseStatus::Sunlit => {
+                SidereonEclipseStatus::Sunlit
+            }
+            sidereon_core::astro::events::eclipse::EclipseStatus::Penumbra => {
+                SidereonEclipseStatus::Penumbra
+            }
+            sidereon_core::astro::events::eclipse::EclipseStatus::Umbra => {
+                SidereonEclipseStatus::Umbra
+            }
+        });
+        SidereonStatus::Ok
+    })
+}
+
+/// Evaluate spherical Earth conical shadow and its position derivative.
+///
+/// Safety: each position points to three doubles in km and out points to
+/// writable storage for one result. The output and inputs must be disjoint.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_eclipse_shadow_fraction_with_gradient(
+    sat_pos_km: *const f64,
+    sun_pos_km: *const f64,
+    out: *mut SidereonShadowGradient,
+) -> SidereonStatus {
+    const OP: &str = "sidereon_eclipse_shadow_fraction_with_gradient";
+    engine_error_operation_boundary(OP, SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out, OP, "out"));
+        out.write(SidereonShadowGradient::default());
+        let sat = c_try!(read_vec3(OP, "sat_pos_km", sat_pos_km));
+        let sun = c_try!(read_vec3(OP, "sun_pos_km", sun_pos_km));
+        let value = c_try!(
+            sidereon_core::astro::events::eclipse::shadow_fraction_with_gradient(sat, sun)
+                .map_err(|err| map_shadow_gradient_error(OP, err))
+        );
+        out.write(SidereonShadowGradient {
+            fraction: value.0,
+            gradient_per_km: value.1,
+        });
+        SidereonStatus::Ok
+    })
+}
+
+/// Evaluate conical shadow and its position derivative for the selected Earth figure.
+///
+/// Safety: each position points to three doubles in km and out points to
+/// writable storage for one result. The output and inputs must be disjoint.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_eclipse_shadow_fraction_with_model_and_gradient(
+    sat_pos_km: *const f64,
+    sun_pos_km: *const f64,
+    model: u32,
+    out: *mut SidereonShadowGradient,
+) -> SidereonStatus {
+    const OP: &str = "sidereon_eclipse_shadow_fraction_with_model_and_gradient";
+    engine_error_operation_boundary(OP, SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out, OP, "out"));
+        out.write(SidereonShadowGradient::default());
+        let sat = c_try!(read_vec3(OP, "sat_pos_km", sat_pos_km));
+        let sun = c_try!(read_vec3(OP, "sun_pos_km", sun_pos_km));
+        let model = c_try!(earth_shadow_model_from_c(OP, model));
+        let value = c_try!(
+            sidereon_core::astro::events::eclipse::shadow_fraction_with_model_and_gradient(
+                sat, sun, model
+            )
+            .map_err(|err| map_shadow_gradient_error(OP, err))
+        );
+        out.write(SidereonShadowGradient {
+            fraction: value.0,
+            gradient_per_km: value.1,
+        });
+        SidereonStatus::Ok
+    })
+}
+
+/// Evaluate the apparent-disc Earth and Moon shadow and its position derivative.
+///
+/// Safety: each position points to three doubles in km and out points to
+/// writable storage for one result. The output and inputs must be disjoint.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_eclipse_shadow_fraction_with_model_moon_and_gradient(
+    sat_pos_km: *const f64,
+    sun_pos_km: *const f64,
+    moon_pos_km: *const f64,
+    model: u32,
+    out: *mut SidereonShadowGradient,
+) -> SidereonStatus {
+    const OP: &str = "sidereon_eclipse_shadow_fraction_with_model_moon_and_gradient";
+    engine_error_operation_boundary(OP, SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out, OP, "out"));
+        out.write(SidereonShadowGradient::default());
+        let sat = c_try!(read_vec3(OP, "sat_pos_km", sat_pos_km));
+        let sun = c_try!(read_vec3(OP, "sun_pos_km", sun_pos_km));
+        let moon = c_try!(read_vec3(OP, "moon_pos_km", moon_pos_km));
+        let model = c_try!(earth_shadow_model_from_c(OP, model));
+        let value = c_try!(
+            sidereon_core::astro::events::eclipse::shadow_fraction_with_model_moon_and_gradient(
+                sat, sun, moon, model
+            )
+            .map_err(|err| map_shadow_gradient_error(OP, err))
+        );
+        out.write(SidereonShadowGradient {
+            fraction: value.0,
+            gradient_per_km: value.1,
+        });
+        SidereonStatus::Ok
+    })
+}
+
+/// IAU 2015 nominal solar radius in kilometres.
+#[no_mangle]
+pub extern "C" fn sidereon_iau_2015_solar_radius_km() -> f64 {
+    sidereon_core::astro::constants::astro::IAU_2015_SOLAR_RADIUS_KM
+}
+
+#[cfg(test)]
+mod shadow_error_tests {
+    use super::*;
+    use crate::engine_error::snapshot_engine_error_for_test;
+
+    #[test]
+    fn antumbra_axis_refuses_gradient() {
+        let satellite = [-2_000_000.0, 0.0, 0.0];
+        let sun = [150_000_000.0, 0.0, 0.0];
+        let mut result = SidereonShadowGradient::default();
+        assert_eq!(
+            unsafe {
+                sidereon_eclipse_shadow_fraction_with_gradient(
+                    satellite.as_ptr(),
+                    sun.as_ptr(),
+                    &mut result,
+                )
+            },
+            SidereonStatus::InvalidArgument,
+        );
+        let (info, detail) = snapshot_engine_error_for_test().unwrap();
+        assert_eq!(info.family, SidereonEngineErrorFamily::ShadowGradient);
+        let detail: serde_json::Value = serde_json::from_str(&detail).unwrap();
+        assert_eq!(detail["error"]["kind"], "numerical_failure");
+        assert_eq!(detail["error"]["fields"], serde_json::json!({}));
     }
 }
 

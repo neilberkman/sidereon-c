@@ -272,7 +272,7 @@ pub unsafe extern "C" fn sidereon_broadcast_emission_media_batch_at_j2000_s(
             ));
             emission_media_batch_common(
                 "sidereon_broadcast_emission_media_batch_at_j2000_s",
-                &broadcast.inner,
+                broadcast.inner.as_ref(),
                 satellites,
                 emission_epochs_j2000_s,
                 count,
