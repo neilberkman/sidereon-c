@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## [4.2.0] - 2026-11-26
 
 ### Added
 
@@ -24,6 +24,8 @@
   with dense output, alongside the built-in gravity and drag configuration.
 
 ### Changed
+
+- Pin `sidereon` and `sidereon-core` to `4.2.0`.
 
 - Integrate numerical trajectories in elapsed TT and use UT1 orientation for
   drag. Solar radiation pressure uses apparent-disc occultation with WGS84

@@ -1,4 +1,4 @@
-/* sidereon-core revision 3c61740f5e3d71f930ce40a6504fc9ce320c0fa7 */
+/* sidereon-core revision 17b493fe8cf6d1b45ecc0982e7d594b88cdd2b7b */
 #ifndef SIDEREON_GNSS_ATTITUDE_PINS_H
 #define SIDEREON_GNSS_ATTITUDE_PINS_H
 #include <stdint.h>
