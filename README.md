@@ -1,6 +1,6 @@
 # sidereon (C)
 
-Version 4.1.0 uses the published `sidereon` and `sidereon-core` 4.1.0 APIs.
+Version 4.2.0 uses the published `sidereon` and `sidereon-core` 4.2.0 APIs.
 
 GNSS and astrodynamics for C. Propagate satellites, predict passes, solve
 precise positions (SPP / RTK / PPP), and work with coordinate frames, time, and

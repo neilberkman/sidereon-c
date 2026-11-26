@@ -26,5 +26,5 @@ publish = false
 
 [dependencies]
 # Published engine API.
-sidereon-core = "=4.1.0"
+sidereon-core = "=4.2.0"
 serde_json = "1"

@@ -9,6 +9,7 @@
 #include <string.h>
 
 int main(void) {
+    char version[33];
     uint32_t major = 99, minor = 99, patch = 99;
     sidereon_version(&major, &minor, &patch);
     if (major != SIDEREON_VERSION_MAJOR || minor != SIDEREON_VERSION_MINOR ||
@@ -25,6 +26,13 @@ int main(void) {
         fprintf(stderr, "version_smoke: SIDEREON_VERSION_STRING is \"%s\" but "
                         "sidereon_version_string() returns \"%s\"\n",
                 SIDEREON_VERSION_STRING, sidereon_version_string());
+        return 1;
+    }
+    snprintf(version, sizeof(version), "%u.%u.%u",
+             (unsigned)major, (unsigned)minor, (unsigned)patch);
+    if (strcmp(version, SIDEREON_VERSION_STRING) != 0) {
+        fprintf(stderr, "version_smoke: numeric version %s differs from %s\n",
+                version, SIDEREON_VERSION_STRING);
         return 1;
     }
     sidereon_version(NULL, NULL, NULL); /* all-NULL is a no-op, not a crash. */

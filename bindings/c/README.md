@@ -1,6 +1,6 @@
 # sidereon (C)
 
-Version 4.1.0 uses the published `sidereon` and `sidereon-core` 4.1.0 APIs.
+Version 4.2.0 uses the published `sidereon` and `sidereon-core` 4.2.0 APIs.
 
 A C-ABI binding over the Sidereon GNSS positioning engine. It is a thin interface
 in the C idiom: opaque handles, integer status codes, and caller-allocated output
@@ -1396,7 +1396,7 @@ reference point, for one) rounds each operation separately, as Rust does.
 
 ## Reference data
 
-Generated reference values use the published `sidereon-core =4.1.0` crate.
+Generated reference values use the published `sidereon-core =4.2.0` crate.
 Their source revision is recorded in `tests/CORE_REVISION` and agrees with the
 crate's source identity. CSPICE reference states are independent reference data.
 

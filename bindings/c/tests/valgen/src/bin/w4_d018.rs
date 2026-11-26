@@ -156,7 +156,7 @@ fn scenario() {
     // sidereon_scenario_simulate_json serializes the output with serde_json.
     let bytes = serde_json::to_vec(&set).expect("scenario output JSON");
     println!("/* test_scenario: sidereon_core::scenario::simulate_scenario of the test's JSON. */");
-    println!("/* The scenario fingerprint and JSON include the core engine version, 4.1.0. */");
+    println!("/* The scenario fingerprint and JSON include the core engine version, 4.2.0. */");
     int("SCENARIO_OBSERVATION_COUNT", set.observation_count());
     int(
         "SCENARIO_EPOCH_OFFSET_COUNT",

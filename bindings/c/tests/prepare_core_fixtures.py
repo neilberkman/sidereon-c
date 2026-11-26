@@ -197,7 +197,7 @@ def registry_emitters(source: Path, scratch: Path, helper_root: Path) -> tuple[P
     if not lock_source.is_file():
         fail(
             "registry fixture dependency lockfile is missing; "
-            "a lockfile for sidereon-core 4.1.0 is required"
+            "a lockfile for sidereon-core 4.2.0 is required"
         )
     shutil.copy2(manifest_source, harness / "Cargo.toml")
     shutil.copy2(lock_source, harness / "Cargo.lock")
