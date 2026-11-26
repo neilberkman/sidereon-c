@@ -791,7 +791,7 @@ pub unsafe extern "C" fn sidereon_solve_broadcast(
         })();
         *out_solution = ptr::null_mut();
         let (broadcast, solve_inputs, with_geodetic) = c_try!(input_result);
-        let inner = match solve_broadcast(&broadcast.inner, &solve_inputs, with_geodetic) {
+        let inner = match solve_broadcast(broadcast.inner.as_ref(), &solve_inputs, with_geodetic) {
             Ok(solution) => solution,
             Err(err) => {
                 set_last_error(format!("sidereon_solve_broadcast: {err}"));
@@ -834,26 +834,30 @@ pub unsafe extern "C" fn sidereon_solve_broadcast_with_models(
         })();
         *out_solution = ptr::null_mut();
         let (broadcast, solve_inputs, with_geodetic, policy) = c_try!(input_result);
-        let solution =
-            match sidereon::solve_spp(&broadcast.inner, &solve_inputs, with_geodetic, policy) {
-                Ok(solution) => solution,
-                Err(sidereon::Error::Spp(sidereon_core::positioning::SolvePolicyError::Solve(
-                    error,
-                ))) => {
-                    set_last_error(format!("{FN}: {error}"));
-                    crate::engine_error::record_engine_error(
-                        crate::engine_error::SidereonEngineErrorFamily::Spp,
-                        FN,
-                        crate::engine_error::spp_error_value(&error),
-                    );
-                    return SidereonStatus::Solve;
-                }
-                Err(error) => {
-                    set_last_error(format!("{FN}: {error}"));
-                    crate::engine_error::RecordEngineError::record_engine_error(FN, &error);
-                    return SidereonStatus::Solve;
-                }
-            };
+        let solution = match sidereon::solve_spp(
+            broadcast.inner.as_ref(),
+            &solve_inputs,
+            with_geodetic,
+            policy,
+        ) {
+            Ok(solution) => solution,
+            Err(sidereon::Error::Spp(sidereon_core::positioning::SolvePolicyError::Solve(
+                error,
+            ))) => {
+                set_last_error(format!("{FN}: {error}"));
+                crate::engine_error::record_engine_error(
+                    crate::engine_error::SidereonEngineErrorFamily::Spp,
+                    FN,
+                    crate::engine_error::spp_error_value(&error),
+                );
+                return SidereonStatus::Solve;
+            }
+            Err(error) => {
+                set_last_error(format!("{FN}: {error}"));
+                crate::engine_error::RecordEngineError::record_engine_error(FN, &error);
+                return SidereonStatus::Solve;
+            }
+        };
         write_boxed_handle(out_solution, SidereonSppSolution { inner: solution });
         SidereonStatus::Ok
     })
@@ -902,7 +906,7 @@ pub unsafe extern "C" fn sidereon_solve_broadcast_with_models_at_exact_epoch(
         };
         let solution = c_try!(guard_result(FN, SidereonStatus::Solve, || {
             sidereon_core::positioning::solve_with_exact_epoch_and_policy(
-                &broadcast.inner,
+                broadcast.inner.as_ref(),
                 &exact_inputs,
                 with_geodetic,
                 policy,
@@ -989,8 +993,13 @@ pub unsafe extern "C" fn sidereon_solve_with_fallback(
             let policy = StalenessPolicy {
                 max_staleness_s: policy.max_staleness_s,
             };
-            match solve_with_fallback(&set, &broadcast.inner, &solve_inputs, policy, with_geodetic)
-            {
+            match solve_with_fallback(
+                &set,
+                broadcast.inner.as_ref(),
+                &solve_inputs,
+                policy,
+                with_geodetic,
+            ) {
                 Ok(sourced) => {
                     write_boxed_handle(
                         out_solution,

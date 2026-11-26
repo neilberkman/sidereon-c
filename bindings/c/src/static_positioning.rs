@@ -354,7 +354,7 @@ pub unsafe extern "C" fn sidereon_solve_static_position_broadcast(
             ));
             solve_static_position_common(
                 "sidereon_solve_static_position_broadcast",
-                &broadcast.inner,
+                broadcast.inner.as_ref(),
                 epochs,
                 epoch_count,
                 options,
@@ -403,7 +403,7 @@ pub unsafe extern "C" fn sidereon_solve_static_position_broadcast_v2(
         let broadcast = c_try!(require_ref(broadcast, FN, "broadcast"));
         solve_static_position_v2_common(
             FN,
-            &broadcast.inner,
+            broadcast.inner.as_ref(),
             epochs,
             epoch_count,
             options,

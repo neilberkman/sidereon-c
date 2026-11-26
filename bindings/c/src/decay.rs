@@ -260,6 +260,80 @@ pub fn map_decay_error(fn_name: &str, err: DecayError) -> SidereonStatus {
     }
 }
 
+/// Estimate the time to reentry with explicit Earth orientation and body ephemeris.
+///
+/// Safety: initial and config are readable. context is NULL or readable with
+/// live handles. out is disjoint writable result storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_estimate_decay_with_context(
+    initial: *const SidereonCartesianState,
+    config: *const SidereonDecayConfig,
+
+    context: *const SidereonPropagationContext,
+    out: *mut SidereonDecayEstimate,
+) -> SidereonStatus {
+    const OP: &str = "sidereon_estimate_decay_with_context";
+    engine_error_operation_boundary(OP, SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out, OP, "out"));
+        let initial = c_try!(require_ref(initial, OP, "initial"));
+        let config = c_try!(decay_config_from_c(
+            OP,
+            c_try!(require_ref(config, OP, "config"))
+        ));
+
+        let context =
+            crate::force_models::force_context_from_c(context, PropagationContext::default());
+        let value = c_try!(
+            sidereon_core::astro::propagator::estimate_decay_with_context(
+                cartesian_state_from_c(initial),
+                &config,
+                &context,
+            )
+            .map_err(|err| map_decay_error(OP, err))
+        );
+        out.write(decay_estimate_to_c(value));
+        SidereonStatus::Ok
+    })
+}
+
+/// Estimate the time to reentry with explicit Earth orientation and body ephemeris.
+///
+/// Safety: initial and config are readable. context is NULL or readable with
+/// live handles. table is live. out is disjoint writable result storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_estimate_decay_with_source_and_context(
+    initial: *const SidereonCartesianState,
+    config: *const SidereonDecayConfig,
+    table: *const SidereonSpaceWeatherTable,
+    context: *const SidereonPropagationContext,
+    out: *mut SidereonDecayEstimate,
+) -> SidereonStatus {
+    const OP: &str = "sidereon_estimate_decay_with_source_and_context";
+    engine_error_operation_boundary(OP, SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out, OP, "out"));
+        let initial = c_try!(require_ref(initial, OP, "initial"));
+        let config = c_try!(decay_config_from_c(
+            OP,
+            c_try!(require_ref(config, OP, "config"))
+        ));
+        let table = c_try!(require_ref(table, OP, "table"));
+        let source = SpaceWeatherSource::Table(table.inner.clone());
+        let context =
+            crate::force_models::force_context_from_c(context, PropagationContext::default());
+        let value = c_try!(
+            sidereon_core::astro::propagator::estimate_decay_with_source_and_context(
+                cartesian_state_from_c(initial),
+                &config,
+                &source,
+                &context,
+            )
+            .map_err(|err| map_decay_error(OP, err))
+        );
+        out.write(decay_estimate_to_c(value));
+        SidereonStatus::Ok
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -707,3 +707,22 @@ cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
     -o "${ppp_kinematic_out}"
 echo "== running ppp_kinematic_smoke program =="
 "${ppp_kinematic_out}" "${ppp_sp3_path}"
+
+for family in orbit_models orbit_estimates orbit_contracts gnss_attitude; do
+    cc -std=c11 -Wall -Wextra -Werror -ffp-contract=off \
+        -I"${binding_root}/include" "${here}/${family}_smoke.c" \
+        -L"${lib_dir}" -lsidereon -Wl,-rpath,"${lib_dir}" -lm \
+        -o "${target_dir}/${family}_smoke"
+done
+"${target_dir}/orbit_models_smoke" \
+    "${local_core_fixtures}/bodies/de440/lnxp1990.440" \
+    "${local_core_fixtures}/icgem/synthetic_icgem2.gfc"
+"${target_dir}/orbit_estimates_smoke" "${ppp_sp3_path}"
+"${target_dir}/gnss_attitude_smoke" \
+    "${here}/fixtures/sp3/GBM0MGXRAP_20201770000_01D_05M_ORB_120epoch.sp3" \
+    "${here}/fixtures/nav/ESBC00DNK_R_20201770000_01D_MN.rnx" \
+    "${local_core_fixtures}/bodies/de440/lnxp1990.440"
+"${target_dir}/orbit_contracts_smoke" \
+    "${local_core_fixtures}/bodies/de440/lnxp1990.440" \
+    "${local_core_fixtures}/icgem/synthetic_icgem2.gfc" \
+    "${local_core_fixtures}/space_weather/SW-All-20260702-trim.csv"

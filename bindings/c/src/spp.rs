@@ -1339,7 +1339,7 @@ pub unsafe extern "C" fn sidereon_solve_broadcast_with_doppler_velocity(
             ));
             solve_spp_with_doppler_common(
                 "sidereon_solve_broadcast_with_doppler_velocity",
-                &broadcast.inner,
+                broadcast.inner.as_ref(),
                 inputs,
                 doppler_observations,
                 doppler_count,
@@ -1834,13 +1834,16 @@ pub unsafe extern "C" fn sidereon_spp_inputs_from_rinex_obs(
                 obs,
                 options
             ));
-            let inner =
-                match sidereon::spp_inputs_from_rinex_obs(&obs.inner, &broadcast.inner, &options) {
-                    Ok(inner) => inner,
-                    Err(err) => {
-                        return map_rinex_spp_error("sidereon_spp_inputs_from_rinex_obs", err);
-                    }
-                };
+            let inner = match sidereon::spp_inputs_from_rinex_obs(
+                &obs.inner,
+                broadcast.inner.as_ref(),
+                &options,
+            ) {
+                Ok(inner) => inner,
+                Err(err) => {
+                    return map_rinex_spp_error("sidereon_spp_inputs_from_rinex_obs", err);
+                }
+            };
             write_boxed_handle(out_inputs, SidereonRinexSppInputs::from_core(inner));
             SidereonStatus::Ok
         },
@@ -1868,11 +1871,14 @@ pub unsafe extern "C" fn sidereon_spp_inputs_from_rinex_obs_with_models(
             options.qzss_clock = qzss_clock;
             options.troposphere_model = troposphere_model;
         }
-        let inner =
-            match sidereon::spp_inputs_from_rinex_obs(&obs.inner, &broadcast.inner, &options) {
-                Ok(inner) => inner,
-                Err(err) => return map_rinex_spp_error(FN, err),
-            };
+        let inner = match sidereon::spp_inputs_from_rinex_obs(
+            &obs.inner,
+            broadcast.inner.as_ref(),
+            &options,
+        ) {
+            Ok(inner) => inner,
+            Err(err) => return map_rinex_spp_error(FN, err),
+        };
         write_boxed_handle(out_inputs, SidereonRinexSppInputs::from_core(inner));
         SidereonStatus::Ok
     })
@@ -1926,7 +1932,7 @@ pub unsafe extern "C" fn sidereon_solve_spp_from_rinex_obs(
                 ))
             };
             let inner = match sidereon::solve_spp_from_rinex_obs(
-                &broadcast.inner,
+                broadcast.inner.as_ref(),
                 &obs.inner,
                 &options,
                 with_geodetic,
@@ -1972,7 +1978,7 @@ pub unsafe extern "C" fn sidereon_solve_spp_from_rinex_obs_with_models(
             c_try!(crate::solve::solve_policy_from_c(FN, &*policy))
         };
         let inner = match sidereon::solve_spp_from_rinex_obs(
-            &broadcast.inner,
+            broadcast.inner.as_ref(),
             &obs.inner,
             &options,
             with_geodetic,
@@ -4439,7 +4445,7 @@ mod tests {
             SidereonStatus::Ok
         );
         let expected_broadcast = core_solve_with_doppler_velocity(
-            unsafe { &(*broadcast).inner },
+            unsafe { (*broadcast).inner.as_ref() },
             &empty_inputs,
             &[],
             true,

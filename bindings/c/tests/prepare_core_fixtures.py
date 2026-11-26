@@ -128,8 +128,11 @@ def git_archive(source: Path, destination: Path) -> None:
     safe_extract(raw.stdout, destination)
 
 
-def exact_test(command: list[str], env: dict[str, str], name: str, label: str | None = None) -> None:
-    result = subprocess.run(command, env=env, capture_output=True, text=True, check=False)
+def exact_test(
+    command: list[str], env: dict[str, str], name: str, label: str | None = None,
+    *, cwd: Path | None = None,
+) -> None:
+    result = subprocess.run(command, cwd=cwd, env=env, capture_output=True, text=True, check=False)
     output = result.stdout + result.stderr
     if result.returncode:
         fail(f"emitter {name} failed:\n{output}")
@@ -170,6 +173,7 @@ def candidate_emitters(source: Path, scratch: Path) -> Path:
             ],
             env,
             test,
+            cwd=staged,
         )
     return staged / "bindings/python/tests/fixtures"
 

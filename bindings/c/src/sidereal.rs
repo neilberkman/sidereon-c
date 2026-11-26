@@ -131,7 +131,7 @@ pub unsafe extern "C" fn sidereon_sidereal_orbit_repeat_lag(
                 sat_id,
             ));
             match sidereon_core::sidereal::orbit_repeat_lag(
-                &broadcast.inner,
+                broadcast.inner.as_ref(),
                 sat,
                 near_epoch_j2000_s,
             ) {

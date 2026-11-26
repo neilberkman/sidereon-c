@@ -6231,7 +6231,9 @@ fn zero_sp3_frame_reconciliation() -> SidereonSp3FrameReconciliation {
     }
 }
 
-fn sp3_terrestrial_frame_to_c(value: sidereon_core::frame_catalog::TerrestrialFrame) -> u32 {
+pub(crate) fn sp3_terrestrial_frame_to_c(
+    value: sidereon_core::frame_catalog::TerrestrialFrame,
+) -> u32 {
     match value {
         sidereon_core::frame_catalog::TerrestrialFrame::Itrf2020 => {
             SidereonTerrestrialFrame::Itrf2020 as u32

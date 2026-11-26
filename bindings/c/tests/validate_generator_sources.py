@@ -167,6 +167,22 @@ def package_revision(package: dict[str, object], lock_path: Path, expected: str)
         if revision != expected:
             fail(f"{name} archive commit {revision} does not match CORE_REVISION {expected}")
         return "registry", revision
+    if source is None and os.environ.get("SIDEREON_CORE_SOURCE"):
+        root = Path(os.environ["SIDEREON_CORE_SOURCE"]).resolve()
+        manifest = Path(str(package["manifest_path"])).resolve()
+        if manifest != root / "crates" / str(name) / "Cargo.toml":
+            fail(f"{name} manifest is outside the configured engine checkout")
+        revision = subprocess.check_output(
+            ["git", "-C", str(root), "rev-parse", "HEAD"], text=True
+        ).strip()
+        if revision != expected:
+            fail(f"{name} checkout commit {revision} does not match CORE_REVISION {expected}")
+        if subprocess.check_output(
+            ["git", "-C", str(root), "status", "--porcelain", "--untracked-files=all"],
+            text=True,
+        ):
+            fail(f"{name} checkout contains uncommitted changes")
+        return "git", revision
     fail(f"{name} has an unsupported Cargo source: {source!r}")
 
 

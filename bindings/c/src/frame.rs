@@ -867,3 +867,31 @@ unsafe fn polar_motion_from_arcsec(
     ft::PolarMotion::from_arcseconds(xp_arcsec, yp_arcsec)
         .map_err(|err| map_frame_transform_error(fn_name, err))
 }
+
+/// GCRS to the mean equator and equinox of date rotation in row-major order.
+///
+/// Safety: ts points to a time-scales record and out_matrix to nine doubles.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_frame_gcrs_to_mean_of_date_matrix(
+    ts: *const SidereonTimeScales,
+    out_matrix: *mut f64,
+) -> SidereonStatus {
+    const OP: &str = "sidereon_frame_gcrs_to_mean_of_date_matrix";
+    engine_error_operation_boundary(OP, SidereonStatus::Panic, || {
+        write_frame_matrix(OP, ts, out_matrix, ft::gcrs_to_mean_of_date_matrix)
+    })
+}
+
+/// The mean equator and equinox of date to GCRS rotation in row-major order.
+///
+/// Safety: ts points to a time-scales record and out_matrix to nine doubles.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_frame_mean_of_date_to_gcrs_matrix(
+    ts: *const SidereonTimeScales,
+    out_matrix: *mut f64,
+) -> SidereonStatus {
+    const OP: &str = "sidereon_frame_mean_of_date_to_gcrs_matrix";
+    engine_error_operation_boundary(OP, SidereonStatus::Panic, || {
+        write_frame_matrix(OP, ts, out_matrix, ft::mean_of_date_to_gcrs_matrix)
+    })
+}

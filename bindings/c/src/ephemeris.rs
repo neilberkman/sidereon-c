@@ -1,5 +1,8 @@
 use super::*;
 use crate::engine_error::engine_error_operation_boundary;
+use crate::force_models::{
+    additional_forces_from_c, reject_output_overlaps_forces, state_propagator_with_environment,
+};
 
 /// Numerical Cartesian-state ephemeris. Opaque to C. Create with
 /// sidereon_propagate_state and release with sidereon_ephemeris_free.
@@ -361,7 +364,7 @@ fn map_state_propagation_error(fn_name: &str, err: PropagationError) -> Sidereon
     SidereonStatus::Solve
 }
 
-fn default_state_propagation_config() -> SidereonStatePropagationConfig {
+pub(crate) fn default_state_propagation_config() -> SidereonStatePropagationConfig {
     let options = IntegratorOptions::default();
     let drag = DragParameters::from_bc_factor_m2_kg(
         0.01,
@@ -389,7 +392,7 @@ fn default_state_propagation_config() -> SidereonStatePropagationConfig {
     }
 }
 
-fn default_force_model_components() -> SidereonForceModelComponents {
+pub(crate) fn default_force_model_components() -> SidereonForceModelComponents {
     SidereonForceModelComponents {
         has_two_body: true,
         two_body_mu_km3_s2_enabled: false,
@@ -411,6 +414,253 @@ fn default_force_model_components() -> SidereonForceModelComponents {
         },
         has_relativity: false,
     }
+}
+
+unsafe fn reject_propagation_output_overlap<T>(
+    operation: &str,
+    out: *mut T,
+    out_name: &str,
+    config: *const SidereonStatePropagationConfig,
+    environment: *const SidereonStatePropagationEnvironment,
+) -> Result<(), SidereonStatus> {
+    reject_output_overlaps_handle(operation, out, out_name, config, "config")?;
+    reject_output_overlaps_handle(operation, out, out_name, environment, "environment")?;
+    if let Some(environment) = environment.as_ref() {
+        reject_output_overlaps_handle(
+            operation,
+            out,
+            out_name,
+            environment.space_weather,
+            "space_weather",
+        )?;
+        reject_output_overlaps_handle(
+            operation,
+            out,
+            out_name,
+            environment.solar_shadow,
+            "solar_shadow",
+        )?;
+        reject_output_overlaps_handle(
+            operation,
+            out,
+            out_name,
+            environment.earth_radiation_pressure,
+            "earth_radiation_pressure",
+        )?;
+        reject_output_overlaps_handle(operation, out, out_name, environment.context, "context")?;
+        if let Some(context) = environment.context.as_ref() {
+            reject_output_overlaps_handle(
+                operation,
+                out,
+                out_name,
+                context.de_ephemeris,
+                "de_ephemeris",
+            )?;
+            reject_output_overlaps_handle(
+                operation,
+                out,
+                out_name,
+                context.earth_orientation,
+                "earth_orientation",
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Sample a numerical ephemeris using the configured forces and optional drag.
+/// Additional forces are summed in array order after the configured forces.
+/// Epochs are absolute TDB seconds past J2000.
+///
+/// Safety: config is readable, epochs_s has epoch_count entries, and environment
+/// is NULL or readable with live handles. additional_forces points to
+/// additional_force_count live handles or is NULL for a zero count.
+/// out is disjoint writable handle storage.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_propagate_state_with_force_model(
+    config: *const SidereonStatePropagationConfig,
+    epochs_s: *const f64,
+    epoch_count: usize,
+    environment: *const SidereonStatePropagationEnvironment,
+    additional_forces: *const *const SidereonForceModel,
+    additional_force_count: usize,
+    out: *mut *mut SidereonEphemeris,
+) -> SidereonStatus {
+    const OP: &str = "sidereon_propagate_state_with_force_model";
+    engine_error_operation_boundary(OP, SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out, OP, "out"));
+        c_try!(reject_propagation_output_overlap(
+            OP,
+            out,
+            "out",
+            config,
+            environment
+        ));
+        c_try!(reject_output_overlaps_forces(
+            OP,
+            out,
+            "out",
+            additional_forces,
+            additional_force_count
+        ));
+        out.write(ptr::null_mut());
+        let config = c_try!(require_ref(config, OP, "config"));
+        let times = c_try!(times_from_c(OP, epochs_s, epoch_count));
+        let (propagator, context) =
+            c_try!(state_propagator_with_environment(OP, config, environment));
+        let additional_forces = c_try!(additional_forces_from_c(
+            OP,
+            additional_forces,
+            additional_force_count
+        ));
+        let states = c_try!(propagator
+            .ephemeris_with_additional_forces(times, &additional_forces, &context)
+            .map_err(|err| crate::covariance::map_propagation_error(OP, err)));
+        write_boxed_handle(
+            out,
+            SidereonEphemeris {
+                times_s: times.to_vec(),
+                states,
+            },
+        );
+        SidereonStatus::Ok
+    })
+}
+
+/// Continuous DP5(4) output from a numerical propagation. Release with
+/// sidereon_dense_output_free.
+pub struct SidereonDenseOutput {
+    pub(crate) inner: Arc<sidereon_core::astro::propagator::dense_output::DenseOutput>,
+}
+
+/// Propagate to an absolute TDB epoch in seconds past J2000 and request
+/// continuous output. Additional forces are summed in array order after the
+/// configured forces and optional drag. RK4 returns a NULL dense output. A zero-duration
+/// DP5(4) arc returns an empty dense output.
+///
+/// Safety: config is readable and environment is NULL or readable with live
+/// handles. additional_forces points to additional_force_count live handles
+/// or is NULL for a zero count. Both outputs are writable and disjoint from
+/// each other and inputs.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_propagate_state_with_dense_output(
+    config: *const SidereonStatePropagationConfig,
+    target_tdb_j2000_s: f64,
+    environment: *const SidereonStatePropagationEnvironment,
+    additional_forces: *const *const SidereonForceModel,
+    additional_force_count: usize,
+    out_final_state: *mut SidereonCartesianState,
+    out_dense: *mut *mut SidereonDenseOutput,
+) -> SidereonStatus {
+    const OP: &str = "sidereon_propagate_state_with_dense_output";
+    engine_error_operation_boundary(OP, SidereonStatus::Panic, || {
+        let out_final_state = c_try!(require_out(out_final_state, OP, "out_final_state"));
+        let out_dense = c_try!(require_out(out_dense, OP, "out_dense"));
+        c_try!(reject_output_overlaps_handle(
+            OP,
+            out_dense,
+            "out_dense",
+            out_final_state,
+            "out_final_state"
+        ));
+        c_try!(reject_propagation_output_overlap(
+            OP,
+            out_dense,
+            "out_dense",
+            config,
+            environment
+        ));
+        c_try!(reject_propagation_output_overlap(
+            OP,
+            out_final_state,
+            "out_final_state",
+            config,
+            environment
+        ));
+        c_try!(reject_output_overlaps_forces(
+            OP,
+            out_dense,
+            "out_dense",
+            additional_forces,
+            additional_force_count
+        ));
+        c_try!(reject_output_overlaps_forces(
+            OP,
+            out_final_state,
+            "out_final_state",
+            additional_forces,
+            additional_force_count
+        ));
+        out_dense.write(ptr::null_mut());
+        let config = c_try!(require_ref(config, OP, "config"));
+        let (mut propagator, context) =
+            c_try!(state_propagator_with_environment(OP, config, environment));
+        let additional_forces = c_try!(additional_forces_from_c(
+            OP,
+            additional_forces,
+            additional_force_count
+        ));
+        propagator.options.dense_output = true;
+        let result = c_try!(propagator
+            .propagate_to_with_additional_forces(target_tdb_j2000_s, &additional_forces, &context)
+            .map_err(|err| crate::covariance::map_propagation_error(OP, err)));
+        if let Some(dense) = result.dense {
+            write_boxed_handle(
+                out_dense,
+                SidereonDenseOutput {
+                    inner: Arc::new(dense),
+                },
+            );
+        }
+        out_final_state.write(cartesian_state_to_c(&result.final_state));
+        SidereonStatus::Ok
+    })
+}
+
+/// Chronologically ordered coverage in TDB seconds past J2000.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct SidereonDenseOutputCoverage {
+    pub has_coverage: bool,
+    pub start_tdb_seconds: f64,
+    pub end_tdb_seconds: f64,
+}
+
+/// Read the inclusive coverage endpoints for either propagation direction.
+/// An empty output sets has_coverage to false and both endpoints to zero.
+///
+/// Safety: output is a live handle and out points to writable result storage
+/// disjoint from the handle.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_dense_output_coverage_tdb_seconds(
+    output: *const SidereonDenseOutput,
+    out: *mut SidereonDenseOutputCoverage,
+) -> SidereonStatus {
+    const OP: &str = "sidereon_dense_output_coverage_tdb_seconds";
+    ffi_boundary(OP, SidereonStatus::Panic, || {
+        let out = c_try!(require_out(out, OP, "out"));
+        c_try!(reject_output_overlaps_handle(
+            OP, out, "out", output, "output"
+        ));
+        out.write(SidereonDenseOutputCoverage::default());
+        let output = c_try!(require_ref(output, OP, "output"));
+        if let Some((start_tdb_seconds, end_tdb_seconds)) = output.inner.coverage_tdb_seconds() {
+            out.write(SidereonDenseOutputCoverage {
+                has_coverage: true,
+                start_tdb_seconds,
+                end_tdb_seconds,
+            });
+        }
+        SidereonStatus::Ok
+    })
+}
+
+/// Release a continuous propagation output handle.
+///
+/// Safety: output is NULL or a live owned handle with no concurrent users.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_dense_output_free(output: *mut SidereonDenseOutput) {
+    ffi_boundary("sidereon_dense_output_free", (), || free_boxed(output));
 }
 
 #[cfg(test)]
@@ -450,6 +700,54 @@ mod tests {
         assert_eq!(written, expected_payload.len());
         assert_eq!(required, expected_payload.len());
         assert_eq!(buf, expected_payload);
+    }
+
+    #[test]
+    fn released_state_propagation_refuses_invalid_configuration_before_integration() {
+        let mut zero_step = default_state_propagation_config();
+        zero_step.epoch_s = 0.0;
+        zero_step.position_km = [7000.0, 0.0, 0.0];
+        zero_step.velocity_km_s = [0.0, 7.5, 0.0];
+        zero_step.initial_step_s = 0.0;
+
+        let mut conflicting_gravity = zero_step;
+        conflicting_gravity.initial_step_s = 60.0;
+        conflicting_gravity.force_model = SidereonPropagationForceModel::Composite as u32;
+        conflicting_gravity.force_components.has_zonal = true;
+        conflicting_gravity.force_components.has_spherical_harmonic = true;
+
+        for (config, reason) in [
+            (zero_step, "initial_step_s must be positive"),
+            (
+                conflicting_gravity,
+                "zonal and spherical_harmonic gravity cannot both be enabled",
+            ),
+        ] {
+            for epochs in [&[0.0, 10.0][..], &[0.0][..], &[][..]] {
+                let mut out = ptr::dangling_mut();
+                let status = unsafe {
+                    sidereon_propagate_state(&config, epochs.as_ptr(), epochs.len(), &mut out)
+                };
+                assert_argument_refusal(status, &format!("sidereon_propagate_state: {reason}"));
+                assert!(out.is_null());
+
+                out = ptr::dangling_mut();
+                let status = unsafe {
+                    sidereon_propagate_state_with_tide_system(
+                        &config,
+                        SidereonGravityTideSystem::TideFree as u32,
+                        epochs.as_ptr(),
+                        epochs.len(),
+                        &mut out,
+                    )
+                };
+                assert_argument_refusal(
+                    status,
+                    &format!("sidereon_propagate_state_with_tide_system: {reason}"),
+                );
+                assert!(out.is_null());
+            }
+        }
     }
 
     #[test]

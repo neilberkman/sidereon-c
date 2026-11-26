@@ -1543,7 +1543,7 @@ pub unsafe extern "C" fn sidereon_fusion_filter_update_tight_broadcast(
                 "sidereon_fusion_filter_update_tight_broadcast",
                 epoch
             ));
-            match filter.inner.update_tight(&broadcast.inner, &epoch) {
+            match filter.inner.update_tight(broadcast.inner.as_ref(), &epoch) {
                 Ok(update) => {
                     *out_update = fusion_update_to_c(&update);
                     SidereonStatus::Ok
@@ -1654,10 +1654,11 @@ pub unsafe extern "C" fn sidereon_fusion_filter_update_tight_broadcast_recorded(
                 "sidereon_fusion_filter_update_tight_broadcast_recorded",
                 epoch
             ));
-            match filter
-                .inner
-                .update_tight_recorded(&broadcast.inner, &epoch, &mut history.inner)
-            {
+            match filter.inner.update_tight_recorded(
+                broadcast.inner.as_ref(),
+                &epoch,
+                &mut history.inner,
+            ) {
                 Ok(update) => {
                     *out_update = fusion_update_to_c(&update);
                     SidereonStatus::Ok
@@ -1759,7 +1760,7 @@ pub unsafe extern "C" fn sidereon_fusion_filter_update_tight_broadcast_time_sync
             ));
             match filter
                 .inner
-                .update_tight_time_sync(&broadcast.inner, &epoch)
+                .update_tight_time_sync(broadcast.inner.as_ref(), &epoch)
             {
                 Ok(update) => {
                     *out_update = time_sync_update_to_c(&update);

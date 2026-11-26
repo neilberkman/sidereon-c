@@ -557,9 +557,8 @@ pub unsafe extern "C" fn sidereon_geodetic_trajectory_components(
                 "sidereon_geodetic_trajectory_components",
                 "trajectory"
             ));
-            for axis in 0..3 {
-                *out_components.add(axis) =
-                    trajectory_component_to_c(&trajectory.inner.components[axis]);
+            for (axis, component) in trajectory.inner.components.iter().enumerate() {
+                *out_components.add(axis) = trajectory_component_to_c(component);
             }
             SidereonStatus::Ok
         },

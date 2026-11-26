@@ -481,6 +481,20 @@ pub struct SidereonTcaPropagatedCovariancePcOptions {
     pub mu_km3_s2: f64,
 }
 
+/// Additional built-in force options for TCA covariance transport.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SidereonTcaForceOptions {
+    /// Force components for the selected model.
+    pub force_components: SidereonForceModelComponents,
+    /// Gravity tide system as SidereonGravityTideSystem.
+    pub gravity_tide_system: u32,
+    /// Optional solar radiation pressure lighting override.
+    pub solar_shadow: *const SidereonRadiationShadowOptions,
+    /// Optional Earth albedo and infrared radiation pressure.
+    pub earth_radiation_pressure: *const SidereonEarthRadiationPressureOptions,
+}
+
 /// One borrowed TLE pair for a TCA secondary catalog.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -788,83 +802,192 @@ pub unsafe extern "C" fn sidereon_find_tca_conjunctions_with_propagated_covarian
     out_written: *mut usize,
     out_required: *mut usize,
 ) -> SidereonStatus {
-    engine_error_operation_boundary(
+    sidereon_find_tca_conjunctions_with_propagated_covariance_from_tles_impl(
         "sidereon_find_tca_conjunctions_with_propagated_covariance_from_tles",
-        SidereonStatus::Panic,
-        || {
-            let fname = "sidereon_find_tca_conjunctions_with_propagated_covariance_from_tles";
-            c_try!(init_copy_counts(fname, out_written, out_required));
-            let p1 = c_try!(tle_line_from_c(fname, "primary_line1", primary_line1));
-            let p2 = c_try!(tle_line_from_c(fname, "primary_line2", primary_line2));
-            let s1 = c_try!(tle_line_from_c(fname, "secondary_line1", secondary_line1));
-            let s2 = c_try!(tle_line_from_c(fname, "secondary_line2", secondary_line2));
-            let tca_options = c_try!(require_ref(tca_options, fname, "tca_options"));
-            let pc_options = c_try!(require_ref(pc_options, fname, "pc_options"));
-            let method = c_try!(pc_method_from_c(fname, pc_options.method));
-            let force_model = c_try!(force_model_kind_from_c(
-                fname,
+        primary_line1,
+        primary_line2,
+        secondary_line1,
+        secondary_line2,
+        window_start_jd_whole,
+        window_start_jd_fraction,
+        window_end_jd_whole,
+        window_end_jd_fraction,
+        tca_options,
+        pc_options,
+        ptr::null(),
+        out,
+        len,
+        out_written,
+        out_required,
+    )
+}
+
+/// Find TCA conjunctions with a configurable built-in force set for covariance transport.
+///
+/// Safety: TLE lines are NUL-terminated; control records are readable. force_options
+/// is NULL or points to readable controls. Outputs are writable and disjoint.
+#[no_mangle]
+pub unsafe extern "C" fn sidereon_find_tca_conjunctions_with_propagated_covariance_from_tles_with_force_options(
+    primary_line1: *const c_char,
+    primary_line2: *const c_char,
+    secondary_line1: *const c_char,
+    secondary_line2: *const c_char,
+    window_start_jd_whole: f64,
+    window_start_jd_fraction: f64,
+    window_end_jd_whole: f64,
+    window_end_jd_fraction: f64,
+    tca_options: *const SidereonTcaFinderOptions,
+    pc_options: *const SidereonTcaPropagatedCovariancePcOptions,
+    force_options: *const SidereonTcaForceOptions,
+    out: *mut SidereonTcaConjunction,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    sidereon_find_tca_conjunctions_with_propagated_covariance_from_tles_impl(
+        "sidereon_find_tca_conjunctions_with_propagated_covariance_from_tles_with_force_options",
+        primary_line1,
+        primary_line2,
+        secondary_line1,
+        secondary_line2,
+        window_start_jd_whole,
+        window_start_jd_fraction,
+        window_end_jd_whole,
+        window_end_jd_fraction,
+        tca_options,
+        pc_options,
+        force_options,
+        out,
+        len,
+        out_written,
+        out_required,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn sidereon_find_tca_conjunctions_with_propagated_covariance_from_tles_impl(
+    operation: &str,
+    primary_line1: *const c_char,
+    primary_line2: *const c_char,
+    secondary_line1: *const c_char,
+    secondary_line2: *const c_char,
+    window_start_jd_whole: f64,
+    window_start_jd_fraction: f64,
+    window_end_jd_whole: f64,
+    window_end_jd_fraction: f64,
+    tca_options: *const SidereonTcaFinderOptions,
+    pc_options: *const SidereonTcaPropagatedCovariancePcOptions,
+    force_options: *const SidereonTcaForceOptions,
+    out: *mut SidereonTcaConjunction,
+    len: usize,
+    out_written: *mut usize,
+    out_required: *mut usize,
+) -> SidereonStatus {
+    engine_error_operation_boundary(operation, SidereonStatus::Panic, || {
+        c_try!(init_copy_counts(operation, out_written, out_required));
+        let p1 = c_try!(tle_line_from_c(operation, "primary_line1", primary_line1));
+        let p2 = c_try!(tle_line_from_c(operation, "primary_line2", primary_line2));
+        let s1 = c_try!(tle_line_from_c(
+            operation,
+            "secondary_line1",
+            secondary_line1
+        ));
+        let s2 = c_try!(tle_line_from_c(
+            operation,
+            "secondary_line2",
+            secondary_line2
+        ));
+        let tca_options = c_try!(require_ref(tca_options, operation, "tca_options"));
+        let pc_options = c_try!(require_ref(pc_options, operation, "pc_options"));
+        let method = c_try!(pc_method_from_c(operation, pc_options.method));
+        let force_model = if let Some(options) = force_options.as_ref() {
+            let mut config = crate::ephemeris::default_state_propagation_config();
+            config.force_model = pc_options.force_model;
+            config.force_components = options.force_components;
+            config.mu_km3_s2_enabled = pc_options.mu_km3_s2_enabled;
+            config.mu_km3_s2 = pc_options.mu_km3_s2;
+            let tide = c_try!(gravity_tide_system_from_c(
+                operation,
+                options.gravity_tide_system
+            ));
+            let mut model = c_try!(propagation_force_model_kind_from_c(
+                operation, &config, tide, false
+            ));
+            c_try!(crate::force_models::configure_radiation(
+                operation,
+                &mut model,
+                options.solar_shadow,
+                options.earth_radiation_pressure
+            ));
+            model
+        } else {
+            c_try!(force_model_kind_from_c(
+                operation,
                 pc_options.force_model,
                 pc_options.mu_km3_s2_enabled,
                 pc_options.mu_km3_s2,
-            ));
-            let integrator = c_try!(propagation_integrator_from_c(fname, pc_options.integrator));
-            let primary_covariance0 = c_try!(Covariance6::try_from_matrix(
-                pc_options.primary_covariance0
-            )
-            .map_err(|err| { extra_invalid_arg(fname, format!("primary_covariance0: {err:?}")) }));
-            let secondary_covariance0 = c_try!(Covariance6::try_from_matrix(
-                pc_options.secondary_covariance0
-            )
-            .map_err(|err| {
-                extra_invalid_arg(fname, format!("secondary_covariance0: {err:?}"))
-            }));
-            let mut integrator_options = IntegratorOptions::default();
-            integrator_options.abs_tol = pc_options.abs_tol;
-            integrator_options.rel_tol = pc_options.rel_tol;
-            integrator_options.initial_step = pc_options.initial_step_s;
-            integrator_options.min_step = pc_options.min_step_s;
-            integrator_options.max_step = pc_options.max_step_s;
-            integrator_options.max_steps = pc_options.max_steps;
-            integrator_options.dense_output = false;
+            ))
+        };
+        let integrator = c_try!(propagation_integrator_from_c(
+            operation,
+            pc_options.integrator
+        ));
+        let primary_covariance0 = c_try!(Covariance6::try_from_matrix(
+            pc_options.primary_covariance0
+        )
+        .map_err(|err| { extra_invalid_arg(operation, format!("primary_covariance0: {err:?}")) }));
+        let secondary_covariance0 = c_try!(Covariance6::try_from_matrix(
+            pc_options.secondary_covariance0
+        )
+        .map_err(|err| {
+            extra_invalid_arg(operation, format!("secondary_covariance0: {err:?}"))
+        }));
+        let mut integrator_options = IntegratorOptions::default();
+        integrator_options.abs_tol = pc_options.abs_tol;
+        integrator_options.rel_tol = pc_options.rel_tol;
+        integrator_options.initial_step = pc_options.initial_step_s;
+        integrator_options.min_step = pc_options.min_step_s;
+        integrator_options.max_step = pc_options.max_step_s;
+        integrator_options.max_steps = pc_options.max_steps;
+        integrator_options.dense_output = false;
 
-            let mut prop_options = core_tca::TcaPropagatedCovariancePcOptions::new(
-                pc_options.hard_body_radius_km,
-                method,
-                primary_covariance0,
-                secondary_covariance0,
-            );
-            prop_options.force_model = force_model;
-            prop_options.integrator = integrator;
-            prop_options.integrator_options = integrator_options;
-            prop_options.process_noise = sidereon_core::astro::propagator::ProcessNoise::None;
-            let conjunctions =
-                match core_tca::find_tca_conjunctions_with_propagated_covariance_from_tles(
-                    core_tca::TcaTle::new(&p1, &p2),
-                    core_tca::TcaTle::new(&s1, &s2),
-                    TcaJulianDate(window_start_jd_whole, window_start_jd_fraction),
-                    TcaJulianDate(window_end_jd_whole, window_end_jd_fraction),
-                    tca_finder_options_from_c(tca_options),
-                    prop_options,
-                ) {
-                    Ok(c) => c,
-                    Err(err) => return map_tca_error(fname, err),
-                };
-            let mapped: Vec<SidereonTcaConjunction> = conjunctions
-                .iter()
-                .map(SidereonTcaConjunction::from_core)
-                .collect();
-            c_try!(copy_prefix_to_c(
-                fname,
-                "out",
-                &mapped,
-                out,
-                len,
-                out_written,
-                out_required
-            ));
-            SidereonStatus::Ok
-        },
-    )
+        let mut prop_options = core_tca::TcaPropagatedCovariancePcOptions::new(
+            pc_options.hard_body_radius_km,
+            method,
+            primary_covariance0,
+            secondary_covariance0,
+        );
+        prop_options.force_model = force_model;
+        prop_options.integrator = integrator;
+        prop_options.integrator_options = integrator_options;
+        prop_options.process_noise = sidereon_core::astro::propagator::ProcessNoise::None;
+        let conjunctions =
+            match core_tca::find_tca_conjunctions_with_propagated_covariance_from_tles(
+                core_tca::TcaTle::new(&p1, &p2),
+                core_tca::TcaTle::new(&s1, &s2),
+                TcaJulianDate(window_start_jd_whole, window_start_jd_fraction),
+                TcaJulianDate(window_end_jd_whole, window_end_jd_fraction),
+                tca_finder_options_from_c(tca_options),
+                prop_options,
+            ) {
+                Ok(c) => c,
+                Err(err) => return map_tca_error(operation, err),
+            };
+        let mapped: Vec<SidereonTcaConjunction> = conjunctions
+            .iter()
+            .map(SidereonTcaConjunction::from_core)
+            .collect();
+        c_try!(copy_prefix_to_c(
+            operation,
+            "out",
+            &mapped,
+            out,
+            len,
+            out_written,
+            out_required
+        ));
+        SidereonStatus::Ok
+    })
 }
 
 // Read a secondary TLE catalog into owned line pairs, returning them so the

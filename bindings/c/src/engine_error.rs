@@ -165,6 +165,24 @@ pub enum SidereonEngineErrorFamily {
     PppPrep = 77,
     /// Precise-positioning kinematic EKF failure.
     PppKinematic = 78,
+    /// Eclipse geometry failure.
+    Eclipse = 79,
+    /// Eclipse gradient failure.
+    ShadowGradient = 80,
+    /// JPL development ephemeris failure.
+    De = 81,
+    /// GNSS satellite attitude geometry failure.
+    GnssAttitude = 82,
+    /// GNSS satellite block identification failure.
+    GnssBlock = 83,
+    /// Analytic orbit propagation or element conversion failure.
+    AnalyticPropagation = 84,
+    /// ICGEM gravity field parsing or evaluation failure.
+    Icgem = 85,
+    /// Initial state and force-parameter estimation failure.
+    OrbitParameterFit = 86,
+    /// Evaluation of orbit prediction errors against a precise reference.
+    OrbitScore = 87,
     /// A family introduced by a later library version.
     Unknown = 999,
 }
@@ -285,6 +303,15 @@ impl SidereonEngineErrorFamily {
             Self::PppCycleSlip => "ppp_cycle_slip",
             Self::PppPrep => "ppp_prep",
             Self::PppKinematic => "ppp_kinematic",
+            Self::Eclipse => "eclipse",
+            Self::ShadowGradient => "shadow_gradient",
+            Self::De => "de",
+            Self::GnssAttitude => "gnss_attitude",
+            Self::GnssBlock => "gnss_block",
+            Self::AnalyticPropagation => "analytic_propagation",
+            Self::Icgem => "icgem",
+            Self::OrbitParameterFit => "orbit_parameter_fit",
+            Self::OrbitScore => "orbit_score",
             Self::Unknown => "unknown",
         }
     }
